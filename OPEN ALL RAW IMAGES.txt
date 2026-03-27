@@ -1,0 +1,21 @@
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+run("Raw...", "image=[16-bit Unsigned] width=768 height=1200 offset=1050 number=1 gap=0 little-endian use");
+
+
+
+run("Images to Stack");
+setTool("rectangle");
+waitForUser( "Pause","big ROI");
+run("Crop");
+waitForUser( "Pause","pick image in center");
+run("Align Slices in Stack", "transformation=Translation");
+makeRectangle(465, 129, 63, 74);
+run("Enhance Contrast", "saturated=0.35");
