@@ -1,2 +1,5 @@
 selected_images/
 cropped_selected_images/
+build/
+aidas.spec
+dist/
