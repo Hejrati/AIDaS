@@ -62,12 +62,16 @@ class Step1Frame(ttk.Frame):
         left_outer = ttk.Frame(main)
         left_outer.pack(side="left", fill="y")
 
-        ctrl_canvas = tk.Canvas(left_outer, highlightthickness=0)
+        ctrl_canvas = tk.Canvas(left_outer, highlightthickness=0, bd=0)
         ctrl_scroll = ttk.Scrollbar(left_outer, orient="vertical", command=ctrl_canvas.yview)
         self.ctrl = ttk.Frame(ctrl_canvas)
         self.ctrl.bind("<Configure>",
                        lambda e: ctrl_canvas.configure(scrollregion=ctrl_canvas.bbox("all")))
-        ctrl_canvas.create_window((0, 0), window=self.ctrl, anchor="nw")
+        ctrl_window = ctrl_canvas.create_window((0, 0), window=self.ctrl, anchor="nw")
+        ctrl_canvas.bind(
+            "<Configure>",
+            lambda e: ctrl_canvas.itemconfigure(ctrl_window, width=e.width),
+        )
         ctrl_canvas.configure(yscrollcommand=ctrl_scroll.set)
         ctrl_canvas.pack(side="left", fill="both", expand=True)
         ctrl_scroll.pack(side="right", fill="y")
@@ -103,7 +107,7 @@ class Step1Frame(ttk.Frame):
     # ═══════════════════════════════════════════════════════════════════════
     def _build_controls(self):
         """Create and lay out the full left-side control panel."""
-        pad = dict(fill="x", padx=25)
+        pad = dict(fill="x", padx=(14, 8))
 
 
         # ── SDB Image Parameters ──

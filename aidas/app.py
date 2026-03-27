@@ -4,13 +4,14 @@ Houses a ttk.Notebook with tabs for each processing step.
 Currently implements Step 1; remaining steps are placeholders.
 """
 
-# Copyright (c) Behzad Hejrati
+# Copyright (c) 2024-2026 Behzad Hejrati
 # https://github.com/Hejrati
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sys
 
+from aidas import __version__
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.config import Config
 
@@ -89,7 +90,7 @@ class AIDaSApp(tk.Tk):
             self.notebook.add(f, text=f"  Step {i}  ")
 
         # ── Status bar ──
-        self.status = ttk.Label(self, text="AIDaS v0.1 — ready",
+        self.status = ttk.Label(self, text=f"AIDaS v{__version__} — ready",
                                 relief="sunken", anchor="w", padding=2)
         self.status.pack(side="bottom", fill="x")
 
@@ -108,7 +109,7 @@ class AIDaSApp(tk.Tk):
         """Change the application theme and save preference."""
         self.style.theme_use(theme_name)
         self.preferences.set("theme", theme_name)
-        self.status.config(text=f"AIDaS v0.1 — theme changed to '{theme_name}'")
+        self.status.config(text=f"AIDaS v{__version__} — theme changed to '{theme_name}'")
 
 
     # ── About dialog ──
@@ -117,10 +118,10 @@ class AIDaSApp(tk.Tk):
         messagebox.showinfo(
             "About AIDaS",
             "AIDaS — OCT Image Processing\n"
-            "Version 0.1.0\n\n"
+            f"Version {__version__}\n\n"
             "Converts ImageJ / R / MATLAB OCT workflows\n"
             "into a cross-platform Python application.\n\n"
-            "Copyright (c) Behzad Hejrati\n"
+            "Copyright (c) 2026 Behzad Hejrati\n"
             "https://github.com/Hejrati\n\n"
             f"Python {sys.version.split()[0]}",
         )
