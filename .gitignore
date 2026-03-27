@@ -3,3 +3,5 @@ cropped_selected_images/
 build/
 aidas.spec
 dist/
+__pycache__/
+*.pyc
