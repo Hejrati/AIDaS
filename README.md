@@ -73,8 +73,23 @@ To create a standalone Windows executable, use PyInstaller:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name AIDaS run_aidas.py
+python -m PyInstaller --onefile --windowed --name AIDaS run_aidas.py
 ```
 
 The executable will be created in the `dist/` folder as `AIDaS.exe`.
+
+### Troubleshooting: `pyinstaller` not recognized (Windows PowerShell)
+
+If you see this error:
+
+```text
+pyinstaller : The term 'pyinstaller' is not recognized as the name of a cmdlet, function, script file, or operable program.
+```
+
+PyInstaller is usually installed, but its script path is not on your `PATH`.
+Use the module form instead:
+
+```bash
+python -m PyInstaller --onefile --windowed --name AIDaS run_aidas.py
+```
 
