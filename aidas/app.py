@@ -97,12 +97,15 @@ class AIDaSApp(tk.Tk):
     # ── Menu actions ──
     def _menu_browse_sdb(self):
         self.notebook.select(0)
-        d = filedialog.askdirectory(
-            title="Select SDB directory",
+        file_path = filedialog.askopenfilename(
+            title="Select SDB file (directory will be used)",
             initialdir=self.step1.sdb_dir_var.get() or None,
+            filetypes=[("SDB files", "*.sdb"), ("All files", "*.*")],
         )
-        if d:
-            self.step1.set_sdb_directory(d)
+        if file_path:
+            import os
+            directory = os.path.dirname(file_path)
+            self.step1.set_sdb_directory(directory)
             self.step1.refresh_sdb_list()
 
     def _set_theme(self, theme_name):

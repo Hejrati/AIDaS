@@ -176,9 +176,9 @@ class Step1Frame(ttk.Frame):
 
         btn_frame = ttk.Frame(sdb)
         btn_frame.pack(fill="x", pady=(4, 0))
-        ttk.Button(btn_frame, text="Open Selected",
+        ttk.Button(btn_frame, text="Preview Selected",
                    command=self._open_selected_sdb).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(btn_frame, text="Refresh",
+        ttk.Button(btn_frame, text="↺ Refresh",
                    command=self.refresh_sdb_list).pack(side="right")
 
         nav_frame = ttk.Frame(sdb)
@@ -219,17 +219,13 @@ class Step1Frame(ttk.Frame):
         roi_tools = ttk.Frame(roi)
         roi_tools.grid(row=3, column=0, columnspan=4, pady=4)
         ttk.Button(roi_tools, text="Apply", command=self._apply_roi_entries).pack(side="left", padx=2)
-        ttk.Button(roi_tools, text="Default ROI", command=self._set_default_roi).pack(side="left", padx=2)
+        ttk.Button(roi_tools, text="↺ Reset", command=self._reset).pack(side="left", padx=2)
         ttk.Button(roi_tools, text="Select All", command=self._select_all_roi).pack(side="left", padx=2)
 
         roi_actions = ttk.Frame(roi)
         roi_actions.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         ttk.Button(roi_actions, text="▶  Crop",
-               command=self._crop_and_scale).pack(fill="x", pady=(0, 2))
-        ttk.Button(roi_actions, text="▶  Crop && Save TIFF…",
-               command=self._crop_scale_and_save_tiff).pack(fill="x", pady=2)
-        ttk.Button(roi_actions, text="↺  Reset to Original",
-               command=self._reset).pack(fill="x", pady=(2, 0))
+                   command=self._crop_and_scale).pack(fill="x", pady=(0, 2))
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
@@ -245,10 +241,39 @@ class Step1Frame(ttk.Frame):
         ttk.Button(df, text="…", width=3,
                    command=self._browse_outdir).pack(side="right")
 
-        ttk.Button(sav, text="Save as Light (HDR)",
-                   command=lambda: self._save_analyze("Light")).pack(fill="x", pady=(6, 2))
-        ttk.Button(sav, text="Save as TIFF…",
-                   command=self._save_tiff).pack(fill="x", pady=2)
+        ttk.Button(sav, text="Save All (TIFF, IMG, HDR)",
+               command=self._save_all_formats).pack(fill="x", pady=(8, 2))
+    def _save_all_formats(self):
+        """Save the current processed image (or raw fallback) as TIFF, HDR, and IMG in one click."""
+        img = self.processed_image if self.processed_image is not None else self.raw_image
+        if img is None:
+            messagebox.showwarning("Nothing to save", "Open a file first.")
+            return
+        outdir = self.outdir_var.get()
+        if not os.path.isdir(outdir):
+            messagebox.showerror("Invalid output folder", f"Folder does not exist: {outdir}")
+            return
+        base_name = self._build_output_name("light")
+        base = os.path.join(outdir, base_name)
+        # Save TIFF
+        tiff_path = base + ".tif"
+        try:
+            save_tiff(tiff_path, img)
+        except Exception as exc:
+            messagebox.showerror("Save error (TIFF)", str(exc))
+            return
+        # Save Analyze 7.5 (HDR + IMG)
+        stack = np.stack([img, img], axis=0)  # shape (2, H, W)
+        try:
+            hdr_path, img_path = write_analyze(base, stack)
+        except Exception as exc:
+            messagebox.showerror("Save error (Analyze)", str(exc))
+            return
+        messagebox.showinfo(
+            "Saved",
+            f"Saved all formats successfully:\n  {tiff_path}\n  {hdr_path}\n  {img_path}\n\nStack: 2 slices of {img.shape[1]}×{img.shape[0]}  {img.dtype}"
+        )
+        self.status_var.set(f"Saved → {tiff_path}, {hdr_path}, {img_path}")
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
@@ -438,12 +463,15 @@ class Step1Frame(ttk.Frame):
 
     def _browse_sdb_dir(self):
         """Prompt for SDB folder and refresh the browser list."""
-        d = filedialog.askdirectory(
-            title="Select SDB directory",
+        file_path = filedialog.askopenfilename(
+            title="Select SDB file (directory will be used)",
             initialdir=self.sdb_dir_var.get() or None,
+            filetypes=[("SDB files", "*.sdb"), ("All files", "*.*")],
         )
-        if d:
-            self.set_sdb_directory(d)
+        if file_path:
+            import os
+            directory = os.path.dirname(file_path)
+            self.set_sdb_directory(directory)
             self.refresh_sdb_list()
 
     def _reset_sdb_dir_to_default(self):
