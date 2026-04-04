@@ -5,3 +5,7 @@ aidas.spec
 dist/
 __pycache__/
 *.pyc
+OCT Segmenter\Model\human_OCT.h5
+.vscode/
+segmenter_output/
+aidas\__pycache__/*
