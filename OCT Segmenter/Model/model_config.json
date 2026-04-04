@@ -1,0 +1,1 @@
+{"input_channels": 1, "num_classes": 7, "image_height": 128, "image_width": 1472, "start_neurons": 8, "pool_layers": 4, "conv_layers": 4, "enc_kernel": [5, 5], "dec_kernel": [2, 2]}
