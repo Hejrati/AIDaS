@@ -9,3 +9,4 @@ OCT Segmenter\Model\human_OCT.h5
 .vscode/
 segmenter_output/
 aidas\__pycache__/*
+aidas\steps\__pycache__/*
