@@ -1,11 +1,10 @@
-"""Step 1 — Resize Raw OCT image.
+"""Step 1 — Load, Resize & Crop Raw OCT Images.
 
 Replicates the ImageJ macro "Step 1 resize raw.txt":
-    1.  Open a raw OCT binary file (16-bit unsigned, configurable params)
+    1.  Open a SDB file (16-bit unsigned, configurable params)
     2.  Display and let user select a crop ROI
-    3.  Crop (pixel replication)
-    4.  Duplicate into a 2-slice stack
-    5.  Save as Analyze 7.5 (.hdr/.img) — "Light"
+    3.  Crop (pixel replication) 
+    4.  Save as "Light" (.hdr/.img/.tiff) in the same folder as source 
 """
 
 import os
@@ -16,6 +15,7 @@ import numpy as np
 
 from aidas.image_canvas import ImageCanvas
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
+from aidas.utils.ui_utils import HoverToolTip
 
 SDB_PREF_KEY = "sdb_dir"
 SDB_DEFAULT_DIR = os.path.expanduser("~/Desktop")
@@ -23,6 +23,7 @@ DEFAULT_RAW_WIDTH = 768
 DEFAULT_RAW_HEIGHT = 1200
 DEFAULT_RAW_OFFSET = 1050
 DEFAULT_RAW_BIT_DEPTH = 16
+DEFAULT_OUTPUT_DIR = SDB_DEFAULT_DIR
 
 
 class Step1Frame(ttk.Frame):
@@ -49,9 +50,11 @@ class Step1Frame(ttk.Frame):
 
         # ----- state -----
         self.raw_image = None          # original loaded image (H, W)  uint16
+        self._source_raw_image = None  # original imported image before width adjustments
         self.processed_image = None    # after crop + scale           uint16
         self.current_file = None       # path of opened raw file
         self.raw_import_params = None  # validated import parameters
+        self._updating_roi_entries = False
 
         # ----- layout -----
         # Fixed sidebar on the left + expandable image area on the right.
@@ -108,32 +111,71 @@ class Step1Frame(ttk.Frame):
     def _build_controls(self):
         """Create and lay out the full left-side control panel."""
         pad = dict(fill="x", padx=(14, 8))
+        numeric_vcmd = (self.register(self._validate_digits_only), "%P")
 
 
         # ── SDB Image Parameters ──
-        imp = ttk.LabelFrame(self.ctrl, text="SDB Image Parameters", padding=1)
-        imp.pack(**pad, pady=5)
+        self.sdb_params_frame = ttk.LabelFrame(self.ctrl, text="SDB Image Parameters", padding=1)
+        self.sdb_params_frame.pack(**pad, pady=5)
 
-        self.width_var = self._param_row(imp, 0, "Width (px):", str(DEFAULT_RAW_WIDTH))
-        self.height_var = self._param_row(imp, 1, "Height (px):", str(DEFAULT_RAW_HEIGHT))
-        self.offset_var = self._param_row(imp, 2, "Offset (bytes):", str(DEFAULT_RAW_OFFSET))
+        self.width_var = tk.StringVar(value=str(DEFAULT_RAW_WIDTH))
+        self.height_var = tk.StringVar(value=str(DEFAULT_RAW_HEIGHT))
+        self.offset_var = tk.StringVar(value=str(DEFAULT_RAW_OFFSET))
 
-        ttk.Label(imp, text="Bit depth:").grid(row=3, column=0, sticky="w", pady=1)
-        self.bitdepth_var = tk.StringVar(value=str(DEFAULT_RAW_BIT_DEPTH))
-        cb = ttk.Combobox(imp, textvariable=self.bitdepth_var,
-                          values=["8", "16"], state="readonly", width=8)
-        cb.grid(row=3, column=1, sticky="e", pady=1)
+        self.width_entry, self.width_minus_btn, self.width_plus_btn, self.width_reset_btn = self._param_button_row(
+            self.sdb_params_frame, 0, "Width (px):", self.width_var, DEFAULT_RAW_WIDTH,
+            step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
+        )
+        self.height_entry, self.height_minus_btn, self.height_plus_btn, self.height_reset_btn = self._param_button_row(
+            self.sdb_params_frame, 1, "Height (px):", self.height_var, DEFAULT_RAW_HEIGHT,
+            step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
+        )
+        self.offset_entry, self.offset_minus_btn, self.offset_plus_btn, self.offset_reset_btn = self._param_button_row(
+            self.sdb_params_frame, 2, "Offset (bytes):", self.offset_var, DEFAULT_RAW_OFFSET,
+            step=2, minimum=0, maximum=10_000_000, validatecommand=numeric_vcmd
+        )
+
+        width_entry_hint = (
+            "Width value: if smaller than source width, image is cropped; "
+            "if larger, image is padded with zeros."
+        )
+        width_minus_hint = "− Width: decrease by 1 px. May crop image if width becomes smaller than source."
+        width_plus_hint = "+ Width: increase by 1 px. Adds zero-padding if width becomes larger than source."
+        width_reset_hint = f"↺ Width: reset to default width ({DEFAULT_RAW_WIDTH} px)."
+        self._width_tooltips = [
+            HoverToolTip(self.width_entry, width_entry_hint),
+            HoverToolTip(self.width_minus_btn, width_minus_hint),
+            HoverToolTip(self.width_plus_btn, width_plus_hint),
+            HoverToolTip(self.width_reset_btn, width_reset_hint),
+        ]
+
+        height_entry_hint = (
+            "Height value: changes the number of image rows used for import; "
+            "too small truncates rows, too large adds zero-filled rows."
+        )
+        height_minus_hint = "− Height: decrease by 1 px. May truncate bottom rows if below source height."
+        height_plus_hint = "+ Height: increase by 1 px. May add zero-filled rows if above source height."
+        height_reset_hint = f"↺ Height: reset to default height ({DEFAULT_RAW_HEIGHT} px)."
+        self._height_tooltips = [
+            HoverToolTip(self.height_entry, height_entry_hint),
+            HoverToolTip(self.height_minus_btn, height_minus_hint),
+            HoverToolTip(self.height_plus_btn, height_plus_hint),
+            HoverToolTip(self.height_reset_btn, height_reset_hint),
+        ]
+
+        self.width_var.trace_add("write", lambda *_: self._on_width_changed())
+        self.height_var.trace_add("write", lambda *_: self._on_import_param_changed())
+        self.offset_var.trace_add("write", lambda *_: self._on_import_param_changed())
 
         self.endian_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(imp, text="Little-endian", variable=self.endian_var
-                        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=1)
-
-        imp_btns = ttk.Frame(imp)
-        imp_btns.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(6, 2))
-        ttk.Button(imp_btns, text="Default",
-                   command=self._set_default_import_params).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(imp_btns, text="Apply",
-                   command=self._apply_import_params).pack(side="right", expand=True, fill="x", padx=(2, 0))
+        self.endian_var.trace_add("write", lambda *_: self._on_import_param_changed())
+        self.endian_checkbox = ttk.Checkbutton(
+            self.sdb_params_frame,
+            text="Little-endian",
+            variable=self.endian_var,
+        )
+        self.endian_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
+        self._endian_tooltip = HoverToolTip(self.endian_checkbox, "Can affect visualization for some offsets")
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
@@ -141,6 +183,7 @@ class Step1Frame(ttk.Frame):
         sdb = ttk.LabelFrame(self.ctrl, text="SDB Files", padding=3)
         sdb.pack(**pad, pady=2)
 
+        ttk.Label(sdb, text="Input dir:").pack(anchor="w")
         dir_frame = ttk.Frame(sdb)
         dir_frame.pack(fill="x")
         self.sdb_dir_var = tk.StringVar(value=self._initial_sdb_dir())
@@ -152,6 +195,8 @@ class Step1Frame(ttk.Frame):
             width=2,
             command=self._reset_sdb_dir_to_default,
         ).pack(side="right", padx=(2, 0))
+        ttk.Button(dir_frame, text="↻", width=3,
+                   command=self.refresh_sdb_list).pack(side="right", padx=(2, 0))
         ttk.Button(dir_frame, text="…", width=3,
                    command=self._browse_sdb_dir).pack(side="right")
 
@@ -174,15 +219,8 @@ class Step1Frame(ttk.Frame):
         self.sdb_listbox.bind("<Double-1>", lambda e: self._open_selected_sdb())
         self.sdb_listbox.bind("<<ListboxSelect>>", self._on_sdb_list_select)
 
-        btn_frame = ttk.Frame(sdb)
-        btn_frame.pack(fill="x", pady=(4, 0))
-        ttk.Button(btn_frame, text="Preview Selected",
-                   command=self._open_selected_sdb).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(btn_frame, text="↺ Refresh",
-                   command=self.refresh_sdb_list).pack(side="right")
-
         nav_frame = ttk.Frame(sdb)
-        nav_frame.pack(fill="x", pady=(2, 0))
+        nav_frame.pack(fill="x", pady=(4, 0))
         ttk.Button(nav_frame, text="◀ Prev",
                    command=self._prev_sdb).pack(side="left", expand=True, fill="x", padx=(0, 2))
         ttk.Button(nav_frame, text="Next ▶",
@@ -194,14 +232,39 @@ class Step1Frame(ttk.Frame):
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
         # ── ROI Selection ──
-        roi = ttk.LabelFrame(self.ctrl, text="ROI Selection (crop region)", padding=3)
+        roi = ttk.LabelFrame(self.ctrl, text="ROI Selection (crop and save)", padding=3)
         roi.pack(**pad, pady=2)
+        for col in range(4):
+            roi.grid_columnconfigure(col, weight=1)
 
         self.roi_x_var = tk.StringVar(value="0")
         self.roi_y_var = tk.StringVar(value="0")
         self.roi_w_var = tk.StringVar(value="100")
         self.roi_h_var = tk.StringVar(value="100")
+        self.roi_x_var.trace_add("write", self._on_roi_entry_changed)
+        self.roi_y_var.trace_add("write", self._on_roi_entry_changed)
+        self.roi_w_var.trace_add("write", self._on_roi_entry_changed)
+        self.roi_h_var.trace_add("write", self._on_roi_entry_changed)
 
+        ttk.Label(roi, text="Output dir:").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 0)
+        )
+        save_dir_row = ttk.Frame(roi)
+        save_dir_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 6))
+        self.outdir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
+        ttk.Entry(save_dir_row, textvariable=self.outdir_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(
+            save_dir_row,
+            text="⌂",
+            width=2,
+            command=self._reset_outdir_to_default,
+        ).pack(side="right", padx=(2, 0))
+        ttk.Button(save_dir_row, text="↻", width=3,
+                   command=self._refresh_outdir_from_source).pack(side="right", padx=(2, 0))
+        ttk.Button(save_dir_row, text="…", width=3,
+                   command=self._browse_outdir).pack(side="right")
+
+        self.roi_entries = []
         for i, (lbl, var, color) in enumerate([
             ("X (Left):", self.roi_x_var, "#DA0404"),
             ("Y (Top):", self.roi_y_var, "#DA0404"),
@@ -210,44 +273,69 @@ class Step1Frame(ttk.Frame):
         ]):
             r, c = divmod(i, 2)
             if color:
-                tk.Label(roi, text=lbl, fg=color).grid(row=r, column=c * 2, sticky="w", pady=1)
+                tk.Label(roi, text=lbl, fg=color).grid(row=r + 2, column=c * 2, sticky="w", pady=1)
             else:
-                ttk.Label(roi, text=lbl).grid(row=r, column=c * 2, sticky="w", pady=1)
-            ttk.Entry(roi, textvariable=var, width=7).grid(
-                row=r, column=c * 2 + 1, sticky="e", padx=(0, 8), pady=1)
+                ttk.Label(roi, text=lbl).grid(row=r + 2, column=c * 2, sticky="w", pady=1)
+            entry = ttk.Entry(
+                roi,
+                textvariable=var,
+                width=7,
+                validate="key",
+                validatecommand=numeric_vcmd,
+            )
+            entry.grid(
+                row=r + 2, column=c * 2 + 1, sticky="e", padx=(0, 8), pady=1)
+            self.roi_entries.append(entry)
 
-        roi_tools = ttk.Frame(roi)
-        roi_tools.grid(row=3, column=0, columnspan=4, pady=4)
-        ttk.Button(roi_tools, text="Apply", command=self._apply_roi_entries).pack(side="left", padx=2)
-        ttk.Button(roi_tools, text="↺ Reset", command=self._reset).pack(side="left", padx=2)
-        ttk.Button(roi_tools, text="Select All", command=self._select_all_roi).pack(side="left", padx=2)
+        roi_presets = ttk.Frame(roi)
+        roi_presets.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        self.default_roi_btn = ttk.Button(roi_presets, text="Default Region", command=self._set_default_roi)
+        self.default_roi_btn.pack(side="left", padx=(0, 4))
+        self.entire_roi_btn = ttk.Button(roi_presets, text="Entire Image", command=self._select_all_roi)
+        self.entire_roi_btn.pack(side="left", padx=(4, 0))
+        #Todo: add AI based auto-ROI detection here
+        ttk.Button(roi_presets, text="Auto Select", command=self._set_default_roi, state="disabled").pack(side="left", padx=(4, 0))
 
         roi_actions = ttk.Frame(roi)
-        roi_actions.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        roi_actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+
         ttk.Button(roi_actions, text="▶  Crop",
                    command=self._crop_and_scale).pack(fill="x", pady=(0, 2))
+        self.undo_crop_btn = ttk.Button(
+            roi_actions,
+            text="↺ Undo Crop",
+            command=self._reset,
+            state="disabled",
+        )
+        self.undo_crop_btn.pack(fill="x", pady=(0, 2))
+        self.save_all_btn = ttk.Button(
+            roi,
+            text="Save All (TIFF, IMG, HDR)",
+            command=self._save_all_formats,
+            state="disabled",
+        )
+        self.save_all_btn.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 2))
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
-        # ── Save ──
-        sav = ttk.LabelFrame(self.ctrl, text="Save Output", padding=3)
-        sav.pack(**pad, pady=2)
+        # ── View ──
+        view = ttk.LabelFrame(self.ctrl, text="View", padding=3)
+        view.pack(**pad, pady=(2, 6))
 
-        ttk.Label(sav, text="Output folder:").pack(anchor="w")
-        df = ttk.Frame(sav)
-        df.pack(fill="x")
-        self.outdir_var = tk.StringVar(value=os.path.expanduser("~/Desktop"))
-        ttk.Entry(df, textvariable=self.outdir_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(df, text="…", width=3,
-                   command=self._browse_outdir).pack(side="right")
+        zf = ttk.Frame(view)
+        zf.pack(fill="x")
+        ttk.Button(zf, text="−", width=3, command=self._zoom_out).pack(side="left")
+        self.zoom_lbl = ttk.Label(zf, text="100 %", anchor="center")
+        self.zoom_lbl.pack(side="left", expand=True)
+        ttk.Button(zf, text="+", width=3, command=self._zoom_in).pack(side="right")
+        ttk.Button(view, text="Fit to Window",
+                   command=self._fit_zoom).pack(fill="x", pady=2)
 
-        ttk.Button(sav, text="Save All (TIFF, IMG, HDR)",
-               command=self._save_all_formats).pack(fill="x", pady=(8, 2))
     def _save_all_formats(self):
-        """Save the current processed image (or raw fallback) as TIFF, HDR, and IMG in one click."""
-        img = self.processed_image if self.processed_image is not None else self.raw_image
+        """Save the current cropped image as TIFF, HDR, and IMG in one click."""
+        img = self.processed_image
         if img is None:
-            messagebox.showwarning("Nothing to save", "Open a file first.")
+            messagebox.showwarning("Nothing to save", "Run 'Crop & Scale' first.")
             return
         outdir = self.outdir_var.get()
         if not os.path.isdir(outdir):
@@ -275,20 +363,46 @@ class Step1Frame(ttk.Frame):
         )
         self.status_var.set(f"Saved → {tiff_path}, {hdr_path}, {img_path}")
 
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
+    def _update_save_button_state(self):
+        """Sync Save/Undo button states with processed image availability."""
+        if getattr(self, "save_all_btn", None) is None:
+            return
+        has_processed = self.processed_image is not None
+        self.save_all_btn.configure(state="normal" if has_processed else "disabled")
+        if getattr(self, "undo_crop_btn", None) is not None:
+            self.undo_crop_btn.configure(state="normal" if has_processed else "disabled")
 
-        # ── View ──
-        view = ttk.LabelFrame(self.ctrl, text="View", padding=3)
-        view.pack(**pad, pady=(2, 6))
+    def _set_widget_tree_state(self, widget, enabled):
+        """Recursively enable or disable widgets inside a container."""
+        state = "normal" if enabled else "disabled"
+        for child in widget.winfo_children():
+            try:
+                child.configure(state=state)
+            except tk.TclError:
+                pass
+            self._set_widget_tree_state(child, enabled)
 
-        zf = ttk.Frame(view)
-        zf.pack(fill="x")
-        ttk.Button(zf, text="−", width=3, command=self._zoom_out).pack(side="left")
-        self.zoom_lbl = ttk.Label(zf, text="100 %", anchor="center")
-        self.zoom_lbl.pack(side="left", expand=True)
-        ttk.Button(zf, text="+", width=3, command=self._zoom_in).pack(side="right")
-        ttk.Button(view, text="Fit to Window",
-                   command=self._fit_zoom).pack(fill="x", pady=2)
+    def _set_sdb_parameters_enabled(self, enabled):
+        """Toggle the SDB import-parameter section as a group."""
+        if getattr(self, "sdb_params_frame", None) is None:
+            return
+        self._set_widget_tree_state(self.sdb_params_frame, enabled)
+
+    def _confirm_discard_processed_image(self, next_path):
+        """Ask before replacing an active cropped image with another source."""
+        if self.processed_image is None:
+            return True
+
+        current_name = os.path.basename(self.current_file) if self.current_file else "current image"
+        next_name = os.path.basename(next_path) if next_path else "the selected image"
+        return messagebox.askyesno(
+            "Discard cropped image?",
+            f"A cropped image is currently active for {current_name}.\n\n"
+            f"Opening {next_name} will discard the cropped result and reset the view.\n"
+            "Continue?",
+            icon="warning",
+            default="no",
+        )
 
     # helper for param rows
     def _initial_sdb_dir(self):
@@ -306,27 +420,89 @@ class Step1Frame(ttk.Frame):
             directory: Directory path selected by user.
         """
         self.sdb_dir_var.set(directory)
+        self._sync_output_dir_with_source(directory)
         if self.preferences is not None:
             self.preferences.set(SDB_PREF_KEY, directory)
 
+    def _sync_output_dir_with_source(self, source_path):
+        """Mirror output folder to the selected source location.
+
+        Args:
+            source_path: Source file path or directory path.
+        """
+        if not source_path:
+            return
+        target_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
+        if target_dir:
+            self.outdir_var.set(target_dir)
+
     # helper for param rows
-    @staticmethod
-    def _param_row(parent, row, label, default):
-        """Create one label+entry row for raw import parameters.
+    def _param_button_row(
+        self,
+        parent,
+        row,
+        label,
+        var,
+        default_value,
+        *,
+        step=1,
+        minimum=0,
+        maximum=10_000_000,
+        validatecommand=None,
+    ):
+        """Create one label+entry row with external minus/plus buttons.
 
         Args:
             parent: Container where the row is placed.
             row: Grid row index.
             label: Label text.
-            default: Default value string for the entry.
+            var: Tk variable bound to the entry.
+            default_value: Value restored by the reset button.
+            minimum: Minimum allowed value.
+            maximum: Maximum allowed value.
 
         Returns:
-            tk.StringVar bound to the created entry widget.
+            tuple: (entry, minus_button, plus_button, reset_button)
         """
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=1)
-        var = tk.StringVar(value=default)
-        ttk.Entry(parent, textvariable=var, width=10).grid(row=row, column=1, sticky="e", pady=1)
-        return var
+        row_frame = ttk.Frame(parent)
+        row_frame.grid(row=row, column=1, sticky="e", pady=1)
+
+        minus_btn = ttk.Button(row_frame, text="−", width=2, command=lambda: self._step_numeric_var(var, -step, minimum, maximum))
+        minus_btn.pack(side="left")
+
+        entry_options = {"textvariable": var, "width": 10}
+        if validatecommand is not None:
+            entry_options["validate"] = "key"
+            entry_options["validatecommand"] = validatecommand
+        entry = ttk.Entry(row_frame, **entry_options)
+        entry.pack(side="left", padx=(4, 4))
+
+        plus_btn = ttk.Button(row_frame, text="+", width=2, command=lambda: self._step_numeric_var(var, step, minimum, maximum))
+        plus_btn.pack(side="left")
+
+        reset_btn = ttk.Button(row_frame, text="↺", width=2, command=lambda: self._reset_numeric_var(var, default_value))
+        reset_btn.pack(side="left", padx=(4, 0))
+
+        return entry, minus_btn, plus_btn, reset_btn
+
+    @staticmethod
+    def _step_numeric_var(var, delta, minimum, maximum):
+        try:
+            current = int(var.get())
+        except ValueError:
+            current = minimum
+        next_value = max(minimum, min(maximum, current + delta))
+        var.set(str(next_value))
+
+    @staticmethod
+    def _reset_numeric_var(var, default_value):
+        var.set(str(default_value))
+
+    @staticmethod
+    def _validate_digits_only(proposed_value):
+        """Allow only digits for numeric entries (empty is allowed while editing)."""
+        return proposed_value == "" or proposed_value.isdigit()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Actions
@@ -337,11 +513,146 @@ class Step1Frame(ttk.Frame):
         self.width_var.set(str(DEFAULT_RAW_WIDTH))
         self.height_var.set(str(DEFAULT_RAW_HEIGHT))
         self.offset_var.set(str(DEFAULT_RAW_OFFSET))
-        self.bitdepth_var.set(str(DEFAULT_RAW_BIT_DEPTH))
         self.endian_var.set(True)
         return self._apply_import_params()
 
-    def _apply_import_params(self):
+    def _on_import_param_changed(self):
+        """Auto-apply import parameters when UI values change."""
+        self._apply_import_params(show_errors=False)
+
+    def _on_width_changed(self):
+        """Store the requested width and resize the current image view without rereading the raw file."""
+        self._apply_import_params(show_errors=False, skip_reload=True)
+        self._apply_width_preview_adjustment()
+
+    def _apply_width_preview_adjustment(self):
+        """Crop or pad the loaded image to match the requested width."""
+        if self._source_raw_image is None or self.current_file is None:
+            return
+
+        try:
+            requested_width = int(self.width_var.get())
+        except ValueError:
+            return
+
+        if requested_width <= 0:
+            return
+
+        source = self._source_raw_image
+        source_width = int(source.shape[1])
+        if requested_width == source_width:
+            adjusted = np.array(source, copy=True)
+            note = f"Width matches source ({source_width}); no crop/pad applied."
+        elif requested_width < source_width:
+            crop = source_width - requested_width
+            left = crop // 2
+            right = left + requested_width
+            adjusted = np.array(source[:, left:right], copy=True)
+            note = f"Warning: width smaller than source; cropped {crop} px from the image."
+        else:
+            pad = requested_width - source_width
+            left = pad // 2
+            right = pad - left
+            adjusted = np.pad(source, ((0, 0), (left, right)), mode="constant", constant_values=0)
+            note = f"Width larger than source; padded {pad} px with zeros."
+
+        self.raw_image = adjusted
+        self.processed_image = None
+        self.image_canvas.set_image(adjusted)
+        self.image_canvas.enable_roi(True)
+        self._set_default_roi()
+        self._update_zoom_label()
+        self.status_var.set(note)
+
+        filename = os.path.basename(self.current_file)
+        self.image_info_var.set(
+            f"{filename} |  Dir: {os.path.dirname(self.current_file)}   "
+        )
+
+    @staticmethod
+    def _offset_noise_score(img):
+        """Heuristic score for offset quality: lower means smoother/more plausible image."""
+        arr = img.astype(np.float32)
+        dx = np.abs(np.diff(arr, axis=1))
+        dy = np.abs(np.diff(arr, axis=0))
+        return float(np.median(dx) + np.median(dy))
+
+    def _auto_find_offset(self):
+        """Search nearby even offsets and pick the least-noisy image alignment."""
+        if not self.current_file:
+            messagebox.showinfo("No image", "Open an SDB file first.")
+            return
+
+        try:
+            w = int(self.width_var.get())
+            h = int(self.height_var.get())
+            off = int(self.offset_var.get())
+            le = self.endian_var.get()
+        except ValueError:
+            messagebox.showerror("Error", "Width/Height/Offset must be valid integers.")
+            return
+
+        if w <= 0 or h <= 0 or off < 0:
+            messagebox.showerror("Error", "Width/Height must be > 0 and Offset must be >= 0.")
+            return
+
+        base = off if off % 2 == 0 else off - 1
+        coarse_start = max(0, base - 128)
+        coarse_end = base + 128
+        coarse_candidates = [o for o in range(coarse_start, coarse_end + 1, 8) if o % 2 == 0]
+        if not coarse_candidates:
+            coarse_candidates = [max(0, base)]
+
+        self.status_var.set("Scanning nearby offsets...")
+        self.update_idletasks()
+
+        best_off = None
+        best_score = None
+
+        for cand in coarse_candidates:
+            try:
+                img = read_raw_oct(
+                    self.current_file,
+                    width=w,
+                    height=h,
+                    offset=cand,
+                    bit_depth=DEFAULT_RAW_BIT_DEPTH,
+                    little_endian=le,
+                )
+            except (OSError, ValueError, RuntimeError):
+                continue
+            score = self._offset_noise_score(img)
+            if best_score is None or score < best_score:
+                best_score = score
+                best_off = cand
+
+        if best_off is None:
+            messagebox.showerror("Auto offset failed", "Could not evaluate candidate offsets.")
+            return
+
+        fine_start = max(0, best_off - 8)
+        fine_end = best_off + 8
+        for cand in range(fine_start, fine_end + 1, 2):
+            try:
+                img = read_raw_oct(
+                    self.current_file,
+                    width=w,
+                    height=h,
+                    offset=cand,
+                    bit_depth=DEFAULT_RAW_BIT_DEPTH,
+                    little_endian=le,
+                )
+            except (OSError, ValueError, RuntimeError):
+                continue
+            score = self._offset_noise_score(img)
+            if score < best_score:
+                best_score = score
+                best_off = cand
+
+        self.offset_var.set(str(best_off))
+        self.status_var.set(f"Auto offset selected: {best_off}")
+
+    def _apply_import_params(self, show_errors=True, skip_reload=False):
         """Validate and store raw import parameters from the form.
 
         If a file is already open, this method immediately reloads that file
@@ -354,29 +665,32 @@ class Step1Frame(ttk.Frame):
             w = int(self.width_var.get())
             h = int(self.height_var.get())
             off = int(self.offset_var.get())
-            bd = int(self.bitdepth_var.get())
             le = self.endian_var.get()
         except ValueError:
-            messagebox.showerror("Error", "Invalid import parameter (must be integers).")
+            if show_errors:
+                messagebox.showerror("Error", "Invalid import parameter (must be integers).")
+            else:
+                self.status_var.set("Waiting for valid import parameters...")
             return False
 
         if w <= 0 or h <= 0 or off < 0:
-            messagebox.showerror("Error", "Width/Height must be > 0 and Offset must be >= 0.")
-            return False
-        if bd not in (8, 16):
-            messagebox.showerror("Error", "Bit depth must be 8 or 16.")
+            if show_errors:
+                messagebox.showerror("Error", "Width/Height must be > 0 and Offset must be >= 0.")
+            else:
+                self.status_var.set("Waiting for valid import parameters...")
             return False
 
         self.raw_import_params = {
             "width": w,
             "height": h,
             "offset": off,
-            "bit_depth": bd,
+            "bit_depth": DEFAULT_RAW_BIT_DEPTH,
             "little_endian": le,
         }
 
         # If an image is already open, immediately re-read it with new params.
-        if self.current_file:
+        # Width changes are handled separately as a display-only crop/pad step.
+        if self.current_file and not skip_reload:
             try:
                 img = read_raw_oct(self.current_file, **self.raw_import_params)
             except (OSError, ValueError, RuntimeError) as exc:
@@ -391,8 +705,14 @@ class Step1Frame(ttk.Frame):
             )
             return True
 
+        if self.current_file and skip_reload:
+            self.status_var.set(
+                f"Width stored for display adjustment: {w}px"
+            )
+            return True
+
         self.status_var.set(
-            f"Import params applied: {w}x{h}, offset {off}, {bd}-bit, "
+            f"Import params applied: {w}x{h}, offset {off}, {DEFAULT_RAW_BIT_DEPTH}-bit, "
             f"{'little' if le else 'big'}-endian"
         )
         return True
@@ -404,7 +724,8 @@ class Step1Frame(ttk.Frame):
             img: Loaded image array with shape (H, W).
             path: Source file path for display and output naming.
         """
-        self.raw_image = img
+        self._source_raw_image = np.array(img, copy=True)
+        self.raw_image = np.array(img, copy=True)
         self.processed_image = None
         self.current_file = path
 
@@ -419,6 +740,8 @@ class Step1Frame(ttk.Frame):
         self.image_canvas.enable_roi(True)
         self._set_default_roi()
         self._update_zoom_label()
+        self._update_save_button_state()
+        self._set_sdb_parameters_enabled(True)
         self.status_var.set(
             f"Loaded {filename} — left-drag ROI, right-drag pan, then Crop & Scale")
 
@@ -429,7 +752,7 @@ class Step1Frame(ttk.Frame):
         Args:
             path: Optional explicit file path. When omitted, shows file picker.
         """
-        if self.raw_import_params is None and not self._apply_import_params():
+        if self.raw_import_params is None and not self._apply_import_params(skip_reload=True):
             return
 
         if path is None:
@@ -449,9 +772,14 @@ class Step1Frame(ttk.Frame):
             )
             return
 
-        # Re-apply before opening so current form values are always used.
-        if not self._apply_import_params():
+        if self.processed_image is not None and not self._confirm_discard_processed_image(path):
             return
+
+        # Re-apply before opening so current form values are always used.
+        if not self._apply_import_params(skip_reload=True):
+            return
+
+        self._sync_output_dir_with_source(path)
 
         try:
             img = read_raw_oct(path, **self.raw_import_params)
@@ -578,6 +906,21 @@ class Step1Frame(ttk.Frame):
             return
         self.image_canvas.set_roi((x, y, w, h))
 
+    def _on_roi_entry_changed(self, *_):
+        """Apply ROI immediately when entry values become valid integers."""
+        if self._updating_roi_entries or self.raw_image is None:
+            return
+        try:
+            x = int(self.roi_x_var.get())
+            y = int(self.roi_y_var.get())
+            w = int(self.roi_w_var.get())
+            h = int(self.roi_h_var.get())
+        except ValueError:
+            return
+        if w <= 0 or h <= 0:
+            return
+        self.image_canvas.set_roi((x, y, w, h))
+
     def _set_roi_and_entries(self, x, y, w, h):
         """Set ROI in canvas and synchronize ROI entry fields.
 
@@ -592,10 +935,12 @@ class Step1Frame(ttk.Frame):
 
     def _update_roi_entries(self, x, y, w, h):
         """Write ROI values into UI entry variables."""
+        self._updating_roi_entries = True
         self.roi_x_var.set(str(x))
         self.roi_y_var.set(str(y))
         self.roi_w_var.set(str(w))
         self.roi_h_var.set(str(h))
+        self._updating_roi_entries = False
 
     def _on_roi_changed(self, roi):
         """Handle ROI-change callback from the canvas interaction layer.
@@ -660,6 +1005,7 @@ class Step1Frame(ttk.Frame):
         self.image_canvas.enable_roi(False)
         self.image_canvas.set_image(scaled)
         self._update_zoom_label()
+        self._set_sdb_parameters_enabled(False)
 
         ih, iw = scaled.shape
         filename = os.path.basename(self.current_file) if self.current_file else "Processed"
@@ -674,6 +1020,11 @@ class Step1Frame(ttk.Frame):
             f"Processed: {w}×{h} → {iw}×{ih}.  "
             f"Save as Light/Dark or Reset to adjust."
         )
+        self._update_save_button_state()
+        self.default_roi_btn.configure(state="disabled")
+        self.entire_roi_btn.configure(state="disabled")
+        for entry in self.roi_entries:
+            entry.configure(state="disabled")
         return True
 
     def _crop_scale_and_save_tiff(self):
@@ -690,6 +1041,12 @@ class Step1Frame(ttk.Frame):
         self.image_canvas.enable_roi(True)
         self._set_default_roi()
         self._update_zoom_label()
+        self._update_save_button_state()
+        self._set_sdb_parameters_enabled(True)
+        self.default_roi_btn.configure(state="normal")
+        self.entire_roi_btn.configure(state="normal")
+        for entry in self.roi_entries:
+            entry.configure(state="normal")
         self.status_var.set("Reset — adjust ROI and process again.")
 
         # Restore the top info display to original image
@@ -706,6 +1063,19 @@ class Step1Frame(ttk.Frame):
         d = filedialog.askdirectory(title="Select output folder")
         if d:
             self.outdir_var.set(d)
+
+    def _reset_outdir_to_default(self):
+        """Reset output directory to default Desktop location."""
+        self.outdir_var.set(DEFAULT_OUTPUT_DIR)
+        self.status_var.set(f"Output directory reset to default: {DEFAULT_OUTPUT_DIR}")
+
+    def _refresh_outdir_from_source(self):
+        """Refresh output directory from the current source image path."""
+        if self.current_file:
+            self._sync_output_dir_with_source(self.current_file)
+            self.status_var.set(f"Output directory synced to source: {self.outdir_var.get()}")
+            return
+        self.status_var.set("No source file loaded yet to sync output directory.")
 
     def _save_analyze(self, name):
         """Save processed image as Analyze 7.5 two-slice stack.
@@ -747,7 +1117,7 @@ class Step1Frame(ttk.Frame):
         if img is None:
             messagebox.showwarning("Nothing to save", "Open a file first.")
             return
-        default_name = f"{self._build_output_name('crop')}.tif"
+        default_name = f"{self._build_output_name('light')}.tif"
         path = filedialog.asksaveasfilename(
             title="Save as TIFF",
             defaultextension=".tif",
@@ -772,11 +1142,8 @@ class Step1Frame(ttk.Frame):
         Returns:
             str: Filename stem without extension.
         """
-        if self.current_file:
-            stem = os.path.splitext(os.path.basename(self.current_file))[0]
-        else:
-            stem = "image"
-        return f"{stem}_{suffix}"
+        suffix = (suffix or "image").strip().lower()
+        return suffix or "image"
 
     # ── Zoom ──
     def _zoom_in(self):

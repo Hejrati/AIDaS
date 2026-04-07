@@ -4,7 +4,7 @@ Houses a ttk.Notebook with tabs for each processing step.
 Currently implements Step 1; remaining steps are placeholders.
 """
 
-# Copyright (c) 2024-2026 Behzad Hejrati
+# Copyright (c) 2026 Behzad Hejrati
 # https://github.com/Hejrati
 
 import tkinter as tk
@@ -25,6 +25,9 @@ class AIDaSApp(tk.Tk):
         self.title("AIDaS — Retinal Image Processing")
         self.geometry("1280x820")
         self.minsize(900, 600)
+
+        # Center window inside the usable desktop area, not under the taskbar.
+        self.after(0, self._center_window)
 
         # ── Configuration ──
         self.preferences = Config()
@@ -67,7 +70,6 @@ class AIDaSApp(tk.Tk):
         menubar.add_cascade(label="Help", menu=help_menu)
         self.config(menu=menubar)
 
-        self.bind_all("<Control-q>", lambda _: self.destroy())
         self.bind_all("<Alt-F4>", lambda _: self.destroy())
 
         # ── Notebook (tabs for each Step) ──
@@ -76,12 +78,11 @@ class AIDaSApp(tk.Tk):
 
         # Step 1
         self.step1 = Step1Frame(self.notebook, preferences=self.preferences)
-        self.notebook.add(self.step1, text="  Step 1 — Resize Raw  ")
+        self.notebook.add(self.step1, text="  Step 1 — Load, Resize & Crop  ")
 
-        # Placeholder tabs for Steps 2-4
+        # Placeholder tabs for Steps 3-4
         for i, title in [
-            (2, "Prep for OCT Analysis"),
-            (3, "Rename & ELM Line"),
+            (3, "Rename & Flatten Image"),
             (4, "Analyse ISez"),
         ]:
             f = ttk.Frame(self.notebook)
@@ -95,6 +96,13 @@ class AIDaSApp(tk.Tk):
         self.status.pack(side="bottom", fill="x")
 
     # ── Menu actions ──
+    def _center_window(self):
+        """Center the window horizontally at the top of the screen."""
+        self.update_idletasks()
+        width = self.winfo_width()
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        self.geometry(f"+{x}+0")
+
     def _menu_browse_sdb(self):
         self.notebook.select(0)
         file_path = filedialog.askopenfilename(
