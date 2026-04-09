@@ -13,6 +13,8 @@ import sys
 
 from aidas import __version__
 from aidas.steps.step1_resize_raw import Step1Frame
+from aidas.steps.step2_annotate import Step2Frame
+
 from aidas.config import Config
 
 
@@ -79,6 +81,11 @@ class AIDaSApp(tk.Tk):
         # Step 1
         self.step1 = Step1Frame(self.notebook, preferences=self.preferences)
         self.notebook.add(self.step1, text="  Step 1 — Load, Resize & Crop  ")
+        
+        # Step 2
+        self.step2 = Step2Frame(self.notebook, preferences=self.preferences, source_step=self.step1)
+        self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
+
 
         # Placeholder tabs for Steps 3-4
         for i, title in [

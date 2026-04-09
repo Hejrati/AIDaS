@@ -189,7 +189,8 @@ def write_analyze(filepath, data):
     with open(base + ".img", "wb") as fh:
         # Analyze stores x-fastest, then y, then z — same as C-contiguous (row-major)
         for s in range(nslices):
-            fh.write(data[s].tobytes())
+            slice_arr = np.ascontiguousarray(np.flipud(data[s]))
+            fh.write(slice_arr.tobytes())
 
     return base + ".hdr", base + ".img"
 
@@ -221,8 +222,12 @@ def read_analyze(filepath):
         raw = np.frombuffer(fh.read(), dtype=dtype)
 
     if nslices > 1:
-        return raw.reshape((nslices, height, width))
-    return raw.reshape((height, width))
+        arr = raw.reshape((nslices, height, width))
+        # When writing we stored flipped slices (flipud). Flip them back to upright.
+        return np.stack([np.flipud(arr[s]) for s in range(arr.shape[0])], axis=0)
+
+    arr = raw.reshape((height, width))
+    return np.flipud(arr)
 
 
 # ════════════════════════════════════════════════════════════════════════════

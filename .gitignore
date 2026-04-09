@@ -10,3 +10,4 @@ OCT Segmenter\Model\human_OCT.h5
 segmenter_output/
 aidas\__pycache__/*
 aidas\steps\__pycache__/*
+run_aidas.spec
