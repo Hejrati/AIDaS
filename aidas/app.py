@@ -10,6 +10,7 @@ Currently implements Step 1; remaining steps are placeholders.
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import sys
+import os
 
 from aidas import __version__
 from aidas.steps.step1_resize_raw import Step1Frame
@@ -23,6 +24,8 @@ class AIDaSApp(tk.Tk):
 
     def __init__(self):
         super().__init__()
+
+        self._set_app_icon()
 
         self.title("AIDaS — Retinal Image Processing")
         self.geometry("1280x820")
@@ -101,6 +104,34 @@ class AIDaSApp(tk.Tk):
         self.status = ttk.Label(self, text=f"AIDaS v{__version__} — ready",
                                 relief="sunken", anchor="w", padding=2)
         self.status.pack(side="bottom", fill="x")
+
+    @staticmethod
+    def _resource_path(relative_path):
+        """Resolve resource path for source runs and PyInstaller bundles."""
+        base_dir = getattr(sys, "_MEIPASS", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+        return os.path.join(base_dir, relative_path)
+
+    def _set_app_icon(self):
+        """Set window/taskbar icon if available; never fail startup if missing."""
+        ico_path = self._resource_path(os.path.join("assets", "aidas.ico"))
+        png_path = self._resource_path(os.path.join("assets", "aidas.png"))
+
+        # On Windows, iconbitmap works best with .ico files.
+        if os.path.isfile(ico_path):
+            try:
+                self.iconbitmap(ico_path)
+                return
+            except tk.TclError:
+                pass
+
+        # PNG fallback for source runs and bundled apps.
+        if os.path.isfile(png_path):
+            try:
+                image = tk.PhotoImage(file=png_path)
+                self.iconphoto(True, image)
+                self._icon_image_ref = image
+            except tk.TclError:
+                pass
 
     # ── Menu actions ──
     def _center_window(self):
