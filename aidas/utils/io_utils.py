@@ -154,29 +154,41 @@ def write_analyze(filepath, data):
 
     dt_code, bitpix = _ANALYZE_DT.get(data.dtype, (4, 16))
 
-    # ---------- build 348-byte header (little-endian) ----------
+    # Match legacy OCT Analyze headers (for example Light 1.hdr): big-endian
+    # metadata with millimeter voxel units.
+    end = ">"
+
+    # ---------- build 348-byte header ----------
     hdr = bytearray(348)
 
     # header_key  (bytes 0-39)
-    struct.pack_into("<i", hdr, 0,  348)        # sizeof_hdr
-    struct.pack_into("<i", hdr, 32, 16384)      # extents
+    struct.pack_into(f"{end}i", hdr, 0,  348)        # sizeof_hdr
+    struct.pack_into(f"{end}i", hdr, 32, 16384)      # extents
     hdr[38] = ord("r")                          # regular
 
     # image_dimension  (bytes 40-147)
-    struct.pack_into("<h", hdr, 40, 4)          # dim[0] — number of dims
-    struct.pack_into("<h", hdr, 42, width)      # dim[1] — x
-    struct.pack_into("<h", hdr, 44, height)     # dim[2] — y
-    struct.pack_into("<h", hdr, 46, nslices)    # dim[3] — z
-    struct.pack_into("<h", hdr, 48, 1)          # dim[4] — t
+    struct.pack_into(f"{end}h", hdr, 40, 4)          # dim[0] — number of dims
+    struct.pack_into(f"{end}h", hdr, 42, width)      # dim[1] — x
+    struct.pack_into(f"{end}h", hdr, 44, height)     # dim[2] — y
+    struct.pack_into(f"{end}h", hdr, 46, nslices)    # dim[3] — z
+    struct.pack_into(f"{end}h", hdr, 48, 1)          # dim[4] — t
 
-    struct.pack_into("<h", hdr, 70, dt_code)    # datatype
-    struct.pack_into("<h", hdr, 72, bitpix)     # bitpix
+    hdr[56:60] = b"mm\x00\x00"                      # voxel units
 
-    for off in (76, 80, 84, 88):                # pixdim[0..3]
-        struct.pack_into("<f", hdr, off, 1.0)
+    struct.pack_into(f"{end}h", hdr, 70, dt_code)    # datatype
+    struct.pack_into(f"{end}h", hdr, 72, bitpix)     # bitpix
 
-    struct.pack_into("<i", hdr, 140, int(data.max()))   # glmax
-    struct.pack_into("<i", hdr, 144, int(data.min()))   # glmin
+    for off in (80, 84, 88):                          # pixdim[1..3]
+        struct.pack_into(f"{end}f", hdr, off, 1.0)
+    struct.pack_into(f"{end}f", hdr, 112, 1.0)       # keep sample-like metadata
+
+    # Analyze datatype 4 is signed 16-bit; compute global range accordingly.
+    if dt_code == 4 and bitpix == 16:
+        data_for_header = np.asarray(data, dtype=np.int16)
+    else:
+        data_for_header = data
+    struct.pack_into(f"{end}i", hdr, 140, int(data_for_header.max()))   # glmax
+    struct.pack_into(f"{end}i", hdr, 144, int(data_for_header.min()))   # glmin
 
     # description
     desc = b"AIDaS OCT Processing"
@@ -190,6 +202,10 @@ def write_analyze(filepath, data):
         # Analyze stores x-fastest, then y, then z — same as C-contiguous (row-major)
         for s in range(nslices):
             slice_arr = np.ascontiguousarray(np.flipud(data[s]))
+            if bitpix == 16:
+                # Analyze datatype 4 uses signed 16-bit storage.
+                target_dtype = np.dtype(f"{end}i2")
+                slice_arr = slice_arr.astype(target_dtype, copy=False)
             fh.write(slice_arr.tobytes())
 
     return base + ".hdr", base + ".img"
@@ -214,9 +230,14 @@ def read_analyze(filepath):
     dt_code = struct.unpack_from(f"{end}h", hdr, 70)[0]
     bitpix  = struct.unpack_from(f"{end}h", hdr, 72)[0]
 
-    dt_map = {(2, 8): np.uint8, (4, 16): np.int16,
-              (8, 32): np.int32, (16, 32): np.float32, (64, 64): np.float64}
-    dtype = dt_map.get((dt_code, bitpix), np.int16)
+    dt_map = {
+        (2, 8): np.dtype("u1"),
+        (4, 16): np.dtype(f"{end}i2"),
+        (8, 32): np.dtype(f"{end}i4"),
+        (16, 32): np.dtype(f"{end}f4"),
+        (64, 64): np.dtype(f"{end}f8"),
+    }
+    dtype = dt_map.get((dt_code, bitpix), np.dtype(f"{end}i2"))
 
     with open(base + ".img", "rb") as fh:
         raw = np.frombuffer(fh.read(), dtype=dtype)
@@ -224,10 +245,16 @@ def read_analyze(filepath):
     if nslices > 1:
         arr = raw.reshape((nslices, height, width))
         # When writing we stored flipped slices (flipud). Flip them back to upright.
-        return np.stack([np.flipud(arr[s]) for s in range(arr.shape[0])], axis=0)
+        out = np.stack([np.flipud(arr[s]) for s in range(arr.shape[0])], axis=0)
+        if out.dtype.byteorder not in ("=", "|"):
+            out = out.astype(out.dtype.newbyteorder("="), copy=False)
+        return out
 
     arr = raw.reshape((height, width))
-    return np.flipud(arr)
+    out = np.flipud(arr)
+    if out.dtype.byteorder not in ("=", "|"):
+        out = out.astype(out.dtype.newbyteorder("="), copy=False)
+    return out
 
 
 # ════════════════════════════════════════════════════════════════════════════

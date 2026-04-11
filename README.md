@@ -78,6 +78,32 @@ python -m PyInstaller --onefile --windowed --name AIDaS run_aidas.py
 
 The executable will be created in the `dist/` folder as `AIDaS.exe`.
 
+### Build with Spec File (Recommended)
+
+If you have `AIDaS.spec`, build from it so app name, icon, and bundled files stay consistent:
+
+```bash
+python -m PyInstaller AIDaS.spec --clean
+```
+
+### Troubleshooting: Desktop Icon Does Not Update (Windows)
+
+If `AIDaS.exe` has the new icon but the desktop shortcut still shows the old icon, Windows is using cached icon data.
+
+1. Delete the old desktop shortcut (do not delete the EXE)
+2. Run `dist/AIDaS.exe` once directly
+3. Create a new desktop shortcut from the new EXE
+4. If still unchanged, clear icon cache and restart Explorer:
+
+```powershell
+Stop-Process -Name explorer -Force
+Remove-Item "$env:LOCALAPPDATA\IconCache.db" -ErrorAction SilentlyContinue
+Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\iconcache*" -ErrorAction SilentlyContinue
+Start-Process explorer.exe
+```
+
+If needed, rename the EXE once (for example, `AIDaS_new.exe`) to bypass filename-based icon caching.
+
 ### Troubleshooting: `pyinstaller` not recognized (Windows PowerShell)
 
 If you see this error:

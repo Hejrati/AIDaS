@@ -105,7 +105,16 @@ class ImageCanvas(ttk.Frame):
     # ---------------------------------------------------------- public API
     def set_image(self, data: np.ndarray | None):
         """Set an image (H, W) numpy array (any dtype)."""
-        self._data = data
+        if data is None:
+            self._data = None
+        else:
+            arr = np.asarray(data)
+            if arr.ndim != 2:
+                raise ValueError("ImageCanvas expects a 2-D grayscale image.")
+            # Analyze data may be big-endian; normalize to native-endian once.
+            if arr.dtype.byteorder not in ("=", "|"):
+                arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
+            self._data = np.ascontiguousarray(arr)
         self._active_line.clear()
         self._line_overlays.clear()
         self._line_preview = None
@@ -248,12 +257,18 @@ class ImageCanvas(ttk.Frame):
         """Normalise to uint8 for display using 0.5-99.5 percentile stretch."""
         if data.dtype == np.uint8:
             return data
-        d = data.astype(np.float64)
-        lo, hi = np.percentile(d, [0.5, 99.5])
+        d = np.asarray(data, dtype=np.float64)
+        finite = np.isfinite(d)
+        if not np.any(finite):
+            return np.zeros(data.shape, dtype=np.uint8)
+        if not np.all(finite):
+            d = np.where(finite, d, np.nan)
+        lo, hi = np.nanpercentile(d, [0.5, 99.5])
         if hi > lo:
             d = np.clip((d - lo) / (hi - lo) * 255.0, 0, 255)
         else:
             d = np.clip(d, 0, 255)
+        d = np.nan_to_num(d, nan=0.0, posinf=255.0, neginf=0.0)
         return d.astype(np.uint8)
 
     def _redraw(self):
@@ -372,7 +387,7 @@ class ImageCanvas(ttk.Frame):
         self._draw_polyline(self._active_line, self._line_color, "active", preview=self._line_preview)
 
     def _draw_vertical_line(self):
-        if self._data is None or self._vertical_line_x is None:
+        if self._data is None or self._vertical_line_x is None or not self._vertical_line_on:
             return
         ih, _iw = self._data.shape[:2]
         x_top, y_top = self._i2c(self._vertical_line_x, 0)

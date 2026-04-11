@@ -82,9 +82,13 @@ class AIDaSApp(tk.Tk):
         self.notebook.pack(fill="both", expand=True, padx=5, pady=(5, 1))
 
         # Step 1
-        self.step1 = Step1Frame(self.notebook, preferences=self.preferences)
+        self.step1 = Step1Frame(
+            self.notebook,
+            preferences=self.preferences,
+            on_processed_image=self._on_step1_processed_image,
+        )
         self.notebook.add(self.step1, text="  Step 1 — Load, Resize & Crop  ")
-        
+
         # Step 2
         self.step2 = Step2Frame(self.notebook, preferences=self.preferences, source_step=self.step1)
         self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
@@ -159,6 +163,12 @@ class AIDaSApp(tk.Tk):
         self.style.theme_use(theme_name)
         self.preferences.set("theme", theme_name)
         self.status.config(text=f"AIDaS v{__version__} — theme changed to '{theme_name}'")
+
+    def _on_step1_processed_image(self, image, source_path):
+        """Receive newly cropped Step 1 image and load it into Step 2."""
+        if getattr(self, "step2", None) is None:
+            return
+        self.step2.load_external_image(image, source_path=source_path)
 
 
     # ── About dialog ──

@@ -37,21 +37,24 @@ class Step1Frame(ttk.Frame):
     - image interaction (zoom/pan/inspection).
     """
 
-    def __init__(self, parent, preferences=None):
+    def __init__(self, parent, preferences=None, on_processed_image=None):
         """Initialize the Step 1 panel and construct all widgets.
 
         Args:
             parent: Parent Tkinter container.
             preferences: Optional preferences object implementing `get` and `set`.
+            on_processed_image: Optional callback receiving (image, source_path)
+                whenever crop/scale produces a new processed image.
         """
         super().__init__(parent)
 
         self.preferences = preferences
+        self._on_processed_image = on_processed_image
 
         # ----- state -----
         self.raw_image = None          # original loaded image (H, W)  uint16
         self._source_raw_image = None  # original imported image before width adjustments
-        self.processed_image = None    # after crop + scale           uint16
+        self.processed_image = None    # after crop + scale           int16 (.img-like preview)
         self.current_file = None       # path of opened raw file
         self.raw_import_params = None  # validated import parameters
         self._updating_roi_entries = False
@@ -299,8 +302,8 @@ class Step1Frame(ttk.Frame):
         roi_actions = ttk.Frame(roi)
         roi_actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
-        ttk.Button(roi_actions, text="▶  Crop",
-                   command=self._crop_and_scale).pack(fill="x", pady=(0, 2))
+        self.crop_btn = ttk.Button(roi_actions, text="▶  Crop", command=self._crop_and_scale)
+        self.crop_btn.pack(fill="x", pady=(0, 2))
         self.undo_crop_btn = ttk.Button(
             roi_actions,
             text="↺ Undo Crop",
@@ -371,6 +374,20 @@ class Step1Frame(ttk.Frame):
         self.save_all_btn.configure(state="normal" if has_processed else "disabled")
         if getattr(self, "undo_crop_btn", None) is not None:
             self.undo_crop_btn.configure(state="normal" if has_processed else "disabled")
+        if getattr(self, "crop_btn", None) is not None:
+            self.crop_btn.configure(state="disabled" if has_processed else "normal")
+
+    @staticmethod
+    def _to_uint8_preview(data):
+        """Scale any grayscale image to uint8 for display."""
+        if data.dtype == np.uint8:
+            return np.array(data, copy=False)
+        arr = data.astype(np.float64)
+        lo = float(np.min(arr))
+        hi = float(np.max(arr))
+        if hi > lo:
+            arr = (arr - lo) / (hi - lo) * 255.0
+        return np.clip(arr, 0, 255).astype(np.uint8)
 
     def _set_widget_tree_state(self, widget, enabled):
         """Recursively enable or disable widgets inside a container."""
@@ -995,25 +1012,33 @@ class Step1Frame(ttk.Frame):
         # Scale (pixel replication)
         scaled = scale_image(cropped, sx=sx, sy=sy)
 
-        # Convert to 16-bit (keep as uint16)
-        if scaled.dtype != np.uint16:
-            scaled = scaled.astype(np.uint16)
+        # Preview/result should match Analyze .img interpretation (signed 16-bit).
+        if scaled.dtype != np.int16:
+            scaled = scaled.astype(np.int16, copy=False)
 
-        self.processed_image = scaled
+        self.processed_image = np.ascontiguousarray(scaled)
+        preview_image = self._to_uint8_preview(self.processed_image)
 
         # Show the result
         self.image_canvas.enable_roi(False)
-        self.image_canvas.set_image(scaled)
+        self.image_canvas.set_image(preview_image)
         self._update_zoom_label()
         self._set_sdb_parameters_enabled(False)
 
-        ih, iw = scaled.shape
+        if callable(self._on_processed_image):
+            try:
+                self._on_processed_image(np.array(self.processed_image, copy=True), self.current_file)
+            except Exception:
+                # Step 1 must remain usable even if Step 2 sync fails.
+                pass
+
+        ih, iw = self.processed_image.shape
         filename = os.path.basename(self.current_file) if self.current_file else "Processed"
 
         # Update the top info display
         self.image_info_var.set(
             f"✓ Processed: {filename}  |  Size: {iw} × {ih} px  |  "
-            f"Type: {scaled.dtype}  |  Range: [{scaled.min()} – {scaled.max()}]  |  "
+            f"Type: {self.processed_image.dtype}  |  Range: [{self.processed_image.min()} – {self.processed_image.max()}]  |  "
             f"Cropped {w}×{h} from ({x},{y}), scaled ×{sx}/×{sy}"
         )
         self.status_var.set(

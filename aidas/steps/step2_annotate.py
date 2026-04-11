@@ -34,11 +34,16 @@ BOUNDARY_PRESETS = [
 BOUNDARY_NAMES = [name for name, _ in BOUNDARY_PRESETS]
 BOUNDARY_COLORS = {name: color for name, color in BOUNDARY_PRESETS}
 TRACE_EXPORT_SUFFIX = "_step2_boundaries.csv"
-IMPORT_BIT_DEPTH_CHOICES = ["8-bit", "16-bit"]
 SEGMENTER_BOUNDARY_ORDER = ["RNFL-Vitreous", "GCL-RNFL", "INL-IPL", "ONL-OPL", "ELM", "RPE"]
+FOVEA_BOUNDARY_NAME = "Fovea-Center"
 
 
 def _bresenham_line(start, end):
+    """Return integer pixel coordinates for a line using Bresenham's algo.
+
+    start, end -- (x, y) pairs (may be floats); returns list of (x, y) ints
+    covering the discrete line between the points.
+    """
     x0, y0 = (int(start[0]), int(start[1]))
     x1, y1 = (int(end[0]), int(end[1]))
 
@@ -65,6 +70,11 @@ def _bresenham_line(start, end):
 
 
 def _polyline_pixels(points):
+    """Convert a polyline (sequence of vertices) into pixel coordinates.
+
+    Uses Bresenham per segment and avoids duplicating shared endpoints.
+    Returns a list of (x, y) integer pixel coordinates.
+    """
     points = [tuple(map(int, point)) for point in points]
     if not points:
         return []
@@ -95,8 +105,16 @@ class Step2Frame(ttk.Frame):
         self.active_boundary = None
         self.boundary_traces = {}
         self.boundary_order = []
+        self.boundary_completion_vars = {}
         self.fovea_x = None
         self._segmenter_running = False
+        self._drawing_locked = False
+        self._updating_fovea_entry = False
+        self._syncing_boundary_selection = False
+        self._fovea_repeat_job = None
+        self._fovea_repeat_dir = 0
+        self._fovea_repeat_ticks = 0
+        self.boundary_completion_vars = {name: tk.BooleanVar(value=False) for name in BOUNDARY_NAMES}
 
         app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         segmenter_root = os.path.join(app_root, "OCT Segmenter")
@@ -165,6 +183,11 @@ class Step2Frame(ttk.Frame):
     #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
     def _build_controls(self):
+        """Construct and lay out all left-side control widgets.
+
+        Controls are placed in titled LabelFrames and arranged vertically
+        inside a scrollable canvas to keep the UI compact.
+        """
         pad = dict(fill="x", padx=(14, 8))
 
         load = ttk.LabelFrame(self.ctrl, text="Image Source", padding=3)
@@ -186,28 +209,10 @@ class Step2Frame(ttk.Frame):
             pady=(4, 0),
         )
 
-        # Supported file types are shown in the dialog; files open automatically
-        bitdepth_row = ttk.Frame(load)
-        bitdepth_row.pack(side="bottom", fill="x", pady=(0, 4))
-        ttk.Label(bitdepth_row, text="Image Bit Depth:").pack(side="left")
-        self.import_bitdepth_var = tk.StringVar(value="8-bit")
-        # Radio-buttons styled as toggle buttons (indicatoroff) to act like flip-flop
-        rb_frame = ttk.Frame(bitdepth_row)
-        rb_frame.pack(side="left", padx=(6, 0))
-        ttk.Radiobutton(
-            rb_frame,
-            text="8-bit",
-            variable=self.import_bitdepth_var,
-            value="8-bit",
-            command=lambda: self._apply_import_bitdepth("8-bit"),
-        ).pack(side="left", padx=(0, 4))
-        ttk.Radiobutton(
-            rb_frame,
-            text="16-bit",
-            variable=self.import_bitdepth_var,
-            value="16-bit",
-            command=lambda: self._apply_import_bitdepth("16-bit"),
-        ).pack(side="left")
+        ttk.Label(load, text="Step 2 input is always loaded as 8-bit.", wraplength=240, justify="left").pack(
+            fill="x",
+            pady=(4, 0),
+        )
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
@@ -242,19 +247,17 @@ class Step2Frame(ttk.Frame):
         ttk.Entry(seg_out_row, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
         ttk.Button(seg_out_row, text="...", width=3, command=self._browse_segmenter_output_dir).pack(side="right")
 
-        # Segmentation actions disabled in prototype — buttons left visible but inactive
         self.segment_button = ttk.Button(
             segmenter,
-            text="Segment Image (Neural Net)",
+            text="AI Segment (no pre-process)",
             command=self._run_neural_segmentation,
-            state="disabled",
         )
         self.segment_button.pack(fill="x")
         self.segment_auto_button = ttk.Button(
             segmenter,
-            text="Auto Process + Segment (AI)",
+            text="AI Segment with Auto Pre-process",
             command=lambda: self._run_neural_segmentation(auto_preprocess=True),
-            state="disabled",
+            
         )
         self.segment_auto_button.pack(fill="x", pady=(3, 0))
 
@@ -276,94 +279,105 @@ class Step2Frame(ttk.Frame):
         boundary = ttk.LabelFrame(self.ctrl, text="Boundary Tracing", padding=3)
         boundary.pack(**pad, pady=2)
 
-        ttk.Label(boundary, text="Active boundary:").pack(anchor="w")
-        self.boundary_var = tk.StringVar(value=BOUNDARY_NAMES[0])
-        self.boundary_combo = ttk.Combobox(
-            boundary,
-            textvariable=self.boundary_var,
-            values=BOUNDARY_NAMES,
-            state="normal",
-        )
-        self.boundary_combo.pack(fill="x", pady=(0, 4))
-
         self.active_trace_var = tk.StringVar(value="No active boundary")
-        ttk.Label(boundary, textvariable=self.active_trace_var, wraplength=240, justify="left").pack(
+        ttk.Label(boundary, textvariable=self.active_trace_var, wraplength=240, justify="left").pack(fill="x", pady=(0, 4))
+
+        workflow = ttk.LabelFrame(boundary, text="Boundary Progress", padding=3)
+        workflow.pack(fill="x", pady=(4, 0))
+
+        workflow_lists = ttk.Frame(workflow)
+        workflow_lists.pack(fill="x")
+
+        incomplete_box = ttk.Frame(workflow_lists)
+        incomplete_box.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        completed_box = ttk.Frame(workflow_lists)
+        completed_box.pack(side="right", fill="both", expand=True, padx=(4, 0))
+
+        ttk.Label(incomplete_box, text="Incomplete").pack(anchor="w")
+        ttk.Label(completed_box, text="Completed").pack(anchor="w")
+
+        self.boundary_incomplete_listbox = tk.Listbox(
+            incomplete_box,
+            height=6,
+            selectmode="browse",
+            exportselection=False,
+        )
+        incomplete_scroll = ttk.Scrollbar(incomplete_box, orient="vertical", command=self.boundary_incomplete_listbox.yview)
+        self.boundary_incomplete_listbox.configure(yscrollcommand=incomplete_scroll.set)
+        self.boundary_incomplete_listbox.pack(side="left", fill="both", expand=True)
+        incomplete_scroll.pack(side="right", fill="y")
+        self.boundary_incomplete_listbox.bind("<<ListboxSelect>>", self._on_boundary_incomplete_selected)
+
+        self.boundary_completed_listbox = tk.Listbox(
+            completed_box,
+            height=6,
+            selectmode="browse",
+            exportselection=False,
+        )
+        completed_scroll = ttk.Scrollbar(completed_box, orient="vertical", command=self.boundary_completed_listbox.yview)
+        self.boundary_completed_listbox.configure(yscrollcommand=completed_scroll.set)
+        self.boundary_completed_listbox.pack(side="left", fill="both", expand=True)
+        completed_scroll.pack(side="right", fill="y")
+        self.boundary_completed_listbox.bind("<<ListboxSelect>>", self._on_boundary_completed_selected)
+
+        workflow_buttons = ttk.Frame(workflow)
+        workflow_buttons.pack(fill="x", pady=(6, 0))
+        self.finish_boundary_btn = ttk.Button(workflow_buttons, text="Finish", command=self._finish_boundary)
+        self.finish_boundary_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
+        self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary)
+        self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
+
+        self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
+        self.clear_all_traces_btn.pack(fill="x", pady=(4, 0))
+
+        self.boundary_workflow_status_var = tk.StringVar(value="Select a boundary to make it active.")
+        ttk.Label(workflow, textvariable=self.boundary_workflow_status_var, wraplength=240, justify="left").pack(
             fill="x",
-            pady=(0, 4),
+            pady=(4, 0),
         )
 
-        trace_buttons = ttk.Frame(boundary)
-        trace_buttons.pack(fill="x", pady=(2, 0))
-        ttk.Button(trace_buttons, text="Start / Reset", command=self._start_boundary).pack(
-            side="left",
-            expand=True,
-            fill="x",
-            padx=(0, 2),
-        )
-        ttk.Button(trace_buttons, text="Undo Point", command=self._undo_point).pack(
-            side="right",
-            expand=True,
-            fill="x",
-            padx=(2, 0),
-        )
-
-        trace_buttons_2 = ttk.Frame(boundary)
-        trace_buttons_2.pack(fill="x", pady=(2, 0))
-        ttk.Button(trace_buttons_2, text="Finish Boundary", command=self._finish_boundary).pack(
-            side="left",
-            expand=True,
-            fill="x",
-            padx=(0, 2),
-        )
-        ttk.Button(trace_buttons_2, text="Clear Active", command=self._clear_active_trace).pack(
-            side="right",
-            expand=True,
-            fill="x",
-            padx=(2, 0),
-        )
-
-        ttk.Button(boundary, text="Clear All Traces", command=self._clear_all_traces).pack(fill="x", pady=(4, 0))
-
-        fovea = ttk.LabelFrame(self.ctrl, text="Foveal Center Line", padding=3)
-        fovea.pack(**pad, pady=(4, 2))
+        fovea = ttk.LabelFrame(boundary, text="Foveal Center Line", padding=3)
+        fovea.pack(fill="x", pady=(4, 2))
 
         self.vertical_mode_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        self.vertical_mode_check = ttk.Checkbutton(
             fovea,
             text="Vertical line mode (click/drag on image)",
             variable=self.vertical_mode_var,
             command=self._on_vertical_mode_toggled,
-        ).pack(anchor="w")
-
-        self.fovea_line_var = tk.StringVar(value="Fovea line: not set")
-        ttk.Label(fovea, textvariable=self.fovea_line_var, wraplength=240, justify="left").pack(
-            fill="x",
-            pady=(2, 4),
         )
+        self.vertical_mode_check.pack(anchor="w")
+
+        # Keep this state var even when the label is hidden; callbacks rely on it.
+        self.fovea_line_var = tk.StringVar(value="Fovea line: not set")
 
         coord_row = ttk.Frame(fovea)
-        coord_row.pack(fill="x", pady=(0, 4))
+        coord_row.pack(fill="x", pady=(0, 2))
         ttk.Label(coord_row, text="Center X:").pack(side="left")
         self.fovea_x_entry_var = tk.StringVar(value="")
-        self.fovea_x_entry = ttk.Entry(coord_row, textvariable=self.fovea_x_entry_var, width=10)
-        self.fovea_x_entry.pack(side="left", padx=(6, 4), fill="x", expand=True)
+        self.fovea_x_entry_var.trace_add("write", self._on_fovea_x_entry_changed)
+        self.fovea_minus_btn = ttk.Button(coord_row, text="-", width=2)
+        self.fovea_minus_btn.pack(side="left", padx=(0, 2))
+        self.fovea_x_entry = ttk.Entry(coord_row, textvariable=self.fovea_x_entry_var, width=6)
+        self.fovea_x_entry.pack(side="left", padx=(6, 4))
+        self.fovea_plus_btn = ttk.Button(coord_row, text="+", width=2)
+        self.fovea_plus_btn.pack(side="left", padx=(0, 4))
+        self._bind_fovea_nudge_button(self.fovea_minus_btn, -1)
+        self._bind_fovea_nudge_button(self.fovea_plus_btn, 1)
         self.fovea_x_entry.bind("<Return>", lambda _e: self._apply_vertical_line_x())
-        ttk.Button(coord_row, text="Set", command=self._apply_vertical_line_x).pack(side="right")
 
-        fovea_buttons = ttk.Frame(fovea)
-        fovea_buttons.pack(fill="x")
-        ttk.Button(fovea_buttons, text="Center", command=self._center_vertical_line).pack(
-            side="left",
-            expand=True,
-            fill="x",
-            padx=(0, 2),
-        )
-        ttk.Button(fovea_buttons, text="Clear", command=self._clear_vertical_line).pack(
-            side="right",
-            expand=True,
-            fill="x",
-            padx=(2, 0),
-        )
+        # Reset icon matches Step 1 numeric reset affordance.
+        self.fovea_reset_btn = ttk.Button(coord_row, text="↺", width=2, command=self._center_vertical_line)
+        self.fovea_reset_btn.pack(side="left")
+
+        fovea_action_row = ttk.Frame(fovea)
+        fovea_action_row.pack(fill="x", pady=(2, 0))
+        self.fovea_set_btn = ttk.Button(fovea_action_row, text="Set", command=self._apply_vertical_line_x)
+        self.fovea_set_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
+        self.fovea_clear_btn = ttk.Button(fovea_action_row, text="Clear", command=self._clear_fovea_lock)
+        self.fovea_clear_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
+
+        self._set_fovea_controls_enabled(False)
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
@@ -391,7 +405,7 @@ class Step2Frame(ttk.Frame):
             fill="x",
             padx=(0, 2),
         )
-        ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv).pack(
+        ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv, state="disabled").pack(
             side="right",
             expand=True,
             fill="x",
@@ -414,10 +428,18 @@ class Step2Frame(ttk.Frame):
             justify="left",
         ).pack(anchor="w")
 
+        self._refresh_boundary_lists()
+
     # ═══════════════════════════════════════════════════════════════════════
     #  Image loading
     # ═══════════════════════════════════════════════════════════════════════
     def _open_image(self):
+        """Show open-file dialog and load the selected image.
+
+        The function auto-detects Analyze/TIFF/standard image formats
+        by extension and converts the image according to the current
+        import bit-depth selection.
+        """
         path = filedialog.askopenfilename(
             title="Select an OCT image",
             filetypes=[
@@ -430,13 +452,18 @@ class Step2Frame(ttk.Frame):
         if not path:
             return
         try:
-            image = self._load_image_from_path(path, bit_depth=self.import_bitdepth_var.get())
+            image = self._load_image_from_path(path)
         except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Open error", str(exc))
             return
         self._show_image(image, path)
 
     def _load_from_step1(self):
+        """Load the processed image exported by the connected Step 1 panel.
+
+        If Step 1 has a `processed_image` (cropped/scaled), prefer that;
+        otherwise fall back to the raw image. Applies current bit-depth.
+        """
         if self.source_step is None:
             messagebox.showinfo("Unavailable", "No Step 1 panel is connected to this view.")
             return
@@ -450,8 +477,19 @@ class Step2Frame(ttk.Frame):
             return
 
         display_path = source_path or "Step 1 output"
-        img = np.array(image, copy=True)
-        img = self._coerce_import_depth(img, self.import_bitdepth_var.get())
+        img = self._coerce_to_8bit(np.array(image, copy=True))
+        self._show_image(img, display_path)
+
+    def load_external_image(self, image, source_path=None):
+        """Load an externally supplied image into Step 2.
+
+        Used by Step 1 auto-sync after crop so the latest .img-like result is
+        immediately available in this panel.
+        """
+        if image is None:
+            return
+        display_path = source_path or "Step 1 output"
+        img = self._coerce_to_8bit(np.array(image, copy=True))
         self._show_image(img, display_path)
 
     def _update_step1_button_state(self):
@@ -473,7 +511,13 @@ class Step2Frame(ttk.Frame):
         if getattr(self, "_step1_watcher_active", False):
             self.after(500, self._update_step1_button_state)
 
-    def _load_image_from_path(self, path, bit_depth="Auto"):
+    def _load_image_from_path(self, path):
+        """Read an image file from disk and return a 2-D numpy array.
+
+        Supports Analyze (.hdr/.img), TIFF stacks, and standard images
+        (PNG/JPEG). For multi-frame TIFFs a single slice is returned
+        (the first frame).
+        """
         ext = os.path.splitext(path)[1].lower()
         if ext in {".hdr", ".img"}:
             data = read_analyze(path)
@@ -486,62 +530,17 @@ class Step2Frame(ttk.Frame):
             data = data[0]
         if data.ndim != 2:
             raise ValueError("Step 2 expects a 2-D grayscale image or a 2-D slice from a stack.")
-        # Apply current import bit depth selection when loading
-        return self._coerce_import_depth(data, bit_depth)
+        return self._coerce_to_8bit(data)
 
-    def _apply_import_bitdepth(self, mode=None):
-        """Convert the currently-displayed image to 8-bit or 16-bit.
-
-        Mode should be either "8-bit" or "16-bit". If no image is loaded,
-        simply update the selection for future loads.
-        """
-        mode = mode or (self.import_bitdepth_var.get() or "8-bit")
-        self.import_bitdepth_var.set(mode)
-        if self.image_data is None:
-            self.status_var.set(f"Import bit depth set to {mode}.")
-            return
-
-        try:
-            converted = self._coerce_import_depth(self.image_data, mode)
-        except Exception as exc:
-            messagebox.showerror("Conversion failed", str(exc))
-            return
-
-        self.image_data = converted
-        self.image_canvas.set_image(converted)
-        self.image_canvas.fit_to_window()
-        filename = os.path.basename(self.current_file) if self.current_file else ""
-        self.image_info_var.set(
-            f"{filename} | Size: {converted.shape[1]} × {converted.shape[0]} px | Type: {converted.dtype}"
-        )
-        self.status_var.set(f"Image converted to {mode}.")
-
-    def _coerce_import_depth(self, data, bit_depth):
-        mode = (bit_depth or "Auto").strip().lower()
-        if mode == "auto":
+    def _coerce_to_8bit(self, data):
+        if data.dtype == np.uint8:
             return np.array(data, copy=False)
-
-        if mode == "8-bit":
-            if data.dtype == np.uint8:
-                return np.array(data, copy=False)
-            scaled = data.astype(np.float64)
-            lo = float(np.min(scaled))
-            hi = float(np.max(scaled))
-            if hi > lo:
-                scaled = (scaled - lo) / (hi - lo) * 255.0
-            return np.clip(scaled, 0, 255).astype(np.uint8)
-
-        if mode == "16-bit":
-            if data.dtype == np.uint16:
-                return np.array(data, copy=False)
-            scaled = data.astype(np.float64)
-            lo = float(np.min(scaled))
-            hi = float(np.max(scaled))
-            if hi > lo:
-                scaled = (scaled - lo) / (hi - lo) * 65535.0
-            return np.clip(scaled, 0, 65535).astype(np.uint16)
-
-        raise ValueError(f"Unsupported import bit depth: {bit_depth}")
+        scaled = data.astype(np.float64)
+        lo = float(np.min(scaled))
+        hi = float(np.max(scaled))
+        if hi > lo:
+            scaled = (scaled - lo) / (hi - lo) * 255.0
+        return np.clip(scaled, 0, 255).astype(np.uint8)
 
     def _show_image(self, image, path):
         self.current_file = path
@@ -552,9 +551,7 @@ class Step2Frame(ttk.Frame):
         self.fovea_x = None
 
         self.image_canvas.set_image(image)
-        self.image_canvas.enable_line(not self.vertical_mode_var.get())
         self.image_canvas.enable_roi(False)
-        self.image_canvas.enable_vertical_line(self.vertical_mode_var.get())
         self.image_canvas.clear_active_line()
         self.image_canvas.clear_line_overlays()
         self.image_canvas.clear_vertical_line()
@@ -569,17 +566,130 @@ class Step2Frame(ttk.Frame):
         self.active_trace_var.set("No active boundary")
         self.fovea_line_var.set("Fovea line: not set")
         self.fovea_x_entry_var.set("")
+        self._reset_boundary_completion()
+        self._set_drawing_locked(False)
         self._refresh_trace_list()
+        self._sync_boundary_canvas_state()
         self.status_var.set(
-            "Image loaded. Left-click to place points, then press Finish Boundary to save the traced pixels."
+            "Image loaded. Left-click to place points only after selecting an incomplete boundary."
         )
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Boundary tracing actions
     # ═══════════════════════════════════════════════════════════════════════
     def _selected_boundary_name(self):
-        name = self.boundary_var.get().strip()
-        return name or "Boundary"
+        if getattr(self, "boundary_incomplete_listbox", None) is not None:
+            selection = self.boundary_incomplete_listbox.curselection()
+            if selection:
+                index = int(selection[0])
+                incomplete_names = self._incomplete_boundary_names()
+                if 0 <= index < len(incomplete_names):
+                    return incomplete_names[index]
+        if self.active_boundary in BOUNDARY_NAMES:
+            return self.active_boundary
+        next_name = self._next_incomplete_boundary()
+        return next_name or BOUNDARY_NAMES[0]
+
+    def _completed_boundary_names(self):
+        return [name for name in BOUNDARY_NAMES if self.boundary_completion_vars.get(name) and self.boundary_completion_vars[name].get()]
+
+    def _incomplete_boundary_names(self):
+        completed = set(self._completed_boundary_names())
+        return [name for name in BOUNDARY_NAMES if name not in completed]
+
+    def _start_boundary_for_name(self, name, auto_advance=False):
+        if self.image_data is None:
+            messagebox.showwarning("No image", "Load an image before tracing boundaries.")
+            return
+
+        if name not in BOUNDARY_NAMES:
+            return
+
+        if self.vertical_mode_var.get():
+            self.vertical_mode_var.set(False)
+            self._on_vertical_mode_toggled()
+
+        if self.image_canvas.get_active_line() and not auto_advance:
+            if not messagebox.askyesno(
+                "Discard current trace?",
+                "Replace the current unfinished trace and start a new boundary?",
+            ):
+                return
+
+        if name in self.boundary_traces and not auto_advance:
+            if not messagebox.askyesno(
+                "Overwrite boundary?",
+                f"Boundary '{name}' already exists. Overwrite it with a new trace?",
+            ):
+                return
+            self.boundary_traces.pop(name, None)
+            if name in self.boundary_order:
+                self.boundary_order.remove(name)
+            self._rebuild_saved_overlays()
+
+        self.active_boundary = name
+        self.image_canvas.clear_active_line()
+        self.boundary_workflow_status_var.set(f"Tracing {name}. Click a boundary name to switch targets.")
+        self.status_var.set(
+            f"Tracing {name}. Left-click to add points, undo points if needed, then finish the boundary."
+        )
+        self._update_active_trace_summary()
+
+    def _set_active_boundary_target(self, name):
+        if name not in BOUNDARY_NAMES:
+            return
+        if self.image_data is None:
+            return
+
+        if self.vertical_mode_var.get():
+            self.vertical_mode_var.set(False)
+            self._on_vertical_mode_toggled()
+
+        self.active_boundary = name
+        self.image_canvas.clear_active_line()
+
+        if name in self._completed_boundary_names():
+            self._refresh_boundary_lists(select_completed_name=name)
+        else:
+            self._refresh_boundary_lists(select_incomplete_name=name)
+
+        self.boundary_workflow_status_var.set(f"Active boundary: {name}")
+        self.status_var.set(
+            f"Tracing {name}. Left-click to add points, undo points if needed, then finish the boundary."
+        )
+        self._update_active_trace_summary()
+        self._update_boundary_action_buttons()
+        self._sync_boundary_canvas_state()
+        self._sync_boundary_canvas_state()
+
+    def _selected_active_boundary_name(self):
+        if self.active_boundary in BOUNDARY_NAMES:
+            return self.active_boundary
+        incomplete = self._incomplete_boundary_names()
+        if getattr(self, "boundary_incomplete_listbox", None) is not None:
+            selection = self.boundary_incomplete_listbox.curselection()
+            if selection:
+                index = int(selection[0])
+                if 0 <= index < len(incomplete):
+                    return incomplete[index]
+        completed = self._completed_boundary_names()
+        if getattr(self, "boundary_completed_listbox", None) is not None:
+            selection = self.boundary_completed_listbox.curselection()
+            if selection:
+                index = int(selection[0])
+                if 0 <= index < len(completed):
+                    return completed[index]
+        return None
+
+    def _update_boundary_action_buttons(self):
+        active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
+        is_completed = active_name in self._completed_boundary_names()
+        is_incomplete = active_name in self._incomplete_boundary_names()
+
+        if getattr(self, "finish_boundary_btn", None) is not None:
+            self.finish_boundary_btn.configure(state="normal" if is_incomplete else "disabled")
+        if getattr(self, "revert_boundary_btn", None) is not None:
+            self.revert_boundary_btn.configure(state="normal" if is_completed else "disabled")
 
     def _boundary_color(self, name):
         if name in BOUNDARY_COLORS:
@@ -588,89 +698,549 @@ class Step2Frame(ttk.Frame):
         index = sum(ord(ch) for ch in name) % len(palette)
         return palette[index]
 
+    def _sync_boundary_canvas_state(self):
+        active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
+        drawing_enabled = (
+            active_name is not None
+            and active_name in self._incomplete_boundary_names()
+            and not self.vertical_mode_var.get()
+        )
+        self.image_canvas.enable_line(drawing_enabled)
+        self.image_canvas.enable_vertical_line(self.vertical_mode_var.get())
+
     def _start_boundary(self):
-        messagebox.showinfo("Prototype", "Boundary tracing is disabled in prototype mode.")
-        return
+        if self.image_data is None:
+            return
+
+        name = self._selected_boundary_name()
+        self._start_boundary_for_name(name)
 
     def _undo_point(self):
-        messagebox.showinfo("Prototype", "Undo point is disabled in prototype mode.")
-        return
+        self.image_canvas.undo_active_line_vertex()
 
     def _clear_active_trace(self):
-        messagebox.showinfo("Prototype", "Clearing active trace is disabled in prototype mode.")
-        return
+        self.image_canvas.clear_active_line()
+        self._update_active_trace_summary()
+        self.status_var.set("Current unfinished trace cleared.")
 
     def _finish_boundary(self):
-        messagebox.showinfo("Prototype", "Finishing boundary is disabled in prototype mode.")
-        return
+        if self.image_data is None:
+            messagebox.showwarning("No image", "Load an image first.")
+            return
+
+        name = self._selected_active_boundary_name()
+        if name is None or name not in self._incomplete_boundary_names():
+            messagebox.showinfo("Select a boundary", "Choose an incomplete boundary first.")
+            return
+        points = self.image_canvas.get_active_line()
+        if len(points) < 2:
+            messagebox.showwarning("Incomplete trace", "Trace at least two points before finishing the boundary.")
+            return
+
+        pixels = _polyline_pixels(points)
+        color = self._boundary_color(name)
+        self.boundary_traces[name] = {
+            "points": list(points),
+            "pixels": pixels,
+            "color": color,
+        }
+        if name not in self.boundary_order:
+            self.boundary_order.append(name)
+
+        self.image_canvas.commit_active_line(color=color, label=name)
+        self.active_boundary = None
+        next_name = self._mark_boundary_complete(name)
+        self._refresh_trace_list()
+        self._select_trace_by_name(name)
+        self._update_saved_trace_summary(name)
+        self.active_trace_var.set("No active boundary")
+        self._update_boundary_action_buttons()
+        if next_name is not None:
+            self._start_boundary_for_name(next_name, auto_advance=True)
+            self.status_var.set(f"Saved '{name}'. Next boundary: {next_name}.")
+        else:
+            self.boundary_workflow_status_var.set("All preset boundaries are complete.")
+            self.status_var.set(f"Saved '{name}'. All preset boundaries are complete.")
+
+    def _revert_boundary(self):
+        name = self._selected_active_boundary_name()
+        if name is None or name not in self._completed_boundary_names():
+            messagebox.showinfo("Select a boundary", "Choose a completed boundary first.")
+            return
+
+        self.boundary_traces.pop(name, None)
+        if name in self.boundary_order:
+            self.boundary_order.remove(name)
+        if name in self.boundary_completion_vars:
+            self.boundary_completion_vars[name].set(False)
+
+        self.active_boundary = name
+        self.image_canvas.clear_active_line()
+        self._rebuild_saved_overlays()
+        self._refresh_trace_list()
+        self._refresh_boundary_lists(select_incomplete_name=name)
+        self._update_boundary_action_buttons()
+        self._sync_boundary_canvas_state()
+        self.trace_detail_var.set("No saved boundary")
+        self.active_trace_var.set(f"Active: {name} | no vertices placed yet")
+        self.status_var.set(f"Reverted '{name}' back to incomplete.")
 
     def _delete_selected_boundary(self):
-        messagebox.showinfo("Prototype", "Deleting saved boundaries is disabled in prototype mode.")
-        return
+        selection = self.trace_listbox.curselection()
+        if not selection:
+            messagebox.showinfo("Nothing selected", "Select a saved boundary first.")
+            return
+        name = self.boundary_order[selection[0]]
+        self.boundary_traces.pop(name, None)
+        self.boundary_order.remove(name)
+        if name in self.boundary_completion_vars:
+            self.boundary_completion_vars[name].set(False)
+        self._refresh_boundary_lists(select_incomplete_name=name)
+        self._rebuild_saved_overlays()
+        self._refresh_trace_list()
+        self.trace_detail_var.set("No saved boundary")
+        self.status_var.set(f"Deleted boundary '{name}'.")
 
     def _clear_all_traces(self):
-        messagebox.showinfo("Prototype", "Clearing all traces is disabled in prototype mode.")
-        return
+        if not self.boundary_traces and not self.image_canvas.get_active_line():
+            return
+        if not messagebox.askyesno("Clear all traces?", "Remove every saved and active boundary trace?"):
+            return
+        self.boundary_traces.clear()
+        self.boundary_order.clear()
+        self._reset_boundary_completion()
+        self.active_boundary = None
+        self.image_canvas.clear_line_overlays()
+        self.image_canvas.clear_active_line()
+        self._refresh_boundary_lists()
+        self._refresh_trace_list()
+        self.trace_detail_var.set("No saved boundary")
+        self.active_trace_var.set("No active boundary")
+        self.status_var.set("All boundary traces cleared.")
 
     def _rebuild_saved_overlays(self):
-        # overlays are disabled in prototype; do nothing
-        return
+        self.image_canvas.clear_line_overlays()
+        for name in self.boundary_order:
+            trace = self.boundary_traces.get(name)
+            if trace:
+                self.image_canvas.add_line_overlay(trace["points"], color=trace["color"], label=name)
+
+    def _reset_boundary_completion(self):
+        for var in self.boundary_completion_vars.values():
+            var.set(False)
+        self._refresh_boundary_lists()
+
+    def _mark_boundary_complete(self, name):
+        if name in self.boundary_completion_vars:
+            self.boundary_completion_vars[name].set(True)
+
+        next_name = self._next_incomplete_boundary(name)
+        if next_name is not None:
+            self._refresh_boundary_lists(select_incomplete_name=next_name)
+        else:
+            self._refresh_boundary_lists(select_completed_name=name)
+        return next_name
+
+    def _next_incomplete_boundary(self, current_name=None):
+        if current_name in BOUNDARY_NAMES:
+            start_index = BOUNDARY_NAMES.index(current_name) + 1
+        else:
+            start_index = 0
+
+        for name in BOUNDARY_NAMES[start_index:]:
+            var = self.boundary_completion_vars.get(name)
+            if var is not None and not var.get():
+                return name
+        for name in BOUNDARY_NAMES[:start_index]:
+            var = self.boundary_completion_vars.get(name)
+            if var is not None and not var.get():
+                return name
+        return None
 
     def _on_vertical_mode_toggled(self):
-        messagebox.showinfo("Prototype", "Vertical line mode is disabled in prototype mode.")
-        # keep the checkbox in a consistent state (off)
-        self.vertical_mode_var.set(False)
-        return
+        if self._drawing_locked:
+            self.vertical_mode_var.set(False)
+            return
+        enabled = self.vertical_mode_var.get()
+        self._set_fovea_controls_enabled(enabled)
+        self.image_canvas.enable_vertical_line(enabled)
+        self.image_canvas.enable_line(not enabled)
+        if enabled:
+            if self.image_data is not None:
+                self._center_vertical_line()
+                self.status_var.set("Vertical line mode enabled. Foveal center line set to image center.")
+            else:
+                self.status_var.set("Vertical line mode enabled. Load an image to place the foveal center line.")
+        else:
+            # When fovea mode is off, clear fovea line/data and saved fovea boundary.
+            self.boundary_traces.pop(FOVEA_BOUNDARY_NAME, None)
+            if FOVEA_BOUNDARY_NAME in self.boundary_order:
+                self.boundary_order.remove(FOVEA_BOUNDARY_NAME)
+            self.image_canvas.clear_vertical_line()
+            self._rebuild_saved_overlays()
+            self._refresh_trace_list()
+            self.trace_detail_var.set("No saved boundary")
+            self.status_var.set("Boundary tracing mode enabled. Left-click to place boundary points.")
+
+    def _refresh_boundary_lists(self, select_incomplete_name=None, select_completed_name=None):
+        if getattr(self, "boundary_incomplete_listbox", None) is None:
+            return
+
+        incomplete_names = self._incomplete_boundary_names()
+        completed_names = self._completed_boundary_names()
+        selected_name = select_incomplete_name if select_incomplete_name is not None else select_completed_name
+
+        self._syncing_boundary_selection = True
+        self.boundary_incomplete_listbox.selection_clear(0, "end")
+        self.boundary_completed_listbox.selection_clear(0, "end")
+        self.boundary_incomplete_listbox.delete(0, "end")
+        for name in incomplete_names:
+            active = "▶" if name == selected_name else " "
+            self.boundary_incomplete_listbox.insert("end", f"{active} {name}")
+
+        self.boundary_completed_listbox.delete(0, "end")
+        for name in completed_names:
+            active = "▶" if name == selected_name else " "
+            self.boundary_completed_listbox.insert("end", f"{active} {name}")
+
+        current = selected_name
+        if current is None:
+            current = self.active_boundary if self.active_boundary in incomplete_names else None
+        if current is None:
+            current = self._next_incomplete_boundary()
+
+        if current in incomplete_names:
+            index = incomplete_names.index(current)
+            self.boundary_incomplete_listbox.selection_clear(0, "end")
+            self.boundary_incomplete_listbox.selection_set(index)
+            self.boundary_incomplete_listbox.see(index)
+
+        if select_completed_name in completed_names:
+            index = completed_names.index(select_completed_name)
+            self.boundary_completed_listbox.selection_clear(0, "end")
+            self.boundary_completed_listbox.selection_set(index)
+            self.boundary_completed_listbox.see(index)
+        self._syncing_boundary_selection = False
+
+        self.boundary_workflow_status_var.set(
+            f"Incomplete: {len(incomplete_names)} | Completed: {len(completed_names)}/{len(BOUNDARY_NAMES)}"
+        )
+        self._update_boundary_action_buttons()
+        self._sync_boundary_canvas_state()
+
+    def _on_boundary_incomplete_selected(self, _event):
+        if self._syncing_boundary_selection:
+            return
+        if getattr(self, "boundary_incomplete_listbox", None) is None:
+            return
+        selection = self.boundary_incomplete_listbox.curselection()
+        if not selection:
+            return
+        index = int(selection[0])
+        incomplete_names = self._incomplete_boundary_names()
+        if 0 <= index < len(incomplete_names):
+            name = incomplete_names[index]
+            self.boundary_completed_listbox.selection_clear(0, "end")
+            self._set_active_boundary_target(name)
+
+    def _on_boundary_completed_selected(self, _event):
+        if self._syncing_boundary_selection:
+            return
+        if getattr(self, "boundary_completed_listbox", None) is None:
+            return
+        selection = self.boundary_completed_listbox.curselection()
+        if not selection:
+            return
+        index = int(selection[0])
+        completed_names = self._completed_boundary_names()
+        if 0 <= index < len(completed_names):
+            name = completed_names[index]
+            self.boundary_incomplete_listbox.selection_clear(0, "end")
+            self._set_active_boundary_target(name)
 
     def _center_vertical_line(self):
-        messagebox.showinfo("Prototype", "Centering vertical line is disabled in prototype mode.")
-        return
+        if self.image_data is None:
+            messagebox.showinfo("No image", "Load an image first.")
+            return
+        width = int(self.image_data.shape[1])
+        center_x = width // 2
+        self.image_canvas.set_vertical_line_x(center_x)
 
     def _clear_vertical_line(self):
-        messagebox.showinfo("Prototype", "Clearing vertical line is disabled in prototype mode.")
-        return
+        self.image_canvas.clear_vertical_line()
+        self.status_var.set("Foveal center line cleared.")
 
     def _apply_vertical_line_x(self):
-        messagebox.showinfo("Prototype", "Setting vertical line X is disabled in prototype mode.")
-        return
+        if self.image_data is None:
+            messagebox.showinfo("No image", "Load an image first.")
+            return
+        raw_value = self.fovea_x_entry_var.get().strip()
+        if not raw_value:
+            messagebox.showinfo("Missing coordinate", "Enter Center X first.")
+            return
+        try:
+            x = int(raw_value)
+        except ValueError:
+            messagebox.showerror("Invalid coordinate", "Center X must be an integer.")
+            return
+        width = int(self.image_data.shape[1])
+        height = int(self.image_data.shape[0])
+        if x < 0 or x >= width:
+            messagebox.showerror("Out of range", f"Center X must be between 0 and {width - 1}.")
+            return
+        self.image_canvas.set_vertical_line_x(x)
+
+        # Save the foveal center line as a boundary entry so it appears in the list.
+        if height >= 2:
+            points = [(x, 0), (x, height - 1)]
+            pixels = _polyline_pixels(points)
+            color = self._boundary_color(FOVEA_BOUNDARY_NAME)
+            self.boundary_traces[FOVEA_BOUNDARY_NAME] = {
+                "points": points,
+                "pixels": pixels,
+                "color": color,
+            }
+            if FOVEA_BOUNDARY_NAME not in self.boundary_order:
+                self.boundary_order.append(FOVEA_BOUNDARY_NAME)
+            self._rebuild_saved_overlays()
+            self._refresh_trace_list()
+            self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
+            self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
+
+        self._set_drawing_locked(True)
+
+        next_name = self._next_incomplete_boundary()
+        if next_name is not None:
+            self._set_active_boundary_target(next_name)
+
+        self.status_var.set(f"Foveal center line set to x={x} and saved to boundary list.")
+
+    def _set_drawing_locked(self, locked):
+        self._drawing_locked = bool(locked)
+        self._stop_fovea_repeat()
+
+        self.vertical_mode_check.configure(state="disabled" if self._drawing_locked else "normal")
+        self._set_fovea_controls_enabled(self.vertical_mode_var.get())
+
+        if self._drawing_locked:
+            self.vertical_mode_var.set(False)
+            self.image_canvas.enable_vertical_line(False)
+            # Keep boundary tracing active while fovea controls are locked.
+            self.image_canvas.enable_line(True)
+        else:
+            self.image_canvas.enable_vertical_line(self.vertical_mode_var.get())
+            self.image_canvas.enable_line(not self.vertical_mode_var.get())
+
+    def _set_fovea_controls_enabled(self, enabled):
+        """Enable/disable fovea-specific controls based on mode and lock state."""
+        state = "normal" if (enabled and not self._drawing_locked) else "disabled"
+        for widget in (
+            self.fovea_minus_btn,
+            self.fovea_x_entry,
+            self.fovea_plus_btn,
+            self.fovea_set_btn,
+            self.fovea_reset_btn,
+        ):
+            widget.configure(state=state)
+
+        # Clear should remain available while locked so the user can unlock.
+        clear_state = "normal" if (self._drawing_locked or (enabled and not self._drawing_locked)) else "disabled"
+        self.fovea_clear_btn.configure(state=clear_state)
+
+    def _clear_fovea_lock(self):
+        """Remove saved fovea lock line, unlock controls, then show default center line."""
+        self.boundary_traces.pop(FOVEA_BOUNDARY_NAME, None)
+        if FOVEA_BOUNDARY_NAME in self.boundary_order:
+            self.boundary_order.remove(FOVEA_BOUNDARY_NAME)
+
+        self._set_drawing_locked(False)
+        self.image_canvas.clear_vertical_line()
+        self._rebuild_saved_overlays()
+        self._refresh_trace_list()
+        self.trace_detail_var.set("No saved boundary")
+
+        if self.image_data is not None:
+            self._center_vertical_line()
+            self.status_var.set("Fovea lock cleared. Default center line restored.")
+        else:
+            self.status_var.set("Fovea lock cleared.")
+
+    def _on_fovea_x_entry_changed(self, *_):
+        """Apply Center X edits immediately when they are valid integers in range."""
+        if self._updating_fovea_entry or self.image_data is None:
+            return
+        raw_value = self.fovea_x_entry_var.get().strip()
+        if not raw_value:
+            return
+        try:
+            x = int(raw_value)
+        except ValueError:
+            return
+        max_x = int(self.image_data.shape[1]) - 1
+        x = max(0, min(x, max_x))
+        if str(x) != raw_value:
+            self._updating_fovea_entry = True
+            self.fovea_x_entry_var.set(str(x))
+            self._updating_fovea_entry = False
+        self.image_canvas.set_vertical_line_x(x)
+
+    def _nudge_fovea_x(self, delta):
+        if self.image_data is None:
+            messagebox.showinfo("No image", "Load an image first.")
+            return
+        width = int(self.image_data.shape[1])
+        max_x = width - 1
+        current = self.fovea_x
+        if current is None:
+            try:
+                current = int(self.fovea_x_entry_var.get().strip())
+            except ValueError:
+                current = width // 2
+        next_x = max(0, min(int(current) + int(delta), max_x))
+        self._updating_fovea_entry = True
+        self.fovea_x_entry_var.set(str(next_x))
+        self._updating_fovea_entry = False
+        self.image_canvas.set_vertical_line_x(next_x)
+
+    def _bind_fovea_nudge_button(self, button, delta):
+        button.bind("<ButtonPress-1>", lambda _event, d=delta: self._start_fovea_repeat(d))
+        button.bind("<ButtonRelease-1>", lambda _event: self._stop_fovea_repeat())
+        button.bind("<Leave>", lambda _event: self._stop_fovea_repeat())
+
+    def _start_fovea_repeat(self, delta):
+        if self.image_data is None:
+            messagebox.showinfo("No image", "Load an image first.")
+            return
+        self._stop_fovea_repeat()
+        self._fovea_repeat_dir = 1 if delta > 0 else -1
+        self._fovea_repeat_ticks = 0
+
+        # Apply one immediate step on initial click.
+        self._nudge_fovea_x(self._fovea_repeat_dir)
+
+        # Brief initial delay, then repeat with acceleration.
+        self._fovea_repeat_job = self.after(180, self._run_fovea_repeat)
+
+    def _run_fovea_repeat(self):
+        if self._fovea_repeat_dir == 0 or self.image_data is None:
+            self._stop_fovea_repeat()
+            return
+
+        self._fovea_repeat_ticks += 1
+
+        step = 1
+        interval = 90
+        if self._fovea_repeat_ticks >= 5:
+            step = 3
+            interval = 55
+        if self._fovea_repeat_ticks >= 14:
+            step = 6
+            interval = 35
+
+        self._nudge_fovea_x(self._fovea_repeat_dir * step)
+        self._fovea_repeat_job = self.after(interval, self._run_fovea_repeat)
+
+    def _stop_fovea_repeat(self):
+        if self._fovea_repeat_job is not None:
+            self.after_cancel(self._fovea_repeat_job)
+            self._fovea_repeat_job = None
+        self._fovea_repeat_dir = 0
+        self._fovea_repeat_ticks = 0
 
     def _on_vertical_line_changed(self, x):
-        # vertical line updates are disabled in prototype; ignore
-        return
+        self.fovea_x = x
+        fovea_line_var = getattr(self, "fovea_line_var", None)
+        fovea_x_entry_var = getattr(self, "fovea_x_entry_var", None)
+
+        if x is None:
+            if fovea_line_var is not None:
+                fovea_line_var.set("Fovea line: not set")
+            self._updating_fovea_entry = True
+            if fovea_x_entry_var is not None:
+                fovea_x_entry_var.set("")
+            self._updating_fovea_entry = False
+            return
+        if fovea_line_var is not None:
+            fovea_line_var.set(f"Fovea line: x={x}")
+        self._updating_fovea_entry = True
+        if fovea_x_entry_var is not None:
+            fovea_x_entry_var.set(str(x))
+        self._updating_fovea_entry = False
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Live updates and selection handling
     # ═══════════════════════════════════════════════════════════════════════
     def _on_active_line_changed(self, points):
-        # active line changes are disabled in prototype
-        return
+        if self.image_data is None:
+            return
+        if not points:
+            self._update_active_trace_summary()
+            return
+
+        pixels = _polyline_pixels(points)
+        name = self.active_boundary or self._selected_boundary_name()
+        self.active_trace_var.set(
+            f"Active: {name} | {len(points)} vertices | {len(pixels)} pixel(s) on line"
+        )
 
     def _on_mouse_moved(self, ix, iy, val):
-        # pointer/status updates are disabled in prototype
-        return
+        if self.image_data is None:
+            return
+        ih, iw = self.image_data.shape[:2]
+        z = self.image_canvas.get_zoom()
+        fovea_text = f"  |  Fovea x: {self.fovea_x}" if self.fovea_x is not None else ""
+        self.status_var.set(
+            f"({ix}, {iy})  val={val}  |  Image: {iw}×{ih} {self.image_data.dtype}  |  Zoom: {z * 100:.0f}%"
+            f"{fovea_text}"
+        )
 
     def _refresh_trace_list(self):
-        # saved traces list disabled in prototype
         self.trace_listbox.delete(0, "end")
-        return
+        for name in self.boundary_order:
+            trace = self.boundary_traces.get(name)
+            if not trace:
+                continue
+            self.trace_listbox.insert(
+                "end",
+                f"{name} — {len(trace['points'])} vertices, {len(trace['pixels'])} pixels",
+            )
 
     def _select_trace_by_name(self, name):
-        # selection disabled in prototype
-        return
+        if name not in self.boundary_order:
+            return
+        index = self.boundary_order.index(name)
+        self.trace_listbox.selection_clear(0, "end")
+        self.trace_listbox.selection_set(index)
+        self.trace_listbox.see(index)
 
     def _on_saved_boundary_selected(self, _event):
-        # saved boundary selection disabled in prototype
-        return
+        selection = self.trace_listbox.curselection()
+        if not selection:
+            return
+        name = self.boundary_order[selection[0]]
+        self._update_saved_trace_summary(name)
 
     def _update_active_trace_summary(self):
-        # active trace summary disabled in prototype
-        self.active_trace_var.set("No active boundary")
-        return
+        if self.active_boundary is None:
+            self.active_trace_var.set("No active boundary")
+            return
+        points = self.image_canvas.get_active_line()
+        if not points:
+            self.active_trace_var.set(f"Active: {self.active_boundary} | no vertices placed yet")
+            return
+        pixels = _polyline_pixels(points)
+        self.active_trace_var.set(
+            f"Active: {self.active_boundary} | {len(points)} vertices | {len(pixels)} pixel(s) on line"
+        )
 
     def _update_saved_trace_summary(self, name):
-        # saved trace summary disabled in prototype
-        self.trace_detail_var.set("No saved boundary")
-        return
+        trace = self.boundary_traces.get(name)
+        if not trace:
+            self.trace_detail_var.set("No saved boundary")
+            return
+        self.trace_detail_var.set(
+            f"{name}: {len(trace['points'])} vertices, {len(trace['pixels'])} pixels saved."
+        )
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Neural segmentation
