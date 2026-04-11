@@ -20,7 +20,7 @@ import numpy as np
 from PIL import Image
 
 from aidas.image_canvas import ImageCanvas
-from aidas.utils.io_utils import read_analyze, read_tiff
+from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze
 
 
 BOUNDARY_PRESETS = [
@@ -36,6 +36,20 @@ BOUNDARY_COLORS = {name: color for name, color in BOUNDARY_PRESETS}
 TRACE_EXPORT_SUFFIX = "_step2_boundaries.csv"
 SEGMENTER_BOUNDARY_ORDER = ["RNFL-Vitreous", "GCL-RNFL", "INL-IPL", "ONL-OPL", "ELM", "RPE"]
 FOVEA_BOUNDARY_NAME = "Fovea-Center"
+MARKED_BACKGROUND_MAX = 230
+COMMON_MARK_VALUES = {
+    "RPE": 255,
+    FOVEA_BOUNDARY_NAME: 243,
+}
+DARK_FIRST_SLICE_EXTRA_MARK_VALUES = {
+    "ELM": 254,
+    "ONL-OPL": 253,
+    "INL-IPL": 252,
+    "GCL-RNFL": 250,
+    "RNFL-Vitreous": 249,
+}
+LIGHT_MARKED_BASENAME = "Light_MARKED"
+DARK_MARKED_BASENAME = "Dark_MARKED"
 
 
 def _bresenham_line(start, end):
@@ -114,6 +128,7 @@ class Step2Frame(ttk.Frame):
         self._fovea_repeat_job = None
         self._fovea_repeat_dir = 0
         self._fovea_repeat_ticks = 0
+        self._input_analyze_template = None
         self.boundary_completion_vars = {name: tk.BooleanVar(value=False) for name in BOUNDARY_NAMES}
 
         app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -412,6 +427,14 @@ class Step2Frame(ttk.Frame):
             padx=(2, 0),
         )
 
+        mark_buttons = ttk.Frame(self.ctrl)
+        mark_buttons.pack(**pad, pady=(3, 0))
+        ttk.Button(
+            mark_buttons,
+            text="Save MARKED Images",
+            command=self._save_marked_images_button,
+        ).pack(fill="x")
+
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
         help_box = ttk.LabelFrame(self.ctrl, text="How to Trace", padding=3)
@@ -477,6 +500,7 @@ class Step2Frame(ttk.Frame):
             return
 
         display_path = source_path or "Step 1 output"
+        self._input_analyze_template = None
         img = self._coerce_to_8bit(np.array(image, copy=True))
         self._show_image(img, display_path)
 
@@ -489,6 +513,7 @@ class Step2Frame(ttk.Frame):
         if image is None:
             return
         display_path = source_path or "Step 1 output"
+        self._input_analyze_template = None
         img = self._coerce_to_8bit(np.array(image, copy=True))
         self._show_image(img, display_path)
 
@@ -521,10 +546,26 @@ class Step2Frame(ttk.Frame):
         ext = os.path.splitext(path)[1].lower()
         if ext in {".hdr", ".img"}:
             data = read_analyze(path)
+            template_data = np.array(data, copy=False)
+            if template_data.ndim == 2:
+                slices = 1
+                height, width = template_data.shape
+            elif template_data.ndim == 3:
+                slices, height, width = template_data.shape
+            else:
+                raise ValueError("Analyze image must be 2-D or 3-D.")
+            self._input_analyze_template = {
+                "slices": int(slices),
+                "height": int(height),
+                "width": int(width),
+                "dtype": np.dtype(template_data.dtype),
+            }
         elif ext in {".tif", ".tiff"}:
             data = read_tiff(path)
+            self._input_analyze_template = None
         else:
             data = np.array(Image.open(path).convert("L"))
+            self._input_analyze_template = None
 
         if data.ndim == 3:
             data = data[0]
@@ -760,7 +801,11 @@ class Step2Frame(ttk.Frame):
             self.status_var.set(f"Saved '{name}'. Next boundary: {next_name}.")
         else:
             self.boundary_workflow_status_var.set("All preset boundaries are complete.")
-            self.status_var.set(f"Saved '{name}'. All preset boundaries are complete.")
+            try:
+                self._save_marked_images(require_complete=True)
+            except OSError as exc:
+                messagebox.showerror("Save error", f"Could not save Light_MARKED Analyze image:\n{exc}")
+                self.status_var.set(f"Saved '{name}'. All preset boundaries are complete.")
 
     def _revert_boundary(self):
         name = self._selected_active_boundary_name()
@@ -1242,6 +1287,157 @@ class Step2Frame(ttk.Frame):
             f"{name}: {len(trace['points'])} vertices, {len(trace['pixels'])} pixels saved."
         )
 
+    def _all_required_boundaries_complete(self):
+        return all(name in self.boundary_traces for name in BOUNDARY_NAMES)
+
+    def _marked_output_basepath(self, basename):
+        if self.current_file and self.current_file != "Step 1 output":
+            out_dir = os.path.dirname(self.current_file)
+        else:
+            out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        return os.path.join(out_dir, basename)
+
+    def _reference_marked_volume_spec(self):
+        template = self._input_analyze_template
+        if template:
+            return (
+                int(template["slices"]),
+                int(template["height"]),
+                int(template["width"]),
+                np.dtype(template["dtype"]),
+            )
+
+        candidates = []
+        app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        candidates.extend(
+            [
+                os.path.join(app_root, "sdb_images", "Light 1.hdr"),
+                os.path.join(app_root, "sdb_images", "Dark 1.hdr"),
+            ]
+        )
+        if self.current_file:
+            source_dir = self.current_file if os.path.isdir(self.current_file) else os.path.dirname(self.current_file)
+            candidates.extend(
+                [
+                    os.path.join(source_dir, "Light 1.hdr"),
+                    os.path.join(source_dir, "Dark 1.hdr"),
+                ]
+            )
+
+        for candidate in candidates:
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                ref = read_analyze(candidate)
+            except Exception:
+                continue
+            shape = ref.shape
+            if ref.ndim == 3:
+                return int(shape[0]), int(shape[1]), int(shape[2]), np.dtype(ref.dtype)
+            if ref.ndim == 2:
+                return 1, int(shape[0]), int(shape[1]), np.dtype(ref.dtype)
+
+        height, width = self.image_data.shape[:2]
+        return 1, int(height), int(width), np.dtype(np.uint8)
+
+    def _build_marked_image(self):
+        marked = self._image_uint8(self.image_data).copy()
+        marked = np.minimum(marked, np.uint8(MARKED_BACKGROUND_MAX))
+        return marked
+
+    def _apply_mark_values(self, target_image, mark_values):
+        height, width = target_image.shape[:2]
+        for name, mark_value in mark_values.items():
+            trace = self.boundary_traces.get(name)
+            if not trace:
+                continue
+            for x, y in trace.get("pixels", []):
+                xi = int(x)
+                yi = int(y)
+                if 0 <= xi < width and 0 <= yi < height:
+                    target_image[yi, xi] = np.uint8(mark_value)
+
+    def _build_marked_volumes(self):
+        target_slices, target_h, target_w, _target_dtype = self._reference_marked_volume_spec()
+        base_marked = self._build_marked_image()
+        if (base_marked.shape[0], base_marked.shape[1]) != (target_h, target_w):
+            base_marked = np.array(
+                Image.fromarray(base_marked).resize((target_w, target_h), Image.Resampling.NEAREST),
+                dtype=np.uint8,
+            )
+
+        # Standard MARKED format: 8-bit with base intensities capped at 230,
+        # RPE+fovea on every slice, and extra boundary labels only on DARK slice 1.
+        light_slice = np.array(base_marked, copy=True)
+        self._apply_mark_values(light_slice, COMMON_MARK_VALUES)
+
+        dark_common_slice = np.array(base_marked, copy=True)
+        self._apply_mark_values(dark_common_slice, COMMON_MARK_VALUES)
+
+        dark_first_slice = np.array(dark_common_slice, copy=True)
+        self._apply_mark_values(dark_first_slice, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
+
+        nslices = max(1, int(target_slices))
+        light_volume = np.stack([light_slice] * nslices, axis=0).astype(np.uint8, copy=False)
+        dark_volume = np.stack([dark_common_slice] * nslices, axis=0).astype(np.uint8, copy=False)
+        dark_volume[0] = dark_first_slice
+        return light_volume, dark_volume
+
+    def _save_marked_images(self, require_complete=False, prompt_on_incomplete=False):
+        if self.image_data is None:
+            return False
+        if not self.boundary_traces:
+            return False
+
+        complete = self._all_required_boundaries_complete()
+        if require_complete and not complete:
+            return False
+        if prompt_on_incomplete and not complete:
+            proceed = messagebox.askyesno(
+                "Boundaries incomplete",
+                "Not all six preset boundaries are complete. Save MARKED images with current traces anyway?",
+            )
+            if not proceed:
+                return False
+
+        light_marked, dark_marked = self._build_marked_volumes()
+        saved_paths = []
+
+        light_base_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME)
+        write_analyze(light_base_path, light_marked)
+        saved_paths.append(light_base_path)
+
+        dark_base_path = self._marked_output_basepath(DARK_MARKED_BASENAME)
+        write_analyze(dark_base_path, dark_marked)
+        saved_paths.append(dark_base_path)
+
+        self.status_var.set(
+            "Saved marked images -> "
+            + ", ".join(f"{path}.img" for path in saved_paths)
+        )
+        return True
+
+    def _save_marked_images_button(self):
+        if self.image_data is None:
+            messagebox.showwarning("No image", "Load an image before saving MARKED outputs.")
+            return
+        if not self.boundary_traces:
+            messagebox.showinfo("Nothing to save", "Trace boundaries first, then save MARKED outputs.")
+            return
+
+        try:
+            saved = self._save_marked_images(prompt_on_incomplete=True)
+        except OSError as exc:
+            messagebox.showerror("Save error", f"Could not save MARKED Analyze images:\n{exc}")
+            return
+
+        if not saved:
+            return
+
+        light_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME) + ".img"
+        dark_path = self._marked_output_basepath(DARK_MARKED_BASENAME) + ".img"
+        messagebox.showinfo("Saved", f"Saved MARKED images:\n{light_path}\n{dark_path}")
+
     # ═══════════════════════════════════════════════════════════════════════
     #  Neural segmentation
     # ═══════════════════════════════════════════════════════════════════════
@@ -1417,6 +1613,16 @@ class Step2Frame(ttk.Frame):
         if self.boundary_order:
             self._select_trace_by_name(self.boundary_order[0])
             self._update_saved_trace_summary(self.boundary_order[0])
+
+        for name in BOUNDARY_NAMES:
+            if name in self.boundary_completion_vars:
+                self.boundary_completion_vars[name].set(name in self.boundary_traces)
+        self._refresh_boundary_lists()
+
+        try:
+            self._save_marked_images(require_complete=True)
+        except OSError as exc:
+            messagebox.showerror("Save error", f"Could not save Light_MARKED Analyze image:\n{exc}")
 
     def _set_segmentation_running(self, running, status_message=None):
         self._segmenter_running = bool(running)
