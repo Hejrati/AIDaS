@@ -66,6 +66,7 @@ class ImageCanvas(ttk.Frame):
         self._vertical_line_x = None
         self._vertical_line_color = "#1e90ff"
         self._drag_vertical_line = False
+        self._vertical_line_items = []
 
         # Drag state
         self._drag = None          # 'tl','tr','bl','br','move' or None
@@ -153,14 +154,14 @@ class ImageCanvas(ttk.Frame):
     def enable_vertical_line(self, enabled=True):
         self._vertical_line_on = bool(enabled)
         self._drag_vertical_line = False
-        self._redraw_overlays()
+        self._update_vertical_line_overlay()
 
     def set_vertical_line_x(self, x):
         if x is None:
             self._vertical_line_x = None
         else:
             self._vertical_line_x = self._clamp_image_point(x, 0)[0]
-        self._redraw_overlays()
+        self._update_vertical_line_overlay()
         self._emit_vertical_line_change()
 
     def get_vertical_line_x(self):
@@ -169,7 +170,7 @@ class ImageCanvas(ttk.Frame):
     def clear_vertical_line(self):
         self._vertical_line_x = None
         self._drag_vertical_line = False
-        self._redraw_overlays()
+        self._update_vertical_line_overlay()
         self._emit_vertical_line_change()
 
     def undo_active_line_vertex(self):
@@ -303,10 +304,22 @@ class ImageCanvas(ttk.Frame):
         if self._data is None or self._img_id is None:
             return
         self.canvas.delete("overlay")
+        self._clear_vertical_line_overlay()
         self._roi_items.clear()
         self._draw_roi()
         self._draw_line_overlays()
         self._draw_active_line()
+        self._draw_vertical_line()
+
+    def _clear_vertical_line_overlay(self):
+        for item_id in self._vertical_line_items:
+            self.canvas.delete(item_id)
+        self._vertical_line_items = []
+
+    def _update_vertical_line_overlay(self):
+        if self._data is None or self._img_id is None:
+            return
+        self._clear_vertical_line_overlay()
         self._draw_vertical_line()
 
     # ---------------------------------------------------------- ROI drawing
@@ -379,12 +392,19 @@ class ImageCanvas(ttk.Frame):
 
     def _draw_line_overlays(self):
         for item in self._line_overlays:
-            self._draw_polyline(item["points"], item["color"], item.get("label"))
+            # Saved overlays can contain thousands of points; skip vertex dots for speed.
+            self._draw_polyline(item["points"], item["color"], item.get("label"), show_vertices=False)
 
     def _draw_active_line(self):
         if not self._active_line:
             return
-        self._draw_polyline(self._active_line, self._line_color, "active", preview=self._line_preview)
+        self._draw_polyline(
+            self._active_line,
+            self._line_color,
+            "active",
+            preview=self._line_preview,
+            show_vertices=True,
+        )
 
     def _draw_vertical_line(self):
         if self._data is None or self._vertical_line_x is None or not self._vertical_line_on:
@@ -392,7 +412,7 @@ class ImageCanvas(ttk.Frame):
         ih, _iw = self._data.shape[:2]
         x_top, y_top = self._i2c(self._vertical_line_x, 0)
         x_bottom, y_bottom = self._i2c(self._vertical_line_x, ih - 1)
-        self.canvas.create_line(
+        line_id = self.canvas.create_line(
             x_top,
             y_top,
             x_bottom,
@@ -400,18 +420,19 @@ class ImageCanvas(ttk.Frame):
             fill=self._vertical_line_color,
             width=2,
             dash=(5, 3),
-            tags=("overlay",),
+            tags=("vertical_overlay",),
         )
-        self.canvas.create_text(
+        text_id = self.canvas.create_text(
             x_top + 8,
             y_top + 6,
             anchor="nw",
             text=f"Fovea x={self._vertical_line_x}",
             fill=self._vertical_line_color,
-            tags=("overlay",),
+            tags=("vertical_overlay",),
         )
+        self._vertical_line_items = [line_id, text_id]
 
-    def _draw_polyline(self, points, color, label=None, preview=None):
+    def _draw_polyline(self, points, color, label=None, preview=None, show_vertices=True):
         if not points:
             return
 
@@ -433,9 +454,18 @@ class ImageCanvas(ttk.Frame):
                 tags=("overlay",),
             )
 
-        for ix, iy in points:
-            cx, cy = self._i2c(ix, iy)
-            self.canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2, fill=color, outline=color, tags=("overlay",))
+        if show_vertices:
+            for ix, iy in points:
+                cx, cy = self._i2c(ix, iy)
+                self.canvas.create_oval(
+                    cx - 2,
+                    cy - 2,
+                    cx + 2,
+                    cy + 2,
+                    fill=color,
+                    outline=color,
+                    tags=("overlay",),
+                )
 
         if label:
             lx, ly = self._i2c(*points[0])
@@ -517,7 +547,7 @@ class ImageCanvas(ttk.Frame):
             ix, _iy = self._c2i(cx, cy)
             self._vertical_line_x = self._clamp_image_point(ix, 0)[0]
             self._drag_vertical_line = True
-            self._redraw_overlays()
+            self._update_vertical_line_overlay()
             self._emit_vertical_line_change()
             return
 
@@ -561,7 +591,7 @@ class ImageCanvas(ttk.Frame):
             new_x = self._clamp_image_point(ix, 0)[0]
             if new_x != self._vertical_line_x:
                 self._vertical_line_x = new_x
-                self._redraw_overlays()
+                self._update_vertical_line_overlay()
                 self._emit_vertical_line_change()
             return
 
@@ -620,6 +650,8 @@ class ImageCanvas(ttk.Frame):
 
     def _on_hover(self, event):
         if self._data is None:
+            return
+        if self._drag_vertical_line:
             return
         cx = self.canvas.canvasx(event.x)
         cy = self.canvas.canvasy(event.y)

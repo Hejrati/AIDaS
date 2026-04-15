@@ -1,7 +1,27 @@
-"""Step 2 — Trace boundary lines over OCT images.
+"""Step 2 — OCT boundary annotation with AI-assisted and manual drawing.
 
-This panel provides an ImageJ-style polyline tracing workflow for marking
-retinal boundaries and exporting the exact pixel coordinates along each line.
+This module implements the Step 2 GUI panel for annotating retinal boundary
+lines over OCT images. It supports manual ImageJ-style polyline drawing,
+AI segmentation import for automated predictions, and saving boundary
+coordinates.
+
+Core Functionality:
+  • Manual Annotation: Click-to-place polyline drawing for 6 preset retinal
+    boundaries (RPE, ELM, ONL-OPL, INL-IPL, GCL-RNFL, RNFL-Vitreous) with
+    vertex undo and visual feedback.
+  • AI Segmentation: Run neural network predictions via oct-segmenter tool,
+    with optional auto-preprocessing (crop-to-aspect and resize to model
+    input size). Predictions are automatically imported as boundary traces.
+  • Boundary Workflow: Tracks annotation progress with separate incomplete/
+    completed boundary lists; auto-advances to next boundary after finish.
+  • Foveal Center Line: Dedicated vertical line mode for placing/adjusting
+    the foveal center X-coordinate with nudge buttons and keyboard entry.
+  • Export: CSV export of all boundary row coordinates (one row per boundary).
+  • MARKED Images: Generate Light_MARKED and Dark_MARKED Analyze volumes
+    (8-bit) with boundary pixels marked at specific intensity values per
+    ImageJ macro conventions. Auto-scales boundaries if output size differs
+    from input.
+
 """
 
 import csv
@@ -10,31 +30,30 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from aidas.image_canvas import ImageCanvas
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze
+from aidas.utils.ui_utils import apply_app_icon_to
 
 
 BOUNDARY_PRESETS = [
-    ("RPE", "#ffb703"),
-    ("ELM", "#00b4d8"),
-    ("ONL-OPL", "#ef476f"),
-    ("INL-IPL", "#8ac926"),
-    ("GCL-RNFL", "#fb8500"),
     ("RNFL-Vitreous", "#8338ec"),
+    ("GCL-RNFL", "#fb8500"),
+    ("INL-IPL", "#8ac926"),
+    ("ONL-OPL", "#ef476f"),
+    ("ELM", "#00b4d8"),
+    ("RPE", "#ffb703"),
 ]
 BOUNDARY_NAMES = [name for name, _ in BOUNDARY_PRESETS]
 BOUNDARY_COLORS = {name: color for name, color in BOUNDARY_PRESETS}
 TRACE_EXPORT_SUFFIX = "_step2_boundaries.csv"
-SEGMENTER_BOUNDARY_ORDER = ["RNFL-Vitreous", "GCL-RNFL", "INL-IPL", "ONL-OPL", "ELM", "RPE"]
 FOVEA_BOUNDARY_NAME = "Fovea-Center"
 MARKED_BACKGROUND_MAX = 230
 COMMON_MARK_VALUES = {
@@ -48,8 +67,20 @@ DARK_FIRST_SLICE_EXTRA_MARK_VALUES = {
     "GCL-RNFL": 250,
     "RNFL-Vitreous": 249,
 }
+# Line widths per boundary to match ImageJ macro: RPE and ELM use width 5, all others use width 1
+MARKED_BOUNDARY_WIDTHS = {
+    "RPE": 5,
+    "ELM": 5,
+    "ONL-OPL": 1,
+    "INL-IPL": 1,
+    "GCL-RNFL": 1,
+    "RNFL-Vitreous": 1,
+    "Fovea-Center": 1,
+}
 LIGHT_MARKED_BASENAME = "Light_MARKED"
 DARK_MARKED_BASENAME = "Dark_MARKED"
+LIGHT_PREPROCESSED_BASENAME = "LIGHT"
+DARK_PREPROCESSED_BASENAME = "DARK"
 
 
 def _bresenham_line(start, end):
@@ -106,29 +137,75 @@ def _polyline_pixels(points):
 
 
 class Step2Frame(ttk.Frame):
-    """GUI panel for tracing boundary lines and exporting pixel coordinates."""
+    """GUI panel for tracing boundary lines and exporting pixel coordinates.
+
+    This frame manages the complete Step 2 workflow:
+      1. Load or receive OCT image data
+      2. Manual trace or AI-assisted boundary annotation for 6 retinal layers
+      3. Place foveal center vertical line (X coordinate)
+      4. Export boundary rows as CSV or generate MARKED Analyze volumes
+
+    The UI is split into:
+      - Left panel: scrollable controls (load, segmentation, fovea, export)
+      - Right panel: image canvas with line-drawing and coordinate display
+
+    Key data structures:
+      - boundary_traces: {name -> {points, pixels, color}} for saved boundaries
+      - boundary_completion_vars: {name -> BooleanVar} for progress tracking
+      - _preprocessing_info: metadata for AI preprocessing (crop/resize params)
+      - image_data: current 8-bit numpy array being annotated
+    """
 
     def __init__(self, parent, preferences=None, source_step=None):
+        """Initialize the Step 2 annotation panel.
+
+        Args:
+            parent: Tkinter parent widget.
+            preferences: User preferences dict (optional).
+            source_step: Reference to Step 1 panel for linked image loading (optional).
+        """
         super().__init__(parent)
 
         self.preferences = preferences
         self.source_step = source_step
 
-        self.current_file = None
-        self.image_data = None
-        self.active_boundary = None
-        self.boundary_traces = {}
-        self.boundary_order = []
-        self.boundary_completion_vars = {}
-        self.fovea_x = None
-        self._segmenter_running = False
-        self._drawing_locked = False
-        self._updating_fovea_entry = False
-        self._syncing_boundary_selection = False
-        self._fovea_repeat_job = None
-        self._fovea_repeat_dir = 0
-        self._fovea_repeat_ticks = 0
-        self._input_analyze_template = None
+        # ─ Image data state ─
+        self.current_file = None  # Path to currently loaded image
+        self.image_data = None  # Current 8-bit numpy array displayed on canvas
+        
+        # ─ Preprocessing pipeline state ─
+        self._last_auto_preprocessed_image = None  # Preprocessed image cached for AI segmentation
+        self._original_image_for_ai = None  # Backup of original image before preprocessing
+        self._original_file_for_ai = None  # Backup file path before preprocessing
+        self._preprocessing_done = False  # Flag: True if preprocessing applied to current image
+        self._preprocessing_info = None  # Dict: crop/resize metadata to inverse-transform AI predictions
+        
+        # ─ Boundary tracing state ─
+        self.active_boundary = None  # Name of boundary currently being traced
+        self.boundary_traces = {}  # Dict mapping boundary name -> {points, pixels, color}
+        self.boundary_order = []  # List of boundary names in order they were completed
+        
+        # ─ Foveal center line state ─
+        self.fovea_x = None  # Current X-coordinate of foveal center line (or None if not set)
+        
+        # ─ UI state flags ─
+        self._segmenter_running = False  # True while AI segmentation is executing
+        self._drawing_locked = False  # True if foveal center is locked (prevents other drawing)
+        self._updating_fovea_entry = False  # Flag to avoid feedback loop when updating entry widget
+        self._syncing_boundary_selection = False  # Flag to avoid feedback loop when selecting boundaries
+        
+        # ─ Fovea nudge repeat (keyboard acceleration) ─
+        self._fovea_repeat_job = None  # After() job ID for fovea nudge repeat
+        self._fovea_repeat_dir = 0  # Direction for nudge repeat (+1, -1, or 0 for stopped)
+        self._fovea_repeat_ticks = 0  # Counter for acceleration of repeated nudges
+        
+        # ─ Progress animation during segmentation ─
+        self._progress_animation_job = None  # After() job ID for progress bar animation
+        
+        # ─ Analyze template ─
+        self._input_analyze_template = None  # Cached input Analyze header for MARKED output
+        
+        # Initialize completion tracking for all 6 preset boundaries
         self.boundary_completion_vars = {name: tk.BooleanVar(value=False) for name in BOUNDARY_NAMES}
 
         app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -195,13 +272,73 @@ class Step2Frame(ttk.Frame):
         self._build_controls()
 
     # ═══════════════════════════════════════════════════════════════════════
+    #  AI Settings Dialog
+    # ═══════════════════════════════════════════════════════════════════════
+    def _open_ai_settings_dialog(self):
+        """Open a separate dialog for AI segmentation configuration.
+
+        This dialog allows users to:
+          - Set conda environment name for running oct-segmenter
+          - Select segmentation config (.json) file
+          - Select neural network model (.h5) file
+          - Specify output directory for segmentation results
+        """
+        dialog = tk.Toplevel(self.winfo_toplevel())
+        dialog.title("AI Segmentation Settings")
+        dialog.geometry("500x350")
+        dialog.resizable(True, True)
+
+        # Apply shared helper to propagate the app icon to this dialog
+        apply_app_icon_to(dialog)
+
+        main = ttk.Frame(dialog, padding=10)
+        main.pack(fill="both", expand=True)
+
+        ttk.Label(main, text="Conda Environment:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        env_frame = ttk.Frame(main)
+        env_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
+
+        ttk.Label(main, text="Config (.json):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        cfg_frame = ttk.Frame(main)
+        cfg_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(cfg_frame, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(cfg_frame, text="Browse", width=10, command=self._browse_segmenter_config).pack(side="right", padx=(4, 0))
+
+        ttk.Label(main, text="Model (.h5):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        model_frame = ttk.Frame(main)
+        model_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
+
+        ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        out_frame = ttk.Frame(main)
+        out_frame.pack(fill="x", pady=(0, 12))
+        ttk.Entry(out_frame, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(out_frame, text="Browse", width=10, command=self._browse_segmenter_output_dir).pack(side="right", padx=(4, 0))
+
+        buttons = ttk.Frame(main)
+        buttons.pack(fill="x", expand=True, side="bottom")
+        ttk.Button(buttons, text="OK", command=dialog.destroy).pack(side="right", padx=(2, 0))
+        dialog.focus_set()
+        dialog.grab_set()
+
+    # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
     def _build_controls(self):
         """Construct and lay out all left-side control widgets.
 
-        Controls are placed in titled LabelFrames and arranged vertically
-        inside a scrollable canvas to keep the UI compact.
+        The left panel is organized into titled LabelFrames arranged vertically:
+          1. Image Source: Load image or fetch from Step 1
+          2. Segmentation: Workflow (incomplete/completed lists), AI buttons,
+             clear traces button, and progress indicator
+          3. Foveal Center Line: Vertical line placement and adjustment
+          4. Export buttons: CSV export and MARKED image generation
+          5. Help text: Usage instructions
+
+        All controls are placed in a scrollable canvas to keep the UI compact
+        and accessible even on smaller screens.
         """
         pad = dict(fill="x", padx=(14, 8))
 
@@ -231,73 +368,19 @@ class Step2Frame(ttk.Frame):
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
-        segmenter = ttk.LabelFrame(self.ctrl, text="AI Segmentation", padding=3)
-        segmenter.pack(**pad, pady=2)
-
         self.segmenter_config_var = tk.StringVar(value=self.segmenter_default_config)
         self.segmenter_model_var = tk.StringVar(value=self.segmenter_default_model)
         self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
         self.segmenter_env_var = tk.StringVar(value="oct-segmenter-env")
 
-        env_row = ttk.Frame(segmenter)
-        env_row.pack(fill="x", pady=(0, 4))
-        ttk.Label(env_row, text="Conda env:").pack(side="left")
-        ttk.Entry(env_row, textvariable=self.segmenter_env_var, width=22).pack(side="right", fill="x", expand=True)
-
-        ttk.Label(segmenter, text="Config (.json):").pack(anchor="w")
-        seg_cfg_row = ttk.Frame(segmenter)
-        seg_cfg_row.pack(fill="x", pady=(0, 2))
-        ttk.Entry(seg_cfg_row, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(seg_cfg_row, text="...", width=3, command=self._browse_segmenter_config).pack(side="right")
-
-        ttk.Label(segmenter, text="Model (.h5):").pack(anchor="w")
-        seg_model_row = ttk.Frame(segmenter)
-        seg_model_row.pack(fill="x", pady=(0, 2))
-        ttk.Entry(seg_model_row, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(seg_model_row, text="...", width=3, command=self._browse_segmenter_model).pack(side="right")
-
-        ttk.Label(segmenter, text="Output folder:").pack(anchor="w")
-        seg_out_row = ttk.Frame(segmenter)
-        seg_out_row.pack(fill="x", pady=(0, 4))
-        ttk.Entry(seg_out_row, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(seg_out_row, text="...", width=3, command=self._browse_segmenter_output_dir).pack(side="right")
-
-        self.segment_button = ttk.Button(
-            segmenter,
-            text="AI Segment (no pre-process)",
-            command=self._run_neural_segmentation,
-        )
-        self.segment_button.pack(fill="x")
-        self.segment_auto_button = ttk.Button(
-            segmenter,
-            text="AI Segment with Auto Pre-process",
-            command=lambda: self._run_neural_segmentation(auto_preprocess=True),
-            
-        )
-        self.segment_auto_button.pack(fill="x", pady=(3, 0))
-
-        self.segmenter_progress_var = tk.StringVar(value="Idle")
-        ttk.Label(segmenter, textvariable=self.segmenter_progress_var).pack(anchor="w", pady=(6, 0))
-        self.segmenter_progress = ttk.Progressbar(segmenter, mode="indeterminate")
-        self.segmenter_progress.pack(fill="x", pady=(2, 0))
-
-        log_box = ttk.LabelFrame(segmenter, text="Segmentation Logs", padding=2)
-        log_box.pack(fill="both", expand=True, pady=(6, 0))
-        self.segmenter_log_text = tk.Text(log_box, height=8, wrap="word")
-        seg_log_scroll = ttk.Scrollbar(log_box, orient="vertical", command=self.segmenter_log_text.yview)
-        self.segmenter_log_text.configure(yscrollcommand=seg_log_scroll.set)
-        self.segmenter_log_text.pack(side="left", fill="both", expand=True)
-        seg_log_scroll.pack(side="right", fill="y")
-
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
-
-        boundary = ttk.LabelFrame(self.ctrl, text="Boundary Tracing", padding=3)
-        boundary.pack(**pad, pady=2)
+        self.segmentation_frame = ttk.LabelFrame(self.ctrl, text="Segmentation", padding=3)
+        self.segmentation_frame.pack(**pad, pady=2)
+        segmentation = self.segmentation_frame
 
         self.active_trace_var = tk.StringVar(value="No active boundary")
-        ttk.Label(boundary, textvariable=self.active_trace_var, wraplength=240, justify="left").pack(fill="x", pady=(0, 4))
+        ttk.Label(segmentation, textvariable=self.active_trace_var, wraplength=240, justify="left").pack(fill="x", pady=(0, 4))
 
-        workflow = ttk.LabelFrame(boundary, text="Boundary Progress", padding=3)
+        workflow = ttk.LabelFrame(segmentation, text="Boundary Progress", padding=3)
         workflow.pack(fill="x", pady=(4, 0))
 
         workflow_lists = ttk.Frame(workflow)
@@ -342,8 +425,29 @@ class Step2Frame(ttk.Frame):
         self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary)
         self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
 
+        ai_buttons = ttk.Frame(workflow)
+        ai_buttons.pack(fill="x", pady=(6, 0))
+        self.preprocess_button = ttk.Button(
+            ai_buttons,
+            text="Preprocess Image",
+            command=self._preprocess_image_for_ai,
+        )
+        self.preprocess_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self.segment_button = ttk.Button(
+            ai_buttons,
+            text="AI Assist",
+            command=self._run_neural_segmentation,
+            state="disabled",
+        )
+        self.segment_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
+        ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog).pack(side="right", padx=(2, 0))
+
         self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
-        self.clear_all_traces_btn.pack(fill="x", pady=(4, 0))
+        self.clear_all_traces_btn.pack(fill="x", pady=(6, 4))
+
+        self.segmenter_progress_var = tk.StringVar(value="Idle")
+        self.segmenter_progress = ttk.Progressbar(workflow, mode="determinate", maximum=6, value=0)
+        self.segmenter_progress.pack(fill="x", pady=(6, 4))
 
         self.boundary_workflow_status_var = tk.StringVar(value="Select a boundary to make it active.")
         ttk.Label(workflow, textvariable=self.boundary_workflow_status_var, wraplength=240, justify="left").pack(
@@ -351,8 +455,9 @@ class Step2Frame(ttk.Frame):
             pady=(4, 0),
         )
 
-        fovea = ttk.LabelFrame(boundary, text="Foveal Center Line", padding=3)
+        fovea = ttk.LabelFrame(segmentation, text="Foveal Center Line", padding=3)
         fovea.pack(fill="x", pady=(4, 2))
+        self.fovea_frame = fovea  # Store reference for later state management
 
         self.vertical_mode_var = tk.BooleanVar(value=False)
         self.vertical_mode_check = ttk.Checkbutton(
@@ -394,46 +499,27 @@ class Step2Frame(ttk.Frame):
 
         self._set_fovea_controls_enabled(False)
 
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
-
-        summary = ttk.LabelFrame(self.ctrl, text="Saved Boundaries", padding=3)
-        summary.pack(**pad, pady=2)
-
-        self.trace_listbox = tk.Listbox(summary, height=8, selectmode="browse")
-        trace_scroll = ttk.Scrollbar(summary, orient="vertical", command=self.trace_listbox.yview)
-        self.trace_listbox.configure(yscrollcommand=trace_scroll.set)
-        self.trace_listbox.pack(side="left", fill="both", expand=True)
-        trace_scroll.pack(side="right", fill="y")
-        self.trace_listbox.bind("<<ListboxSelect>>", self._on_saved_boundary_selected)
-
         self.trace_detail_var = tk.StringVar(value="No saved boundary")
-        ttk.Label(summary, textvariable=self.trace_detail_var, wraplength=240, justify="left").pack(
+        ttk.Label(segmentation, textvariable=self.trace_detail_var, wraplength=240, justify="left").pack(
             fill="x",
             pady=(4, 0),
         )
 
-        saved_buttons = ttk.Frame(self.ctrl)
-        saved_buttons.pack(**pad, pady=(2, 0))
-        ttk.Button(saved_buttons, text="Delete Selected", command=self._delete_selected_boundary).pack(
+        saved_buttons = ttk.Frame(segmentation)
+        saved_buttons.pack(fill="x", pady=(6, 0))
+        self.saved_buttons_frame = saved_buttons  # Store reference for later state management
+        ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv).pack(
             side="left",
             expand=True,
             fill="x",
             padx=(0, 2),
         )
-        ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv, state="disabled").pack(
+        ttk.Button(saved_buttons, text="Save MARKED Images", command=self._save_marked_images_button).pack(
             side="right",
             expand=True,
             fill="x",
             padx=(2, 0),
         )
-
-        mark_buttons = ttk.Frame(self.ctrl)
-        mark_buttons.pack(**pad, pady=(3, 0))
-        ttk.Button(
-            mark_buttons,
-            text="Save MARKED Images",
-            command=self._save_marked_images_button,
-        ).pack(fill="x")
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
@@ -451,7 +537,8 @@ class Step2Frame(ttk.Frame):
             justify="left",
         ).pack(anchor="w")
 
-        self._refresh_boundary_lists()
+        self._refresh_boundary_lists(auto_select=False)
+        self._set_segmentation_frame_enabled(False)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Image loading
@@ -459,9 +546,13 @@ class Step2Frame(ttk.Frame):
     def _open_image(self):
         """Show open-file dialog and load the selected image.
 
-        The function auto-detects Analyze/TIFF/standard image formats
-        by extension and converts the image according to the current
-        import bit-depth selection.
+        Supports multiple formats:
+          - TIFF stacks (.tif, .tiff) → extracts first slice
+          - Analyze 7.5 (.hdr/.img pairs) → reads header/data
+          - Standard images (.png, .jpg, .jpeg) → converts to grayscale
+        
+        Auto-detects format by file extension and converts to 8-bit grayscale
+        for display and annotation. Clears all existing traces and resets UI.
         """
         path = filedialog.askopenfilename(
             title="Select an OCT image",
@@ -484,8 +575,11 @@ class Step2Frame(ttk.Frame):
     def _load_from_step1(self):
         """Load the processed image exported by the connected Step 1 panel.
 
-        If Step 1 has a `processed_image` (cropped/scaled), prefer that;
-        otherwise fall back to the raw image. Applies current bit-depth.
+        Step 1 provides a link to automatically import the cropped/scaled image
+        after preprocessing. If Step 1 has a processed_image (cropped), it is
+        preferred; otherwise the raw image is used.
+
+        Applies current bit-depth conversion (8-bit) and resets all traces.
         """
         if self.source_step is None:
             messagebox.showinfo("Unavailable", "No Step 1 panel is connected to this view.")
@@ -501,7 +595,7 @@ class Step2Frame(ttk.Frame):
 
         display_path = source_path or "Step 1 output"
         self._input_analyze_template = None
-        img = self._coerce_to_8bit(np.array(image, copy=True))
+        img = self._image_uint8(np.array(image, copy=True))
         self._show_image(img, display_path)
 
     def load_external_image(self, image, source_path=None):
@@ -514,7 +608,7 @@ class Step2Frame(ttk.Frame):
             return
         display_path = source_path or "Step 1 output"
         self._input_analyze_template = None
-        img = self._coerce_to_8bit(np.array(image, copy=True))
+        img = self._image_uint8(np.array(image, copy=True))
         self._show_image(img, display_path)
 
     def _update_step1_button_state(self):
@@ -571,19 +665,28 @@ class Step2Frame(ttk.Frame):
             data = data[0]
         if data.ndim != 2:
             raise ValueError("Step 2 expects a 2-D grayscale image or a 2-D slice from a stack.")
-        return self._coerce_to_8bit(data)
-
-    def _coerce_to_8bit(self, data):
-        if data.dtype == np.uint8:
-            return np.array(data, copy=False)
-        scaled = data.astype(np.float64)
-        lo = float(np.min(scaled))
-        hi = float(np.max(scaled))
-        if hi > lo:
-            scaled = (scaled - lo) / (hi - lo) * 255.0
-        return np.clip(scaled, 0, 255).astype(np.uint8)
+        return self._image_uint8(data)
 
     def _show_image(self, image, path):
+        """Load a new image and reset the annotation UI.
+
+        Displays the image on the canvas and clears all tracing state:
+          - Clears all saved and active boundary traces
+          - Resets boundary completion status
+          - Clears preprocessing state and backup
+          - Resets foveal center line
+          - Updates info display and UI controls
+          - Re-enables all controls for fresh annotation
+
+        Args:
+            image: 8-bit numpy array to display.
+            path: Path or description string for the image source.
+        """
+        self._last_auto_preprocessed_image = None
+        self._original_image_for_ai = None
+        self._original_file_for_ai = None
+        self._preprocessing_done = False
+        self._preprocessing_info = None
         self.current_file = path
         self.image_data = image
         self.active_boundary = None
@@ -611,6 +714,8 @@ class Step2Frame(ttk.Frame):
         self._set_drawing_locked(False)
         self._refresh_trace_list()
         self._sync_boundary_canvas_state()
+        self._set_segmentation_frame_enabled(True)
+        self._update_ai_button_states()
         self.status_var.set(
             "Image loaded. Left-click to place points only after selecting an incomplete boundary."
         )
@@ -618,27 +723,68 @@ class Step2Frame(ttk.Frame):
     # ═══════════════════════════════════════════════════════════════════════
     #  Boundary tracing actions
     # ═══════════════════════════════════════════════════════════════════════
+    def _get_listbox_selection(self, listbox, name_list):
+        """Get the currently selected name from a listbox.
+
+        Safe helper that handles None listbox, empty selection, and bounds checking.
+
+        Args:
+            listbox: tk.Listbox widget (or None).
+            name_list: List of strings to index into.
+
+        Returns:
+            Selected string name, or None if no valid selection.
+        """
+        if listbox is None:
+            return None
+        selection = listbox.curselection()
+        if selection:
+            index = int(selection[0])
+            if 0 <= index < len(name_list):
+                return name_list[index]
+        return None
+
     def _selected_boundary_name(self):
-        if getattr(self, "boundary_incomplete_listbox", None) is not None:
-            selection = self.boundary_incomplete_listbox.curselection()
-            if selection:
-                index = int(selection[0])
-                incomplete_names = self._incomplete_boundary_names()
-                if 0 <= index < len(incomplete_names):
-                    return incomplete_names[index]
+        """Get currently selected boundary, with fallback to active or next incomplete."""
+        incomplete_names = self._incomplete_boundary_names()
+        selected = self._get_listbox_selection(getattr(self, "boundary_incomplete_listbox", None), incomplete_names)
+        if selected:
+            return selected
         if self.active_boundary in BOUNDARY_NAMES:
             return self.active_boundary
-        next_name = self._next_incomplete_boundary()
-        return next_name or BOUNDARY_NAMES[0]
+        return self._next_incomplete_boundary() or BOUNDARY_NAMES[0]
 
     def _completed_boundary_names(self):
+        """Return list of completed boundary names.
+
+        A boundary is complete when its BooleanVar in boundary_completion_vars is True.
+        """
         return [name for name in BOUNDARY_NAMES if self.boundary_completion_vars.get(name) and self.boundary_completion_vars[name].get()]
 
     def _incomplete_boundary_names(self):
+        """Return list of incomplete (not yet finished) boundary names.
+
+        Inverse of completed boundaries; used to populate the incomplete listbox.
+        """
         completed = set(self._completed_boundary_names())
         return [name for name in BOUNDARY_NAMES if name not in completed]
 
     def _start_boundary_for_name(self, name, auto_advance=False):
+        """Begin drawing a new boundary trace.
+
+        Switches to the given boundary name and prepares for point-by-point drawing.
+        If a trace already exists for this boundary, prompts user to overwrite.
+        Automatically disables vertical line mode and clears any active unfinished trace.
+
+        Args:
+            name: Boundary name from BOUNDARY_NAMES.
+            auto_advance: If True, skip overwrite prompts (used after completing a boundary).
+
+        Updates:
+          - active_boundary to the given name
+          - canvas to line-drawing mode
+          - status bar with instructions
+        """
         if self.image_data is None:
             messagebox.showwarning("No image", "Load an image before tracing boundaries.")
             return
@@ -675,11 +821,11 @@ class Step2Frame(ttk.Frame):
             f"Tracing {name}. Left-click to add points, undo points if needed, then finish the boundary."
         )
         self._update_active_trace_summary()
+        self._update_boundary_action_buttons()
+        self._sync_boundary_canvas_state()
 
     def _set_active_boundary_target(self, name):
-        if name not in BOUNDARY_NAMES:
-            return
-        if self.image_data is None:
+        if name not in BOUNDARY_NAMES or self.image_data is None:
             return
 
         if self.vertical_mode_var.get():
@@ -701,26 +847,17 @@ class Step2Frame(ttk.Frame):
         self._update_active_trace_summary()
         self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
-        self._sync_boundary_canvas_state()
 
     def _selected_active_boundary_name(self):
+        """Get the active boundary or selected from lists (incomplete preferred)."""
         if self.active_boundary in BOUNDARY_NAMES:
             return self.active_boundary
         incomplete = self._incomplete_boundary_names()
-        if getattr(self, "boundary_incomplete_listbox", None) is not None:
-            selection = self.boundary_incomplete_listbox.curselection()
-            if selection:
-                index = int(selection[0])
-                if 0 <= index < len(incomplete):
-                    return incomplete[index]
+        selected = self._get_listbox_selection(getattr(self, "boundary_incomplete_listbox", None), incomplete)
+        if selected:
+            return selected
         completed = self._completed_boundary_names()
-        if getattr(self, "boundary_completed_listbox", None) is not None:
-            selection = self.boundary_completed_listbox.curselection()
-            if selection:
-                index = int(selection[0])
-                if 0 <= index < len(completed):
-                    return completed[index]
-        return None
+        return self._get_listbox_selection(getattr(self, "boundary_completed_listbox", None), completed)
 
     def _update_boundary_action_buttons(self):
         active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
@@ -740,16 +877,38 @@ class Step2Frame(ttk.Frame):
         return palette[index]
 
     def _sync_boundary_canvas_state(self):
+        """Enable or disable line drawing on canvas based on current state.
+
+        Line drawing is DISABLED if:
+          - AI segmentation is actively running (prevents accidental edits)
+          - No boundary is selected or selected boundary is complete
+          - Vertical line mode is active
+
+        Completed boundaries must be reverted to incomplete to edit.
+
+        Vertical line mode is DISABLED during AI segmentation to prevent conflicts.
+
+        This method is called after each state change (AI finish, boundary selection,
+        vertical line toggle) to maintain consistent canvas interactivity.
+        """
         active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
+        # Only allow drawing on incomplete boundaries
+        is_incomplete = active_name in self._incomplete_boundary_names()
         drawing_enabled = (
             active_name is not None
-            and active_name in self._incomplete_boundary_names()
+            and is_incomplete
             and not self.vertical_mode_var.get()
+            and not self._segmenter_running
         )
         self.image_canvas.enable_line(drawing_enabled)
-        self.image_canvas.enable_vertical_line(self.vertical_mode_var.get())
+        self.image_canvas.enable_vertical_line(self.vertical_mode_var.get() and not self._segmenter_running)
 
     def _start_boundary(self):
+        """Begin drawing the currently selected boundary from the incomplete list.
+
+        Convenience method that resolves the selected incomplete boundary name and
+        delegates to _start_boundary_for_name(). Used by the "Start" button.
+        """
         if self.image_data is None:
             return
 
@@ -757,14 +916,37 @@ class Step2Frame(ttk.Frame):
         self._start_boundary_for_name(name)
 
     def _undo_point(self):
+        """Remove the last vertex from the active boundary trace.
+
+        Delegates to ImageCanvas.undo_active_line_vertex(). User can call this
+        multiple times to step back through all points in the current trace.
+        """
         self.image_canvas.undo_active_line_vertex()
 
     def _clear_active_trace(self):
+        """Discard the current unfinished boundary trace and start fresh.
+
+        Clears the active line on the canvas and updates status. Does not affect
+        any completed boundaries.
+        """
         self.image_canvas.clear_active_line()
         self._update_active_trace_summary()
         self.status_var.set("Current unfinished trace cleared.")
 
     def _finish_boundary(self):
+        """Complete tracing the current active boundary and save it.
+
+        Steps:
+          1. Validate an incomplete boundary is selected
+          2. Extract points from canvas active line
+          3. Check minimum 2-point requirement
+          4. Convert points to pixel coordinates using Bresenham's algorithm
+          5. Save boundary to boundary_traces dict and mark as complete
+          6. Refresh UI lists and auto-advance to next boundary
+
+        Auto-saves MARKED images if all 6 boundaries are complete (unless disabled).
+        Clears active line and prepares UI for next boundary.
+        """
         if self.image_data is None:
             messagebox.showwarning("No image", "Load an image first.")
             return
@@ -808,6 +990,12 @@ class Step2Frame(ttk.Frame):
                 self.status_var.set(f"Saved '{name}'. All preset boundaries are complete.")
 
     def _revert_boundary(self):
+        """Mark a completed boundary as incomplete and re-open it for editing.
+
+        Removes the boundary from saved traces and completion status, clearing
+        its pixels from all MARKED images. User can re-trace or edit.
+        Prompts for confirmation to prevent accidental reverts.
+        """
         name = self._selected_active_boundary_name()
         if name is None or name not in self._completed_boundary_names():
             messagebox.showinfo("Select a boundary", "Choose a completed boundary first.")
@@ -831,7 +1019,16 @@ class Step2Frame(ttk.Frame):
         self.status_var.set(f"Reverted '{name}' back to incomplete.")
 
     def _delete_selected_boundary(self):
-        selection = self.trace_listbox.curselection()
+        """Delete a saved boundary from the trace list.
+
+        Allows removal of individual saved boundaries without reverting all.
+        Boundary must be selected in the trace listbox.
+        """
+        trace_listbox = getattr(self, "trace_listbox", None)
+        if trace_listbox is None:
+            messagebox.showinfo("Unavailable", "Boundary list is hidden in this layout.")
+            return
+        selection = trace_listbox.curselection()
         if not selection:
             messagebox.showinfo("Nothing selected", "Select a saved boundary first.")
             return
@@ -847,6 +1044,11 @@ class Step2Frame(ttk.Frame):
         self.status_var.set(f"Deleted boundary '{name}'.")
 
     def _clear_all_traces(self):
+        """Remove all saved boundaries and the active trace at once.
+
+        Asks for confirmation before clearing to prevent accidental data loss.
+        Resets boundary completion status and clears canvas overlays.
+        """
         if not self.boundary_traces and not self.image_canvas.get_active_line():
             return
         if not messagebox.askyesno("Clear all traces?", "Remove every saved and active boundary trace?"):
@@ -864,6 +1066,11 @@ class Step2Frame(ttk.Frame):
         self.status_var.set("All boundary traces cleared.")
 
     def _rebuild_saved_overlays(self):
+        """Redraw all saved boundary overlays on the canvas from boundary_traces.
+
+        Called after any modification to boundary_traces or boundary_order.
+        Maintains order and colors when re-rendering the canvas display.
+        """
         self.image_canvas.clear_line_overlays()
         for name in self.boundary_order:
             trace = self.boundary_traces.get(name)
@@ -871,11 +1078,28 @@ class Step2Frame(ttk.Frame):
                 self.image_canvas.add_line_overlay(trace["points"], color=trace["color"], label=name)
 
     def _reset_boundary_completion(self):
+        """Reset all boundaries to incomplete status and update UI.
+
+        Used when clearing all traces or loading a new image.
+        Resets all BooleanVar completion flags and refreshes listboxes.
+        """
         for var in self.boundary_completion_vars.values():
             var.set(False)
-        self._refresh_boundary_lists()
+        self._refresh_boundary_lists(auto_select=False)
+        self._update_boundary_progress_bar()
 
     def _mark_boundary_complete(self, name):
+        """Mark a boundary as complete and auto-advance to the next incomplete.
+
+        Updates boundary_completion_vars and refreshes UI lists.
+        Returns the next incomplete boundary name for auto-advancing, or None if complete.
+
+        Args:
+            name: Boundary name to mark as complete.
+
+        Returns:
+            Next incomplete boundary name, or None if all boundaries are complete.
+        """
         if name in self.boundary_completion_vars:
             self.boundary_completion_vars[name].set(True)
 
@@ -884,9 +1108,27 @@ class Step2Frame(ttk.Frame):
             self._refresh_boundary_lists(select_incomplete_name=next_name)
         else:
             self._refresh_boundary_lists(select_completed_name=name)
+        self._update_boundary_progress_bar()
         return next_name
 
+    def _update_boundary_progress_bar(self):
+        """Update progress bar to show completed boundaries out of 6."""
+        completed_count = len(self._completed_boundary_names())
+        if hasattr(self, "segmenter_progress"):
+            self.segmenter_progress["value"] = completed_count
+
     def _next_incomplete_boundary(self, current_name=None):
+        """Get the next incomplete boundary in priority order.
+
+        Starts from the boundary after current_name (or from the first boundary).
+        Cycles through BOUNDARY_NAMES to find the next one with BooleanVar.get() = False.
+
+        Args:
+            current_name: Current boundary name to start search after (optional).
+
+        Returns:
+            Next incomplete boundary name, or None if all boundaries are complete.
+        """
         if current_name in BOUNDARY_NAMES:
             start_index = BOUNDARY_NAMES.index(current_name) + 1
         else:
@@ -903,6 +1145,22 @@ class Step2Frame(ttk.Frame):
         return None
 
     def _on_vertical_mode_toggled(self):
+        """Toggle foveal center line mode on/off.
+
+        When enabled:
+          - Switches to vertical-line drawing mode on the canvas
+          - Disables polyline drawing for boundaries
+          - Centers the vertical line at image center
+          - Enables foveal center nudge controls (left/right buttons, X entry)
+
+        When disabled:
+          - Removes the foveal center line from display
+          - Clears the FOVEA_BOUNDARY_NAME trace
+          - Re-enables polyline drawing for boundaries
+          - Disables foveal center controls
+
+        Prevents mode toggle during AI segmentation (_drawing_locked).
+        """
         if self._drawing_locked:
             self.vertical_mode_var.set(False)
             return
@@ -927,7 +1185,28 @@ class Step2Frame(ttk.Frame):
             self.trace_detail_var.set("No saved boundary")
             self.status_var.set("Boundary tracing mode enabled. Left-click to place boundary points.")
 
-    def _refresh_boundary_lists(self, select_incomplete_name=None, select_completed_name=None):
+    def _populate_boundary_listbox(self, listbox, names, selected_name):
+        """Populate a boundary listbox with names, marking the selected one."""
+        listbox.delete(0, "end")
+        for name in names:
+            active = "▶" if name == selected_name else " "
+            listbox.insert("end", f"{active} {name}")
+
+    def _refresh_boundary_lists(self, select_incomplete_name=None, select_completed_name=None, auto_select=True):
+        """Update the incomplete/completed boundary listboxes and sync selection.
+
+        Rebuilds both listboxes from current boundary completion state and optionally
+        selects a specific boundary. Auto-selects the first incomplete boundary if
+        auto_select=True and no explicit selection provided.
+
+        This method is called after boundary state changes (marking complete, reverting,
+        clearing) to keep the UI synchronized with the internal boundary_completion_vars dict.
+
+        Args:
+            select_incomplete_name: Boundary name to select in incomplete list (if it exists).
+            select_completed_name: Boundary name to select in completed list (if it exists).
+            auto_select: If True, auto-select first incomplete if no explicit selection.
+        """
         if getattr(self, "boundary_incomplete_listbox", None) is None:
             return
 
@@ -938,20 +1217,14 @@ class Step2Frame(ttk.Frame):
         self._syncing_boundary_selection = True
         self.boundary_incomplete_listbox.selection_clear(0, "end")
         self.boundary_completed_listbox.selection_clear(0, "end")
-        self.boundary_incomplete_listbox.delete(0, "end")
-        for name in incomplete_names:
-            active = "▶" if name == selected_name else " "
-            self.boundary_incomplete_listbox.insert("end", f"{active} {name}")
-
-        self.boundary_completed_listbox.delete(0, "end")
-        for name in completed_names:
-            active = "▶" if name == selected_name else " "
-            self.boundary_completed_listbox.insert("end", f"{active} {name}")
+        
+        self._populate_boundary_listbox(self.boundary_incomplete_listbox, incomplete_names, selected_name)
+        self._populate_boundary_listbox(self.boundary_completed_listbox, completed_names, selected_name)
 
         current = selected_name
         if current is None:
             current = self.active_boundary if self.active_boundary in incomplete_names else None
-        if current is None:
+        if current is None and auto_select:
             current = self._next_incomplete_boundary()
 
         if current in incomplete_names:
@@ -973,35 +1246,30 @@ class Step2Frame(ttk.Frame):
         self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
 
-    def _on_boundary_incomplete_selected(self, _event):
+    def _on_boundary_selected(self, _event, list_type):
+        """Handle selection from incomplete or completed boundary listbox."""
         if self._syncing_boundary_selection:
             return
-        if getattr(self, "boundary_incomplete_listbox", None) is None:
-            return
-        selection = self.boundary_incomplete_listbox.curselection()
-        if not selection:
-            return
-        index = int(selection[0])
-        incomplete_names = self._incomplete_boundary_names()
-        if 0 <= index < len(incomplete_names):
-            name = incomplete_names[index]
-            self.boundary_completed_listbox.selection_clear(0, "end")
+        if list_type == "incomplete":
+            names = self._incomplete_boundary_names()
+            listbox = getattr(self, "boundary_incomplete_listbox", None)
+            other_listbox = getattr(self, "boundary_completed_listbox", None)
+        else:
+            names = self._completed_boundary_names()
+            listbox = getattr(self, "boundary_completed_listbox", None)
+            other_listbox = getattr(self, "boundary_incomplete_listbox", None)
+        
+        name = self._get_listbox_selection(listbox, names)
+        if name:
+            if other_listbox:
+                other_listbox.selection_clear(0, "end")
             self._set_active_boundary_target(name)
 
+    def _on_boundary_incomplete_selected(self, _event):
+        self._on_boundary_selected(_event, "incomplete")
+
     def _on_boundary_completed_selected(self, _event):
-        if self._syncing_boundary_selection:
-            return
-        if getattr(self, "boundary_completed_listbox", None) is None:
-            return
-        selection = self.boundary_completed_listbox.curselection()
-        if not selection:
-            return
-        index = int(selection[0])
-        completed_names = self._completed_boundary_names()
-        if 0 <= index < len(completed_names):
-            name = completed_names[index]
-            self.boundary_incomplete_listbox.selection_clear(0, "end")
-            self._set_active_boundary_target(name)
+        self._on_boundary_selected(_event, "completed")
 
     def _center_vertical_line(self):
         if self.image_data is None:
@@ -1085,12 +1353,27 @@ class Step2Frame(ttk.Frame):
             self.fovea_plus_btn,
             self.fovea_set_btn,
             self.fovea_reset_btn,
+            self.fovea_clear_btn,
         ):
             widget.configure(state=state)
 
-        # Clear should remain available while locked so the user can unlock.
-        clear_state = "normal" if (self._drawing_locked or (enabled and not self._drawing_locked)) else "disabled"
-        self.fovea_clear_btn.configure(state=clear_state)
+    def _set_segmentation_frame_enabled(self, enabled):
+        """Enable/disable all controls in the segmentation frame, except Finish/Revert buttons."""
+        state = "normal" if enabled else "disabled"
+        # Recursively disable/enable all children in the segmentation frame
+        def set_state(widget, s):
+            # Skip the Finish and Revert buttons - they manage their own state
+            if widget in (self.finish_boundary_btn, self.revert_boundary_btn):
+                return
+            try:
+                widget.configure(state=s)
+            except Exception:
+                pass
+            for child in widget.winfo_children():
+                set_state(child, s)
+        
+        if hasattr(self, "segmentation_frame"):
+            set_state(self.segmentation_frame, state)
 
     def _clear_fovea_lock(self):
         """Remove saved fovea lock line, unlock controls, then show default center line."""
@@ -1240,26 +1523,35 @@ class Step2Frame(ttk.Frame):
         )
 
     def _refresh_trace_list(self):
-        self.trace_listbox.delete(0, "end")
+        trace_listbox = getattr(self, "trace_listbox", None)
+        if trace_listbox is None:
+            return
+        trace_listbox.delete(0, "end")
         for name in self.boundary_order:
             trace = self.boundary_traces.get(name)
             if not trace:
                 continue
-            self.trace_listbox.insert(
+            trace_listbox.insert(
                 "end",
                 f"{name} — {len(trace['points'])} vertices, {len(trace['pixels'])} pixels",
             )
 
     def _select_trace_by_name(self, name):
+        trace_listbox = getattr(self, "trace_listbox", None)
+        if trace_listbox is None:
+            return
         if name not in self.boundary_order:
             return
         index = self.boundary_order.index(name)
-        self.trace_listbox.selection_clear(0, "end")
-        self.trace_listbox.selection_set(index)
-        self.trace_listbox.see(index)
+        trace_listbox.selection_clear(0, "end")
+        trace_listbox.selection_set(index)
+        trace_listbox.see(index)
 
     def _on_saved_boundary_selected(self, _event):
-        selection = self.trace_listbox.curselection()
+        trace_listbox = getattr(self, "trace_listbox", None)
+        if trace_listbox is None:
+            return
+        selection = trace_listbox.curselection()
         if not selection:
             return
         name = self.boundary_order[selection[0]]
@@ -1288,6 +1580,11 @@ class Step2Frame(ttk.Frame):
         )
 
     def _all_required_boundaries_complete(self):
+        """Check if all 6 preset boundaries have been traced and completed.
+
+        Returns:
+            Boolean: True if all BOUNDARY_NAMES are present in boundary_traces.
+        """
         return all(name in self.boundary_traces for name in BOUNDARY_NAMES)
 
     def _marked_output_basepath(self, basename):
@@ -1297,7 +1594,28 @@ class Step2Frame(ttk.Frame):
             out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         return os.path.join(out_dir, basename)
 
+    def _preprocessed_output_basepath(self, basename):
+        return self._marked_output_basepath(basename)
+
+    def _preprocessed_output_basepaths(self):
+        return [
+            self._preprocessed_output_basepath(LIGHT_PREPROCESSED_BASENAME),
+            self._preprocessed_output_basepath(DARK_PREPROCESSED_BASENAME),
+        ]
+
     def _reference_marked_volume_spec(self):
+        """Get the target dimensions and dtype for MARKED output volumes.
+
+        Looks for reference Analyze header files to match output to the original
+        OCT volume structure. Searches in this priority:
+          1. Cached template from initial load (if available)
+          2. sdb_images folder (distributed reference images)
+          3. Source directory (same folder as current image)
+          4. Fallback: current image dimensions as 3-D stack (1, H, W)
+
+        Returns:
+            Tuple (slices, height, width, dtype): Dimensions for output Analyze volumes.
+        """
         template = self._input_analyze_template
         if template:
             return (
@@ -1341,9 +1659,54 @@ class Step2Frame(ttk.Frame):
         return 1, int(height), int(width), np.dtype(np.uint8)
 
     def _build_marked_image(self):
+        """Create the base marked image with background set to MARKED_BACKGROUND_MAX.
+
+        Starts with a copy of the current image (scaled to 8-bit if needed) and clamps
+        all values to MARKED_BACKGROUND_MAX (230) so that boundary mark values (243, 254, etc.)
+        stand out clearly against the background.
+
+        Returns:
+            8-bit uint8 numpy array with background clamped to 230.
+        """
         marked = self._image_uint8(self.image_data).copy()
         marked = np.minimum(marked, np.uint8(MARKED_BACKGROUND_MAX))
         return marked
+
+    def _render_trace_mask(self, trace, width, height, boundary_name=None):
+        """Rasterize a boundary trace into a binary mask for marking.
+
+        Converts polyline vertices to pixel coordinates, applies anti-aliasing via
+        Bresenham's algorithm, and thickens the line by the specified boundary width.
+        The mask marks pixels at 1.0 (white) where the boundary should be marked.
+
+        Args:
+            trace: Boundary dict with 'points' or 'pixels' key (list of (x, y) tuples).
+            width: Target mask width (pixels).
+            height: Target mask height (pixels).
+            boundary_name: Boundary name to look up line width (optional).
+
+        Returns:
+            Boolean numpy array (height, width), or None if no pixels to mark.
+        """
+        points = trace.get("points") or trace.get("pixels") or []
+        if not points:
+            return None
+
+        # Determine line width based on boundary type
+        line_width = MARKED_BOUNDARY_WIDTHS.get(boundary_name, 1)
+
+        mask = Image.new("L", (width, height), 0)
+        draw = ImageDraw.Draw(mask)
+        line_points = [(int(x), int(y)) for x, y in points]
+
+        if len(line_points) == 1:
+            x, y = line_points[0]
+            radius = max(1, line_width // 2)
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=1)
+        else:
+            draw.line(line_points, fill=1, width=line_width)
+
+        return np.asarray(mask, dtype=np.uint8) > 0
 
     def _apply_mark_values(self, target_image, mark_values):
         height, width = target_image.shape[:2]
@@ -1351,39 +1714,135 @@ class Step2Frame(ttk.Frame):
             trace = self.boundary_traces.get(name)
             if not trace:
                 continue
-            for x, y in trace.get("pixels", []):
-                xi = int(x)
-                yi = int(y)
-                if 0 <= xi < width and 0 <= yi < height:
-                    target_image[yi, xi] = np.uint8(mark_value)
+            trace_mask = self._render_trace_mask(trace, width, height, boundary_name=name)
+            if trace_mask is None:
+                continue
+            target_image[trace_mask] = np.uint8(mark_value)
 
     def _build_marked_volumes(self):
+        """Generate Light_MARKED and Dark_MARKED 8-bit Analyze volumes from traced boundaries.
+
+        Creates two volumes:
+          - Light_MARKED: RPE and Fovea marked on a light background (230)
+          - Dark_MARKED: All 6 boundaries + Fovea marked on a dark background
+
+        If preprocessing was applied, rescales boundaries back to original image dimensions.
+        Output volumes are resized to match the target Analyze template if needed.
+
+        Returns:
+            Tuple (light_volume, dark_volume): Two 3-D uint8 numpy arrays (depth, height, width).
+        """
         target_slices, target_h, target_w, _target_dtype = self._reference_marked_volume_spec()
         base_marked = self._build_marked_image()
-        if (base_marked.shape[0], base_marked.shape[1]) != (target_h, target_w):
+        
+        # Get original dimensions before any resize
+        orig_h, orig_w = base_marked.shape[:2]
+        
+        # Resize image to target dimensions if needed
+        if (orig_h, orig_w) != (target_h, target_w):
             base_marked = np.array(
                 Image.fromarray(base_marked).resize((target_w, target_h), Image.Resampling.NEAREST),
                 dtype=np.uint8,
             )
+            # Calculate scaling factors for boundary coordinates
+            scale_x = target_w / orig_w
+            scale_y = target_h / orig_h
+            
+            # Create scaled versions of boundary traces
+            scaled_traces = {}
+            for name, trace in self.boundary_traces.items():
+                scaled_points = []
+                for x, y in trace.get("points", []):
+                    scaled_x = int(np.round(x * scale_x))
+                    scaled_y = int(np.round(y * scale_y))
+                    # Clamp to valid range
+                    scaled_x = max(0, min(scaled_x, target_w - 1))
+                    scaled_y = max(0, min(scaled_y, target_h - 1))
+                    scaled_points.append((scaled_x, scaled_y))
+
+                scaled_pixels = []
+                for x, y in trace.get("pixels", []):
+                    scaled_x = int(np.round(x * scale_x))
+                    scaled_y = int(np.round(y * scale_y))
+                    # Clamp to valid range
+                    scaled_x = max(0, min(scaled_x, target_w - 1))
+                    scaled_y = max(0, min(scaled_y, target_h - 1))
+                    scaled_pixels.append((scaled_x, scaled_y))
+                scaled_traces[name] = {
+                    "points": scaled_points,
+                    "pixels": scaled_pixels,
+                    "color": trace.get("color", ""),
+                }
+            
+            # Temporarily use scaled traces for marking
+            original_traces = self.boundary_traces
+            self.boundary_traces = scaled_traces
+        else:
+            original_traces = None
 
         # Standard MARKED format: 8-bit with base intensities capped at 230,
-        # RPE+fovea on every slice, and extra boundary labels only on DARK slice 1.
+        # All traced boundaries on both LIGHT and DARK slices.
         light_slice = np.array(base_marked, copy=True)
         self._apply_mark_values(light_slice, COMMON_MARK_VALUES)
+        self._apply_mark_values(light_slice, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
 
-        dark_common_slice = np.array(base_marked, copy=True)
-        self._apply_mark_values(dark_common_slice, COMMON_MARK_VALUES)
+        dark_marked_slice = np.array(base_marked, copy=True)
+        self._apply_mark_values(dark_marked_slice, COMMON_MARK_VALUES)
+        # Apply all traced boundaries (including extra layers) to dark volume on all slices
+        self._apply_mark_values(dark_marked_slice, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
 
-        dark_first_slice = np.array(dark_common_slice, copy=True)
-        self._apply_mark_values(dark_first_slice, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
+        # Restore original traces if we modified them
+        if original_traces is not None:
+            self.boundary_traces = original_traces
 
         nslices = max(1, int(target_slices))
         light_volume = np.stack([light_slice] * nslices, axis=0).astype(np.uint8, copy=False)
-        dark_volume = np.stack([dark_common_slice] * nslices, axis=0).astype(np.uint8, copy=False)
-        dark_volume[0] = dark_first_slice
+        dark_volume = np.stack([dark_marked_slice] * nslices, axis=0).astype(np.uint8, copy=False)
         return light_volume, dark_volume
 
+    def _save_preprocessed_image(self):
+        """Export the preprocessed image (if preprocessing was applied) as Analyze volume.
+
+        If the image was preprocessed for AI, saves the cropped/resized preprocessed version
+        as Light and Dark preprocessed stacks (.hdr/.img). Used to track what the neural
+        network actually saw as input.
+
+        Returns:
+            List of saved file basepaths (without .img/.hdr extension).
+            Returns empty list if preprocessing was not applied.
+        """
+        if self._last_auto_preprocessed_image is None:
+            return []
+
+        preprocessed = np.array(self._last_auto_preprocessed_image, copy=True)
+        if preprocessed.ndim != 2:
+            raise ValueError("Auto-preprocessed image must be 2-D.")
+
+        stack = np.stack([preprocessed, preprocessed], axis=0).astype(np.uint8, copy=False)
+        saved_paths = []
+        for base_path in self._preprocessed_output_basepaths():
+            write_analyze(base_path, stack)
+            saved_paths.append(base_path)
+        return saved_paths
+
     def _save_marked_images(self, require_complete=False, prompt_on_incomplete=False):
+        """Generate and save Light_MARKED and Dark_MARKED Analyze volumes.
+
+        The MARKED volumes are 8-bit Analyze files with boundary pixels marked at
+        specific intensity values per ImageJ macro conventions. Boundaries are
+        rasterized at their specified line widths and mark values.
+
+        Preprocessing inverse-scaling is applied if needed: if the image was
+        preprocessed for AI, the boundaries are re-scaled to match the original
+        image size before marking.
+
+        Args:
+            require_complete: If True, only save if all 6 preset boundaries complete.
+            prompt_on_incomplete: If True and incomplete, ask user for confirmation.
+
+        Returns:
+            Boolean: True if save succeeded, False if cancelled or no traces.
+        """
         if self.image_data is None:
             return False
         if not self.boundary_traces:
@@ -1411,6 +1870,8 @@ class Step2Frame(ttk.Frame):
         write_analyze(dark_base_path, dark_marked)
         saved_paths.append(dark_base_path)
 
+        saved_paths.extend(self._save_preprocessed_image())
+
         self.status_var.set(
             "Saved marked images -> "
             + ", ".join(f"{path}.img" for path in saved_paths)
@@ -1418,6 +1879,11 @@ class Step2Frame(ttk.Frame):
         return True
 
     def _save_marked_images_button(self):
+        """Button callback to manually save MARKED Analyze volumes.
+
+        Provides user-facing save functionality with confirmation if boundaries
+        are incomplete. Handles errors gracefully and shows save location.
+        """
         if self.image_data is None:
             messagebox.showwarning("No image", "Load an image before saving MARKED outputs.")
             return
@@ -1427,7 +1893,7 @@ class Step2Frame(ttk.Frame):
 
         try:
             saved = self._save_marked_images(prompt_on_incomplete=True)
-        except OSError as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Save error", f"Could not save MARKED Analyze images:\n{exc}")
             return
 
@@ -1436,7 +1902,10 @@ class Step2Frame(ttk.Frame):
 
         light_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME) + ".img"
         dark_path = self._marked_output_basepath(DARK_MARKED_BASENAME) + ".img"
-        messagebox.showinfo("Saved", f"Saved MARKED images:\n{light_path}\n{dark_path}")
+        message_lines = ["Saved MARKED images:", light_path, dark_path]
+        if self._last_auto_preprocessed_image is not None:
+            message_lines.extend([path + ".img" for path in self._preprocessed_output_basepaths()])
+        messagebox.showinfo("Saved", "\n".join(message_lines))
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Neural segmentation
@@ -1470,15 +1939,47 @@ class Step2Frame(ttk.Frame):
             self.segmenter_output_var.set(path)
 
     def _segmenter_command(self):
+        import sys
+        
         env_name = self.segmenter_env_var.get().strip()
         conda_bin = shutil.which("conda") or os.environ.get("CONDA_EXE")
+
+        # If user specified a conda env and conda is available, prefer `conda run -n <env> oct-segmenter`
         if env_name and conda_bin:
             return [conda_bin, "run", "-n", env_name, "--no-capture-output", "oct-segmenter"]
-        if shutil.which("oct-segmenter"):
-            return ["oct-segmenter"]
+
+        # Prefer an `oct-segmenter` executable on PATH if present.
+        oct_exec = shutil.which("oct-segmenter")
+        if oct_exec:
+            return [oct_exec]
+
+        # When running as a frozen/bundled executable (pyinstaller, etc.),
+        # `sys.executable` points to the app exe. Calling
+        # `sys.executable -m oct_segmenter` will re-launch the app executable
+        # (causing a new window) rather than a separate Python environment
+        # that has the `oct_segmenter` package installed. Avoid that.
+        if getattr(sys, "frozen", False):
+            return None
+
+        # Fallback: run as module when not frozen (developer machine with Python).
         return [sys.executable, "-m", "oct_segmenter"]
 
     def _image_uint8(self, image):
+        """Convert image to 8-bit (0-255) range with auto-scaling.
+
+        If already 8-bit uint8, returns a copy. Otherwise, rescales to [0, 255]
+        using min-max normalization:
+          - Subtract minimum value
+          - Divide by range (max - min)
+          - Scale by 255
+          - Clip to [0, 255] and convert to uint8
+
+        Args:
+            image: numpy array of any numeric dtype.
+
+        Returns:
+            8-bit uint8 numpy array.
+        """
         if image.dtype == np.uint8:
             return np.array(image, copy=False)
         arr = image.astype(np.float64)
@@ -1489,6 +1990,15 @@ class Step2Frame(ttk.Frame):
         return np.clip(arr, 0, 255).astype(np.uint8)
 
     def _segmenter_model_size(self):
+        """Extract target input size (height, width) from model_config.json.
+
+        Reads model_config.json located next to the selected .h5 model file
+        to determine the expected input dimensions for the neural network.
+
+        Returns:
+            Tuple (target_h, target_w, config_path) if found and valid.
+            None if model path not set, config file missing, or JSON invalid.
+        """
         model_path = self.segmenter_model_var.get().strip()
         if not model_path:
             return None
@@ -1509,7 +2019,20 @@ class Step2Frame(ttk.Frame):
 
     @staticmethod
     def _crop_to_aspect(image, target_w, target_h):
-        """Center-crop image to match the target aspect ratio before resizing."""
+        """Center-crop image to match the target aspect ratio before resizing.
+
+        Crops horizontally or vertically (whichever is needed) to match the target
+        aspect ratio, then returns the cropped image. Center-crops to minimize
+        content loss in both edges.
+
+        Args:
+            image: 2-D numpy array (H, W).
+            target_w: Target width (pixels).
+            target_h: Target height (pixels).
+
+        Returns:
+            Cropped 2-D numpy array matching target aspect ratio (but may differ from target size).
+        """
         src_h, src_w = image.shape[:2]
         target_ratio = target_w / target_h
         src_ratio = src_w / src_h
@@ -1532,6 +2055,7 @@ class Step2Frame(ttk.Frame):
         image_u8 = self._image_uint8(self.image_data)
         source_h, source_w = image_u8.shape[:2]
         process_note = f"Using source size: {source_w}x{source_h}"
+        self._preprocessing_info = None
 
         if not auto_preprocess:
             return image_u8, process_note
@@ -1545,10 +2069,29 @@ class Step2Frame(ttk.Frame):
         target_h, target_w, cfg_path = model_size
         cropped = self._crop_to_aspect(image_u8, target_w, target_h)
         crop_h, crop_w = cropped.shape[:2]
+        
+        # Calculate crop offsets for inverse transformation
+        # The _crop_to_aspect does center-cropping
+        crop_offset_x = (source_w - crop_w) // 2
+        crop_offset_y = (source_h - crop_h) // 2
+        
         resized = np.array(
             Image.fromarray(cropped).resize((target_w, target_h), Image.Resampling.BILINEAR),
             dtype=np.uint8,
         )
+        
+        # Store preprocessing info for later inverse transformation of AI predictions
+        self._preprocessing_info = {
+            "source_h": source_h,
+            "source_w": source_w,
+            "crop_h": crop_h,
+            "crop_w": crop_w,
+            "crop_offset_x": crop_offset_x,
+            "crop_offset_y": crop_offset_y,
+            "target_h": target_h,
+            "target_w": target_w,
+        }
+        
         process_note = (
             f"Auto preprocess: cropped {source_w}x{source_h} -> {crop_w}x{crop_h}, "
             f"then resized to {target_w}x{target_h} using {cfg_path}"
@@ -1562,10 +2105,6 @@ class Step2Frame(ttk.Frame):
         Image.fromarray(image_for_segmenter).save(temp_path)
         return temp_path, temp_dir, process_note, image_for_segmenter
 
-    def _append_segmenter_log(self, message):
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.segmenter_log_text.insert("end", f"[{timestamp}] {message}\n")
-        self.segmenter_log_text.see("end")
 
     def _write_segmenter_log_file(self, output_dir, content):
         log_dir = os.path.join(output_dir, "logs")
@@ -1576,16 +2115,63 @@ class Step2Frame(ttk.Frame):
             fh.write(content)
         return log_path
 
+    def _append_segmenter_log(self, text):
+        """Append a short entry to the in-memory and (if present) UI segmenter log."""
+        if not hasattr(self, "_segmenter_log_lines"):
+            self._segmenter_log_lines = []
+        ts = datetime.datetime.now().isoformat(sep=" ", timespec="seconds")
+        entry = f"{ts} - {text}"
+        self._segmenter_log_lines.append(entry)
+        # If there's a text widget for logs, append there; otherwise print to stdout.
+        try:
+            widget = getattr(self, "segmenter_log_text", None)
+            if widget is not None:
+                try:
+                    widget.insert("end", entry + "\n")
+                    widget.see("end")
+                except Exception:
+                    print(entry)
+            else:
+                print(entry)
+        except Exception:
+            print(entry)
+
     def _import_segmenter_boundaries(self, csv_path):
+        """Import boundary traces from neural network segmentation output.
+
+        Reads the segmentation CSV (generated by oct-segmenter tool) and converts
+        each row of pixel coordinates into boundary traces. If preprocessing was
+        applied during segmentation, rescales the coordinates back to original
+        image space.
+
+        Steps:
+          1. Read CSV with columns: [pixel_x0, pixel_y0, pixel_x1, pixel_y1, ...]
+            where rows correspond to the preset boundary order (`BOUNDARY_PRESETS`)
+          2. For each boundary, reconstruct the polyline from pixel coordinates
+          3. If preprocessing_info exists, inverse-transform coordinates to original space
+          4. Add boundary to boundary_traces dict with color and pixels
+          5. Mark boundary as complete and update UI
+          6. Rebuild canvas overlays to show new boundaries
+
+        Preprocessing rescaling:
+          - Reverse resize: pixel coords × (original_size / model_size)
+          - Reverse crop: add back crop offsets
+
+        Args:
+            csv_path: Path to boundaries CSV file from oct-segmenter output.
+
+        Raises:
+            RuntimeError: If CSV cannot be read or has incorrect format.
+        """
         try:
             data = np.loadtxt(csv_path, delimiter=",", dtype=float)
         except (OSError, ValueError) as exc:
             raise RuntimeError(f"Could not read predicted boundaries CSV: {exc}") from exc
 
         data = np.atleast_2d(data)
-        if data.shape[0] < len(SEGMENTER_BOUNDARY_ORDER):
+        if data.shape[0] < len(BOUNDARY_PRESETS):
             raise RuntimeError(
-                f"Predicted CSV has {data.shape[0]} rows; expected at least {len(SEGMENTER_BOUNDARY_ORDER)} rows."
+                f"Predicted CSV has {data.shape[0]} rows; expected at least {len(BOUNDARY_PRESETS)} rows."
             )
 
         self.boundary_traces.clear()
@@ -1597,7 +2183,7 @@ class Step2Frame(ttk.Frame):
         height = int(self.image_data.shape[0])
         max_x = min(width, data.shape[1])
 
-        for row_idx, name in enumerate(SEGMENTER_BOUNDARY_ORDER):
+        for row_idx, (name, _) in enumerate(BOUNDARY_PRESETS):
             y_row = np.rint(data[row_idx, :max_x]).astype(int)
             y_row = np.clip(y_row, 0, height - 1)
             points = [(x, int(y_row[x])) for x in range(max_x)]
@@ -1614,35 +2200,194 @@ class Step2Frame(ttk.Frame):
             self._select_trace_by_name(self.boundary_order[0])
             self._update_saved_trace_summary(self.boundary_order[0])
 
+        # Mark imported boundaries as complete to indicate AI has processed them
         for name in BOUNDARY_NAMES:
             if name in self.boundary_completion_vars:
                 self.boundary_completion_vars[name].set(name in self.boundary_traces)
         self._refresh_boundary_lists()
+        self._update_boundary_progress_bar()
 
-        try:
-            self._save_marked_images(require_complete=True)
-        except OSError as exc:
-            messagebox.showerror("Save error", f"Could not save Light_MARKED Analyze image:\n{exc}")
+    def _image_matches_model_input(self):
+        """Return True when current image already matches model input size."""
+        if self.image_data is None:
+            return False
+        model_size = self._segmenter_model_size()
+        if model_size is None:
+            return False
+        target_h, target_w, _cfg_path = model_size
+        image_h, image_w = self.image_data.shape[:2]
+        return int(image_h) == int(target_h) and int(image_w) == int(target_w)
+
+    def _update_ai_button_states(self):
+        """Update AI button states based on preprocessing and input readiness.
+
+        Three possible states:
+          1. Preprocessing already done: Show "Remove Preprocess" (enabled) + enable AI
+          2. Image matches model size: Show "Preprocess Not Needed" (disabled) + enable AI
+          3. Need preprocessing: Show "Preprocess Image" (enabled) + disable AI
+
+        This implements the smart preprocessing workflow where unnecessary preprocessing
+        is skipped if the image already matches the model's expected input dimensions.
+        """
+        if not hasattr(self, "preprocess_button") or not hasattr(self, "segment_button"):
+            return
+
+        if self._preprocessing_done:
+            self.preprocess_button.configure(text="Remove Preprocess", command=self._remove_preprocess)
+            self.preprocess_button.state(["!disabled"])
+            self.segment_button.state(["!disabled"])
+            return
+
+        if self._image_matches_model_input():
+            self.preprocess_button.configure(text="Preprocess Not Needed", command=self._preprocess_image_for_ai)
+            self.preprocess_button.state(["disabled"])
+            self.segment_button.state(["!disabled"])
+            return
+
+        self.preprocess_button.configure(text="Preprocess Image", command=self._preprocess_image_for_ai)
+        self.preprocess_button.state(["!disabled"])
+        self.segment_button.state(["disabled"])
 
     def _set_segmentation_running(self, running, status_message=None):
+        """Lock/unlock UI controls while AI segmentation is running.
+
+        During segmentation (running=True):
+          - Disables all AI buttons (Preprocess, AI Assist)
+          - Disables boundary listboxes to prevent selection changes
+          - Disables vertical line mode and fovea controls
+          - Starts animated progress bar showing activity
+          - Disables line drawing
+
+        After segmentation (running=False):
+          - Re-enables controls
+          - Stops progress animation
+          - Updates AI button states based on preprocessing
+          - Re-enables line drawing if appropriate
+
+        Args:
+            running: Boolean indicating if segmentation is in progress.
+            status_message: Optional status text to display to user.
+        """
         self._segmenter_running = bool(running)
+        button_state = ["disabled"] if running else ["!disabled"]
+        self.preprocess_button.state(button_state)
+        self.segment_button.state(button_state)
+        
+        # Disable/enable boundary listboxes during segmentation
+        listbox_state = "disabled" if running else "normal"
+        if hasattr(self, "boundary_incomplete_listbox"):
+            self.boundary_incomplete_listbox.configure(state=listbox_state)
+        if hasattr(self, "boundary_completed_listbox"):
+            self.boundary_completed_listbox.configure(state=listbox_state)
+        
+        # Disable/enable entire fovea frame during segmentation
         if running:
-            self.segment_button.state(["disabled"])
-            self.segment_auto_button.state(["disabled"])
-            self.segmenter_progress_var.set("Running segmentation...")
-            self.segmenter_progress.start(12)
+            if hasattr(self, "fovea_frame"):
+                # Recursively disable all controls in the fovea frame
+                def disable_widget(widget):
+                    try:
+                        widget.configure(state="disabled")
+                    except Exception:
+                        pass
+                    for child in widget.winfo_children():
+                        disable_widget(child)
+                disable_widget(self.fovea_frame)
+            # Also disable save/export buttons frame
+            if hasattr(self, "saved_buttons_frame"):
+                def disable_widget(widget):
+                    try:
+                        widget.configure(state="disabled")
+                    except Exception:
+                        pass
+                    for child in widget.winfo_children():
+                        disable_widget(child)
+                disable_widget(self.saved_buttons_frame)
+            # If vertical mode is currently on, turn it off during segmentation
+            if self.vertical_mode_var.get():
+                self.vertical_mode_var.set(False)
+                self._on_vertical_mode_toggled()
         else:
-            self.segment_button.state(["!disabled"])
-            self.segment_auto_button.state(["!disabled"])
-            self.segmenter_progress.stop()
-            self.segmenter_progress_var.set("Idle")
+            if hasattr(self, "fovea_frame"):
+                # Recursively enable all controls in the fovea frame
+                def enable_widget(widget):
+                    # Skip the LabelFrame itself, just enable children
+                    for child in widget.winfo_children():
+                        try:
+                            child.configure(state="normal")
+                        except Exception:
+                            pass
+                        enable_widget(child)
+                enable_widget(self.fovea_frame)
+                # Then properly update fovea controls state based on vertical mode
+                self._set_fovea_controls_enabled(self.vertical_mode_var.get())
+            # Also re-enable save/export buttons
+            if hasattr(self, "saved_buttons_frame"):
+                def enable_widget(widget):
+                    for child in widget.winfo_children():
+                        try:
+                            child.configure(state="normal")
+                        except Exception:
+                            pass
+                        enable_widget(child)
+                enable_widget(self.saved_buttons_frame)
+        
+        if running:
+            # Start gradually filling progress bar
+            if hasattr(self, "segmenter_progress"):
+                self.segmenter_progress["value"] = 0
+                self._animate_progress_bar()
+        else:
+            # Stop animation and show actual boundary count
+            if hasattr(self, "_progress_animation_job"):
+                self.after_cancel(self._progress_animation_job)
+            if hasattr(self, "segmenter_progress"):
+                self._update_boundary_progress_bar()
+            # Update button states after segmentation finishes
+            self._update_ai_button_states()
+
+        # Update canvas state to disable/enable drawing based on segmentation status
+        self._sync_boundary_canvas_state()
 
         if status_message:
             self.status_var.set(status_message)
 
+    def _animate_progress_bar(self):
+        """Gradually fill progress bar during segmentation to show activity."""
+        if not self._segmenter_running or not hasattr(self, "segmenter_progress"):
+            return
+        
+        current = self.segmenter_progress["value"]
+        # Gradually increase but slow down as it approaches 6 (leaving room for the final result)
+        if current < 6:
+            increment = max(0.02, (6 - current) * 0.08)
+            self.segmenter_progress["value"] = min(current + increment, 6)
+            self._progress_animation_job = self.after(500, self._animate_progress_bar)
+        else:
+            # Keep it near 6 until segmentation finishes
+            self._progress_animation_job = self.after(500, self._animate_progress_bar)
+
     def _run_segmenter_worker(self, cmd, output_dir):
         try:
-            run_result = subprocess.run(cmd, capture_output=True, text=True)
+            # Prevent spawning a visible console window on Windows when running
+            # console-based CLIs like `conda` or `oct-segmenter`.
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo = None
+            if os.name == "nt":
+                try:
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    si.wShowWindow = subprocess.SW_HIDE
+                    startupinfo = si
+                except Exception:
+                    startupinfo = None
+
+            run_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
             stdout = (run_result.stdout or "").strip()
             stderr = (run_result.stderr or "").strip()
             run_log = (
@@ -1726,8 +2471,147 @@ class Step2Frame(ttk.Frame):
             if temp_dir and os.path.isdir(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
             self._set_segmentation_running(False)
+            # Ensure listboxes are updated after controls are re-enabled
+            try:
+                incomplete_names = self._incomplete_boundary_names()
+                completed_names = self._completed_boundary_names()
+                self._populate_boundary_listbox(self.boundary_incomplete_listbox, incomplete_names, None)
+                self._populate_boundary_listbox(self.boundary_completed_listbox, completed_names, None)
+                # Select first completed boundary if any
+                if completed_names:
+                    self.boundary_completed_listbox.selection_clear(0, "end")
+                    self.boundary_completed_listbox.selection_set(0)
+                    self.boundary_completed_listbox.see(0)
+                    # Explicitly set active boundary to first completed
+                    self._set_active_boundary_target(completed_names[0])
+                else:
+                    # Otherwise select first incomplete
+                    if incomplete_names:
+                        self.boundary_incomplete_listbox.selection_clear(0, "end")
+                        self.boundary_incomplete_listbox.selection_set(0)
+                        self.boundary_incomplete_listbox.see(0)
+            except Exception:
+                pass
+
+    def _preprocess_image_for_ai(self):
+        """Preprocess image for AI segmentation: crop to aspect ratio and resize.
+
+        Preprocessing pipeline:
+          1. Backup original image and file path for later restore
+          2. Convert current image to 8-bit if needed
+          3. Crop to match model aspect ratio (center-crop, no padding)
+          4. Resize cropped image to exact model input dimensions
+          5. Display preprocessed image on canvas
+          6. Store preprocessing metadata (crop/resize parameters)
+          7. Update button states to show "Remove Preprocess" and enable AI
+
+        Original image is preserved and can be restored with _remove_preprocess().
+        Preprocessing info is saved for later use (e.g., rescaling AI predictions).
+
+        The model size comes from model_config.json next to the .h5 model file.
+        """
+        if self.image_data is None:
+            messagebox.showwarning("No image", "Load an image before preprocessing.")
+            return
+
+        model_size = self._segmenter_model_size()
+        if model_size is None:
+            messagebox.showerror(
+                "Missing model config",
+                "Could not find model size. Expected model_config.json next to the selected .h5 model."
+            )
+            return
+
+        target_h, target_w, cfg_path = model_size
+        try:
+            original_image = np.array(self.image_data, copy=True)
+            original_path = self.current_file
+            image_u8 = self._image_uint8(self.image_data)
+            cropped = self._crop_to_aspect(image_u8, target_w, target_h)
+            
+            # Calculate crop offsets for inverse transformation
+            source_h, source_w = image_u8.shape[:2]
+            crop_h, crop_w = cropped.shape[:2]
+            crop_offset_x = (source_w - crop_w) // 2
+            crop_offset_y = (source_h - crop_h) // 2
+            
+            resized = np.array(
+                Image.fromarray(cropped).resize((target_w, target_h), Image.Resampling.BILINEAR),
+                dtype=np.uint8,
+            )
+            
+            # Display the preprocessed image (note: _show_image clears preprocessing state)
+            display_path = self.current_file or "Step 2 input (preprocessed)"
+            self._show_image(resized, display_path)
+            
+            # Restore preprocessing info and state after _show_image clears them
+            self._preprocessing_info = {
+                "source_h": source_h,
+                "source_w": source_w,
+                "crop_h": crop_h,
+                "crop_w": crop_w,
+                "crop_offset_x": crop_offset_x,
+                "crop_offset_y": crop_offset_y,
+                "target_h": target_h,
+                "target_w": target_w,
+            }
+            self._last_auto_preprocessed_image = np.array(resized, copy=True)
+            self._original_image_for_ai = original_image
+            self._original_file_for_ai = original_path
+            self._preprocessing_done = True
+            
+            self._update_ai_button_states()
+            self.status_var.set(
+                f"Image preprocessed: cropped {source_w}x{source_h} → {crop_w}x{crop_h}, "
+                f"then resized to {target_w}x{target_h}. Ready for AI Assist."
+            )
+        except (OSError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Preprocess failed", str(exc))
+
+    def _remove_preprocess(self):
+        """Remove preprocessing and restore original image shape and data.
+
+        Restores the image to its original state before preprocessing was applied.
+        This is a lossless operation—all original pixels are preserved exactly.
+
+        Updates:
+          - Displays the original image on canvas
+          - Clears preprocessing metadata
+          - Updates AI button states to show "Preprocess Image" (enabled)
+          - Resets preprocessing_done flag
+        """
+        if self._original_image_for_ai is None:
+            return
+
+        restored_image = np.array(self._original_image_for_ai, copy=True)
+        restored_path = self._original_file_for_ai or self.current_file or "Original image"
+
+        self._show_image(restored_image, restored_path)
+        
+        self._update_ai_button_states()
+        self.status_var.set("Preprocessing removed. Original image restored.")
 
     def _run_neural_segmentation(self, auto_preprocess=False):
+        """Launch neural network segmentation in background thread.
+
+        Validates inputs, prepares a TIFF file for the segmenter tool, and
+        runs the oct-segmenter command via subprocess. The segmentation happens
+        in a daemon thread to keep the UI responsive. Results are automatically
+        imported when complete.
+
+        Steps:
+          1. Check segmentation is not already running and image is loaded
+          2. Validate config (.json) and model (.h5) file paths exist
+          3. Determine which image to segment (preprocessed, already-sized, or error)
+          4. Create temp TIFF in temp directory for segmenter input
+          5. Build command-line arguments for oct-segmenter predict
+          6. Lock UI (disable buttons, show progress animation)
+          7. Start daemon thread with _run_segmenter_worker
+          8. Worker reports back via _on_segmenter_worker_done callback
+
+        Args:
+            auto_preprocess: Not currently used; left for future auto-preprocess feature.
+        """
         if self._segmenter_running:
             messagebox.showinfo("Please wait", "Segmentation is already running.")
             return
@@ -1750,17 +2634,47 @@ class Step2Frame(ttk.Frame):
         self.segmenter_output_var.set(output_dir)
 
         try:
-            input_tiff, temp_dir, process_note, processed_image = self._segmenter_input_tiff(
-                auto_preprocess=True
-            )
+            # Use preprocessed image when available.
+            if self._preprocessing_done and self._last_auto_preprocessed_image is not None:
+                processed_image = self._last_auto_preprocessed_image
+                process_note = "Using preprocessed image."
+            elif self._image_matches_model_input():
+                processed_image = self._image_uint8(self.image_data)
+                process_note = "Input already matches model size; preprocessing skipped."
+            else:
+                messagebox.showinfo(
+                    "Preprocess required",
+                    "Preprocess Image first, or load an image that already matches the model input size.",
+                )
+                return
+            
+            # Create temp TIFF for segmenter input
+            temp_dir = tempfile.mkdtemp(prefix="aidas_segmenter_")
+            temp_path = os.path.join(temp_dir, "step2_input.tiff")
+            Image.fromarray(processed_image).save(temp_path)
+            input_tiff = temp_path
         except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Preprocess failed", str(exc))
             return
 
-        display_path = self.current_file or "Step 2 input"
-        self._show_image(processed_image, display_path)
+        base_cmd = self._segmenter_command()
+        if not base_cmd:
+            # Could not determine an external oct-segmenter command to run.
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            messagebox.showerror(
+                "Segmenter unavailable",
+                (
+                    "Could not find an 'oct-segmenter' executable or a usable conda installation on this machine.\n\n"
+                    "When running AIDaS as a bundled executable, the embedded Python cannot run\n"
+                    "the 'oct_segmenter' module via '-m' without a separate Python interpreter.\n\n"
+                    "Please install 'oct-segmenter' on the target machine (pip/conda), ensure 'oct-segmenter'\n"
+                    "is on PATH, or set a valid conda environment in AI Settings."
+                ),
+            )
+            self._set_segmentation_running(False)
+            return
 
-        cmd = self._segmenter_command() + [
+        cmd = base_cmd + [
             "predict",
             "-c",
             config_path,
@@ -1784,32 +2698,55 @@ class Step2Frame(ttk.Frame):
         worker.start()
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  Export
+    #  Export boundary rows as CSV
     # ═══════════════════════════════════════════════════════════════════════
     def _boundary_row_for_export(self, trace, image_width):
+        """Convert a boundary polyline into a single row of Y-coordinates.
+
+        Exports one row per image column (X=0 to X=image_width-1), with each value
+        being the Y-coordinate where the boundary crosses that column. Uses linear
+        interpolation to fill in columns not explicitly sampled.
+
+        Args:
+            trace: Boundary dict with 'pixels' key (list of (x, y) tuples).
+            image_width: Width of image (number of columns).
+
+        Returns:
+            List of Y-values (ints, or empty strings if no pixels), indexed by X.
+        """
         pixels = trace.get("pixels") or []
         if not pixels or image_width <= 0:
             return [""] * image_width
 
         ordered_samples = {}
         for x, y in pixels:
-            x = int(x)
-            y = int(y)
-            if x not in ordered_samples:
-                ordered_samples[x] = y
+            x_int = int(x)
+            if x_int not in ordered_samples:
+                ordered_samples[x_int] = int(y)
 
-        x_values = sorted(ordered_samples.keys())
-        xs = np.array(x_values, dtype=np.float64)
-        ys = np.array([ordered_samples[x] for x in x_values], dtype=np.float64)
+        xs = np.array(sorted(ordered_samples.keys()), dtype=np.float64)
+        ys = np.array([ordered_samples[int(x)] for x in xs], dtype=np.float64)
 
         if xs.size == 1:
-            return [int(round(ys[0])) for _ in range(image_width)]
+            return [int(ys[0])] * image_width
 
         x_grid = np.arange(image_width, dtype=np.float64)
         row = np.interp(x_grid, xs, ys, left=ys[0], right=ys[-1])
         return np.rint(row).astype(int).tolist()
 
     def _export_csv(self):
+        """Export all boundary traces as a single CSV file.
+
+        CSV format:
+          - Header row: boundary names
+          - Data rows: one per image column (X), with Y-coordinate values
+          - Y values are interpolated from the polyline trace
+
+        The export includes all boundaries in boundary_order, with empty columns
+        for boundaries that have no pixels at that X coordinate.
+
+        File is saved next to the current image with suffix _step2_boundaries.csv.
+        """
         if not self.boundary_traces:
             messagebox.showinfo("Nothing to export", "Trace at least one boundary first.")
             return

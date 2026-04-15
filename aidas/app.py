@@ -122,6 +122,8 @@ class AIDaSApp(tk.Tk):
 
         # On Windows, iconbitmap works best with .ico files.
         if os.path.isfile(ico_path):
+            # remember the ico path so dialogs/Toplevels can reuse it
+            self._icon_ico_path = ico_path
             try:
                 self.iconbitmap(ico_path)
                 return
@@ -133,6 +135,7 @@ class AIDaSApp(tk.Tk):
             try:
                 image = tk.PhotoImage(file=png_path)
                 self.iconphoto(True, image)
+                # keep a reference so the image isn't garbage-collected
                 self._icon_image_ref = image
             except tk.TclError:
                 pass
