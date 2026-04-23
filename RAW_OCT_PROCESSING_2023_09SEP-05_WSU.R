@@ -36,6 +36,59 @@
 ############
 ############
 
+.DEBUG.STEP <- "startup"
+dbg <- function(step, ...) {
+  .DEBUG.STEP <<- step
+  cat(paste0("DEBUG [", step, "] ", paste(..., collapse=" "), "\n"))
+}
+
+stop.at.boundary <- function(step, ...) {
+  dbg(step, ...)
+  stop("Execution stopped at current translated boundary.", call.=FALSE)
+}
+
+format.number <- function(x) {
+  sprintf("%.6f", as.numeric(x))
+}
+
+show.scalar.stats <- function(name, value) {
+  cat(paste0("STAT ", name, ": type=", class(value)[1], " value=", paste(value, collapse=","), "\n"))
+}
+
+show.vector.stats <- function(name, values) {
+  cat(paste0(
+    "STAT ", name, ": type=int_vector length=", length(values),
+    " values=", paste(values, collapse=","),
+    " min=", format.number(min(values)),
+    " max=", format.number(max(values)),
+    " mean=", format.number(mean(values)),
+    " sum=", format.number(sum(values)),
+    "\n"
+  ))
+}
+
+show.array.stats <- function(name, value) {
+  vals <- as.numeric(value)
+  cat(paste0(
+    "STAT ", name, ": type=array class=", class(value)[1],
+    " dim=", paste(dim(value), collapse="x"),
+    " min=", format.number(min(vals, na.rm=TRUE)),
+    " max=", format.number(max(vals, na.rm=TRUE)),
+    " mean=", format.number(mean(vals, na.rm=TRUE)),
+    " sum=", format.number(sum(vals, na.rm=TRUE)),
+    " na=", sum(is.na(value)),
+    "\n"
+  ))
+}
+
+options(error = function() {
+  cat(paste0("ERROR: failure at step '", .DEBUG.STEP, "'\n"))
+  traceback(3)
+  stop("Execution stopped after debug traceback.")
+})
+
+dbg("startup", "Script started")
+
 
 REFERENCE.DARK="DARK_MARKED"
 REFERENCE.LIGHT="LIGHT_MARKED"
@@ -49,9 +102,11 @@ IMAGE.INDEX.LIGHT=c(1,
 IMAGE.INDEX.DARK=c(1,
 2)
 
+OUTDIR <- getwd()
 
-length(IMAGE.INDEX.LIGHT)
-length(IMAGE.INDEX.DARK)
+
+dbg("input-config", "Working directory:", OUTDIR)
+dbg("input-config", "length(IMAGE.INDEX.LIGHT)=", length(IMAGE.INDEX.LIGHT), "length(IMAGE.INDEX.DARK)=", length(IMAGE.INDEX.DARK))
 
 ########################################################################################
 ########################################################################################
@@ -106,6 +161,7 @@ DFforSECONDfit=10
 
 #
 # load everything; sometimes it loads as four-dimensional instead of three-dimensional; correct this
+dbg("load-images", "Loading Analyze volumes")
 REF.DARK<-f.read.analyze.volume(paste(REFERENCE.DARK,".hdr",sep=""))
 REF.LIGHT<-f.read.analyze.volume(paste(REFERENCE.LIGHT,".hdr",sep=""))
 DARK<-f.read.analyze.volume(paste(TO.PROCESS.DARK,".hdr",sep=""))
@@ -114,6 +170,22 @@ if(length(dim(REF.DARK))==4) REF.DARK=REF.DARK[,,,1]
 if(length(dim(REF.LIGHT))==4) REF.LIGHT=REF.LIGHT[,,,1]
 if(length(dim(DARK))==4) DARK=DARK[,,,1]
 if(length(dim(LIGHT))==4) LIGHT=LIGHT[,,,1]
+dbg("load-images", "REF.DARK dim:", paste(dim(REF.DARK), collapse="x"), "REF.LIGHT dim:", paste(dim(REF.LIGHT), collapse="x"))
+dbg("load-images", "DARK dim:", paste(dim(DARK), collapse="x"), "LIGHT dim:", paste(dim(LIGHT), collapse="x"))
+dbg("variable-stats", "Printing summary statistics for current variables")
+show.scalar.stats("REFERENCE.DARK", REFERENCE.DARK)
+show.scalar.stats("REFERENCE.LIGHT", REFERENCE.LIGHT)
+show.scalar.stats("TO.PROCESS.DARK", TO.PROCESS.DARK)
+show.scalar.stats("TO.PROCESS.LIGHT", TO.PROCESS.LIGHT)
+show.scalar.stats("PIXEL.WIDTH", PIXEL.WIDTH)
+show.scalar.stats("DFonINITIALspline", DFonINITIALspline)
+show.scalar.stats("DFforSECONDfit", DFforSECONDfit)
+show.vector.stats("IMAGE.INDEX.LIGHT", IMAGE.INDEX.LIGHT)
+show.vector.stats("IMAGE.INDEX.DARK", IMAGE.INDEX.DARK)
+show.array.stats("REF.DARK", REF.DARK)
+show.array.stats("REF.LIGHT", REF.LIGHT)
+show.array.stats("DARK", DARK)
+show.array.stats("LIGHT", LIGHT)
 ########################################################
 ## right now, DARK[,2,] refers to y=2 of the first slice
 ## right now, DARK[2,,] refers to x=2 of the first slice
@@ -160,6 +232,14 @@ fovea.line=cbind(Xcoords[which(!(is.na(Xcoords)))],Ycoords[which(!(is.na(Xcoords
 fovea.line=fovea.line[order(fovea.line[,1]),]
 ## just in case it's a perfectly vertical line....
 if(length(unique(fovea.line[,1]))==1) fovea.line[1,1]=fovea.line[1,1]+0.1
+dbg("fovea-center", "Translating the first R block for fovea center detection")
+dbg("variable-stats", "Printing summary statistics for translated fovea variables")
+show.array.stats("R", R)
+show.array.stats("Xs", Xs)
+show.array.stats("Ys", Ys)
+show.array.stats("Xcoords", Xcoords)
+show.array.stats("Ycoords", Ycoords)
+show.array.stats("fovea.line", fovea.line)
 
 
 #
@@ -172,6 +252,12 @@ Xcoords=Xs*R
 Ycoords=Ys*R
 RPE.line=cbind(Xcoords[which(!(is.na(Xcoords)))],Ycoords[which(!(is.na(Xcoords)))])
 RPE.line=RPE.line[order(RPE.line[,1]),]
+dbg("rpe-line", "Translating the next R block for RPE.line detection")
+dbg("variable-stats", "Printing summary statistics for translated RPE variables")
+show.array.stats("R", R)
+show.array.stats("Xcoords", Xcoords)
+show.array.stats("Ycoords", Ycoords)
+show.array.stats("RPE.line", RPE.line)
 
 #
 # now, fit a smooth spline (which will let us collect derivatives) to the RPE.line
@@ -215,11 +301,23 @@ image(y=seq(1,dim(DARK)[2],1),x=seq(1,dim(DARK)[1],1),DARK[,,1])
 matlines(RPE.info.2[,1],RPE.info.2[,2])
 RPE.info.2[,3]<-( (-1) / RPE.info.2[,3] )
 colnames(RPE.info.2)<-c("x_pix","y_pix","perpendicular_slope_pix","dist.on.spline.microns")
+dbg("rpe-spline", "Translating the spline/center/RPE.info block through line 305")
+dbg("variable-stats", "Printing summary statistics for translated spline variables")
+show.array.stats("RPE.spline.compare", RPE.spline.compare)
+show.array.stats("RPE.spline", RPE.spline)
+show.array.stats("fovea.curve", fovea.curve)
+show.array.stats("compare.fovea.and.RPE", compare.fovea.and.RPE)
+show.scalar.stats("CENTER", CENTER)
+show.scalar.stats("CENTER.value", CENTER.value)
+show.array.stats("RPE.info", RPE.info)
+show.array.stats("RPE.info.2", RPE.info.2)
 
 ###@ 
 ###@ and let's extract the apparent angle from RPE.info.2
 APPARENT.ANGLE=RPE.info.2[which( (RPE.info.2[,4]>500) & (RPE.info.2[,4]<2750) ),1:2]
 SLOPEY=summary(lm(APPARENT.ANGLE[,2] ~ APPARENT.ANGLE[,1]))$coef[2,1]
+SLOPEY.500.to.2750=SLOPEY
+APPARENT.ANGLE.500.to.2750=APPARENT.ANGLE
 ## so the slope ("change in y given 1 unit change in x") gives us the angle via atan(SLOPE)
 ##... atan(1) (which would be 1 unit change in y for 1 unit change in x, so 45 deg) is 0.7853982... cuz it's in radians.
 #DEGREES=atan(SLOPEY)*180/pi
@@ -228,6 +326,14 @@ SLOPEY=summary(lm(APPARENT.ANGLE[,2] ~ APPARENT.ANGLE[,1]))$coef[2,1]
 ###@ and let's extract the apparent angle from RPE.info.2
 APPARENT.ANGLE=RPE.info.2[which( (RPE.info.2[,4]>-100) & (RPE.info.2[,4]<100) ),1:2]
 SLOPEY=summary(lm(APPARENT.ANGLE[,2] ~ APPARENT.ANGLE[,1]))$coef[2,1]
+SLOPEY.neg100.to.100=SLOPEY
+APPARENT.ANGLE.neg100.to.100=APPARENT.ANGLE
+dbg("apparent-angle", "Translating the APPARENT.ANGLE block through line 331")
+dbg("variable-stats", "Printing summary statistics for translated APPARENT.ANGLE variables")
+show.array.stats("APPARENT.ANGLE.500.to.2750", APPARENT.ANGLE.500.to.2750)
+show.scalar.stats("SLOPEY.500.to.2750", SLOPEY.500.to.2750)
+show.array.stats("APPARENT.ANGLE.neg100.to.100", APPARENT.ANGLE.neg100.to.100)
+show.scalar.stats("SLOPEY.neg100.to.100", SLOPEY.neg100.to.100)
 rm(SLOPEY,APPARENT.ANGLE)
 ###@ 
 ###@ 
@@ -276,7 +382,15 @@ Retina.Points=RPE.info.2[,c(4,1,2,3,3,3,3,3)]
 Retina.Points[,5:6]=ADD+Retina.Points[,2:3]
 Retina.Points[,7:8]=SUB+Retina.Points[,2:3]
 colnames(Retina.Points)<-c("dist.on.spline.microns","x_pix","y_pix","perpendicular_slope_pix","end.x","end.y","start.x","start.y")
-
+dbg("perpendiculars", "Translating the perpendicular-setup block through line 386")
+dbg("variable-stats", "Printing summary statistics for translated perpendicular variables")
+show.array.stats("INTERCEPTS", INTERCEPTS)
+show.array.stats("DELTAS", DELTAS)
+show.scalar.stats("pixel.move", pixel.move)
+show.array.stats("ADD", ADD)
+show.array.stats("FLIP", FLIP)
+show.array.stats("SUB", SUB)
+show.array.stats("Retina.Points", Retina.Points)
 
 rm(RPE.spline.compare,compare.fovea.and.RPE,fovea.curve,RPE.sp,RPE.line,CENTER,CENTER.value,RPE.info)
 rm(INTERCEPTS,DELTAS,RPE.info.2,SUB,ADD,FLIP,pixel.move)
@@ -307,6 +421,7 @@ rm(fovea.line)
 #
 ##
 FLATTENED.MARKERS=matrix(,nrow(Retina.Points),500)
+dbg("flattened-markers", "FLATTENED.MARKERS dim:", paste(dim(FLATTENED.MARKERS), collapse="x"), "Retina.Points rows:", nrow(Retina.Points))
 UpperX=dim(DARK)[2];
 UpperY=dim(DARK)[1];
 
@@ -319,6 +434,12 @@ for(x in 1:nrow(Retina.Points))
  LINE=floor(LINE); ## because the matrix starts at 1,1, all coordinates calculated to-date would use anything between 1 and 1.999 to refer to 1.
  F=as.vector(tapply(LINE[,c(2,1)],as.factor(cbind(seq(1,(500+1),1),seq(1,(500+1),1))),GETrecon));
  FLATTENED.MARKERS[x,1:ncol(FLATTENED.MARKERS)]=F[2:length(F)]}
+dbg("variable-stats", "Printing summary statistics for translated flattened-marker variables")
+show.scalar.stats("UpperX", UpperX)
+show.scalar.stats("UpperY", UpperY)
+show.array.stats("unwrapped.recon", unwrapped.recon)
+show.array.stats("FLATTENED.MARKERS", FLATTENED.MARKERS)
+dbg("dark-loop", "Translating the dark-image loop through line 599")
 
 
 #################################################
@@ -346,7 +467,8 @@ colnames(APPARENT.ANGLES.FOR.DARK)<-c("image","fovea_neg100_to_100","500_to_2750
 # dark
 FLATTENED.DARK.RETINA=array(data=NA, dim=c(nrow(Retina.Points),500,dim(DARK)[3]))
 for(z in 1:length(IMAGE.INDEX.DARK))
- {R=REF.DARK[,,z];
+ {dbg("dark-loop", "Processing z=", z, "of", length(IMAGE.INDEX.DARK), "REF.DARK slice dim:", paste(dim(REF.DARK[,,z]), collapse="x"))
+  R=REF.DARK[,,z];
   R[which(R<243)]=NA;
   R[which(R>243)]=NA;
   R[which(R==243)]=1;
@@ -477,10 +599,14 @@ for(z in 1:length(IMAGE.INDEX.DARK))
 
 
 
+dbg("dark-loop", "Translating the dark-image loop through line 599")
+
+
 # light
 FLATTENED.LIGHT.RETINA=array(data=NA, dim=c(nrow(Retina.Points),500,dim(LIGHT)[3]))
 for(z in 1:length(IMAGE.INDEX.LIGHT))
- {R=REF.LIGHT[,,z];
+ {dbg("light-loop", "Processing z=", z, "of", length(IMAGE.INDEX.LIGHT), "REF.LIGHT slice dim:", paste(dim(REF.LIGHT[,,z]), collapse="x"))
+  R=REF.LIGHT[,,z];
   R[which(R<243)]=NA;
   R[which(R>243)]=NA;
   R[which(R==243)]=1;
@@ -624,6 +750,14 @@ rm(R)
 
 
 
+
+dbg("light-loop", "Translating the light-image loop through line 755")
+dbg("variable-stats", "Printing summary statistics for translated dark/light loop variables")
+show.array.stats("APPARENT.ANGLES.FOR.LIGHT", APPARENT.ANGLES.FOR.LIGHT)
+show.array.stats("APPARENT.ANGLES.FOR.DARK", APPARENT.ANGLES.FOR.DARK)
+show.array.stats("FLATTENED.DARK.RETINA", FLATTENED.DARK.RETINA)
+show.array.stats("FLATTENED.LIGHT.RETINA", FLATTENED.LIGHT.RETINA)
+
 #################################################
 #################################################
 #################################################
@@ -661,6 +795,13 @@ FLATTENED.LIGHT.RETINA=FLATTENED.LIGHT.RETINA+32768
 FLATTENED.LIGHT.RETINA[which(FLATTENED.LIGHT.RETINA<0)]=0
 ## </new for 2022-JUN-19> 
 FLATTENED.LIGHT.RETINA.RAW=2^(FLATTENED.LIGHT.RETINA/5000)
+dbg("post-log-convert", "Converted DARK and LIGHT flattened arrays back to raw scale")
+dbg("variable-stats", "Printing summary statistics for translated post-log conversion variables")
+show.array.stats("FLATTENED.DARK.RETINA", FLATTENED.DARK.RETINA)
+show.array.stats("FLATTENED.DARK.RETINA.RAW", FLATTENED.DARK.RETINA.RAW)
+show.array.stats("FLATTENED.LIGHT.RETINA", FLATTENED.LIGHT.RETINA)
+show.array.stats("FLATTENED.LIGHT.RETINA.RAW", FLATTENED.LIGHT.RETINA.RAW)
+stop.at.boundary("exit-after-post-log-convert", "Reached current translated boundary after post-log conversion; stopping here.")
 
 
 #################################################
@@ -674,6 +815,7 @@ FLATTENED.LIGHT.RETINA.RAW=2^(FLATTENED.LIGHT.RETINA/5000)
 ### (or the outer 2/3rds of the retina, or whatever)
 
 FIRST.GRAND.MEAN=FLATTENED.DARK.RETINA.RAW[,,1]
+dbg("grand-mean", "Building FIRST.GRAND.MEAN from DARK and LIGHT volumes")
 for(z in 2:dim(FLATTENED.DARK.RETINA.RAW)[3]) FIRST.GRAND.MEAN=FIRST.GRAND.MEAN+FLATTENED.DARK.RETINA.RAW[,,z]
 for(z in 2:dim(FLATTENED.LIGHT.RETINA.RAW)[3]) FIRST.GRAND.MEAN=FIRST.GRAND.MEAN+FLATTENED.LIGHT.RETINA.RAW[,,z]
 FIRST.GRAND.MEAN=FIRST.GRAND.MEAN/(dim(FLATTENED.DARK.RETINA.RAW)[3]+dim(FLATTENED.LIGHT.RETINA.RAW)[3])
@@ -682,8 +824,12 @@ FIRST.GRAND.MEAN=FIRST.GRAND.MEAN/(dim(FLATTENED.DARK.RETINA.RAW)[3]+dim(FLATTEN
 ## grap estimate sof retinal thickness based on hand-drawn location
 ROUGH.VIT.RETINA.POSITION=cbind(seq(-200,3000,1),seq(-200,3000,1))
 ROUGH.VIT.RETINA.POSITION[,2]<-NA
+dbg("rough-vit-loop", "ROUGH.VIT.RETINA.POSITION rows:", nrow(ROUGH.VIT.RETINA.POSITION), "FLATTENED.MARKERS rows:", nrow(FLATTENED.MARKERS))
 for(x in 1:nrow(ROUGH.VIT.RETINA.POSITION))
- {A=which(FLATTENED.MARKERS[x,]==249);
+ {if(x > nrow(FLATTENED.MARKERS)) {
+   stop(paste0("Index exceeds FLATTENED.MARKERS in rough-vit-loop: x=", x, ", rows=", nrow(FLATTENED.MARKERS), ". Adjust loop bounds to marker rows."))
+  }
+  A=which(FLATTENED.MARKERS[x,]==249);
   if(length(A)>0) ROUGH.VIT.RETINA.POSITION[x,2]=A[length(A)]}
 
 #
@@ -987,10 +1133,10 @@ FLATTENED.LIGHT.RETINA.RRC=FLATTENED.LIGHT.RETINA.RRC[,(vertex-430):(vertex+30),
 
 EXPORT=FLATTENED.DARK.RETINA.RRC
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat_",TO.PROCESS.DARK,sep=""),size="float")
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat_",TO.PROCESS.DARK,sep=""),size="float",path.out=OUTDIR)
 EXPORT=FLATTENED.LIGHT.RETINA.RRC
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat_",TO.PROCESS.LIGHT,sep=""),size="float")
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat_",TO.PROCESS.LIGHT,sep=""),size="float",path.out=OUTDIR)
 
 ## !!here
 
@@ -3127,7 +3273,7 @@ FLATTENED.DARK.RETINA.RRC.N[50:152,,]=FLATTENED.DARK.RETINA.RRC.N.fovea[50:152,,
 ## the pixel dimensions of this are 1 micron in the x, and 1.25% of the retinal thickness in the y
 EXPORT=FLATTENED.DARK.RETINA.RRC.N
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat-normed_",TO.PROCESS.DARK,sep=""),size="float")
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat-normed_",TO.PROCESS.DARK,sep=""),size="float",path.out=OUTDIR)
 
 
 ######################################################################################################################################################################################################################################
@@ -3262,7 +3408,7 @@ FLATTENED.LIGHT.RETINA.RRC.N[50:152,,]=FLATTENED.LIGHT.RETINA.RRC.N.fovea[50:152
 ## the pixel dimensions of this are 1 micron in the x, and 1.25% of the retinal thickness in the y
 EXPORT=FLATTENED.LIGHT.RETINA.RRC.N
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat-normed_",TO.PROCESS.LIGHT,sep=""),size="float")
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat-normed_",TO.PROCESS.LIGHT,sep=""),size="float",path.out=OUTDIR)
 
 
 
@@ -3336,12 +3482,12 @@ rm(VITREOUS.RETINA.POSITION.DARK,VITREOUS.RETINA.POSITION.LIGHT)
 #FLATTENED.MARKERS.RRC = linearized but not spatially normalized data showing the mand-made markers
 #IMAGE.INDEX.DARK = manually set, lists the ordder, and # of each image in series
 #MAIN.DARK.OUTPUTS = image# in first column, second colum is the apparent angle of the RPE in each image (linear estimate for 500 to 2750 microns right of fovea)
-#                    ...which is needed per Lujan's 2011 paper "Revealing Henle’s Fiber Layer Using Spectral Domain Optical Coherence Tomography"
+#                    ...which is needed per Lujan's 2011 paper "Revealing Henleï¿½s Fiber Layer Using Spectral Domain Optical Coherence Tomography"
 #                    the third through fifth coulmns are mean thickness from 500 to 2750 microns right of the fovea.
 #MAIN.DARK.OUTPUTS.fovea = image# in first column, second colum is the apparent angle of the RPE in each image 
 #                          (linear estimate for -100 to 100 microns from the fovea... a slightly wider sweep than -50 to 50 used just in the service of making sure there's a nice
 #                           pool of values for the linear estimate, which regardless is centered on the fovea)
-#                           ...this is needed per Lujan's 2011 paper "Revealing Henle’s Fiber Layer Using Spectral Domain Optical Coherence Tomography"
+#                           ...this is needed per Lujan's 2011 paper "Revealing Henleï¿½s Fiber Layer Using Spectral Domain Optical Coherence Tomography"
 #                           the third coulmn is the mean thickness from -50 to 50 microns right of the fovea.
 #R.RPE.POSITION.DARK = position of the RPE (after "revision", hence the "R." prefix; uses smooth splines to minimize jitter/errors in layer localization)
 #                      with distance along the RPE in the flattened retina stored by row (one row is 1 micron, span is -100 to 2750 microns from the optic nerve)
@@ -3414,6 +3560,15 @@ write(t(EXPORT),ncol=ncol(EXPORT),file=paste("_fovea_light_profiles_",TO.PROCESS
 rm(EXPORT.2.buff,EXPORT.2,EXPORT)
 
 save.image(paste("_done_",TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,".RData",sep=""))
+
+
+
+
+
+
+
+
+
 
 
 

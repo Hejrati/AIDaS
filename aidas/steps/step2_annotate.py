@@ -39,7 +39,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from aidas.image_canvas import ImageCanvas
-from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze
+from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.ui_utils import apply_app_icon_to
 
 
@@ -81,6 +81,11 @@ LIGHT_MARKED_BASENAME = "Light_MARKED"
 DARK_MARKED_BASENAME = "Dark_MARKED"
 LIGHT_PREPROCESSED_BASENAME = "LIGHT"
 DARK_PREPROCESSED_BASENAME = "DARK"
+
+# Standard output dimensions (test1 format: 2 slices, 177 height, 2133 width)
+STANDARD_OUTPUT_SLICES = 2
+STANDARD_OUTPUT_HEIGHT = 177
+STANDARD_OUTPUT_WIDTH = 2133
 
 
 def _bresenham_line(start, end):
@@ -134,6 +139,57 @@ def _polyline_pixels(points):
         pixel_points.extend(segment)
 
     return pixel_points or [points[0]]
+
+
+def _resize_to_standard_format(volume_3d):
+    """Resize a 3-D volume (slices, height, width) to standard output format (test1).
+
+    Standard format: (2 slices, 177 height, 2133 width)
+    Uses pixel replication scaling (no interpolation) to match ImageJ behavior.
+    
+    Args:
+        volume_3d: numpy array of shape (n_slices, height, width) and dtype uint8.
+    
+    Returns:
+        Resized array of shape (STANDARD_OUTPUT_SLICES, STANDARD_OUTPUT_HEIGHT, STANDARD_OUTPUT_WIDTH).
+    """
+    if volume_3d.ndim != 3:
+        raise ValueError(f"Expected 3-D volume, got shape {volume_3d.shape}")
+    
+    current_slices, current_height, current_width = volume_3d.shape
+    target_slices = STANDARD_OUTPUT_SLICES
+    target_height = STANDARD_OUTPUT_HEIGHT
+    target_width = STANDARD_OUTPUT_WIDTH
+    
+    # If already at target size, return as-is
+    if (current_slices == target_slices and current_height == target_height 
+        and current_width == target_width):
+        return volume_3d.copy()
+    
+    # Resize each slice independently using pixel replication
+    resized_slices = []
+    for s in range(min(current_slices, target_slices)):
+        slice_data = volume_3d[s]
+        
+        # Calculate scale factors
+        sy = target_height / current_height
+        sx = target_width / current_width
+        
+        # Use scale_image for pixel replication (no interpolation)
+        # scale_image expects integer scales, so we'll do this via PIL for subpixel accuracy
+        pil_img = Image.fromarray(slice_data, mode='L')
+        pil_resized = pil_img.resize(
+            (target_width, target_height),
+            Image.NEAREST  # nearest-neighbor (pixel replication)
+        )
+        resized_arr = np.array(pil_resized, dtype=np.uint8)
+        resized_slices.append(resized_arr)
+    
+    # If we need more slices (shouldn't happen), pad with zeros
+    while len(resized_slices) < target_slices:
+        resized_slices.append(np.zeros((target_height, target_width), dtype=np.uint8))
+    
+    return np.stack(resized_slices[:target_slices], axis=0)
 
 
 class Step2Frame(ttk.Frame):
@@ -283,45 +339,46 @@ class Step2Frame(ttk.Frame):
           - Select neural network model (.h5) file
           - Specify output directory for segmentation results
         """
-        dialog = tk.Toplevel(self.winfo_toplevel())
-        dialog.title("AI Segmentation Settings")
-        dialog.geometry("500x350")
-        dialog.resizable(True, True)
+        pass
+        # dialog = tk.Toplevel(self.winfo_toplevel())
+        # dialog.title("AI Segmentation Settings")
+        # dialog.geometry("500x350")
+        # dialog.resizable(True, True)
 
-        # Apply shared helper to propagate the app icon to this dialog
-        apply_app_icon_to(dialog)
+        # # Apply shared helper to propagate the app icon to this dialog
+        # apply_app_icon_to(dialog)
 
-        main = ttk.Frame(dialog, padding=10)
-        main.pack(fill="both", expand=True)
+        # main = ttk.Frame(dialog, padding=10)
+        # main.pack(fill="both", expand=True)
 
-        ttk.Label(main, text="Conda Environment:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
-        env_frame = ttk.Frame(main)
-        env_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
+        # ttk.Label(main, text="Conda Environment:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        # env_frame = ttk.Frame(main)
+        # env_frame.pack(fill="x", pady=(0, 6))
+        # ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
 
-        ttk.Label(main, text="Config (.json):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        cfg_frame = ttk.Frame(main)
-        cfg_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(cfg_frame, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(cfg_frame, text="Browse", width=10, command=self._browse_segmenter_config).pack(side="right", padx=(4, 0))
+        # ttk.Label(main, text="Config (.json):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        # cfg_frame = ttk.Frame(main)
+        # cfg_frame.pack(fill="x", pady=(0, 6))
+        # ttk.Entry(cfg_frame, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
+        # ttk.Button(cfg_frame, text="Browse", width=10, command=self._browse_segmenter_config).pack(side="right", padx=(4, 0))
 
-        ttk.Label(main, text="Model (.h5):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        model_frame = ttk.Frame(main)
-        model_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
+        # ttk.Label(main, text="Model (.h5):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        # model_frame = ttk.Frame(main)
+        # model_frame.pack(fill="x", pady=(0, 6))
+        # ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
+        # ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
 
-        ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        out_frame = ttk.Frame(main)
-        out_frame.pack(fill="x", pady=(0, 12))
-        ttk.Entry(out_frame, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(out_frame, text="Browse", width=10, command=self._browse_segmenter_output_dir).pack(side="right", padx=(4, 0))
+        # ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        # out_frame = ttk.Frame(main)
+        # out_frame.pack(fill="x", pady=(0, 12))
+        # ttk.Entry(out_frame, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
+        # ttk.Button(out_frame, text="Browse", width=10, command=self._browse_segmenter_output_dir).pack(side="right", padx=(4, 0))
 
-        buttons = ttk.Frame(main)
-        buttons.pack(fill="x", expand=True, side="bottom")
-        ttk.Button(buttons, text="OK", command=dialog.destroy).pack(side="right", padx=(2, 0))
-        dialog.focus_set()
-        dialog.grab_set()
+        # buttons = ttk.Frame(main)
+        # buttons.pack(fill="x", expand=True, side="bottom")
+        # ttk.Button(buttons, text="OK", command=dialog.destroy).pack(side="right", padx=(2, 0))
+        # dialog.focus_set()
+        # dialog.grab_set()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
@@ -440,7 +497,7 @@ class Step2Frame(ttk.Frame):
             state="disabled",
         )
         self.segment_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
-        ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog).pack(side="right", padx=(2, 0))
+        ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog,).pack(side="right", padx=(2, 0))
 
         self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
         self.clear_all_traces_btn.pack(fill="x", pady=(6, 4))
@@ -1606,57 +1663,19 @@ class Step2Frame(ttk.Frame):
     def _reference_marked_volume_spec(self):
         """Get the target dimensions and dtype for MARKED output volumes.
 
-        Looks for reference Analyze header files to match output to the original
-        OCT volume structure. Searches in this priority:
-          1. Cached template from initial load (if available)
-          2. sdb_images folder (distributed reference images)
-          3. Source directory (same folder as current image)
-          4. Fallback: current image dimensions as 3-D stack (1, H, W)
+        Returns standard output format (test1 format):
+          - Slices: 2
+          - Height: 177
+          - Width: 2133
+          - Dtype: uint8
+
+        This ensures all MARKED images are saved in a consistent, normalized format
+        regardless of input image size.
 
         Returns:
-            Tuple (slices, height, width, dtype): Dimensions for output Analyze volumes.
+            Tuple (slices, height, width, dtype): Standard dimensions for output Analyze volumes.
         """
-        template = self._input_analyze_template
-        if template:
-            return (
-                int(template["slices"]),
-                int(template["height"]),
-                int(template["width"]),
-                np.dtype(template["dtype"]),
-            )
-
-        candidates = []
-        app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        candidates.extend(
-            [
-                os.path.join(app_root, "sdb_images", "Light 1.hdr"),
-                os.path.join(app_root, "sdb_images", "Dark 1.hdr"),
-            ]
-        )
-        if self.current_file:
-            source_dir = self.current_file if os.path.isdir(self.current_file) else os.path.dirname(self.current_file)
-            candidates.extend(
-                [
-                    os.path.join(source_dir, "Light 1.hdr"),
-                    os.path.join(source_dir, "Dark 1.hdr"),
-                ]
-            )
-
-        for candidate in candidates:
-            if not os.path.isfile(candidate):
-                continue
-            try:
-                ref = read_analyze(candidate)
-            except Exception:
-                continue
-            shape = ref.shape
-            if ref.ndim == 3:
-                return int(shape[0]), int(shape[1]), int(shape[2]), np.dtype(ref.dtype)
-            if ref.ndim == 2:
-                return 1, int(shape[0]), int(shape[1]), np.dtype(ref.dtype)
-
-        height, width = self.image_data.shape[:2]
-        return 1, int(height), int(width), np.dtype(np.uint8)
+        return (STANDARD_OUTPUT_SLICES, STANDARD_OUTPUT_HEIGHT, STANDARD_OUTPUT_WIDTH, np.dtype(np.uint8))
 
     def _build_marked_image(self):
         """Create the base marked image with background set to MARKED_BACKGROUND_MAX.
@@ -1722,15 +1741,15 @@ class Step2Frame(ttk.Frame):
     def _build_marked_volumes(self):
         """Generate Light_MARKED and Dark_MARKED 8-bit Analyze volumes from traced boundaries.
 
-        Creates two volumes:
+        Creates two volumes in standard output format (test1 dimensions):
           - Light_MARKED: RPE and Fovea marked on a light background (230)
           - Dark_MARKED: All 6 boundaries + Fovea marked on a dark background
 
+        All output volumes are automatically resized to standard format (177 height × 2133 width, 2 slices).
         If preprocessing was applied, rescales boundaries back to original image dimensions.
-        Output volumes are resized to match the target Analyze template if needed.
 
         Returns:
-            Tuple (light_volume, dark_volume): Two 3-D uint8 numpy arrays (depth, height, width).
+            Tuple (light_volume, dark_volume): Two 3-D uint8 numpy arrays in standard format.
         """
         target_slices, target_h, target_w, _target_dtype = self._reference_marked_volume_spec()
         base_marked = self._build_marked_image()
@@ -1738,7 +1757,7 @@ class Step2Frame(ttk.Frame):
         # Get original dimensions before any resize
         orig_h, orig_w = base_marked.shape[:2]
         
-        # Resize image to target dimensions if needed
+        # Resize image to target standard dimensions if needed
         if (orig_h, orig_w) != (target_h, target_w):
             base_marked = np.array(
                 Image.fromarray(base_marked).resize((target_w, target_h), Image.Resampling.NEAREST),
@@ -1795,17 +1814,23 @@ class Step2Frame(ttk.Frame):
         if original_traces is not None:
             self.boundary_traces = original_traces
 
+        # Create volume with standard number of slices (always 2 in standard format)
         nslices = max(1, int(target_slices))
         light_volume = np.stack([light_slice] * nslices, axis=0).astype(np.uint8, copy=False)
         dark_volume = np.stack([dark_marked_slice] * nslices, axis=0).astype(np.uint8, copy=False)
+        
+        # Ensure output volumes are in standard format
+        light_volume = _resize_to_standard_format(light_volume)
+        dark_volume = _resize_to_standard_format(dark_volume)
+        
         return light_volume, dark_volume
 
     def _save_preprocessed_image(self):
         """Export the preprocessed image (if preprocessing was applied) as Analyze volume.
 
         If the image was preprocessed for AI, saves the cropped/resized preprocessed version
-        as Light and Dark preprocessed stacks (.hdr/.img). Used to track what the neural
-        network actually saw as input.
+        as Light and Dark preprocessed stacks (.hdr/.img) in standard format (test1 dimensions).
+        Used to track what the neural network actually saw as input.
 
         Returns:
             List of saved file basepaths (without .img/.hdr extension).
@@ -1818,7 +1843,12 @@ class Step2Frame(ttk.Frame):
         if preprocessed.ndim != 2:
             raise ValueError("Auto-preprocessed image must be 2-D.")
 
+        # Create a 3D stack with 2 identical slices
         stack = np.stack([preprocessed, preprocessed], axis=0).astype(np.uint8, copy=False)
+        
+        # Resize to standard output format
+        stack = _resize_to_standard_format(stack)
+        
         saved_paths = []
         for base_path in self._preprocessed_output_basepaths():
             write_analyze(base_path, stack)

@@ -15,6 +15,7 @@ import os
 from aidas import __version__
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2Frame
+from aidas.steps.step3_flatten import Step3Frame
 
 from aidas.config import Config
 
@@ -93,10 +94,12 @@ class AIDaSApp(tk.Tk):
         self.step2 = Step2Frame(self.notebook, preferences=self.preferences, source_step=self.step1)
         self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
 
+        # Step 3
+        self.step3 = Step3Frame(self.notebook, preferences=self.preferences, source_step=self.step2)
+        self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
 
-        # Placeholder tabs for Steps 3-4
+        # Placeholder tabs for Steps 4
         for i, title in [
-            (3, "Rename & Flatten Image"),
             (4, "Analyse ISez"),
         ]:
             f = ttk.Frame(self.notebook)

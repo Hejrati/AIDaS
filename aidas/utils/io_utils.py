@@ -202,10 +202,20 @@ def write_analyze(filepath, data):
         # Analyze stores x-fastest, then y, then z — same as C-contiguous (row-major)
         for s in range(nslices):
             slice_arr = np.ascontiguousarray(np.flipud(data[s]))
-            if bitpix == 16:
+            if (dt_code, bitpix) == (2, 8):
+                target_dtype = np.dtype("u1")
+            elif (dt_code, bitpix) == (4, 16):
                 # Analyze datatype 4 uses signed 16-bit storage.
                 target_dtype = np.dtype(f"{end}i2")
-                slice_arr = slice_arr.astype(target_dtype, copy=False)
+            elif (dt_code, bitpix) == (8, 32):
+                target_dtype = np.dtype(f"{end}i4")
+            elif (dt_code, bitpix) == (16, 32):
+                target_dtype = np.dtype(f"{end}f4")
+            elif (dt_code, bitpix) == (64, 64):
+                target_dtype = np.dtype(f"{end}f8")
+            else:
+                target_dtype = np.dtype(f"{end}i2")
+            slice_arr = slice_arr.astype(target_dtype, copy=False)
             fh.write(slice_arr.tobytes())
 
     return base + ".hdr", base + ".img"
