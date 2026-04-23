@@ -1231,16 +1231,27 @@ class Step3Frame(ttk.Frame):
         fig = Figure(figsize=(11, 7), dpi=100)
 
         if view == "grand_mean":
-            ax1 = fig.add_subplot(121)
-            ax2 = fig.add_subplot(122)
-            ax1.imshow(self.results['final_grand_mean'], cmap="gray", aspect="auto")
-            ax1.axhline(self.results['vertex'], color="r", linestyle="--", alpha=0.7)
-            ax1.set_title("Final Grand Mean")
-            profile = np.nanmean(self.results['final_grand_mean'], axis=1)
-            ax2.plot(profile)
-            ax2.axvline(self.results['vertex'], color="r", linestyle="--", alpha=0.7)
-            ax2.set_title("Intensity Profile")
-            ax2.grid(True, alpha=0.3)
+            # Row layout: profile on top, image on bottom
+            ax1 = fig.add_subplot(211)
+            ax2 = fig.add_subplot(212)
+            gm = self.results['final_grand_mean']
+
+            # Top: intensity profile across columns
+            profile = np.nanmean(gm, axis=0)
+            xs = np.arange(1, profile.size + 1, dtype=np.float64)
+            ax1.plot(xs, profile, color="black", linewidth=1.0)
+            ax1.axvline(self.results['vertex'], color="r", linestyle="--", alpha=0.7)
+            ax1.set_title("Intensity Profile")
+            ax1.set_xlabel("column")
+            ax1.set_ylabel("mean intensity")
+            ax1.grid(True, alpha=0.3)
+
+            # Bottom: grand mean image displayed horizontally (columns left->right)
+            ax2.imshow(gm.T, cmap="gray", aspect="auto")
+            # Draw horizontal line across the image at the detected vertex (row corresponding to column)
+            ax2.axhline(self.results['vertex'], color="r", linestyle="--", alpha=0.7)
+            ax2.set_title("Final Grand Mean")
+            ax2.axis("off")
         else:
             ax1 = fig.add_subplot(221)
             ax2 = fig.add_subplot(222)
