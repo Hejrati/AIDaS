@@ -1,0 +1,41 @@
+name: oct-segmenter-env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy=2.2.6
+  - scipy=1.15.2
+  - matplotlib=3.10.8
+  - pillow>=10.0
+  - pyside6=6.11.0
+  - shiboken6=6.11.0
+  - contourpy=1.3.2
+  - cycler=0.12.1
+  - fonttools=4.62.1
+  - kiwisolver=1.5.0
+  - packaging=26.1
+  - pyparsing=3.3.2
+  - python-dateutil=2.9.0.post0
+  - tornado=6.5.5
+  - typeguard=4.5.1
+  - typing_extensions=4.15.0
+  - unicodedata2=17.0.1
+  - pip
+  - pip:
+    - C:/Users/behzad/Desktop/AIDaS/OCT%20Segmenter/oct_segmenter-0.8.4-py3-none-any.whl
+    - imgviz==1.8.0
+    - prettytable==3.17.0
+    - art==6.5
+    - cmap==0.7.2
+    - munkres==1.1.4
+    - wcwidth==0.6.0
+
+# Notes:
+# - This file pins key conda packages (preferred from conda-forge) and
+#   installs a local wheel for `oct-segmenter` plus a few pip-only packages.
+# - If you prefer everything via pip, run `pip install -r requirements.txt`.
+# - To create the environment locally:
+#
+# conda env create -f environment.yml
+# conda activate oct-segmenter-env

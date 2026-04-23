@@ -15,6 +15,14 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageTk
 
+# Backwards-compatible resampling constant: newer Pillow exposes
+# `Image.Resampling`, older versions use module-level constants like
+# `Image.NEAREST`.
+try:
+    RESAMPLE_NEAREST = Image.Resampling.NEAREST
+except Exception:
+    RESAMPLE_NEAREST = Image.NEAREST
+
 
 class ImageCanvas(ttk.Frame):
     """Zoomable image canvas with rectangle ROI, line tracing, and vertical marker."""
@@ -288,7 +296,7 @@ class ImageCanvas(ttk.Frame):
         draw_h = max(zh, ch)
         self._img_offset_x = (draw_w - zw) / 2.0
         self._img_offset_y = (draw_h - zh) / 2.0
-        pil = Image.fromarray(disp, "L").resize((zw, zh), Image.Resampling.NEAREST)
+        pil = Image.fromarray(disp, "L").resize((zw, zh), RESAMPLE_NEAREST)
         self._photo = ImageTk.PhotoImage(pil)
         self._img_id = self.canvas.create_image(
             self._img_offset_x,

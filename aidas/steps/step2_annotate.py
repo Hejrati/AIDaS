@@ -339,46 +339,45 @@ class Step2Frame(ttk.Frame):
           - Select neural network model (.h5) file
           - Specify output directory for segmentation results
         """
-        pass
-        # dialog = tk.Toplevel(self.winfo_toplevel())
-        # dialog.title("AI Segmentation Settings")
-        # dialog.geometry("500x350")
-        # dialog.resizable(True, True)
+        dialog = tk.Toplevel(self.winfo_toplevel())
+        dialog.title("AI Segmentation Settings")
+        dialog.geometry("500x350")
+        dialog.resizable(True, True)
 
-        # # Apply shared helper to propagate the app icon to this dialog
-        # apply_app_icon_to(dialog)
+        # Apply shared helper to propagate the app icon to this dialog
+        apply_app_icon_to(dialog)
 
-        # main = ttk.Frame(dialog, padding=10)
-        # main.pack(fill="both", expand=True)
+        main = ttk.Frame(dialog, padding=10)
+        main.pack(fill="both", expand=True)
 
-        # ttk.Label(main, text="Conda Environment:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
-        # env_frame = ttk.Frame(main)
-        # env_frame.pack(fill="x", pady=(0, 6))
-        # ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
+        ttk.Label(main, text="Conda Environment:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        env_frame = ttk.Frame(main)
+        env_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
 
-        # ttk.Label(main, text="Config (.json):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        # cfg_frame = ttk.Frame(main)
-        # cfg_frame.pack(fill="x", pady=(0, 6))
-        # ttk.Entry(cfg_frame, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
-        # ttk.Button(cfg_frame, text="Browse", width=10, command=self._browse_segmenter_config).pack(side="right", padx=(4, 0))
+        ttk.Label(main, text="Config (.json):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        cfg_frame = ttk.Frame(main)
+        cfg_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(cfg_frame, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(cfg_frame, text="Browse", width=10, command=self._browse_segmenter_config).pack(side="right", padx=(4, 0))
 
-        # ttk.Label(main, text="Model (.h5):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        # model_frame = ttk.Frame(main)
-        # model_frame.pack(fill="x", pady=(0, 6))
-        # ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
-        # ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
+        ttk.Label(main, text="Model (.h5):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        model_frame = ttk.Frame(main)
+        model_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
 
-        # ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        # out_frame = ttk.Frame(main)
-        # out_frame.pack(fill="x", pady=(0, 12))
-        # ttk.Entry(out_frame, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
-        # ttk.Button(out_frame, text="Browse", width=10, command=self._browse_segmenter_output_dir).pack(side="right", padx=(4, 0))
+        ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        out_frame = ttk.Frame(main)
+        out_frame.pack(fill="x", pady=(0, 12))
+        ttk.Entry(out_frame, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(out_frame, text="Browse", width=10, command=self._browse_segmenter_output_dir).pack(side="right", padx=(4, 0))
 
-        # buttons = ttk.Frame(main)
-        # buttons.pack(fill="x", expand=True, side="bottom")
-        # ttk.Button(buttons, text="OK", command=dialog.destroy).pack(side="right", padx=(2, 0))
-        # dialog.focus_set()
-        # dialog.grab_set()
+        buttons = ttk.Frame(main)
+        buttons.pack(fill="x", expand=True, side="bottom")
+        ttk.Button(buttons, text="OK", command=dialog.destroy).pack(side="right", padx=(2, 0))
+        dialog.focus_set()
+        dialog.grab_set()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
@@ -494,7 +493,6 @@ class Step2Frame(ttk.Frame):
             ai_buttons,
             text="AI Assist",
             command=self._run_neural_segmentation,
-            state="disabled",
         )
         self.segment_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
         ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog,).pack(side="right", padx=(2, 0))
