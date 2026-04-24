@@ -14,7 +14,7 @@ Core steps:
 from __future__ import annotations
 
 import numpy as np
-from scipy.interpolate import LSQUnivariateSpline, UnivariateSpline, interp1d
+from scipy.interpolate import BSpline, UnivariateSpline, interp1d
 from scipy.stats import pearsonr
 from scipy.ndimage import gaussian_filter1d
 import tkinter as tk
@@ -40,7 +40,7 @@ def _normalize_analyze_path(base_path):
 
 def _load_analyze_volume_r_layout(path):
     """Load an Analyze volume using the same layout convention as main.py."""
-    volume = np.asarray(read_analyze(_normalize_analyze_path(path)))
+    volume = np.asarray(read_analyze(_normalize_analyze_path(path)), dtype=np.uint8)
 
     # Match the R script's effective (y, x, slice) layout.
     if volume.ndim == 3:
@@ -79,7 +79,11 @@ def _fit_line_coeffs(points):
 
 
 def _fit_smooth_spline_like_r(x, y, df, degree=3):
-    """Approximate R smooth.spline(df=...) with a regression spline."""
+    """Approximate R smooth.spline(df=...) with a penalized B-spline smoother.
+
+    This matches main.py more closely than a plain regression spline because it
+    chooses the smoothing penalty by targeting effective degrees of freedom.
+    """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
 
@@ -91,51 +95,92 @@ def _fit_smooth_spline_like_r(x, y, df, degree=3):
     if unique_x.size <= degree + 1:
         return UnivariateSpline(unique_x, unique_y, k=min(degree, unique_x.size - 1), s=0)
 
-    n_coeff = max(int(df), degree + 1)
-    n_internal = max(0, n_coeff - (degree + 1))
+    if df >= unique_x.size - 1:
+        return UnivariateSpline(unique_x, unique_y, k=degree, w=np.sqrt(counts), s=0)
 
-    if n_internal == 0:
-        return UnivariateSpline(unique_x, unique_y, k=degree, s=0)
-
+    n_internal = int(min(max(df * 6, 24), max(8, unique_x.size - (degree + 1))))
     probs = np.linspace(0.0, 1.0, n_internal + 2)[1:-1]
-    knots = np.quantile(unique_x, probs)
-    knots = np.unique(knots)
+    interior = np.quantile(unique_x, probs)
+    interior = np.unique(interior)
 
     eps = np.finfo(np.float64).eps * max(1.0, float(unique_x[-1] - unique_x[0]))
-    knots = knots[(knots > unique_x[0] + eps) & (knots < unique_x[-1] - eps)]
+    interior = interior[(interior > unique_x[0] + eps) & (interior < unique_x[-1] - eps)]
+    if interior.size == 0:
+        return UnivariateSpline(unique_x, unique_y, k=degree, w=np.sqrt(counts), s=len(unique_x))
 
-    while knots.size > 0:
+    knots = np.concatenate(
+        (
+            np.repeat(unique_x[0], degree + 1),
+            interior,
+            np.repeat(unique_x[-1], degree + 1),
+        )
+    )
+    n_coeff = knots.size - degree - 1
+    if n_coeff <= degree + 1:
+        return UnivariateSpline(unique_x, unique_y, k=degree, w=np.sqrt(counts), s=len(unique_x))
+
+    basis = np.empty((unique_x.size, n_coeff), dtype=np.float64)
+    eye = np.eye(n_coeff, dtype=np.float64)
+    for idx in range(n_coeff):
+        basis[:, idx] = BSpline(knots, eye[idx], degree, extrapolate=True)(unique_x)
+
+    weighted_basis = basis * counts[:, None]
+    bt_w_b = basis.T @ weighted_basis
+    rhs = basis.T @ (counts * unique_y)
+    penalty = np.diff(np.eye(n_coeff, dtype=np.float64), n=2, axis=0)
+    penalty = penalty.T @ penalty
+
+    def solve_for_lambda(lam):
+        system = bt_w_b + (lam * penalty)
+        ridge = np.eye(system.shape[0], dtype=np.float64) * (1e-10 * max(1.0, np.trace(bt_w_b) / system.shape[0]))
         try:
-            return LSQUnivariateSpline(
-                unique_x,
-                unique_y,
-                t=knots,
-                w=np.sqrt(counts),
-                k=degree,
-            )
-        except ValueError:
-            knots = knots[1:-1]
+            coeffs = np.linalg.solve(system + ridge, rhs)
+            smoother = np.linalg.solve(system + ridge, bt_w_b)
+        except np.linalg.LinAlgError:
+            coeffs = np.linalg.lstsq(system + ridge, rhs, rcond=None)[0]
+            smoother = np.linalg.lstsq(system + ridge, bt_w_b, rcond=None)[0]
+        edf = float(np.trace(smoother))
+        return coeffs, edf
 
-    return UnivariateSpline(unique_x, unique_y, k=degree, s=len(unique_x))
+    target_df = float(max(2.0, min(df, n_coeff)))
+
+    coeffs_lo, edf_lo = solve_for_lambda(0.0)
+    if target_df >= edf_lo:
+        return BSpline(knots, coeffs_lo, degree, extrapolate=True)
+
+    lam_lo = 0.0
+    lam_hi = 1.0
+    coeffs_hi, edf_hi = solve_for_lambda(lam_hi)
+    while edf_hi > target_df and lam_hi < 1e12:
+        lam_lo = lam_hi
+        lam_hi *= 10.0
+        coeffs_hi, edf_hi = solve_for_lambda(lam_hi)
+
+    best_coeffs = coeffs_hi
+    for _ in range(50):
+        lam_mid = 0.5 * (lam_lo + lam_hi)
+        coeffs_mid, edf_mid = solve_for_lambda(lam_mid)
+        best_coeffs = coeffs_mid
+        if abs(edf_mid - target_df) < 1e-3:
+            break
+        if edf_mid > target_df:
+            lam_lo = lam_mid
+        else:
+            lam_hi = lam_mid
+
+    return BSpline(knots, best_coeffs, degree, extrapolate=True)
 
 
 def _build_floor_sample_line(start_x, end_x, start_y, end_y):
     """Mirror the R/main.py seq(...); floor(...) sampling line construction."""
+    # R uses seq(from, to, by=(to-from)/500), which should yield 501 points:
+    # from + by * 0:500. Build that sequence directly so we avoid np.arange
+    # endpoint drift and keep the same floor() inputs as closely as possible.
     dx = (end_x - start_x) / 500.0
     dy = (end_y - start_y) / 500.0
-    line_x = np.arange(start_x, end_x + dx, dx)
-    line_y = np.arange(start_y, end_y + dy, dy)
-
-    if line_x.size < 501:
-        line_x = np.linspace(start_x, end_x, 501)
-    else:
-        line_x = line_x[:501]
-
-    if line_y.size < 501:
-        line_y = np.linspace(start_y, end_y, 501)
-    else:
-        line_y = line_y[:501]
-
+    offsets = np.arange(501, dtype=np.float64)
+    line_x = start_x + (dx * offsets)
+    line_y = start_y + (dy * offsets)
     return np.floor(np.column_stack((line_x, line_y)))
 
 
