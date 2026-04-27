@@ -24,6 +24,12 @@ DEFAULT_RAW_HEIGHT = 1200
 DEFAULT_RAW_OFFSET = 1050
 DEFAULT_RAW_BIT_DEPTH = 16
 DEFAULT_OUTPUT_DIR = SDB_DEFAULT_DIR
+CROP_SCALE_X = 3
+CROP_SCALE_Y = 1
+DEFAULT_ROI_X = 170
+DEFAULT_ROI_Y = 585
+DEFAULT_ROI_WIDTH = 491
+DEFAULT_ROI_HEIGHT = 128
 
 
 class Step1Frame(ttk.Frame):
@@ -58,6 +64,8 @@ class Step1Frame(ttk.Frame):
         self.current_file = None       # path of opened raw file
         self.raw_import_params = None  # validated import parameters
         self._updating_roi_entries = False
+        self._updating_target_size_entries = False
+        self._target_size_edit_active = False
 
         # ----- layout -----
         # Fixed sidebar on the left + expandable image area on the right.
@@ -244,10 +252,14 @@ class Step1Frame(ttk.Frame):
         self.roi_y_var = tk.StringVar(value="0")
         self.roi_w_var = tk.StringVar(value="100")
         self.roi_h_var = tk.StringVar(value="100")
+        self.target_w_var = tk.StringVar(value=str(100 * CROP_SCALE_X))
+        self.target_h_var = tk.StringVar(value=str(100 * CROP_SCALE_Y))
         self.roi_x_var.trace_add("write", self._on_roi_entry_changed)
         self.roi_y_var.trace_add("write", self._on_roi_entry_changed)
         self.roi_w_var.trace_add("write", self._on_roi_entry_changed)
         self.roi_h_var.trace_add("write", self._on_roi_entry_changed)
+        self.target_w_var.trace_add("write", self._on_target_size_entry_changed)
+        self.target_h_var.trace_add("write", self._on_target_size_entry_changed)
 
         ttk.Label(roi, text="Output dir:").grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 0)
@@ -271,8 +283,8 @@ class Step1Frame(ttk.Frame):
         for i, (lbl, var, color) in enumerate([
             ("X (Left):", self.roi_x_var, "#DA0404"),
             ("Y (Top):", self.roi_y_var, "#DA0404"),
-            ("Width (W):", self.roi_w_var, None),
-            ("Height (H):", self.roi_h_var, None),
+            ("Source W:", self.roi_w_var, None),
+            ("Source H:", self.roi_h_var, None),
         ]):
             r, c = divmod(i, 2)
             if color:
@@ -290,8 +302,34 @@ class Step1Frame(ttk.Frame):
                 row=r + 2, column=c * 2 + 1, sticky="e", padx=(0, 8), pady=1)
             self.roi_entries.append(entry)
 
+        ttk.Label(roi, text="Target W:").grid(row=4, column=0, sticky="w", pady=(4, 1))
+        self.target_w_entry = ttk.Entry(
+            roi,
+            textvariable=self.target_w_var,
+            width=7,
+            validate="key",
+            validatecommand=numeric_vcmd,
+        )
+        self.target_w_entry.grid(row=4, column=1, sticky="e", padx=(0, 8), pady=(4, 1))
+        ttk.Label(roi, text="Target H:").grid(row=4, column=2, sticky="w", pady=(4, 1))
+        self.target_h_entry = ttk.Entry(
+            roi,
+            textvariable=self.target_h_var,
+            width=7,
+            validate="key",
+            validatecommand=numeric_vcmd,
+        )
+        self.target_h_entry.grid(row=4, column=3, sticky="e", padx=(0, 8), pady=(4, 1))
+        self.target_size_entries = [self.target_w_entry, self.target_h_entry]
+
+        ttk.Label(
+            roi,
+            text=f"Scale: target width is source width x{CROP_SCALE_X}; height unchanged.",
+            foreground="gray",
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(2, 2))
+
         roi_presets = ttk.Frame(roi)
-        roi_presets.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        roi_presets.grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 2))
         self.default_roi_btn = ttk.Button(roi_presets, text="Default Region", command=self._set_default_roi)
         self.default_roi_btn.pack(side="left", padx=(0, 4))
         self.entire_roi_btn = ttk.Button(roi_presets, text="Entire Image", command=self._select_all_roi)
@@ -300,7 +338,7 @@ class Step1Frame(ttk.Frame):
         ttk.Button(roi_presets, text="Auto Select", command=self._set_default_roi, state="disabled").pack(side="left", padx=(4, 0))
 
         roi_actions = ttk.Frame(roi)
-        roi_actions.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        roi_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
         self.crop_btn = ttk.Button(roi_actions, text="▶  Crop", command=self._crop_and_scale)
         self.crop_btn.pack(fill="x", pady=(0, 2))
@@ -317,7 +355,7 @@ class Step1Frame(ttk.Frame):
             command=self._save_all_formats,
             state="disabled",
         )
-        self.save_all_btn.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(2, 2))
+        self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(2, 2))
 
         ttk.Separator(self.ctrl).pack(**pad, pady=3)
 
@@ -893,15 +931,15 @@ class Step1Frame(ttk.Frame):
     def _set_default_roi(self):
         """Set ROI to a centered band on the opened image.
 
-        Default behavior: full image width and 150 px height, vertically centered.
+        Default behavior: a fixed source crop region using the legacy offset.
         """
         if self.raw_image is None:
             return
         ih, iw = self.raw_image.shape
-        x = 0
-        w = iw
-        h = min(155, ih)
-        y = 560
+        x = min(DEFAULT_ROI_X, max(0, iw - 1))
+        y = min(DEFAULT_ROI_Y, max(0, ih - 1))
+        w = min(DEFAULT_ROI_WIDTH, iw - x)
+        h = min(DEFAULT_ROI_HEIGHT, ih - y)
         self._set_roi_and_entries(x, y, w, h)
 
     def _select_all_roi(self):
@@ -936,7 +974,38 @@ class Step1Frame(ttk.Frame):
             return
         if w <= 0 or h <= 0:
             return
+        self._update_target_size_entries(w, h)
         self.image_canvas.set_roi((x, y, w, h))
+
+    def _on_target_size_entry_changed(self, *_):
+        """Update source ROI size when the user edits final target dimensions."""
+        if self._updating_target_size_entries or self.raw_image is None:
+            return
+        try:
+            x = int(self.roi_x_var.get())
+            y = int(self.roi_y_var.get())
+            target_w = int(self.target_w_var.get())
+            target_h = int(self.target_h_var.get())
+        except ValueError:
+            return
+        if target_w <= 0 or target_h <= 0:
+            return
+
+        source_w = max(1, int(round(target_w / CROP_SCALE_X)))
+        source_h = max(1, int(round(target_h / CROP_SCALE_Y)))
+        ih, iw = self.raw_image.shape
+        source_w = min(source_w, max(1, iw - x))
+        source_h = min(source_h, max(1, ih - y))
+
+        self._updating_roi_entries = True
+        self.roi_w_var.set(str(source_w))
+        self.roi_h_var.set(str(source_h))
+        self._updating_roi_entries = False
+        self._target_size_edit_active = True
+        try:
+            self.image_canvas.set_roi((x, y, source_w, source_h))
+        finally:
+            self._target_size_edit_active = False
 
     def _set_roi_and_entries(self, x, y, w, h):
         """Set ROI in canvas and synchronize ROI entry fields.
@@ -950,7 +1019,7 @@ class Step1Frame(ttk.Frame):
         self._update_roi_entries(x, y, w, h)
         self.image_canvas.set_roi((x, y, w, h))
 
-    def _update_roi_entries(self, x, y, w, h):
+    def _update_roi_entries(self, x, y, w, h, update_target=True):
         """Write ROI values into UI entry variables."""
         self._updating_roi_entries = True
         self.roi_x_var.set(str(x))
@@ -958,6 +1027,29 @@ class Step1Frame(ttk.Frame):
         self.roi_w_var.set(str(w))
         self.roi_h_var.set(str(h))
         self._updating_roi_entries = False
+        if update_target:
+            self._update_target_size_entries(w, h)
+
+    def _update_target_size_entries(self, w=None, h=None):
+        """Keep target size entries aligned with the source ROI dimensions."""
+        if getattr(self, "target_w_var", None) is None:
+            return
+        if w is None or h is None:
+            try:
+                w = int(self.roi_w_var.get())
+                h = int(self.roi_h_var.get())
+            except ValueError:
+                return
+
+        if w <= 0 or h <= 0:
+            return
+
+        final_w = w * CROP_SCALE_X
+        final_h = h * CROP_SCALE_Y
+        self._updating_target_size_entries = True
+        self.target_w_var.set(str(final_w))
+        self.target_h_var.set(str(final_h))
+        self._updating_target_size_entries = False
 
     def _on_roi_changed(self, roi):
         """Handle ROI-change callback from the canvas interaction layer.
@@ -966,7 +1058,13 @@ class Step1Frame(ttk.Frame):
             roi: Tuple `(x, y, w, h)` in image coordinates.
         """
         x, y, w, h = roi
-        self._update_roi_entries(x, y, w, h)
+        self._update_roi_entries(
+            x,
+            y,
+            w,
+            h,
+            update_target=not self._target_size_edit_active,
+        )
 
     def _on_mouse_moved(self, ix, iy, val):
         """Update status with cursor position/value for current image.
@@ -1004,7 +1102,7 @@ class Step1Frame(ttk.Frame):
             return False
 
         x, y, w, h = roi
-        sx, sy = 3, 1
+        sx, sy = CROP_SCALE_X, CROP_SCALE_Y
 
         # Crop
         cropped = self.raw_image[y:y + h, x:x + w].copy()
@@ -1048,7 +1146,7 @@ class Step1Frame(ttk.Frame):
         self._update_save_button_state()
         self.default_roi_btn.configure(state="disabled")
         self.entire_roi_btn.configure(state="disabled")
-        for entry in self.roi_entries:
+        for entry in self.roi_entries + self.target_size_entries:
             entry.configure(state="disabled")
         return True
 
@@ -1070,7 +1168,7 @@ class Step1Frame(ttk.Frame):
         self._set_sdb_parameters_enabled(True)
         self.default_roi_btn.configure(state="normal")
         self.entire_roi_btn.configure(state="normal")
-        for entry in self.roi_entries:
+        for entry in self.roi_entries + self.target_size_entries:
             entry.configure(state="normal")
         self.status_var.set("Reset — adjust ROI and process again.")
 
