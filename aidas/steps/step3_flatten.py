@@ -28,6 +28,18 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from aidas.utils.io_utils import read_analyze, write_analyze
+from main import (
+    build_fovea_normalized_strip as _main_build_fovea_normalized_strip,
+    build_main_normalized_strip as _main_build_main_normalized_strip,
+    build_profile_matrix as _main_build_profile_matrix,
+    compute_retina_points_for_marked_slice as _main_compute_retina_points_for_marked_slice,
+    fill_na_with_leading_non_na as _main_fill_na_with_leading_non_na,
+    first_closest_zero_crossing as _main_first_closest_zero_crossing,
+    refine_border_position_pass as _main_refine_border_position_pass,
+    slice_rows_1based as _main_slice_rows_1based,
+    smooth_position_matrix as _main_smooth_position_matrix,
+    write_object_table as _main_write_object_table,
+)
 
 
 def _normalize_analyze_path(base_path):
@@ -40,7 +52,7 @@ def _normalize_analyze_path(base_path):
 
 def _load_analyze_volume_r_layout(path):
     """Load an Analyze volume using the same layout convention as main.py."""
-    volume = np.asarray(read_analyze(_normalize_analyze_path(path)), dtype=np.uint8)
+    volume = np.asarray(read_analyze(_normalize_analyze_path(path)))
 
     # Match the R script's effective (y, x, slice) layout.
     if volume.ndim == 3:
@@ -361,15 +373,20 @@ class OCTFlatteningProcessor:
         ref_volume = self.ref_dark if reference_volume is None else reference_volume
         img_volume = self.dark if raw_volume is None else raw_volume
 
-        rpe_spline, fovea_coeffs, center_value = self.find_rpe_and_fovea(
-            slice_idx, reference_volume=ref_volume
-        )
-        
-        # Build retina sampling points
-        retina_points = self.build_retina_points(rpe_spline, center_value)
-        
-        image_2d = img_volume[:, :, slice_idx]
         ref_2d = ref_volume[:, :, slice_idx]
+        xs, ys = _build_coordinate_grids(ref_2d)
+        (
+            retina_points,
+            rpe_info_2,
+            slopey_neg100_to_100_deg,
+            slopey_0_to_2750_deg,
+        ) = _main_compute_retina_points_for_marked_slice(
+            ref_2d,
+            xs,
+            ys,
+        )
+
+        image_2d = img_volume[:, :, slice_idx]
 
         # Sample flattened retina
         flattened_dark = self.sample_perpendiculars(image_2d, retina_points)
@@ -379,8 +396,9 @@ class OCTFlatteningProcessor:
             'flattened': flattened_dark,
             'markers': flattened_markers,
             'retina_points': retina_points,
-            'rpe_spline': rpe_spline,
-            'center_value': center_value
+            'rpe_info_2': rpe_info_2,
+            'angle_fovea_deg': slopey_neg100_to_100_deg,
+            'angle_main_deg': slopey_0_to_2750_deg,
         }
 
     @staticmethod
@@ -507,20 +525,40 @@ class OCTFlatteningProcessor:
         flattened_dark_raw = []
         flattened_light_raw = []
         flattened_markers_all = []
+        apparent_angles_for_dark = np.column_stack(
+            (
+                np.asarray([idx + 1 for idx in dark_slices], dtype=np.float64),
+                np.full(len(dark_slices), np.nan, dtype=np.float64),
+                np.full(len(dark_slices), np.nan, dtype=np.float64),
+            )
+        )
+        apparent_angles_for_light = np.column_stack(
+            (
+                np.asarray([idx + 1 for idx in light_slices], dtype=np.float64),
+                np.full(len(light_slices), np.nan, dtype=np.float64),
+                np.full(len(light_slices), np.nan, dtype=np.float64),
+            )
+        )
         
-        for z in dark_slices:
+        for out_idx, z in enumerate(dark_slices):
             result = self.process_slice(z, reference_volume=self.ref_dark, raw_volume=self.dark)
             flattened_dark_raw.append(result['flattened'])
             flattened_markers_all.append(result['markers'])
+            apparent_angles_for_dark[out_idx, 1] = result['angle_fovea_deg']
+            apparent_angles_for_dark[out_idx, 2] = result['angle_main_deg']
         
-        for z in light_slices:
+        for out_idx, z in enumerate(light_slices):
             result = self.process_slice(z, reference_volume=self.ref_light, raw_volume=self.light)
             flattened_light_raw.append(result['flattened'])
+            apparent_angles_for_light[out_idx, 1] = result['angle_fovea_deg']
+            apparent_angles_for_light[out_idx, 2] = result['angle_main_deg']
         
         return {
             'flattened_dark': np.array(flattened_dark_raw),
             'flattened_light': np.array(flattened_light_raw),
-            'markers': np.array(flattened_markers_all) if flattened_markers_all else None
+            'markers': np.array(flattened_markers_all) if flattened_markers_all else None,
+            'apparent_angles_for_dark': apparent_angles_for_dark,
+            'apparent_angles_for_light': apparent_angles_for_light,
         }
 
 
@@ -594,6 +632,486 @@ def _save_profile_plot(profile_xy: np.ndarray, output_path: str, title: str, ver
     fig.tight_layout()
     fig.savefig(output_path, bbox_inches="tight")
     plt.close(fig)
+
+
+def _save_main_style_exports(results, output_dir):
+    """Generate the final text/npz outputs from main.py for Step 3."""
+    outdir = Path(output_dir)
+    plots_dir = outdir / "python_plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # Match main.py's late-export stage: use the post-vertex cropped arrays
+    # (461 columns), not the pre-crop 500-column RRC arrays.
+    flattened_dark_retina_rrc = np.transpose(np.asarray(results["final_dark"], dtype=np.float64), (1, 2, 0))
+    flattened_light_retina_rrc = np.transpose(np.asarray(results["final_light"], dtype=np.float64), (1, 2, 0))
+    flattened_markers_rrc = np.asarray(results["markers"], dtype=np.float64)
+    apparent_angles_for_dark = np.asarray(results["apparent_angles_for_dark"], dtype=np.float64)
+    apparent_angles_for_light = np.asarray(results["apparent_angles_for_light"], dtype=np.float64)
+
+    hand_borders = np.full((flattened_dark_retina_rrc.shape[0], 6), np.nan, dtype=np.float64)
+    hand_borders[:, 5] = 431.0
+    for x in range(flattened_markers_rrc.shape[0]):
+        a = np.where(flattened_markers_rrc[x, :] == 254)[0]
+        if a.size > 0:
+            hand_borders[x, 4] = float(np.mean(a + 1))
+        a = np.where(flattened_markers_rrc[x, :] == 253)[0]
+        if a.size > 0:
+            hand_borders[x, 3] = float(np.mean(a + 1))
+        a = np.where(flattened_markers_rrc[x, :] == 252)[0]
+        if a.size > 0:
+            hand_borders[x, 2] = float(np.mean(a + 1))
+        a = np.where(flattened_markers_rrc[x, :] == 250)[0]
+        if a.size > 0:
+            hand_borders[x, 1] = float(np.mean(a + 1))
+        a = np.where(flattened_markers_rrc[x, :] == 249)[0]
+        if a.size > 0:
+            hand_borders[x, 0] = float(np.mean(a + 1))
+
+    start_move = 21
+    end_move = (flattened_dark_retina_rrc.shape[0] - start_move) - 1
+    blank = np.full(6, np.nan, dtype=np.float64)
+    blank[5] = 431.0
+
+    true_borders_dark = np.full((flattened_dark_retina_rrc.shape[0], 6, flattened_dark_retina_rrc.shape[2]), np.nan, dtype=np.float64)
+    for z in range(flattened_dark_retina_rrc.shape[2]):
+        review = flattened_dark_retina_rrc[:, :, z]
+        profile_x = np.arange(1.0, review.shape[1] + 1.0, 1.0)
+        for x in range(start_move, end_move + 1):
+            new_values = blank.copy()
+            row_window = slice(x - 20, x + 20)
+            profile = np.column_stack((profile_x, np.nanmean(review[row_window, :], axis=0)))
+            segment = np.round(np.nanmean(hand_borders[row_window, :], axis=0))
+
+            if not np.isnan(segment[0]):
+                seg1 = int(segment[0])
+                check = _main_slice_rows_1based(profile, seg1 - 20, seg1 + 20)
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))[10:31, :]
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[0] = _main_first_closest_zero_crossing(check, 1.0)
+
+            if not np.isnan(segment[1]):
+                seg2 = int(segment[1])
+                movein = 20.0
+                if not np.isnan(segment[2]):
+                    movein_alt = np.ceil(segment[2] - segment[1]) / 2.0
+                    if movein_alt < 20:
+                        movein = movein_alt
+                check = _main_slice_rows_1based(profile, int(new_values[0]), int(seg2 + movein))
+                if new_values[0] > seg2:
+                    seg2 = int(new_values[0])
+                check[:, 1] = np.log(check[:, 1])
+                seg2_index = np.where(check[:, 0] == seg2)[0][0]
+                m = np.nanmax(check[: (seg2_index + 1), 1])
+                peak_start = np.where(check[: (seg2_index + 1), 1] == m)[0][0]
+                check = check[peak_start:, :]
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))
+                seg2_index = np.where(check[:, 0] == seg2)[0][0]
+                if (seg2_index + 11) < check.shape[0]:
+                    check = check[: (seg2_index + 11), :]
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[1] = _main_first_closest_zero_crossing(check, -1.0)
+
+            if not np.isnan(segment[2]):
+                seg3 = int(segment[2])
+                movein = 20.0
+                if not np.isnan(segment[3]):
+                    movein_alt = np.ceil(segment[3] - segment[2]) / 2.0
+                    if movein_alt < 20:
+                        movein = movein_alt
+                check = _main_slice_rows_1based(profile, int(seg3 - movein), int(seg3 + movein))
+                m = np.nanmax(check[: int(movein + 1), 1])
+                peak_start = np.where(check[: int(movein + 1), 1] == m)[0][0]
+                check = check[peak_start:, :]
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))
+                seg3_index = np.where(check[:, 0] == seg3)[0][0]
+                if (seg3_index + 11) < check.shape[0]:
+                    check = check[: (seg3_index + 11), :]
+                seg3_index = np.where(check[:, 0] == seg3)[0][0]
+                if (seg3_index - 10) > 0:
+                    check = check[(seg3_index - 10):, :]
+                if check.size == 4:
+                    check = np.vstack((check, check))
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[2] = _main_first_closest_zero_crossing(check, -1.0)
+
+            if not np.isnan(segment[3]):
+                seg4 = int(segment[3])
+                movein = 20.0
+                if not np.isnan(segment[4]):
+                    movein_alt = np.ceil(segment[4] - segment[3]) / 2.0
+                    if movein_alt < 20:
+                        movein = movein_alt
+                check = _main_slice_rows_1based(profile, int(seg4 - movein), int(seg4 + movein))
+                m = np.nanmax(check[: int(movein + 1), 1])
+                peak_start = np.where(check[: int(movein + 1), 1] == m)[0][0]
+                check = check[peak_start:, :]
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))
+                seg4_index = np.where(check[:, 0] == seg4)[0][0]
+                if (seg4_index + 11) < check.shape[0]:
+                    check = check[: (seg4_index + 11), :]
+                seg4_index = np.where(check[:, 0] == seg4)[0][0]
+                if (seg4_index - 10) > 0:
+                    check = check[(seg4_index - 10):, :]
+                if check.size == 4:
+                    check = np.vstack((check, check))
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[3] = _main_first_closest_zero_crossing(check, -1.0)
+
+            if not np.isnan(segment[4]):
+                seg5 = int(segment[4])
+                check = _main_slice_rows_1based(profile, seg5 - 5, seg5 + 5)
+                m = np.nanmax(check[:, 1])
+                localpeak = float(np.round(np.nanmean(check[np.where(check[:, 1] == m)[0], 0])))
+                new_values[4] = localpeak
+                low = float(check[2, 0])
+                high = float(check[9, 0])
+                if (localpeak > low) and (localpeak < high):
+                    local_index = np.where(check[:, 0] == localpeak)[0][0]
+                    check = check[(local_index - 2):(local_index + 3), :]
+                    c_sp = _fit_smooth_spline_like_r(check[:, 0], check[:, 1], df=2)
+                    c_x = np.arange(check[0, 0], check[4, 0] + 0.1, 0.1)
+                    cspline = np.column_stack((c_x, c_sp(c_x)))
+                    vertex_local = float(np.mean(cspline[np.where(cspline[:, 1] == np.nanmax(cspline[:, 1]))[0], 0]))
+                    if (vertex_local > low) and (vertex_local < high):
+                        new_values[4] = float(np.round(vertex_local, 1))
+
+            true_borders_dark[x - 1, :, z] = new_values
+
+    true_borders_light = np.full((flattened_light_retina_rrc.shape[0], 6, flattened_light_retina_rrc.shape[2]), np.nan, dtype=np.float64)
+    for z in range(flattened_light_retina_rrc.shape[2]):
+        review = flattened_light_retina_rrc[:, :, z]
+        profile_x = np.arange(1.0, review.shape[1] + 1.0, 1.0)
+        for x in range(start_move, end_move + 1):
+            new_values = blank.copy()
+            row_window = slice(x - 20, x + 20)
+            profile = np.column_stack((profile_x, np.nanmean(review[row_window, :], axis=0)))
+            segment = np.round(np.nanmean(hand_borders[row_window, :], axis=0))
+
+            if not np.isnan(segment[0]):
+                seg1 = int(segment[0])
+                check = _main_slice_rows_1based(profile, seg1 - 20, seg1 + 20)
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))[10:31, :]
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[0] = _main_first_closest_zero_crossing(check, 1.0)
+
+            if not np.isnan(segment[1]):
+                seg2 = int(segment[1])
+                movein = 20.0
+                if not np.isnan(segment[2]):
+                    movein_alt = np.ceil(segment[2] - segment[1]) / 2.0
+                    if movein_alt < 20:
+                        movein = movein_alt
+                check = _main_slice_rows_1based(profile, int(new_values[0]), int(seg2 + movein))
+                if new_values[0] > seg2:
+                    seg2 = int(new_values[0])
+                check[:, 1] = np.log(check[:, 1])
+                seg2_index = np.where(check[:, 0] == seg2)[0][0]
+                m = np.nanmax(check[: (seg2_index + 1), 1])
+                peak_start = np.where(check[: (seg2_index + 1), 1] == m)[0][0]
+                check = check[peak_start:, :]
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))
+                seg2_index = np.where(check[:, 0] == seg2)[0][0]
+                if (seg2_index + 11) < check.shape[0]:
+                    check = check[: (seg2_index + 11), :]
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[1] = _main_first_closest_zero_crossing(check, -1.0)
+
+            if not np.isnan(segment[2]):
+                seg3 = int(segment[2])
+                movein = 20.0
+                if not np.isnan(segment[3]):
+                    movein_alt = np.ceil(segment[3] - segment[2]) / 2.0
+                    if movein_alt < 20:
+                        movein = movein_alt
+                check = _main_slice_rows_1based(profile, int(seg3 - movein), int(seg3 + movein))
+                m = np.nanmax(check[: int(movein + 1), 1])
+                peak_start = np.where(check[: int(movein + 1), 1] == m)[0][0]
+                check = check[peak_start:, :]
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))
+                seg3_index = np.where(check[:, 0] == seg3)[0][0]
+                if (seg3_index + 11) < check.shape[0]:
+                    check = check[: (seg3_index + 11), :]
+                seg3_index = np.where(check[:, 0] == seg3)[0][0]
+                if (seg3_index - 10) > 0:
+                    check = check[(seg3_index - 10):, :]
+                if check.size == 4:
+                    check = np.vstack((check, check))
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[2] = _main_first_closest_zero_crossing(check, -1.0)
+
+            if not np.isnan(segment[3]):
+                seg4 = int(segment[3])
+                movein = 20.0
+                if not np.isnan(segment[4]):
+                    movein_alt = np.ceil(segment[4] - segment[3]) / 2.0
+                    if movein_alt < 20:
+                        movein = movein_alt
+                check = _main_slice_rows_1based(profile, int(seg4 - movein), int(seg4 + movein))
+                m = np.nanmax(check[: int(movein + 1), 1])
+                peak_start = np.where(check[: int(movein + 1), 1] == m)[0][0]
+                check = check[peak_start:, :]
+                half = (np.nanmin(check[:, 1]) + np.nanmax(check[:, 1])) / 2.0
+                check = np.column_stack((check, check))
+                seg4_index = np.where(check[:, 0] == seg4)[0][0]
+                if (seg4_index + 11) < check.shape[0]:
+                    check = check[: (seg4_index + 11), :]
+                seg4_index = np.where(check[:, 0] == seg4)[0][0]
+                if (seg4_index - 10) > 0:
+                    check = check[(seg4_index - 10):, :]
+                if check.size == 4:
+                    check = np.vstack((check, check))
+                check[:, 2] = check[:, 1] - half
+                check[:, 3] = np.sign(check[:, 2])
+                new_values[3] = _main_first_closest_zero_crossing(check, -1.0)
+
+            if not np.isnan(segment[4]):
+                seg5 = int(segment[4])
+                check = _main_slice_rows_1based(profile, seg5 - 5, seg5 + 5)
+                m = np.nanmax(check[:, 1])
+                localpeak = float(np.round(np.nanmean(check[np.where(check[:, 1] == m)[0], 0])))
+                new_values[4] = localpeak
+                low = float(check[2, 0])
+                high = float(check[9, 0])
+                if (localpeak > low) and (localpeak < high):
+                    local_index = np.where(check[:, 0] == localpeak)[0][0]
+                    check = check[(local_index - 2):(local_index + 3), :]
+                    c_sp = _fit_smooth_spline_like_r(check[:, 0], check[:, 1], df=2)
+                    c_x = np.arange(check[0, 0], check[4, 0] + 0.1, 0.1)
+                    cspline = np.column_stack((c_x, c_sp(c_x)))
+                    vertex_local = float(np.mean(cspline[np.where(cspline[:, 1] == np.nanmax(cspline[:, 1]))[0], 0]))
+                    if (vertex_local > low) and (vertex_local < high):
+                        new_values[4] = float(np.round(vertex_local, 1))
+
+            true_borders_light[x - 1, :, z] = new_values
+
+    for z in range(flattened_dark_retina_rrc.shape[2]):
+        true_borders_dark[:, 5, z] = 431.0
+    for z in range(flattened_light_retina_rrc.shape[2]):
+        true_borders_light[:, 5, z] = 431.0
+
+    vitreous_retina_position_dark = true_borders_dark[:, 0, :].copy()[599:, :]
+    rnfl_gcl_position_dark = true_borders_dark[:, 1, :].copy()[599:, :]
+    inl_ipl_position_dark = true_borders_dark[:, 2, :].copy()[599:, :]
+    onl_opl_position_dark = true_borders_dark[:, 3, :].copy()[599:, :]
+    olm_position_dark = true_borders_dark[:, 4, :].copy()[599:, :]
+    rpe_position_dark = true_borders_dark[:, 5, :].copy()[599:, :]
+
+    # Match main.py exactly here: both DARK and LIGHT smoothing inputs start at row 599.
+    vitreous_retina_position_light = true_borders_light[:, 0, :].copy()[599:, :]
+    rnfl_gcl_position_light = true_borders_light[:, 1, :].copy()[599:, :]
+    inl_ipl_position_light = true_borders_light[:, 2, :].copy()[599:, :]
+    onl_opl_position_light = true_borders_light[:, 3, :].copy()[599:, :]
+    olm_position_light = true_borders_light[:, 4, :].copy()[599:, :]
+    rpe_position_light = true_borders_light[:, 5, :].copy()[599:, :]
+
+    position_mats_dark = {
+        "VITREOUS.RETINA.POSITION.DARK": vitreous_retina_position_dark,
+        "RNFL.GCL.POSITION.DARK": rnfl_gcl_position_dark,
+        "INL.IPL.POSITION.DARK": inl_ipl_position_dark,
+        "ONL.OPL.POSITION.DARK": onl_opl_position_dark,
+        "OLM.POSITION.DARK": olm_position_dark,
+        "RPE.POSITION.DARK": rpe_position_dark,
+    }
+    position_mats_light = {
+        "VITREOUS.RETINA.POSITION.LIGHT": vitreous_retina_position_light,
+        "RNFL.GCL.POSITION.LIGHT": rnfl_gcl_position_light,
+        "INL.IPL.POSITION.LIGHT": inl_ipl_position_light,
+        "ONL.OPL.POSITION.LIGHT": onl_opl_position_light,
+        "OLM.POSITION.LIGHT": olm_position_light,
+        "RPE.POSITION.LIGHT": rpe_position_light,
+    }
+
+    _main_refine_border_position_pass(position_mats_dark, ["RPE.POSITION.DARK", "OLM.POSITION.DARK", "VITREOUS.RETINA.POSITION.DARK", "ONL.OPL.POSITION.DARK", "INL.IPL.POSITION.DARK"], "INL.IPL.POSITION.DARK", 2.0, plots_dir, "python_dark_inl_ipl_refinement")
+    _main_refine_border_position_pass(position_mats_dark, ["INL.IPL.POSITION.DARK", "RPE.POSITION.DARK", "OLM.POSITION.DARK", "VITREOUS.RETINA.POSITION.DARK", "ONL.OPL.POSITION.DARK"], "ONL.OPL.POSITION.DARK", 2.0, plots_dir, "python_dark_onl_opl_refinement")
+    _main_refine_border_position_pass(position_mats_dark, ["ONL.OPL.POSITION.DARK", "INL.IPL.POSITION.DARK", "RPE.POSITION.DARK", "OLM.POSITION.DARK", "VITREOUS.RETINA.POSITION.DARK"], "VITREOUS.RETINA.POSITION.DARK", 2.0, plots_dir, "python_dark_vitreous_retina_refinement")
+    _main_refine_border_position_pass(position_mats_dark, ["VITREOUS.RETINA.POSITION.DARK", "ONL.OPL.POSITION.DARK", "INL.IPL.POSITION.DARK", "RPE.POSITION.DARK", "OLM.POSITION.DARK"], "OLM.POSITION.DARK", 3.0, plots_dir, "python_dark_olm_refinement")
+    _main_refine_border_position_pass(position_mats_dark, ["VITREOUS.RETINA.POSITION.DARK", "ONL.OPL.POSITION.DARK", "INL.IPL.POSITION.DARK", "RPE.POSITION.DARK", "OLM.POSITION.DARK", "RNFL.GCL.POSITION.DARK"], "RNFL.GCL.POSITION.DARK", 2.0, plots_dir, "python_dark_rnfl_gcl_refinement")
+
+    _main_refine_border_position_pass(position_mats_light, ["RPE.POSITION.LIGHT", "OLM.POSITION.LIGHT", "VITREOUS.RETINA.POSITION.LIGHT", "ONL.OPL.POSITION.LIGHT", "INL.IPL.POSITION.LIGHT"], "INL.IPL.POSITION.LIGHT", 2.0, plots_dir, "python_light_inl_ipl_refinement")
+    _main_refine_border_position_pass(position_mats_light, ["INL.IPL.POSITION.LIGHT", "RPE.POSITION.LIGHT", "OLM.POSITION.LIGHT", "VITREOUS.RETINA.POSITION.LIGHT", "ONL.OPL.POSITION.LIGHT"], "ONL.OPL.POSITION.LIGHT", 2.0, plots_dir, "python_light_onl_opl_refinement")
+    _main_refine_border_position_pass(position_mats_light, ["ONL.OPL.POSITION.LIGHT", "INL.IPL.POSITION.LIGHT", "RPE.POSITION.LIGHT", "OLM.POSITION.LIGHT", "VITREOUS.RETINA.POSITION.LIGHT"], "VITREOUS.RETINA.POSITION.LIGHT", 2.0, plots_dir, "python_light_vitreous_retina_refinement")
+    _main_refine_border_position_pass(position_mats_light, ["VITREOUS.RETINA.POSITION.LIGHT", "ONL.OPL.POSITION.LIGHT", "INL.IPL.POSITION.LIGHT", "RPE.POSITION.LIGHT", "OLM.POSITION.LIGHT"], "OLM.POSITION.LIGHT", 3.0, plots_dir, "python_light_olm_refinement")
+    _main_refine_border_position_pass(position_mats_light, ["VITREOUS.RETINA.POSITION.LIGHT", "ONL.OPL.POSITION.LIGHT", "INL.IPL.POSITION.LIGHT", "RPE.POSITION.LIGHT", "OLM.POSITION.LIGHT", "RNFL.GCL.POSITION.LIGHT"], "RNFL.GCL.POSITION.LIGHT", 2.0, plots_dir, "python_light_rnfl_gcl_refinement")
+
+    x_dark = np.arange(2750.0 - vitreous_retina_position_dark.shape[0] + 1.0, 2750.0 + 1.0, 1.0)
+    r_vitreous_retina_position_dark, _ = _main_smooth_position_matrix(vitreous_retina_position_dark, x_dark, 11, plots_dir, "python_revised_vitreous_retina_dark")
+    r_rnfl_gcl_position_dark, _ = _main_smooth_position_matrix(rnfl_gcl_position_dark, x_dark, 11, plots_dir, "python_revised_rnfl_gcl_dark")
+    r_inl_ipl_position_dark, _ = _main_smooth_position_matrix(inl_ipl_position_dark, x_dark, 11, plots_dir, "python_revised_inl_ipl_dark")
+    r_onl_opl_position_dark, _ = _main_smooth_position_matrix(onl_opl_position_dark, x_dark, 11, plots_dir, "python_revised_onl_opl_dark")
+    r_olm_position_dark, _ = _main_smooth_position_matrix(olm_position_dark, x_dark, 11, plots_dir, "python_revised_olm_dark")
+    r_rpe_position_dark = np.asarray(rpe_position_dark, dtype=np.float64).copy()
+    for z in range(r_rpe_position_dark.shape[1]):
+        r_rpe_position_dark[:, z] = _main_fill_na_with_leading_non_na(r_rpe_position_dark[:, z])
+
+    x_light = np.arange(2750.0 - vitreous_retina_position_light.shape[0] + 1.0, 2750.0 + 1.0, 1.0)
+    r_vitreous_retina_position_light, _ = _main_smooth_position_matrix(vitreous_retina_position_light, x_light, 11, plots_dir, "python_revised_vitreous_retina_light")
+    r_rnfl_gcl_position_light, _ = _main_smooth_position_matrix(rnfl_gcl_position_light, x_light, 11, plots_dir, "python_revised_rnfl_gcl_light")
+    r_inl_ipl_position_light, _ = _main_smooth_position_matrix(inl_ipl_position_light, x_light, 11, plots_dir, "python_revised_inl_ipl_light")
+    r_onl_opl_position_light, _ = _main_smooth_position_matrix(onl_opl_position_light, x_light, 11, plots_dir, "python_revised_onl_opl_light")
+    r_olm_position_light, _ = _main_smooth_position_matrix(olm_position_light, x_light, 11, plots_dir, "python_revised_olm_light")
+    r_rpe_position_light = np.asarray(rpe_position_light, dtype=np.float64).copy()
+    for z in range(r_rpe_position_light.shape[1]):
+        r_rpe_position_light[:, z] = _main_fill_na_with_leading_non_na(r_rpe_position_light[:, z])
+
+    pad_dark = np.full((599, r_vitreous_retina_position_dark.shape[1]), np.nan, dtype=np.float64)
+    r_vitreous_retina_position_dark = np.vstack((pad_dark, r_vitreous_retina_position_dark))
+    r_rnfl_gcl_position_dark = np.vstack((pad_dark, r_rnfl_gcl_position_dark))
+    r_inl_ipl_position_dark = np.vstack((pad_dark, r_inl_ipl_position_dark))
+    r_onl_opl_position_dark = np.vstack((pad_dark, r_onl_opl_position_dark))
+    r_olm_position_dark = np.vstack((pad_dark, r_olm_position_dark))
+    r_rpe_position_dark = np.vstack((pad_dark, r_rpe_position_dark))
+
+    pad_light = np.full((600, r_vitreous_retina_position_light.shape[1]), np.nan, dtype=np.float64)
+    r_vitreous_retina_position_light = np.vstack((pad_light, r_vitreous_retina_position_light))
+    r_rnfl_gcl_position_light = np.vstack((pad_light, r_rnfl_gcl_position_light))
+    r_inl_ipl_position_light = np.vstack((pad_light, r_inl_ipl_position_light))
+    r_onl_opl_position_light = np.vstack((pad_light, r_onl_opl_position_light))
+    r_olm_position_light = np.vstack((pad_light, r_olm_position_light))
+    r_rpe_position_light = np.vstack((pad_light, r_rpe_position_light))
+
+    main_dark_outputs = np.column_stack((apparent_angles_for_dark[:, 0], apparent_angles_for_dark[:, 0], apparent_angles_for_dark[:, 0], apparent_angles_for_dark[:, 0]))
+    for x in range(main_dark_outputs.shape[0]):
+        main_dark_outputs[x, 1] = float(np.nanmean(r_rpe_position_dark[:, x] - r_vitreous_retina_position_dark[:, x]))
+        main_dark_outputs[x, 2] = float(np.nanmean(r_rpe_position_dark[:, x] - r_olm_position_dark[:, x]))
+        main_dark_outputs[x, 3] = float(np.nanmean(r_rnfl_gcl_position_dark[:, x] - r_vitreous_retina_position_dark[:, x]))
+
+    main_light_outputs = np.column_stack((apparent_angles_for_light[:, 0], apparent_angles_for_light[:, 0], apparent_angles_for_light[:, 0], apparent_angles_for_light[:, 0]))
+    for x in range(main_light_outputs.shape[0]):
+        main_light_outputs[x, 1] = float(np.nanmean(r_rpe_position_light[:, x] - r_vitreous_retina_position_light[:, x]))
+        main_light_outputs[x, 2] = float(np.nanmean(r_rpe_position_light[:, x] - r_olm_position_light[:, x]))
+        main_light_outputs[x, 3] = float(np.nanmean(r_rnfl_gcl_position_light[:, x] - r_vitreous_retina_position_light[:, x]))
+
+    flattened_dark_retina_rrc_n = _main_build_main_normalized_strip(flattened_dark_retina_rrc, r_rpe_position_dark, r_olm_position_dark, r_onl_opl_position_dark, r_inl_ipl_position_dark, r_rnfl_gcl_position_dark, r_vitreous_retina_position_dark, row_start=601)
+    flattened_light_retina_rrc_n = _main_build_main_normalized_strip(flattened_light_retina_rrc, r_rpe_position_light[: flattened_light_retina_rrc.shape[0], :], r_olm_position_light[: flattened_light_retina_rrc.shape[0], :], r_onl_opl_position_light[: flattened_light_retina_rrc.shape[0], :], r_inl_ipl_position_light[: flattened_light_retina_rrc.shape[0], :], r_rnfl_gcl_position_light[: flattened_light_retina_rrc.shape[0], :], r_vitreous_retina_position_light[: flattened_light_retina_rrc.shape[0], :], row_start=601)
+    flattened_dark_retina_rrc_n_profiles = _main_build_profile_matrix(flattened_dark_retina_rrc_n, list(range(1, flattened_dark_retina_rrc.shape[2] + 1)))
+    flattened_light_retina_rrc_n_profiles = _main_build_profile_matrix(flattened_light_retina_rrc_n, list(range(1, flattened_light_retina_rrc.shape[2] + 1)))
+
+    r_rpe_position_dark_fovea = true_borders_dark[20:181, 5, :].copy()
+    r_olm_position_dark_fovea_raw = true_borders_dark[20:181, 4, :].copy()
+    x_neg80_to_80 = np.arange(-80.0, 80.0 + 1.0, 1.0)
+    r_olm_position_dark_fovea_raw, _ = _main_smooth_position_matrix(r_olm_position_dark_fovea_raw, x_neg80_to_80, 3, plots_dir, "python_dark_fovea_olm")
+    r_olm_position_dark_fovea2 = r_olm_position_dark_fovea_raw[30:131, :].copy()
+    r_rpe_position_dark_fovea2 = r_rpe_position_dark_fovea[30:131, :].copy()
+    r_olm_position_dark_fovea = r_olm_position_dark.copy()
+    r_olm_position_dark_fovea[50:151, :] = r_olm_position_dark_fovea2
+    r_rpe_position_dark_fovea_full = r_rpe_position_dark.copy()
+    r_rpe_position_dark_fovea_full[50:151, :] = r_rpe_position_dark_fovea2
+
+    main_dark_outputs_fovea = main_dark_outputs[:, [0, 2]].copy()
+    main_dark_outputs_fovea[:, 1] = np.nan
+    for x in range(main_dark_outputs_fovea.shape[0]):
+        main_dark_outputs_fovea[x, 1] = float(np.nanmean(r_rpe_position_dark_fovea_full[50:151, x] - r_olm_position_dark_fovea[50:151, x]))
+
+    flattened_dark_retina_rrc_n_fovea = _main_build_fovea_normalized_strip(flattened_dark_retina_rrc, r_rpe_position_dark_fovea_full, r_olm_position_dark_fovea, row_start=51, row_end=151)
+    flattened_dark_retina_rrc_n_fovea_profiles = _main_build_profile_matrix(flattened_dark_retina_rrc_n_fovea, list(range(1, flattened_dark_retina_rrc.shape[2] + 1)), row_slice=slice(50, 151))
+    flattened_dark_retina_rrc_n_fovea_profiles = flattened_dark_retina_rrc_n_fovea_profiles[56:90, :]
+    flattened_dark_retina_rrc_n[49:152, :, :] = flattened_dark_retina_rrc_n_fovea[49:152, :, :]
+
+    r_rpe_position_light_fovea = true_borders_light[20:181, 5, :].copy()
+    r_olm_position_light_fovea_raw = true_borders_light[20:181, 4, :].copy()
+    r_olm_position_light_fovea_raw, _ = _main_smooth_position_matrix(r_olm_position_light_fovea_raw, x_neg80_to_80, 3, plots_dir, "python_light_fovea_olm")
+    r_olm_position_light_fovea2 = r_olm_position_light_fovea_raw[30:131, :].copy()
+    r_rpe_position_light_fovea2 = r_rpe_position_light_fovea[30:131, :].copy()
+    r_olm_position_light_fovea = r_olm_position_light.copy()
+    r_olm_position_light_fovea[50:151, :] = r_olm_position_light_fovea2
+    r_rpe_position_light_fovea_full = r_rpe_position_light.copy()
+    r_rpe_position_light_fovea_full[50:151, :] = r_rpe_position_light_fovea2
+
+    main_light_outputs_fovea = main_light_outputs[:, [0, 2]].copy()
+    main_light_outputs_fovea[:, 1] = np.nan
+    for x in range(main_light_outputs_fovea.shape[0]):
+        main_light_outputs_fovea[x, 1] = float(np.nanmean(r_rpe_position_light_fovea_full[50:151, x] - r_olm_position_light_fovea[50:151, x]))
+
+    flattened_light_retina_rrc_n_fovea = _main_build_fovea_normalized_strip(flattened_light_retina_rrc, r_rpe_position_light_fovea_full[: flattened_light_retina_rrc.shape[0], :], r_olm_position_light_fovea[: flattened_light_retina_rrc.shape[0], :], row_start=51, row_end=151)
+    flattened_light_retina_rrc_n_fovea_profiles = _main_build_profile_matrix(flattened_light_retina_rrc_n_fovea, list(range(1, flattened_light_retina_rrc.shape[2] + 1)), row_slice=slice(50, 151))
+    flattened_light_retina_rrc_n_fovea_profiles = flattened_light_retina_rrc_n_fovea_profiles[56:90, :]
+    flattened_light_retina_rrc_n[49:152, :, :] = flattened_light_retina_rrc_n_fovea[49:152, :, :]
+
+    main_dark_outputs = np.column_stack((main_dark_outputs[:, 0], apparent_angles_for_dark[:, 2], main_dark_outputs[:, 1:4]))
+    main_light_outputs = np.column_stack((main_light_outputs[:, 0], apparent_angles_for_light[:, 2], main_light_outputs[:, 1:4]))
+    main_dark_outputs_fovea = np.column_stack((main_dark_outputs_fovea[:, 0], apparent_angles_for_dark[:, 1], main_dark_outputs_fovea[:, 1]))
+    main_light_outputs_fovea = np.column_stack((main_light_outputs_fovea[:, 0], apparent_angles_for_light[:, 1], main_light_outputs_fovea[:, 1]))
+
+    dark_profiles_table = np.round(np.column_stack((main_dark_outputs, flattened_dark_retina_rrc_n_profiles[:, 1:].T)), 3)
+    dark_profiles_export = np.vstack((dark_profiles_table[0:1, :], dark_profiles_table)).astype(object)
+    dark_profiles_export[0, :] = np.asarray(["DARK", "angle", "whole", "RPEtoOLM", "RNFL", *np.arange(-3.75, 107.5 + 1.25, 1.25)], dtype=object)
+    dark_profiles_txt_path = outdir / "_dark_profiles_DARK.txt"
+    _main_write_object_table(dark_profiles_export, dark_profiles_txt_path)
+
+    light_profiles_table = np.round(np.column_stack((main_light_outputs, flattened_light_retina_rrc_n_profiles[:, 1:].T)), 3)
+    light_profiles_export = np.vstack((light_profiles_table[0:1, :], light_profiles_table)).astype(object)
+    light_profiles_export[0, :] = np.asarray(["LIGHT", "angle", "whole", "RPEtoOLM", "RNFL", *np.arange(-3.75, 107.5 + 1.25, 1.25)], dtype=object)
+    light_profiles_txt_path = outdir / "_light_profiles_LIGHT.txt"
+    _main_write_object_table(light_profiles_export, light_profiles_txt_path)
+
+    dark_fovea_export_left = np.column_stack((main_dark_outputs_fovea[:, 0], main_dark_outputs_fovea[:, 1], np.full(main_dark_outputs_fovea.shape[0], np.nan, dtype=np.float64), main_dark_outputs_fovea[:, 2], np.full(main_dark_outputs_fovea.shape[0], np.nan, dtype=np.float64)))
+    dark_fovea_export_right = flattened_dark_retina_rrc_n_fovea_profiles[:, 1:]
+    dark_fovea_buffer = np.full((56, dark_fovea_export_right.shape[1]), np.nan, dtype=np.float64)
+    dark_fovea_export_right = np.vstack((dark_fovea_buffer, dark_fovea_export_right)).T
+    dark_fovea_table = np.round(np.column_stack((dark_fovea_export_left, dark_fovea_export_right)), 3)
+    dark_fovea_export = np.vstack((dark_fovea_table[0:1, :], dark_fovea_table)).astype(object)
+    dark_fovea_export[0, :] = np.asarray(["foveaDARK", "angle", "whole", "RPEtoOLM", "RNFL", *np.arange(-3.75, 107.5 + 1.25, 1.25)], dtype=object)
+    dark_fovea_txt_path = outdir / "_fovea_dark_profiles_DARK.txt"
+    _main_write_object_table(dark_fovea_export, dark_fovea_txt_path)
+
+    light_fovea_export_left = np.column_stack((main_light_outputs_fovea[:, 0], main_light_outputs_fovea[:, 1], np.full(main_light_outputs_fovea.shape[0], np.nan, dtype=np.float64), main_light_outputs_fovea[:, 2], np.full(main_light_outputs_fovea.shape[0], np.nan, dtype=np.float64)))
+    light_fovea_export_right = flattened_light_retina_rrc_n_fovea_profiles[:, 1:]
+    light_fovea_buffer = np.full((56, light_fovea_export_right.shape[1]), np.nan, dtype=np.float64)
+    light_fovea_export_right = np.vstack((light_fovea_buffer, light_fovea_export_right)).T
+    light_fovea_table = np.round(np.column_stack((light_fovea_export_left, light_fovea_export_right)), 3)
+    light_fovea_export = np.vstack((light_fovea_table[0:1, :], light_fovea_table)).astype(object)
+    light_fovea_export[0, :] = np.asarray(["foveaLIGHT", "angle", "whole", "RPEtoOLM", "RNFL", *np.arange(-3.75, 107.5 + 1.25, 1.25)], dtype=object)
+    light_fovea_txt_path = outdir / "_fovea_light_profiles_LIGHT.txt"
+    _main_write_object_table(light_fovea_export, light_fovea_txt_path)
+
+    final_save_path = outdir / "_done_DARK__and__LIGHT.npz"
+    np.savez_compressed(
+        final_save_path,
+        MAIN_DARK_OUTPUTS=main_dark_outputs,
+        MAIN_LIGHT_OUTPUTS=main_light_outputs,
+        MAIN_DARK_OUTPUTS_fovea=main_dark_outputs_fovea,
+        MAIN_LIGHT_OUTPUTS_fovea=main_light_outputs_fovea,
+        FLATTENED_DARK_RETINA_RRC_N=flattened_dark_retina_rrc_n,
+        FLATTENED_LIGHT_RETINA_RRC_N=flattened_light_retina_rrc_n,
+        FLATTENED_DARK_RETINA_RRC_N_profiles=flattened_dark_retina_rrc_n_profiles,
+        FLATTENED_LIGHT_RETINA_RRC_N_profiles=flattened_light_retina_rrc_n_profiles,
+        FLATTENED_DARK_RETINA_RRC_N_fovea_profiles=flattened_dark_retina_rrc_n_fovea_profiles,
+        FLATTENED_LIGHT_RETINA_RRC_N_fovea_profiles=flattened_light_retina_rrc_n_fovea_profiles,
+        R_RPE_POSITION_DARK=r_rpe_position_dark,
+        R_RPE_POSITION_LIGHT=r_rpe_position_light,
+        R_OLM_POSITION_DARK=r_olm_position_dark,
+        R_OLM_POSITION_LIGHT=r_olm_position_light,
+        R_ONL_OPL_POSITION_DARK=r_onl_opl_position_dark,
+        R_ONL_OPL_POSITION_LIGHT=r_onl_opl_position_light,
+        R_INL_IPL_POSITION_DARK=r_inl_ipl_position_dark,
+        R_INL_IPL_POSITION_LIGHT=r_inl_ipl_position_light,
+        R_RNFL_GCL_POSITION_DARK=r_rnfl_gcl_position_dark,
+        R_RNFL_GCL_POSITION_LIGHT=r_rnfl_gcl_position_light,
+        R_VITREOUS_RETINA_POSITION_DARK=r_vitreous_retina_position_dark,
+        R_VITREOUS_RETINA_POSITION_LIGHT=r_vitreous_retina_position_light,
+    )
+
+    return {
+        "dark_profiles_txt_path": dark_profiles_txt_path,
+        "light_profiles_txt_path": light_profiles_txt_path,
+        "dark_fovea_txt_path": dark_fovea_txt_path,
+        "light_fovea_txt_path": light_fovea_txt_path,
+        "final_save_path": final_save_path,
+    }
 
 
 def _compute_shift_positions(volume_raw, first_grand_mean, look_to, pixel_width):
@@ -869,6 +1387,8 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
     dark_flat = np.transpose(initial['flattened_dark'], (1, 2, 0)).astype(np.float64)
     light_flat = np.transpose(initial['flattened_light'], (1, 2, 0)).astype(np.float64)
     markers = np.transpose(initial['markers'][0:1, :, :], (1, 2, 0)).astype(np.float64)[:, :, 0]
+    apparent_angles_for_dark = np.asarray(initial["apparent_angles_for_dark"], dtype=np.float64)
+    apparent_angles_for_light = np.asarray(initial["apparent_angles_for_light"], dtype=np.float64)
     if diff_logger is not None:
         diff_logger.capture(
             "01_flattened_input",
@@ -1035,6 +1555,11 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
         'shift_light_refined': shift_light_refined,
         'best_lateral_dark': best_lat_dark,
         'best_lateral_light': best_lat_light,
+        'dark_rrc': dark_rrc,
+        'light_rrc': light_rrc,
+        'markers_rrc': markers_rrc,
+        'apparent_angles_for_dark': apparent_angles_for_dark,
+        'apparent_angles_for_light': apparent_angles_for_light,
     }
 
 
@@ -1119,16 +1644,65 @@ class Step3Frame(ttk.Frame):
                 return base
         return None
 
+    @staticmethod
+    def _analyze_stack_info(base_path):
+        data = np.asarray(read_analyze(_normalize_analyze_path(base_path)))
+        if data.ndim == 2:
+            shape = (1, int(data.shape[0]), int(data.shape[1]))
+        elif data.ndim == 3:
+            shape = tuple(int(v) for v in data.shape)
+        else:
+            raise ValueError(f"Analyze file must be 2-D or 3-D, got shape {data.shape}.")
+        return {
+            "shape": shape,
+            "bits": int(data.dtype.itemsize * 8),
+        }
+
+    @classmethod
+    def _analyze_stack_shape(cls, base_path):
+        return cls._analyze_stack_info(base_path)["shape"]
+
+    @staticmethod
+    def _format_stack_info(label, info):
+        bits_label = f"{info['bits']}-bit"
+        return f"{label}: {info['shape']} | {bits_label}"
+
+    @classmethod
+    def _read_input_stack_info(cls, paths):
+        return {label: cls._analyze_stack_info(path) for label, path in paths.items()}
+
+    @classmethod
+    def _validate_input_stack_shapes(cls, stack_info):
+        shapes = {label: info["shape"] for label, info in stack_info.items()}
+        expected = shapes["Dark_MARKED"]
+        mismatched = {label: shape for label, shape in shapes.items() if shape != expected}
+        if mismatched:
+            lines = [f"Dark_MARKED: {expected}"]
+            lines.extend(f"{label}: {shape}" for label, shape in mismatched.items())
+            raise ValueError(
+                "Step 3 inputs must all have the same Analyze stack shape "
+                "(slices, height, width).\n" + "\n".join(lines)
+            )
+        return shapes
+
+    def _save_step2_marked_outputs(self):
+        if self.source_step is None or not hasattr(self.source_step, "_save_marked_images"):
+            return
+        saved = self.source_step._save_marked_images(require_complete=True)
+        if not saved:
+            raise RuntimeError("Step 2 MARKED outputs were not saved. Complete all Step 2 boundaries first.")
+
     def _use_step2_output(self):
         if self.source_step is None or not hasattr(self.source_step, "_marked_output_basepath"):
             messagebox.showwarning("Step 2 Output", "Step 2 output is not available. Use Browse Output Folder.")
             return
 
         try:
+            self._save_step2_marked_outputs()
             dark_base = self.source_step._marked_output_basepath("Dark_MARKED")
             self.current_sdb_dir = os.path.dirname(dark_base)
             self.dir_var.set(self.current_sdb_dir)
-            self.status_var.set("Using Step 2 output folder.")
+            self.status_var.set("Using Step 2 output folder. MARKED files saved.")
         except Exception as exc:
             messagebox.showerror("Step 2 Output", f"Could not read Step 2 output path.\n{exc}")
 
@@ -1175,6 +1749,19 @@ class Step3Frame(ttk.Frame):
             )
             return
 
+        input_paths = {
+            "Dark_MARKED": dark_marked,
+            "Light_MARKED": light_marked,
+            "DARK": dark_raw,
+            "LIGHT": light_raw,
+        }
+        try:
+            input_info = self._read_input_stack_info(input_paths)
+        except Exception as exc:
+            messagebox.showerror("Load", f"Cannot load Step 3 inputs.\n{exc}")
+            self.status_var.set("Step 3 input dimensions do not match.")
+            return
+
         self.processor = OCTFlatteningProcessor(
             reference_dark_path=dark_marked,
             reference_light_path=light_marked,
@@ -1186,12 +1773,11 @@ class Step3Frame(ttk.Frame):
         )
 
         self.info_var.set(
-            f"ref_dark: {self.processor.ref_dark.shape}\n"
-            f"ref_light: {self.processor.ref_light.shape}\n"
-            f"dark: {self.processor.dark.shape}\n"
-            f"light: {self.processor.light.shape}"
-        )
-        self.status_var.set("Loaded Step 3 inputs. Ready to run.")
+            f"{self._format_stack_info('Dark_MARKED ',input_info['Dark_MARKED'])}\n"
+            f"{self._format_stack_info('Light_MARKED ', input_info['Light_MARKED'])}\n"
+            f"{self._format_stack_info('DARK ', input_info['DARK'])}\n"
+            f"{self._format_stack_info('LIGHT ', input_info['LIGHT'])}\n")
+        self.status_var.set("Loaded Step 3 inputs with bit depth info. Ready to run.")
 
     def _run_processing(self):
         if self.processor is None:
@@ -1346,6 +1932,7 @@ class Step3Frame(ttk.Frame):
             light_export = self._prepare_export_volume(self.results['final_light'])
             write_analyze(os.path.join(out_dir, "_flat_DARK"), dark_export)
             write_analyze(os.path.join(out_dir, "_flat_LIGHT"), light_export)
+            _save_main_style_exports(self.results, out_dir)
             self.status_var.set("Flattened images exported.")
             messagebox.showinfo("Export", "Exported _flat_DARK and _flat_LIGHT.")
         except Exception as exc:
@@ -1366,6 +1953,7 @@ class Step3Frame(ttk.Frame):
             light_export = self._prepare_export_volume(self.results['final_light'])
             write_analyze(dark_out, dark_export)
             write_analyze(light_out, light_export)
+            _save_main_style_exports(self.results, self.current_sdb_dir)
 
             # Save profile-style plots matching main.py: find_vertex and vertex
             find_path = os.path.join(self.current_sdb_dir, "DARK_MARKED_find_vertex.png")

@@ -28,6 +28,7 @@ DFonINITIALspline = 10
 DFforSECONDfit = 10
 
 DEFAULT_INPUT_DIR = Path(r"C:\Users\behzad\Desktop\flat")
+DEFAULT_OUTPUT_DIR = Path(r"C:\Users\behzad\Desktop\flat\output")
 DEBUG_STEP = "startup"
 
 
@@ -100,7 +101,7 @@ def show_array_stats(name: str, array: np.ndarray) -> None:
 
 def load_analyze_volume_r_layout(path: Path) -> np.ndarray:
     """Load an Analyze volume and match the R script's x/y/slice layout."""
-    volume = np.asarray(read_analyze(path), dtype=np.uint8)
+    volume = np.asarray(read_analyze(path))
 
     # read_analyze() returns (slice, x, y) for stacks. For this OCT dataset,
     # the R script is operating as if the loaded array is (y, x, slice), with
@@ -885,10 +886,10 @@ def format_export_cell(value: object) -> str:
 
 
 def write_object_table(table: np.ndarray, output_path: Path) -> None:
-    """Write a mixed string/number table similar to the R write() output."""
+    """Write a mixed table in the same row orientation as R's write(t(EXPORT))."""
     output_path = Path(output_path)
     with output_path.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in table:
+        for row in np.asarray(table, dtype=object).T:
             handle.write(" ".join(format_export_cell(cell) for cell in row))
             handle.write("\n")
 
@@ -902,10 +903,16 @@ def main() -> dict[str, np.ndarray]:
         default=str(DEFAULT_INPUT_DIR),
         help="Folder containing DARK/LIGHT and *_MARKED Analyze files.",
     )
+    parser.add_argument(
+        "--output-dir",
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Folder where plots, Analyze exports, text profiles, and NPZ files are written.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
-    outdir = Path.cwd()
+    outdir = Path(args.output_dir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
     # dbg("startup", "Script started")
     # dbg("input-config", "Working directory:", outdir)
