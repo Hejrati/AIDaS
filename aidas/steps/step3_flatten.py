@@ -338,7 +338,7 @@ class OCTFlatteningProcessor:
 
         return retina_points
     
-    def sample_perpendiculars(self, image_2d, retina_points, n_samples=500):
+    def sample_perpendiculars(self, image_2d, retina_points, n_samples=500, progress_cb=None):
         """Sample image intensities using the same floor-based logic as main.py."""
         flattened = np.full((retina_points.shape[0], n_samples), np.nan, dtype=np.float64)
         upper_x = int(image_2d.shape[1])
@@ -360,10 +360,12 @@ class OCTFlatteningProcessor:
                 dtype=np.float64,
             )
             flattened[x_idx, :] = values[1:]
+            if progress_cb is not None and (x_idx % 100 == 0 or x_idx == retina_points.shape[0] - 1):
+                progress_cb(x_idx + 1, retina_points.shape[0])
         
         return flattened
     
-    def process_slice(self, slice_idx=0, reference_volume=None, raw_volume=None):
+    def process_slice(self, slice_idx=0, reference_volume=None, raw_volume=None, progress_cb=None):
         """Process a single slice: extract RPE, fovea, and flatten.
         
         Returns:
@@ -389,8 +391,16 @@ class OCTFlatteningProcessor:
         image_2d = img_volume[:, :, slice_idx]
 
         # Sample flattened retina
-        flattened_dark = self.sample_perpendiculars(image_2d, retina_points)
-        flattened_markers = self.sample_perpendiculars(ref_2d, retina_points)
+        flattened_dark = self.sample_perpendiculars(
+            image_2d,
+            retina_points,
+            progress_cb=(lambda done, total: progress_cb("image", done, total)) if progress_cb is not None else None,
+        )
+        flattened_markers = self.sample_perpendiculars(
+            ref_2d,
+            retina_points,
+            progress_cb=(lambda done, total: progress_cb("markers", done, total)) if progress_cb is not None else None,
+        )
         
         return {
             'flattened': flattened_dark,
@@ -512,7 +522,7 @@ class OCTFlatteningProcessor:
         
         return shifted
     
-    def process_all_slices(self):
+    def process_all_slices(self, progress_cb=None):
         """Process all slices and return flattened volumes.
         
         Returns:
@@ -540,18 +550,46 @@ class OCTFlatteningProcessor:
             )
         )
         
+        total_jobs = (len(dark_slices) * 2) + (len(light_slices) * 2)
+        completed_jobs = 0
+
+        def slice_progress(label, modality, out_idx, z, done, total):
+            if progress_cb is None:
+                return
+            local = 0.5 * (done / max(1, total))
+            if label == "markers":
+                local += 0.5
+            overall = (completed_jobs + local) / max(1, total_jobs)
+            progress_cb(overall, f"Flattening {modality} slice {z + 1} ({label})")
+
         for out_idx, z in enumerate(dark_slices):
-            result = self.process_slice(z, reference_volume=self.ref_dark, raw_volume=self.dark)
+            result = self.process_slice(
+                z,
+                reference_volume=self.ref_dark,
+                raw_volume=self.dark,
+                progress_cb=lambda label, done, total, out_idx=out_idx, z=z: slice_progress(
+                    label, "DARK", out_idx, z, done, total
+                ),
+            )
             flattened_dark_raw.append(result['flattened'])
             flattened_markers_all.append(result['markers'])
             apparent_angles_for_dark[out_idx, 1] = result['angle_fovea_deg']
             apparent_angles_for_dark[out_idx, 2] = result['angle_main_deg']
+            completed_jobs += 2
         
         for out_idx, z in enumerate(light_slices):
-            result = self.process_slice(z, reference_volume=self.ref_light, raw_volume=self.light)
+            result = self.process_slice(
+                z,
+                reference_volume=self.ref_light,
+                raw_volume=self.light,
+                progress_cb=lambda label, done, total, out_idx=out_idx, z=z: slice_progress(
+                    label, "LIGHT", out_idx, z, done, total
+                ),
+            )
             flattened_light_raw.append(result['flattened'])
             apparent_angles_for_light[out_idx, 1] = result['angle_fovea_deg']
             apparent_angles_for_light[out_idx, 2] = result['angle_main_deg']
+            completed_jobs += 2
         
         return {
             'flattened_dark': np.array(flattened_dark_raw),
@@ -634,11 +672,45 @@ def _save_profile_plot(profile_xy: np.ndarray, output_path: str, title: str, ver
     plt.close(fig)
 
 
-def _save_main_style_exports(results, output_dir):
+def _save_flat_checkpoint(results, output_dir):
+    """Save the Python equivalent of R's DARK__and__LIGHT__flat.RData."""
+    outdir = Path(output_dir)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    flattened_dark_retina_rrc = np.transpose(np.asarray(results["final_dark"], dtype=np.float64), (1, 2, 0))
+    flattened_light_retina_rrc = np.transpose(np.asarray(results["final_light"], dtype=np.float64), (1, 2, 0))
+    flattened_markers_rrc = np.asarray(results["markers"], dtype=np.float64)
+
+    flat_save_path = outdir / "DARK__and__LIGHT__flat.npz"
+    np.savez_compressed(
+        flat_save_path,
+        FLATTENED_DARK_RETINA_RRC=flattened_dark_retina_rrc,
+        FLATTENED_LIGHT_RETINA_RRC=flattened_light_retina_rrc,
+        FLATTENED_MARKERS_RRC=flattened_markers_rrc,
+        FIRST_GRAND_MEAN=np.asarray(results["first_grand_mean"], dtype=np.float64),
+        SECOND_GRAND_MEAN=np.asarray(results["second_grand_mean"], dtype=np.float64),
+        FINAL_GRAND_MEAN=np.asarray(results["final_grand_mean"], dtype=np.float64),
+        GRAND_PROFILE=np.asarray(results["grand_profile"], dtype=np.float64),
+        APPARENT_ANGLES_FOR_DARK=np.asarray(results["apparent_angles_for_dark"], dtype=np.float64),
+        APPARENT_ANGLES_FOR_LIGHT=np.asarray(results["apparent_angles_for_light"], dtype=np.float64),
+        SHIFT_POSITION_DARK=np.asarray(results["shift_dark"], dtype=np.float64),
+        SHIFT_POSITION_LIGHT=np.asarray(results["shift_light"], dtype=np.float64),
+        SHIFT_POSITION_DARK_REFINED=np.asarray(results["shift_dark_refined"], dtype=np.float64),
+        SHIFT_POSITION_LIGHT_REFINED=np.asarray(results["shift_light_refined"], dtype=np.float64),
+        BEST_LAT_MOVE_DARK=np.asarray(results["best_lateral_dark"], dtype=np.float64),
+        BEST_LAT_MOVE_LIGHT=np.asarray(results["best_lateral_light"], dtype=np.float64),
+        VERTEX=np.asarray([results["vertex"]], dtype=np.float64),
+    )
+    return flat_save_path
+
+
+def _save_main_style_exports(results, output_dir, progress_cb=None):
     """Generate the final text/npz outputs from main.py for Step 3."""
     outdir = Path(output_dir)
     plots_dir = outdir / "python_plots"
     plots_dir.mkdir(parents=True, exist_ok=True)
+    _emit_progress(progress_cb, 0, "Preparing profile exports")
+    flat_checkpoint_path = _save_flat_checkpoint(results, outdir)
 
     # Match main.py's late-export stage: use the post-vertex cropped arrays
     # (461 columns), not the pre-crop 500-column RRC arrays.
@@ -666,6 +738,8 @@ def _save_main_style_exports(results, output_dir):
         a = np.where(flattened_markers_rrc[x, :] == 249)[0]
         if a.size > 0:
             hand_borders[x, 0] = float(np.mean(a + 1))
+        if progress_cb is not None and (x % 300 == 0 or x == flattened_markers_rrc.shape[0] - 1):
+            _emit_progress(progress_cb, 5 * ((x + 1) / max(1, flattened_markers_rrc.shape[0])), "Reading hand-marked borders")
 
     start_move = 21
     end_move = (flattened_dark_retina_rrc.shape[0] - start_move) - 1
@@ -673,6 +747,8 @@ def _save_main_style_exports(results, output_dir):
     blank[5] = 431.0
 
     true_borders_dark = np.full((flattened_dark_retina_rrc.shape[0], 6, flattened_dark_retina_rrc.shape[2]), np.nan, dtype=np.float64)
+    dark_total = max(1, flattened_dark_retina_rrc.shape[2] * (end_move - start_move + 1))
+    dark_done = 0
     for z in range(flattened_dark_retina_rrc.shape[2]):
         review = flattened_dark_retina_rrc[:, :, z]
         profile_x = np.arange(1.0, review.shape[1] + 1.0, 1.0)
@@ -784,8 +860,17 @@ def _save_main_style_exports(results, output_dir):
                         new_values[4] = float(np.round(vertex_local, 1))
 
             true_borders_dark[x - 1, :, z] = new_values
+            dark_done += 1
+            if progress_cb is not None and (dark_done % 150 == 0 or dark_done == dark_total):
+                _emit_progress(
+                    progress_cb,
+                    5 + (20 * dark_done / dark_total),
+                    f"Detecting DARK borders: slice {z + 1}",
+                )
 
     true_borders_light = np.full((flattened_light_retina_rrc.shape[0], 6, flattened_light_retina_rrc.shape[2]), np.nan, dtype=np.float64)
+    light_total = max(1, flattened_light_retina_rrc.shape[2] * (end_move - start_move + 1))
+    light_done = 0
     for z in range(flattened_light_retina_rrc.shape[2]):
         review = flattened_light_retina_rrc[:, :, z]
         profile_x = np.arange(1.0, review.shape[1] + 1.0, 1.0)
@@ -897,6 +982,13 @@ def _save_main_style_exports(results, output_dir):
                         new_values[4] = float(np.round(vertex_local, 1))
 
             true_borders_light[x - 1, :, z] = new_values
+            light_done += 1
+            if progress_cb is not None and (light_done % 150 == 0 or light_done == light_total):
+                _emit_progress(
+                    progress_cb,
+                    25 + (20 * light_done / light_total),
+                    f"Detecting LIGHT borders: slice {z + 1}",
+                )
 
     for z in range(flattened_dark_retina_rrc.shape[2]):
         true_borders_dark[:, 5, z] = 431.0
@@ -935,6 +1027,7 @@ def _save_main_style_exports(results, output_dir):
         "RPE.POSITION.LIGHT": rpe_position_light,
     }
 
+    _emit_progress(progress_cb, 48, "Refining border positions")
     _main_refine_border_position_pass(position_mats_dark, ["RPE.POSITION.DARK", "OLM.POSITION.DARK", "VITREOUS.RETINA.POSITION.DARK", "ONL.OPL.POSITION.DARK", "INL.IPL.POSITION.DARK"], "INL.IPL.POSITION.DARK", 2.0, plots_dir, "python_dark_inl_ipl_refinement")
     _main_refine_border_position_pass(position_mats_dark, ["INL.IPL.POSITION.DARK", "RPE.POSITION.DARK", "OLM.POSITION.DARK", "VITREOUS.RETINA.POSITION.DARK", "ONL.OPL.POSITION.DARK"], "ONL.OPL.POSITION.DARK", 2.0, plots_dir, "python_dark_onl_opl_refinement")
     _main_refine_border_position_pass(position_mats_dark, ["ONL.OPL.POSITION.DARK", "INL.IPL.POSITION.DARK", "RPE.POSITION.DARK", "OLM.POSITION.DARK", "VITREOUS.RETINA.POSITION.DARK"], "VITREOUS.RETINA.POSITION.DARK", 2.0, plots_dir, "python_dark_vitreous_retina_refinement")
@@ -947,6 +1040,7 @@ def _save_main_style_exports(results, output_dir):
     _main_refine_border_position_pass(position_mats_light, ["VITREOUS.RETINA.POSITION.LIGHT", "ONL.OPL.POSITION.LIGHT", "INL.IPL.POSITION.LIGHT", "RPE.POSITION.LIGHT", "OLM.POSITION.LIGHT"], "OLM.POSITION.LIGHT", 3.0, plots_dir, "python_light_olm_refinement")
     _main_refine_border_position_pass(position_mats_light, ["VITREOUS.RETINA.POSITION.LIGHT", "ONL.OPL.POSITION.LIGHT", "INL.IPL.POSITION.LIGHT", "RPE.POSITION.LIGHT", "OLM.POSITION.LIGHT", "RNFL.GCL.POSITION.LIGHT"], "RNFL.GCL.POSITION.LIGHT", 2.0, plots_dir, "python_light_rnfl_gcl_refinement")
 
+    _emit_progress(progress_cb, 58, "Smoothing DARK layer positions")
     x_dark = np.arange(2750.0 - vitreous_retina_position_dark.shape[0] + 1.0, 2750.0 + 1.0, 1.0)
     r_vitreous_retina_position_dark, _ = _main_smooth_position_matrix(vitreous_retina_position_dark, x_dark, 11, plots_dir, "python_revised_vitreous_retina_dark")
     r_rnfl_gcl_position_dark, _ = _main_smooth_position_matrix(rnfl_gcl_position_dark, x_dark, 11, plots_dir, "python_revised_rnfl_gcl_dark")
@@ -957,6 +1051,7 @@ def _save_main_style_exports(results, output_dir):
     for z in range(r_rpe_position_dark.shape[1]):
         r_rpe_position_dark[:, z] = _main_fill_na_with_leading_non_na(r_rpe_position_dark[:, z])
 
+    _emit_progress(progress_cb, 68, "Smoothing LIGHT layer positions")
     x_light = np.arange(2750.0 - vitreous_retina_position_light.shape[0] + 1.0, 2750.0 + 1.0, 1.0)
     r_vitreous_retina_position_light, _ = _main_smooth_position_matrix(vitreous_retina_position_light, x_light, 11, plots_dir, "python_revised_vitreous_retina_light")
     r_rnfl_gcl_position_light, _ = _main_smooth_position_matrix(rnfl_gcl_position_light, x_light, 11, plots_dir, "python_revised_rnfl_gcl_light")
@@ -995,11 +1090,13 @@ def _save_main_style_exports(results, output_dir):
         main_light_outputs[x, 2] = float(np.nanmean(r_rpe_position_light[:, x] - r_olm_position_light[:, x]))
         main_light_outputs[x, 3] = float(np.nanmean(r_rnfl_gcl_position_light[:, x] - r_vitreous_retina_position_light[:, x]))
 
+    _emit_progress(progress_cb, 76, "Building normalized retinal strips")
     flattened_dark_retina_rrc_n = _main_build_main_normalized_strip(flattened_dark_retina_rrc, r_rpe_position_dark, r_olm_position_dark, r_onl_opl_position_dark, r_inl_ipl_position_dark, r_rnfl_gcl_position_dark, r_vitreous_retina_position_dark, row_start=601)
     flattened_light_retina_rrc_n = _main_build_main_normalized_strip(flattened_light_retina_rrc, r_rpe_position_light[: flattened_light_retina_rrc.shape[0], :], r_olm_position_light[: flattened_light_retina_rrc.shape[0], :], r_onl_opl_position_light[: flattened_light_retina_rrc.shape[0], :], r_inl_ipl_position_light[: flattened_light_retina_rrc.shape[0], :], r_rnfl_gcl_position_light[: flattened_light_retina_rrc.shape[0], :], r_vitreous_retina_position_light[: flattened_light_retina_rrc.shape[0], :], row_start=601)
     flattened_dark_retina_rrc_n_profiles = _main_build_profile_matrix(flattened_dark_retina_rrc_n, list(range(1, flattened_dark_retina_rrc.shape[2] + 1)))
     flattened_light_retina_rrc_n_profiles = _main_build_profile_matrix(flattened_light_retina_rrc_n, list(range(1, flattened_light_retina_rrc.shape[2] + 1)))
 
+    _emit_progress(progress_cb, 84, "Building fovea-normalized strips")
     r_rpe_position_dark_fovea = true_borders_dark[20:181, 5, :].copy()
     r_olm_position_dark_fovea_raw = true_borders_dark[20:181, 4, :].copy()
     x_neg80_to_80 = np.arange(-80.0, 80.0 + 1.0, 1.0)
@@ -1046,6 +1143,21 @@ def _save_main_style_exports(results, output_dir):
     main_dark_outputs_fovea = np.column_stack((main_dark_outputs_fovea[:, 0], apparent_angles_for_dark[:, 1], main_dark_outputs_fovea[:, 1]))
     main_light_outputs_fovea = np.column_stack((main_light_outputs_fovea[:, 0], apparent_angles_for_light[:, 1], main_light_outputs_fovea[:, 1]))
 
+    _emit_progress(progress_cb, 90, "Writing normalized Analyze outputs")
+    dark_norm_export = np.transpose(
+        np.nan_to_num(flattened_dark_retina_rrc_n, nan=0.0),
+        (2, 1, 0),
+    ).astype(np.float32)
+    light_norm_export = np.transpose(
+        np.nan_to_num(flattened_light_retina_rrc_n, nan=0.0),
+        (2, 1, 0),
+    ).astype(np.float32)
+    dark_norm_export_base = outdir / "_flat-normed_DARK"
+    light_norm_export_base = outdir / "_flat-normed_LIGHT"
+    write_analyze(str(dark_norm_export_base), dark_norm_export)
+    write_analyze(str(light_norm_export_base), light_norm_export)
+
+    _emit_progress(progress_cb, 92, "Writing profile tables")
     dark_profiles_table = np.round(np.column_stack((main_dark_outputs, flattened_dark_retina_rrc_n_profiles[:, 1:].T)), 3)
     dark_profiles_export = np.vstack((dark_profiles_table[0:1, :], dark_profiles_table)).astype(object)
     dark_profiles_export[0, :] = np.asarray(["DARK", "angle", "whole", "RPEtoOLM", "RNFL", *np.arange(-3.75, 107.5 + 1.25, 1.25)], dtype=object)
@@ -1079,6 +1191,7 @@ def _save_main_style_exports(results, output_dir):
     _main_write_object_table(light_fovea_export, light_fovea_txt_path)
 
     final_save_path = outdir / "_done_DARK__and__LIGHT.npz"
+    _emit_progress(progress_cb, 97, "Writing final Step 3 NPZ")
     np.savez_compressed(
         final_save_path,
         MAIN_DARK_OUTPUTS=main_dark_outputs,
@@ -1105,16 +1218,20 @@ def _save_main_style_exports(results, output_dir):
         R_VITREOUS_RETINA_POSITION_LIGHT=r_vitreous_retina_position_light,
     )
 
+    _emit_progress(progress_cb, 100, "Profile exports complete")
     return {
         "dark_profiles_txt_path": dark_profiles_txt_path,
         "light_profiles_txt_path": light_profiles_txt_path,
         "dark_fovea_txt_path": dark_fovea_txt_path,
         "light_fovea_txt_path": light_fovea_txt_path,
+        "dark_norm_export_base": dark_norm_export_base,
+        "light_norm_export_base": light_norm_export_base,
+        "flat_checkpoint_path": flat_checkpoint_path,
         "final_save_path": final_save_path,
     }
 
 
-def _compute_shift_positions(volume_raw, first_grand_mean, look_to, pixel_width):
+def _compute_shift_positions(volume_raw, first_grand_mean, look_to, pixel_width, progress_cb=None):
     """R-equivalent local vertical alignment scan (SHIFT.POSITION.*)."""
     n_x, n_y, n_z = volume_raw.shape
     dist_axis = np.arange(-200, -200 + n_x, 1)
@@ -1125,13 +1242,18 @@ def _compute_shift_positions(volume_raw, first_grand_mean, look_to, pixel_width)
     start_move = 201
     end_move = (n_x - start_move) - 1
 
+    x_positions = list(range(start_move, max(start_move, end_move) + 1, 50))
+    total_steps = max(1, n_z * len(x_positions))
+    done_steps = 0
+
     for z in range(n_z):
         revise = volume_raw[:, :, z]
-        for x_1b in range(start_move, max(start_move, end_move) + 1, 50):
+        for x_1b in x_positions:
             x0 = x_1b - 1
             x_start = x0 - 199
             x_end = x0 + 201
             if x_start < 0 or x_end > n_x:
+                done_steps += 1
                 continue
 
             profile = np.nanmean(revise[x_start:x_end, :], axis=0)
@@ -1147,6 +1269,7 @@ def _compute_shift_positions(volume_raw, first_grand_mean, look_to, pixel_width)
             i0 = top_range - 1
             i1 = 480
             if i1 <= i0:
+                done_steps += 1
                 continue
 
             check_p = profile[i0:i1]
@@ -1169,6 +1292,9 @@ def _compute_shift_positions(volume_raw, first_grand_mean, look_to, pixel_width)
                     best_move = move
 
             shift_pos[x0, z + 1] = best_move
+            done_steps += 1
+            if progress_cb is not None and (done_steps % 5 == 0 or done_steps == total_steps):
+                progress_cb(done_steps / total_steps, f"slice {z + 1}, row {x_1b}")
 
     # Convert from "move" to target border (R: 450 - move)
     shift_pos[:, 1:] = 450 - shift_pos[:, 1:]
@@ -1285,7 +1411,7 @@ def _apply_vertical_refinement_markers(markers, shift_refined_col):
     return out
 
 
-def _best_lateral_moves(volume_refined, second_grand_mean):
+def _best_lateral_moves(volume_refined, second_grand_mean, progress_cb=None):
     """R-equivalent lateral shift optimization (+/-39 rows)."""
     n_x, _, n_z = volume_refined.shape
     sgm = second_grand_mean[39:(n_x - 39), :]
@@ -1305,6 +1431,8 @@ def _best_lateral_moves(volume_refined, second_grand_mean):
                 best_corr = corr
                 best_move = move
         best[z, 1] = best_move
+        if progress_cb is not None:
+            progress_cb((z + 1) / max(1, n_z), f"slice {z + 1}")
     return best
 
 
@@ -1381,7 +1509,13 @@ def _detect_vertex(final_grand_mean):
 def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
     """Run Step 3 using the R pipeline stages and return key outputs."""
     _emit_progress(progress_cb, 2, "Flattening slices from MARKED references")
-    initial = processor.process_all_slices()
+    initial = processor.process_all_slices(
+        progress_cb=lambda frac, label: _emit_progress(
+            progress_cb,
+            2 + (10 * frac),
+            label,
+        )
+    )
 
     # Convert to R-style axis order: (x, y, z)
     dark_flat = np.transpose(initial['flattened_dark'], (1, 2, 0)).astype(np.float64)
@@ -1429,10 +1563,30 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
         diff_logger.capture("04_lookup_region", {"look_to": look_to, "rough_vit": rough_vit})
 
     _emit_progress(progress_cb, 40, "Computing vertical alignment for DARK")
-    shift_dark, shift_dark_refined = _compute_shift_positions(dark_raw, first_grand_mean, look_to[:, 1], processor.pixel_width)
+    shift_dark, shift_dark_refined = _compute_shift_positions(
+        dark_raw,
+        first_grand_mean,
+        look_to[:, 1],
+        processor.pixel_width,
+        progress_cb=lambda frac, label: _emit_progress(
+            progress_cb,
+            40 + (10 * frac),
+            f"Computing vertical alignment for DARK ({label})",
+        ),
+    )
 
     _emit_progress(progress_cb, 50, "Computing vertical alignment for LIGHT")
-    shift_light, shift_light_refined = _compute_shift_positions(light_raw, first_grand_mean, look_to[:, 1], processor.pixel_width)
+    shift_light, shift_light_refined = _compute_shift_positions(
+        light_raw,
+        first_grand_mean,
+        look_to[:, 1],
+        processor.pixel_width,
+        progress_cb=lambda frac, label: _emit_progress(
+            progress_cb,
+            50 + (10 * frac),
+            f"Computing vertical alignment for LIGHT ({label})",
+        ),
+    )
     if diff_logger is not None:
         diff_logger.capture(
             "05_vertical_shifts",
@@ -1469,10 +1623,26 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
         diff_logger.capture("07_second_grand_mean", {"second_grand_mean": second_grand_mean})
 
     _emit_progress(progress_cb, 78, "Computing lateral alignment for DARK")
-    best_lat_dark = _best_lateral_moves(dark_refined, second_grand_mean)
+    best_lat_dark = _best_lateral_moves(
+        dark_refined,
+        second_grand_mean,
+        progress_cb=lambda frac, label: _emit_progress(
+            progress_cb,
+            78 + (6 * frac),
+            f"Computing lateral alignment for DARK ({label})",
+        ),
+    )
 
     _emit_progress(progress_cb, 84, "Computing lateral alignment for LIGHT")
-    best_lat_light = _best_lateral_moves(light_refined, second_grand_mean)
+    best_lat_light = _best_lateral_moves(
+        light_refined,
+        second_grand_mean,
+        progress_cb=lambda frac, label: _emit_progress(
+            progress_cb,
+            84 + (6 * frac),
+            f"Computing lateral alignment for LIGHT ({label})",
+        ),
+    )
     if diff_logger is not None:
         diff_logger.capture(
             "08_lateral_moves",
@@ -1565,6 +1735,8 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
 
 class Step3Frame(ttk.Frame):
     """Step 3 tab UI that runs this module's flattening pipeline inside the app."""
+    SIDEBAR_WIDTH = 280
+    SIDEBAR_TEXT_WRAP = 250
 
     def __init__(self, parent, preferences=None, source_step=None):
         super().__init__(parent)
@@ -1593,19 +1765,33 @@ class Step3Frame(ttk.Frame):
 
         left = ttk.Frame(main)
         left.pack(side="left", fill="y", padx=6, pady=6)
+        left.configure(width=self.SIDEBAR_WIDTH)
+        left.pack_propagate(False)
 
         ttk.Button(left, text="Use Step 2 Output", command=self._use_step2_output).pack(fill="x", pady=2)
         ttk.Button(left, text="Browse Output Folder", command=self._browse_output_folder).pack(fill="x", pady=2)
         ttk.Button(left, text="Load MARKED + RAW (Choose Folder)", command=self._load_processor).pack(fill="x", pady=2)
 
         self.dir_var = tk.StringVar(value="(no folder selected)")
-        ttk.Label(left, textvariable=self.dir_var, wraplength=250, foreground="gray").pack(fill="x", pady=(2, 8))
+        ttk.Label(
+            left,
+            textvariable=self.dir_var,
+            wraplength=self.SIDEBAR_TEXT_WRAP,
+            foreground="gray",
+            justify="left",
+        ).pack(fill="x", pady=(2, 8))
 
         ttk.Button(left, text="Run Step 3", command=self._run_processing).pack(fill="x", pady=2)
 
         self.progress = ttk.Progressbar(left, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=2)
-        ttk.Label(left, textvariable=self.progress_text_var, foreground="gray").pack(fill="x", pady=(0, 4))
+        ttk.Label(
+            left,
+            textvariable=self.progress_text_var,
+            wraplength=self.SIDEBAR_TEXT_WRAP,
+            foreground="gray",
+            justify="left",
+        ).pack(fill="x", pady=(0, 4))
 
         ttk.Label(left, text="View").pack(anchor="w", pady=(8, 2))
         view_combo = ttk.Combobox(
@@ -1625,7 +1811,12 @@ class Step3Frame(ttk.Frame):
         ttk.Button(left, text="Export Flattened", command=self._export_results).pack(fill="x", pady=(10, 2))
 
         ttk.Separator(left).pack(fill="x", pady=8)
-        ttk.Label(left, textvariable=self.info_var, wraplength=250, justify="left").pack(fill="x")
+        ttk.Label(
+            left,
+            textvariable=self.info_var,
+            wraplength=self.SIDEBAR_TEXT_WRAP,
+            justify="left",
+        ).pack(fill="x")
 
         right = ttk.Frame(main)
         right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
@@ -1655,6 +1846,7 @@ class Step3Frame(ttk.Frame):
             raise ValueError(f"Analyze file must be 2-D or 3-D, got shape {data.shape}.")
         return {
             "shape": shape,
+            "dtype": str(data.dtype),
             "bits": int(data.dtype.itemsize * 8),
         }
 
@@ -1665,7 +1857,7 @@ class Step3Frame(ttk.Frame):
     @staticmethod
     def _format_stack_info(label, info):
         bits_label = f"{info['bits']}-bit"
-        return f"{label}: {info['shape']} | {bits_label}"
+        return f"{label}: {info['shape']} | {bits_label} {info['dtype']}"
 
     @classmethod
     def _read_input_stack_info(cls, paths):
@@ -1802,6 +1994,7 @@ class Step3Frame(ttk.Frame):
 
     def _process_worker(self):
         diff_logger = None
+        output_dir = self.current_sdb_dir
         try:
             results = run_step3_pipeline(
                 self.processor,
@@ -1810,11 +2003,17 @@ class Step3Frame(ttk.Frame):
             )
 
             summary_path = None
-            self.after(0, lambda: self._on_processing_done(results, None, summary_path, None))
+            save_error = self._save_generated_outputs(
+                results=results,
+                output_dir=output_dir,
+                progress_cb=self._threadsafe_progress,
+                ui_updates=False,
+            )
+            self.after(0, lambda: self._on_processing_done(results, None, summary_path, None, save_error, output_dir))
         except Exception as exc:
-            self.after(0, lambda: self._on_processing_done(None, exc, None, None))
+            self.after(0, lambda: self._on_processing_done(None, exc, None, None, None, output_dir))
 
-    def _on_processing_done(self, results, error, summary_path=None, diff_logger=None):
+    def _on_processing_done(self, results, error, summary_path=None, diff_logger=None, save_error=None, save_dir=None):
         self._busy = False
 
         if error is not None:
@@ -1828,7 +2027,9 @@ class Step3Frame(ttk.Frame):
             self.last_diff_log_dir = str(Path(summary_path).parent)
         self.progress.configure(value=100)
         self.progress_text_var.set("Completed")
-        if summary_path is not None:
+        if save_error is not None:
+            self.status_var.set(f"Step 3 complete, but auto-save failed: {save_error}")
+        elif summary_path is not None:
             msg = "Step 3 complete. Diff log saved."
             if diff_logger is not None and diff_logger.first_divergence is not None:
                 first = diff_logger.first_divergence
@@ -1838,10 +2039,8 @@ class Step3Frame(ttk.Frame):
                 )
             self.status_var.set(msg)
         else:
-            self.status_var.set("Step 3 complete.")
+            self.status_var.set(f"Step 3 complete. Outputs saved to {save_dir or self.current_sdb_dir}")
         self._render()
-        self.progress_text_var.set("Saving outputs...")
-        self._save_generated_outputs()
 
     def _render(self):
         if self.results is None:
@@ -1942,25 +2141,37 @@ class Step3Frame(ttk.Frame):
     def _prepare_export_volume(volume):
         return np.transpose(np.nan_to_num(volume, nan=0.0), (0, 2, 1)).astype(np.float32)
 
-    def _save_generated_outputs(self):
-        if self.results is None or not self.current_sdb_dir:
-            return
+    def _save_generated_outputs(self, results=None, output_dir=None, progress_cb=None, ui_updates=True):
+        results = self.results if results is None else results
+        output_dir = self.current_sdb_dir if output_dir is None else output_dir
+        if results is None or not output_dir:
+            return None
 
         try:
-            dark_out = os.path.join(self.current_sdb_dir, "_flat_DARK")
-            light_out = os.path.join(self.current_sdb_dir, "_flat_LIGHT")
-            dark_export = self._prepare_export_volume(self.results['final_dark'])
-            light_export = self._prepare_export_volume(self.results['final_light'])
+            _emit_progress(progress_cb, 96, "Saving flattened Analyze outputs")
+            dark_out = os.path.join(output_dir, "_flat_DARK")
+            light_out = os.path.join(output_dir, "_flat_LIGHT")
+            dark_export = self._prepare_export_volume(results['final_dark'])
+            light_export = self._prepare_export_volume(results['final_light'])
             write_analyze(dark_out, dark_export)
             write_analyze(light_out, light_export)
-            _save_main_style_exports(self.results, self.current_sdb_dir)
+            _save_main_style_exports(
+                results,
+                output_dir,
+                progress_cb=lambda pct, label: _emit_progress(
+                    progress_cb,
+                    96 + (3 * pct / 100.0),
+                    label,
+                ),
+            )
 
             # Save profile-style plots matching main.py: find_vertex and vertex
-            find_path = os.path.join(self.current_sdb_dir, "DARK_MARKED_find_vertex.png")
-            _save_profile_plot(self.results['grand_profile'], find_path, "Find Vertex", verticals=(450.0, 434.0, 466.0))
+            _emit_progress(progress_cb, 99, "Saving profile plots")
+            find_path = os.path.join(output_dir, "DARK_MARKED_find_vertex.png")
+            _save_profile_plot(results['grand_profile'], find_path, "Find Vertex", verticals=(450.0, 434.0, 466.0))
 
             # Compute the local check_spline and save the vertex plot (matching main.py logic)
-            gp = np.array(self.results['grand_profile'], copy=True)
+            gp = np.array(results['grand_profile'], copy=True)
             # Slice 433:466 (1-based indexing in main.py => 433:466 zero-based slice)
             gp_slice = gp[433:466, :]
             try:
@@ -1972,15 +2183,20 @@ class Step3Frame(ttk.Frame):
             except Exception:
                 check_spline = None
 
-            vertex_plot_path = os.path.join(self.current_sdb_dir, "DARK_MARKED_vertex.png")
-            _save_profile_plot(gp_slice, vertex_plot_path, "Vertex", verticals=(self.results['vertex'],), spline_xy=(check_spline[:, 0:2] if check_spline is not None else None))
+            vertex_plot_path = os.path.join(output_dir, "DARK_MARKED_vertex.png")
+            _save_profile_plot(gp_slice, vertex_plot_path, "Vertex", verticals=(results['vertex'],), spline_xy=(check_spline[:, 0:2] if check_spline is not None else None))
 
-            self.progress_text_var.set("Completed")
-            if self.last_diff_log_dir:
-                self.info_var.set(self.info_var.get() + f"\n\ndiff_log: {self.last_diff_log_dir}")
-            self.status_var.set(f"Step 3 complete. Outputs saved to {self.current_sdb_dir}")
+            _emit_progress(progress_cb, 100, "Completed")
+            if ui_updates:
+                self.progress_text_var.set("Completed")
+                if self.last_diff_log_dir:
+                    self.info_var.set(self.info_var.get() + f"\n\ndiff_log: {self.last_diff_log_dir}")
+                self.status_var.set(f"Step 3 complete. Outputs saved to {output_dir}")
+            return None
         except Exception as exc:
-            self.status_var.set(f"Step 3 complete, but auto-save failed: {exc}")
+            if ui_updates:
+                self.status_var.set(f"Step 3 complete, but auto-save failed: {exc}")
+            return str(exc)
 
 
 def main():
