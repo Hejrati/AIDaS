@@ -1110,16 +1110,16 @@ class Step1Frame(ttk.Frame):
         # Scale (pixel replication)
         scaled = scale_image(cropped, sx=sx, sy=sy)
 
-        # Preview/result should match Analyze .img interpretation (signed 16-bit).
+        # Match the legacy ImageJ/Analyze path used by the reference outputs:
+        # cropped 16-bit OCT samples are stored/displayed as signed int16.
         if scaled.dtype != np.int16:
             scaled = scaled.astype(np.int16, copy=False)
 
         self.processed_image = np.ascontiguousarray(scaled)
-        preview_image = self._to_uint8_preview(self.processed_image)
-
-        # Show the result
+        # Show the true 16-bit processed image. ImageCanvas creates its own
+        # display-only 8-bit view without changing the stored annotation data.
         self.image_canvas.enable_roi(False)
-        self.image_canvas.set_image(preview_image)
+        self.image_canvas.set_image(self.processed_image)
         self._update_zoom_label()
         self._set_sdb_parameters_enabled(False)
 

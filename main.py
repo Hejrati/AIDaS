@@ -885,6 +885,17 @@ def format_export_cell(value: object) -> str:
     return str(value)
 
 
+def format_tab_export_cell(value: object) -> str:
+    """Format tabular follow-on exports without losing thickness precision."""
+    if isinstance(value, (np.floating, float)):
+        if np.isnan(value):
+            return "NA"
+        return f"{float(value):.6f}"
+    if isinstance(value, (np.integer, int)):
+        return str(int(value))
+    return str(value)
+
+
 def write_object_table(table: np.ndarray, output_path: Path) -> None:
     """Write a mixed table in the same row orientation as R's write(t(EXPORT))."""
     output_path = Path(output_path)
@@ -892,6 +903,178 @@ def write_object_table(table: np.ndarray, output_path: Path) -> None:
         for row in np.asarray(table, dtype=object).T:
             handle.write(" ".join(format_export_cell(cell) for cell in row))
             handle.write("\n")
+
+
+def write_tab_object_table(table: np.ndarray, output_path: Path) -> None:
+    """Write a mixed table with tab separators in R's write(t(EXPORT)) orientation."""
+    output_path = Path(output_path)
+    with output_path.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in np.asarray(table, dtype=object).T:
+            handle.write("\t".join(format_tab_export_cell(cell) for cell in row))
+            handle.write("\n")
+
+
+def _load_npz_array(data: np.lib.npyio.NpzFile, *names: str) -> np.ndarray:
+    for name in names:
+        if name in data.files:
+            return np.asarray(data[name], dtype=np.float64)
+    raise KeyError(f"Missing expected array. Tried: {', '.join(names)}")
+
+
+def save_tissue_border_plot(
+    flattened_rrc: np.ndarray,
+    position_arrays: list[tuple[np.ndarray, str]],
+    output_path: Path,
+    title: str,
+) -> None:
+    """Translate the R tissue-border image/matlines plot."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    x_axis = np.arange(-100.0, 2751.0, 1.0)
+    y_axis = np.arange(-30.0, 431.0, 1.0)
+    image = np.asarray(flattened_rrc[: x_axis.size, ::-1, 0], dtype=np.float64).T
+
+    fig, ax = plt.subplots(figsize=(12, 4), dpi=150)
+    ax.imshow(
+        image,
+        cmap="gray",
+        origin="lower",
+        aspect="auto",
+        extent=(x_axis[0], x_axis[-1], y_axis[0], y_axis[-1]),
+    )
+    for positions, color in position_arrays:
+        y_values = 431.0 - np.asarray(positions[: x_axis.size, 0], dtype=np.float64)
+        ax.plot(x_axis, y_values, color=color, linewidth=1.0)
+    ax.set_title(title)
+    ax.set_xlabel("Distance from Fovea (microns)")
+    ax.set_ylabel("Distance from RPE (microns)")
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight")
+    plt.close(fig)
+
+
+def build_thickness_export(
+    rpe: np.ndarray,
+    olm: np.ndarray,
+    onl_opl: np.ndarray,
+    inl_ipl: np.ndarray,
+    rnfl_gcl: np.ndarray,
+    vitreous: np.ndarray,
+) -> np.ndarray:
+    """Build the translated THICKNESS.EXPORT table from the R follow-on script."""
+    x_axis = np.arange(-100, 2751, 1)
+    rpe = np.asarray(rpe[: x_axis.size, 0], dtype=np.float64)
+    olm = np.asarray(olm[: x_axis.size, 0], dtype=np.float64)
+    onl_opl = np.asarray(onl_opl[: x_axis.size, 0], dtype=np.float64)
+    inl_ipl = np.asarray(inl_ipl[: x_axis.size, 0], dtype=np.float64)
+    rnfl_gcl = np.asarray(rnfl_gcl[: x_axis.size, 0], dtype=np.float64)
+    vitreous = np.asarray(vitreous[: x_axis.size, 0], dtype=np.float64)
+
+    rows = [
+        ("Distance_from_Fundus_um", x_axis),
+        ("WholeRetina_um", rpe - vitreous),
+        ("RPE_to_OLM_um", rpe - olm),
+        ("OLM_to_ONL_OPLborder_um", olm - onl_opl),
+        ("ONL_OPLborder_to_INL_IPLborder_um", onl_opl - inl_ipl),
+        ("INL_IPLborder_to_RNFL_GCLborder_um", inl_ipl - rnfl_gcl),
+        ("RNFL_GCLborder_to_vitreous_um", rnfl_gcl - vitreous),
+    ]
+    summed_layers = rows[3][1] + rows[4][1] + rows[5][1]
+    rows.append(("Summed_layers", summed_layers))
+
+    export = np.empty((len(rows), x_axis.size + 1), dtype=object)
+    for row_index, (label, values) in enumerate(rows):
+        export[row_index, 0] = label
+        export[row_index, 1:] = values
+    return export
+
+
+def run_more_outputs_from_step3_npz(
+    flat_npz_path: Path,
+    done_npz_path: Path,
+    output_dir: Path,
+) -> dict[str, Path]:
+    """Python translation of the follow-on more_outputs_afterRAW... R script."""
+    flat_npz_path = Path(flat_npz_path)
+    done_npz_path = Path(done_npz_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    with np.load(flat_npz_path) as flat_data, np.load(done_npz_path) as done_data:
+        flattened_dark = _load_npz_array(flat_data, "FLATTENED_DARK_RETINA_RRC", "flattened_dark_retina_rrc")
+        flattened_light = _load_npz_array(flat_data, "FLATTENED_LIGHT_RETINA_RRC", "flattened_light_retina_rrc")
+
+        rpe_dark = _load_npz_array(done_data, "R_RPE_POSITION_DARK")
+        rpe_light = _load_npz_array(done_data, "R_RPE_POSITION_LIGHT")
+        olm_dark = _load_npz_array(done_data, "R_OLM_POSITION_DARK")
+        olm_light = _load_npz_array(done_data, "R_OLM_POSITION_LIGHT")
+        onl_opl_dark = _load_npz_array(done_data, "R_ONL_OPL_POSITION_DARK")
+        onl_opl_light = _load_npz_array(done_data, "R_ONL_OPL_POSITION_LIGHT")
+        inl_ipl_dark = _load_npz_array(done_data, "R_INL_IPL_POSITION_DARK")
+        inl_ipl_light = _load_npz_array(done_data, "R_INL_IPL_POSITION_LIGHT")
+        rnfl_gcl_dark = _load_npz_array(done_data, "R_RNFL_GCL_POSITION_DARK")
+        rnfl_gcl_light = _load_npz_array(done_data, "R_RNFL_GCL_POSITION_LIGHT")
+        vitreous_dark = _load_npz_array(done_data, "R_VITREOUS_RETINA_POSITION_DARK")
+        vitreous_light = _load_npz_array(done_data, "R_VITREOUS_RETINA_POSITION_LIGHT")
+
+    dark_plot_path = output_dir / f"_tissueBorders__{TO_PROCESS_DARK}.png"
+    light_plot_path = output_dir / f"_tissueBorders__{TO_PROCESS_LIGHT}.png"
+
+    save_tissue_border_plot(
+        flattened_dark,
+        [
+            (rpe_dark, "red"),
+            (olm_dark, "blue"),
+            (onl_opl_dark, "red"),
+            (inl_ipl_dark, "blue"),
+            (rnfl_gcl_dark, "red"),
+            (vitreous_dark, "blue"),
+        ],
+        dark_plot_path,
+        f"Tissue Borders {TO_PROCESS_DARK}",
+    )
+    save_tissue_border_plot(
+        flattened_light,
+        [
+            (rpe_light, "red"),
+            (olm_light, "blue"),
+            (onl_opl_light, "red"),
+            (inl_ipl_light, "blue"),
+            (rnfl_gcl_light, "red"),
+            (vitreous_light, "blue"),
+        ],
+        light_plot_path,
+        f"Tissue Borders {TO_PROCESS_LIGHT}",
+    )
+
+    dark_thickness = build_thickness_export(
+        rpe_dark,
+        olm_dark,
+        onl_opl_dark,
+        inl_ipl_dark,
+        rnfl_gcl_dark,
+        vitreous_dark,
+    )
+    light_thickness = build_thickness_export(
+        rpe_light,
+        olm_light,
+        onl_opl_light,
+        inl_ipl_light,
+        rnfl_gcl_light,
+        vitreous_light,
+    )
+    dark_thickness_path = output_dir / f"_thickness_vs_distance_from_fovea_{TO_PROCESS_DARK}.txt"
+    light_thickness_path = output_dir / f"_thickness_vs_distance_from_fovea_{TO_PROCESS_LIGHT}.txt"
+    write_tab_object_table(dark_thickness, dark_thickness_path)
+    write_tab_object_table(light_thickness, light_thickness_path)
+
+    return {
+        "dark_plot": dark_plot_path,
+        "light_plot": light_plot_path,
+        "dark_thickness": dark_thickness_path,
+        "light_thickness": light_thickness_path,
+    }
 
 
 def main() -> dict[str, np.ndarray]:
@@ -908,11 +1091,35 @@ def main() -> dict[str, np.ndarray]:
         default=str(DEFAULT_OUTPUT_DIR),
         help="Folder where plots, Analyze exports, text profiles, and NPZ files are written.",
     )
+    parser.add_argument(
+        "--more-outputs",
+        action="store_true",
+        help="Run the translated follow-on R output script from saved Step 3 NPZ variables.",
+    )
+    parser.add_argument(
+        "--flat-npz",
+        default=None,
+        help="Path to DARK__and__LIGHT__flat.npz for --more-outputs.",
+    )
+    parser.add_argument(
+        "--done-npz",
+        default=None,
+        help="Path to _done_DARK__and__LIGHT.npz for --more-outputs.",
+    )
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir)
     outdir = Path(args.output_dir)
     outdir.mkdir(parents=True, exist_ok=True)
+
+    if args.more_outputs:
+        flat_npz = Path(args.flat_npz) if args.flat_npz else input_dir / "DARK__and__LIGHT__flat.npz"
+        done_npz = Path(args.done_npz) if args.done_npz else input_dir / f"_done_{TO_PROCESS_DARK}__and__{TO_PROCESS_LIGHT}.npz"
+        outputs = run_more_outputs_from_step3_npz(flat_npz, done_npz, outdir)
+        dbg("more-outputs", "Generated translated follow-on outputs")
+        for name, path in outputs.items():
+            show_scalar_stats(name, path)
+        return {}
 
     # dbg("startup", "Script started")
     # dbg("input-config", "Working directory:", outdir)

@@ -10,8 +10,8 @@ Core Functionality:
     boundaries (RPE, ELM, ONL-OPL, INL-IPL, GCL-RNFL, RNFL-Vitreous) with
     vertex undo and visual feedback.
   • AI Segmentation: Run neural network predictions via oct-segmenter tool,
-    with optional auto-preprocessing (crop-to-aspect and resize to model
-    input size). Predictions are automatically imported as boundary traces.
+    with optional auto-preprocessing (center-crop to model input size).
+    Predictions are automatically imported as boundary traces.
   • Boundary Workflow: Tracks annotation progress with separate incomplete/
     completed boundary lists; auto-advances to next boundary after finish.
   • Foveal Center Line: Dedicated vertical line mode for placing/adjusting
@@ -79,8 +79,8 @@ MARKED_BOUNDARY_WIDTHS = {
 }
 LIGHT_MARKED_BASENAME = "Light_MARKED"
 DARK_MARKED_BASENAME = "Dark_MARKED"
-LIGHT_PREPROCESSED_BASENAME = "LIGHT"
-DARK_PREPROCESSED_BASENAME = "DARK"
+LIGHT_PREPROCESSED_BASENAME = "Light"
+DARK_PREPROCESSED_BASENAME = "Dark"
 
 # Standard output dimensions (test1 format: 2 slices, 177 height, 2133 width)
 STANDARD_OUTPUT_SLICES = 2
@@ -142,14 +142,14 @@ def _polyline_pixels(points):
 
 
 def _resize_to_standard_format(volume_3d):
-    """Resize a 3-D volume (slices, height, width) to standard output format (test1).
+    """Resize a 3-D volume (slices, height, width) to standard output format.
 
     Standard format: (2 slices, 177 height, 2133 width)
     Uses pixel replication scaling (no interpolation) to match ImageJ behavior.
-    
+
     Args:
-        volume_3d: numpy array of shape (n_slices, height, width) and dtype uint8.
-    
+        volume_3d: numpy array of shape (n_slices, height, width).
+
     Returns:
         Resized array of shape (STANDARD_OUTPUT_SLICES, STANDARD_OUTPUT_HEIGHT, STANDARD_OUTPUT_WIDTH).
     """
@@ -166,29 +166,23 @@ def _resize_to_standard_format(volume_3d):
         and current_width == target_width):
         return volume_3d.copy()
     
-    # Resize each slice independently using pixel replication
+    # Resize each slice independently using nearest-neighbor indexing so the
+    # original dtype is preserved for 16-bit LIGHT/DARK volumes.
+    y_idx = np.floor(np.arange(target_height) * current_height / target_height).astype(np.int64)
+    x_idx = np.floor(np.arange(target_width) * current_width / target_width).astype(np.int64)
+    y_idx = np.clip(y_idx, 0, current_height - 1)
+    x_idx = np.clip(x_idx, 0, current_width - 1)
+
     resized_slices = []
     for s in range(min(current_slices, target_slices)):
         slice_data = volume_3d[s]
-        
-        # Calculate scale factors
-        sy = target_height / current_height
-        sx = target_width / current_width
-        
-        # Use scale_image for pixel replication (no interpolation)
-        # scale_image expects integer scales, so we'll do this via PIL for subpixel accuracy
-        pil_img = Image.fromarray(slice_data, mode='L')
-        pil_resized = pil_img.resize(
-            (target_width, target_height),
-            Image.NEAREST  # nearest-neighbor (pixel replication)
-        )
-        resized_arr = np.array(pil_resized, dtype=np.uint8)
+        resized_arr = np.ascontiguousarray(slice_data[np.ix_(y_idx, x_idx)])
         resized_slices.append(resized_arr)
-    
+
     # If we need more slices (shouldn't happen), pad with zeros
     while len(resized_slices) < target_slices:
-        resized_slices.append(np.zeros((target_height, target_width), dtype=np.uint8))
-    
+        resized_slices.append(np.zeros((target_height, target_width), dtype=volume_3d.dtype))
+
     return np.stack(resized_slices[:target_slices], axis=0)
 
 
@@ -208,8 +202,8 @@ class Step2Frame(ttk.Frame):
     Key data structures:
       - boundary_traces: {name -> {points, pixels, color}} for saved boundaries
       - boundary_completion_vars: {name -> BooleanVar} for progress tracking
-      - _preprocessing_info: metadata for AI preprocessing (crop/resize params)
-      - image_data: current 8-bit numpy array being annotated
+      - _preprocessing_info: metadata for AI preprocessing crop params
+      - image_data: current numpy array being annotated
     """
 
     def __init__(self, parent, preferences=None, source_step=None):
@@ -227,14 +221,14 @@ class Step2Frame(ttk.Frame):
 
         # ─ Image data state ─
         self.current_file = None  # Path to currently loaded image
-        self.image_data = None  # Current 8-bit numpy array displayed on canvas
+        self.image_data = None  # Current numpy array displayed on canvas
         
         # ─ Preprocessing pipeline state ─
         self._last_auto_preprocessed_image = None  # Preprocessed image cached for AI segmentation
         self._original_image_for_ai = None  # Backup of original image before preprocessing
         self._original_file_for_ai = None  # Backup file path before preprocessing
         self._preprocessing_done = False  # Flag: True if preprocessing applied to current image
-        self._preprocessing_info = None  # Dict: crop/resize metadata to inverse-transform AI predictions
+        self._preprocessing_info = None  # Dict: crop metadata to inverse-transform AI predictions
         
         # ─ Boundary tracing state ─
         self.active_boundary = None  # Name of boundary currently being traced
@@ -417,7 +411,7 @@ class Step2Frame(ttk.Frame):
             pady=(4, 0),
         )
 
-        ttk.Label(load, text="Step 2 input is always loaded as 8-bit.", wraplength=240, justify="left").pack(
+        ttk.Label(load, text="Step 2 keeps 16-bit image data when available; MARKED outputs are 8-bit.", wraplength=240, justify="left").pack(
             fill="x",
             pady=(4, 0),
         )
@@ -606,8 +600,8 @@ class Step2Frame(ttk.Frame):
           - Analyze 7.5 (.hdr/.img pairs) → reads header/data
           - Standard images (.png, .jpg, .jpeg) → converts to grayscale
         
-        Auto-detects format by file extension and converts to 8-bit grayscale
-        for display and annotation. Clears all existing traces and resets UI.
+        Auto-detects format by file extension and preserves 16-bit grayscale
+        data when available. Clears all existing traces and resets UI.
         """
         path = filedialog.askopenfilename(
             title="Select an OCT image",
@@ -634,7 +628,7 @@ class Step2Frame(ttk.Frame):
         after preprocessing. If Step 1 has a processed_image (cropped), it is
         preferred; otherwise the raw image is used.
 
-        Applies current bit-depth conversion (8-bit) and resets all traces.
+        Preserves the source image bit depth and resets all traces.
         """
         if self.source_step is None:
             messagebox.showinfo("Unavailable", "No Step 1 panel is connected to this view.")
@@ -650,7 +644,7 @@ class Step2Frame(ttk.Frame):
 
         display_path = source_path or "Step 1 output"
         self._input_analyze_template = None
-        img = self._image_uint8(np.array(image, copy=True))
+        img = self._image_for_annotation(image)
         self._show_image(img, display_path)
 
     def load_external_image(self, image, source_path=None):
@@ -663,7 +657,7 @@ class Step2Frame(ttk.Frame):
             return
         display_path = source_path or "Step 1 output"
         self._input_analyze_template = None
-        img = self._image_uint8(np.array(image, copy=True))
+        img = self._image_for_annotation(image)
         self._show_image(img, display_path)
 
     def _update_step1_button_state(self):
@@ -689,8 +683,8 @@ class Step2Frame(ttk.Frame):
         """Read an image file from disk and return a 2-D numpy array.
 
         Supports Analyze (.hdr/.img), TIFF stacks, and standard images
-        (PNG/JPEG). For multi-frame TIFFs a single slice is returned
-        (the first frame).
+        (PNG/JPEG). For multi-frame inputs a single slice is returned
+        (the first frame). 16-bit sources are preserved for annotation.
         """
         ext = os.path.splitext(path)[1].lower()
         if ext in {".hdr", ".img"}:
@@ -720,7 +714,7 @@ class Step2Frame(ttk.Frame):
             data = data[0]
         if data.ndim != 2:
             raise ValueError("Step 2 expects a 2-D grayscale image or a 2-D slice from a stack.")
-        return self._image_uint8(data)
+        return self._image_for_annotation(data)
 
     def _show_image(self, image, path):
         """Load a new image and reset the annotation UI.
@@ -734,7 +728,8 @@ class Step2Frame(ttk.Frame):
           - Re-enables all controls for fresh annotation
 
         Args:
-            image: 8-bit numpy array to display.
+            image: numpy array to display and annotate. Source bit depth is preserved;
+                the canvas normalizes a preview for display only.
             path: Path or description string for the image source.
         """
         self._last_auto_preprocessed_image = None
@@ -1823,30 +1818,30 @@ class Step2Frame(ttk.Frame):
         
         return light_volume, dark_volume
 
-    def _save_preprocessed_image(self):
-        """Export the preprocessed image (if preprocessing was applied) as Analyze volume.
+    def _save_light_dark_images(self):
+        """Export unmarked LIGHT and DARK Analyze volumes from the current image.
 
-        If the image was preprocessed for AI, saves the cropped/resized preprocessed version
-        as Light and Dark preprocessed stacks (.hdr/.img) in standard format (test1 dimensions).
-        Used to track what the neural network actually saw as input.
+        These outputs use the original annotation image dtype. If AI
+        preprocessing temporarily displays an 8-bit model input, save the
+        backed-up original image instead so LIGHT/DARK remain 16-bit.
 
         Returns:
             List of saved file basepaths (without .img/.hdr extension).
-            Returns empty list if preprocessing was not applied.
         """
-        if self._last_auto_preprocessed_image is None:
+        source_image = self._original_image_for_ai if self._original_image_for_ai is not None else self.image_data
+        if source_image is None:
             return []
 
-        preprocessed = np.array(self._last_auto_preprocessed_image, copy=True)
-        if preprocessed.ndim != 2:
-            raise ValueError("Auto-preprocessed image must be 2-D.")
+        image = np.asarray(source_image)
+        if image.ndim != 2:
+            raise ValueError("Current Step 2 image must be 2-D.")
 
         # Create a 3D stack with 2 identical slices
-        stack = np.stack([preprocessed, preprocessed], axis=0).astype(np.uint8, copy=False)
-        
+        stack = np.stack([image, image], axis=0)
+
         # Resize to standard output format
         stack = _resize_to_standard_format(stack)
-        
+
         saved_paths = []
         for base_path in self._preprocessed_output_basepaths():
             write_analyze(base_path, stack)
@@ -1898,7 +1893,7 @@ class Step2Frame(ttk.Frame):
         write_analyze(dark_base_path, dark_marked)
         saved_paths.append(dark_base_path)
 
-        saved_paths.extend(self._save_preprocessed_image())
+        saved_paths.extend(self._save_light_dark_images())
 
         self.status_var.set(
             "Saved marked images -> "
@@ -1931,8 +1926,7 @@ class Step2Frame(ttk.Frame):
         light_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME) + ".img"
         dark_path = self._marked_output_basepath(DARK_MARKED_BASENAME) + ".img"
         message_lines = ["Saved MARKED images:", light_path, dark_path]
-        if self._last_auto_preprocessed_image is not None:
-            message_lines.extend([path + ".img" for path in self._preprocessed_output_basepaths()])
+        message_lines.extend([path + ".img" for path in self._preprocessed_output_basepaths()])
         messagebox.showinfo("Saved", "\n".join(message_lines))
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -2017,6 +2011,19 @@ class Step2Frame(ttk.Frame):
             arr = (arr - lo) / (hi - lo) * 255.0
         return np.clip(arr, 0, 255).astype(np.uint8)
 
+    def _image_for_annotation(self, image):
+        """Return a 2-D image array for Step 2 without changing bit depth.
+
+        SDB data arrives from Step 1 already opened as 16-bit; keep that data
+        as-is instead of promoting or rescaling it here.
+        """
+        arr = np.asarray(image)
+        if arr.ndim != 2:
+            raise ValueError("Step 2 expects a 2-D grayscale image.")
+        if arr.dtype.byteorder not in ("=", "|"):
+            arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
+        return np.ascontiguousarray(arr)
+
     def _segmenter_model_size(self):
         """Extract target input size (height, width) from model_config.json.
 
@@ -2046,38 +2053,22 @@ class Step2Frame(ttk.Frame):
             return None
 
     @staticmethod
-    def _crop_to_aspect(image, target_w, target_h):
-        """Center-crop image to match the target aspect ratio before resizing.
+    def _center_crop_to_size(image, target_w, target_h):
+        """Crop image to the exact target size without resizing.
 
-        Crops horizontally or vertically (whichever is needed) to match the target
-        aspect ratio, then returns the cropped image. Center-crops to minimize
-        content loss in both edges.
-
-        Args:
-            image: 2-D numpy array (H, W).
-            target_w: Target width (pixels).
-            target_h: Target height (pixels).
-
-        Returns:
-            Cropped 2-D numpy array matching target aspect ratio (but may differ from target size).
+        Width is center-cropped. Extra height is removed from the top only so
+        the returned crop keeps the bottom target_h rows.
         """
         src_h, src_w = image.shape[:2]
-        target_ratio = target_w / target_h
-        src_ratio = src_w / src_h
-
-        if abs(src_ratio - target_ratio) < 1e-6:
-            return np.array(image, copy=True)
-
-        if src_ratio > target_ratio:
-            crop_w = int(round(src_h * target_ratio))
-            crop_w = max(1, min(crop_w, src_w))
-            x0 = (src_w - crop_w) // 2
-            return np.array(image[:, x0:x0 + crop_w], copy=True)
-
-        crop_h = int(round(src_w / target_ratio))
-        crop_h = max(1, min(crop_h, src_h))
-        y0 = (src_h - crop_h) // 2
-        return np.array(image[y0:y0 + crop_h, :], copy=True)
+        if src_w < target_w or src_h < target_h:
+            raise ValueError(
+                f"Image is {src_w}x{src_h}, smaller than AI input {target_w}x{target_h}; "
+                "cannot center-crop without upsampling."
+            )
+        x0 = (src_w - target_w) // 2
+        y0 = src_h - target_h
+        cropped = np.array(image[y0:y0 + target_h, x0:x0 + target_w], copy=True)
+        return cropped, x0, y0
 
     def _prepare_segmenter_input_image(self, auto_preprocess=False):
         image_u8 = self._image_uint8(self.image_data)
@@ -2095,19 +2086,9 @@ class Step2Frame(ttk.Frame):
             )
 
         target_h, target_w, cfg_path = model_size
-        cropped = self._crop_to_aspect(image_u8, target_w, target_h)
+        cropped, crop_offset_x, crop_offset_y = self._center_crop_to_size(image_u8, target_w, target_h)
         crop_h, crop_w = cropped.shape[:2]
-        
-        # Calculate crop offsets for inverse transformation
-        # The _crop_to_aspect does center-cropping
-        crop_offset_x = (source_w - crop_w) // 2
-        crop_offset_y = (source_h - crop_h) // 2
-        
-        resized = np.array(
-            Image.fromarray(cropped).resize((target_w, target_h), Image.Resampling.BILINEAR),
-            dtype=np.uint8,
-        )
-        
+
         # Store preprocessing info for later inverse transformation of AI predictions
         self._preprocessing_info = {
             "source_h": source_h,
@@ -2121,10 +2102,10 @@ class Step2Frame(ttk.Frame):
         }
         
         process_note = (
-            f"Auto preprocess: cropped {source_w}x{source_h} -> {crop_w}x{crop_h}, "
-            f"then resized to {target_w}x{target_h} using {cfg_path}"
+            f"Auto preprocess: center-cropped {source_w}x{source_h} -> {crop_w}x{crop_h} "
+            f"without resizing using {cfg_path}"
         )
-        return resized, process_note
+        return cropped, process_note
 
     def _segmenter_input_tiff(self, auto_preprocess=False):
         image_for_segmenter, process_note = self._prepare_segmenter_input_image(auto_preprocess=auto_preprocess)
@@ -2522,16 +2503,15 @@ class Step2Frame(ttk.Frame):
                 pass
 
     def _preprocess_image_for_ai(self):
-        """Preprocess image for AI segmentation: crop to aspect ratio and resize.
+        """Preprocess image for AI segmentation with exact center crop.
 
         Preprocessing pipeline:
           1. Backup original image and file path for later restore
           2. Convert current image to 8-bit if needed
-          3. Crop to match model aspect ratio (center-crop, no padding)
-          4. Resize cropped image to exact model input dimensions
-          5. Display preprocessed image on canvas
-          6. Store preprocessing metadata (crop/resize parameters)
-          7. Update button states to show "Remove Preprocess" and enable AI
+          3. Center-crop to exact model input dimensions (no downsampling or resizing)
+          4. Display preprocessed image on canvas
+          5. Store preprocessing metadata
+          6. Update button states to show "Remove Preprocess" and enable AI
 
         Original image is preserved and can be restored with _remove_preprocess().
         Preprocessing info is saved for later use (e.g., rescaling AI predictions).
@@ -2555,22 +2535,15 @@ class Step2Frame(ttk.Frame):
             original_image = np.array(self.image_data, copy=True)
             original_path = self.current_file
             image_u8 = self._image_uint8(self.image_data)
-            cropped = self._crop_to_aspect(image_u8, target_w, target_h)
+            cropped, crop_offset_x, crop_offset_y = self._center_crop_to_size(image_u8, target_w, target_h)
             
             # Calculate crop offsets for inverse transformation
             source_h, source_w = image_u8.shape[:2]
             crop_h, crop_w = cropped.shape[:2]
-            crop_offset_x = (source_w - crop_w) // 2
-            crop_offset_y = (source_h - crop_h) // 2
-            
-            resized = np.array(
-                Image.fromarray(cropped).resize((target_w, target_h), Image.Resampling.BILINEAR),
-                dtype=np.uint8,
-            )
             
             # Display the preprocessed image (note: _show_image clears preprocessing state)
             display_path = self.current_file or "Step 2 input (preprocessed)"
-            self._show_image(resized, display_path)
+            self._show_image(cropped, display_path)
             
             # Restore preprocessing info and state after _show_image clears them
             self._preprocessing_info = {
@@ -2583,7 +2556,7 @@ class Step2Frame(ttk.Frame):
                 "target_h": target_h,
                 "target_w": target_w,
             }
-            self._last_auto_preprocessed_image = np.array(resized, copy=True)
+            self._last_auto_preprocessed_image = np.array(cropped, copy=True)
             self._original_image_for_ai = original_image
             self._original_file_for_ai = original_path
             self._preprocessing_done = True
@@ -2591,7 +2564,7 @@ class Step2Frame(ttk.Frame):
             self._update_ai_button_states()
             self.status_var.set(
                 f"Image preprocessed: cropped {source_w}x{source_h} → {crop_w}x{crop_h}, "
-                f"then resized to {target_w}x{target_h}. Ready for AI Assist."
+                "no resizing/downsampling. Ready for AI Assist."
             )
         except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Preprocess failed", str(exc))

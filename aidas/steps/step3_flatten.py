@@ -16,7 +16,6 @@ from __future__ import annotations
 import numpy as np
 from scipy.interpolate import BSpline, UnivariateSpline, interp1d
 from scipy.stats import pearsonr
-from scipy.ndimage import gaussian_filter1d
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
@@ -36,9 +35,18 @@ from main import (
     fill_na_with_leading_non_na as _main_fill_na_with_leading_non_na,
     first_closest_zero_crossing as _main_first_closest_zero_crossing,
     refine_border_position_pass as _main_refine_border_position_pass,
+    run_more_outputs_from_step3_npz as _main_run_more_outputs_from_step3_npz,
     slice_rows_1based as _main_slice_rows_1based,
     smooth_position_matrix as _main_smooth_position_matrix,
     write_object_table as _main_write_object_table,
+)
+
+MARKER_LAYER_VALUES = (
+    ("RNFL-Vitreous", 249),
+    ("GCL-RNFL", 250),
+    ("INL-IPL", 252),
+    ("ONL-OPL", 253),
+    ("ELM", 254),
 )
 
 
@@ -204,6 +212,38 @@ def _get_recon_value(unwrapped_recon, upper_x, upper_y, point):
         idx = int((col - 1) * upper_y + row - 1)
         return float(unwrapped_recon[idx])
     return np.nan
+
+
+def _validate_marker_coverage(flattened_markers_rrc, start_move=21):
+    """Return messages for marker layers missing from moving windows."""
+    markers = np.asarray(flattened_markers_rrc)
+    hand_borders = np.full((markers.shape[0], len(MARKER_LAYER_VALUES)), np.nan, dtype=np.float64)
+    for col, (_name, marker_value) in enumerate(MARKER_LAYER_VALUES):
+        for row in range(markers.shape[0]):
+            idx = np.where(markers[row, :] == marker_value)[0]
+            if idx.size:
+                hand_borders[row, col] = float(np.mean(idx + 1))
+
+    end_move = (markers.shape[0] - start_move) - 1
+    messages = []
+    for col, (name, marker_value) in enumerate(MARKER_LAYER_VALUES):
+        bad_rows = []
+        valid_rows = np.where(~np.isnan(hand_borders[:, col]))[0]
+        for x in range(start_move, end_move + 1):
+            row_window = slice(x - 20, x + 20)
+            if np.all(np.isnan(hand_borders[row_window, col])):
+                bad_rows.append(x)
+        if bad_rows:
+            valid_text = (
+                f"{int(valid_rows.min()) + 1}..{int(valid_rows.max()) + 1}"
+                if valid_rows.size
+                else "none"
+            )
+            messages.append(
+                f"{name} marker {marker_value} is missing from {len(bad_rows)} moving windows "
+                f"(first row {bad_rows[0] + 1}, last row {bad_rows[-1] + 1}; valid marker rows: {valid_text})."
+            )
+    return messages
 
 
 
@@ -650,6 +690,10 @@ def _save_profile_plot(profile_xy: np.ndarray, output_path: str, title: str, ver
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    profile_xy = np.asarray(profile_xy)
+    if profile_xy.size == 0 or profile_xy.shape[0] == 0:
+        return
+
     fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
     ax.plot(profile_xy[:, 0], profile_xy[:, 1], color="black", linewidth=1.0)
     if spline_xy is not None:
@@ -743,6 +787,15 @@ def _save_main_style_exports(results, output_dir, progress_cb=None):
 
     start_move = 21
     end_move = (flattened_dark_retina_rrc.shape[0] - start_move) - 1
+    coverage_messages = _validate_marker_coverage(flattened_markers_rrc, start_move=start_move)
+    if coverage_messages:
+        raise RuntimeError(
+            "Step 3 cannot localize all retinal layers because the final cropped MARKED image "
+            "has missing boundary markers:\n"
+            + "\n".join(f"- {message}" for message in coverage_messages)
+            + "\n\nRe-save Step 2 MARKED images after setting the fovea center, then reload Step 3."
+        )
+
     blank = np.full(6, np.nan, dtype=np.float64)
     blank[5] = 431.0
 
@@ -1465,43 +1518,30 @@ def _crop_rrc(volume_refined, best_lat_moves):
 
 def _detect_vertex(final_grand_mean):
     """R-equivalent vertex detection around columns 434..466."""
-    grand_profile = np.column_stack([
-        np.arange(1, final_grand_mean.shape[1] + 1, dtype=np.float64),
-        _nanmean_axis0(final_grand_mean),
-    ])
+    grand_profile = np.column_stack(
+        (
+            np.arange(1.0, final_grand_mean.shape[1] + 1.0, 1.0),
+            _nanmean_axis0(final_grand_mean),
+        )
+    )
 
-    lo = 434
-    hi = min(466, grand_profile.shape[0])
-    if hi <= lo:
+    gp = grand_profile[433:466, :]
+    if gp.shape[0] == 0:
         return 431, grand_profile
 
-    gp = grand_profile[lo - 1:hi, :]
-    x = gp[:, 0]
-    y = gp[:, 1]
+    check_sp = _fit_smooth_spline_like_r(gp[:, 0], gp[:, 1], df=10)
+    check_x = np.arange(434.0, 467.0, 1.0)
+    check_spline = np.column_stack((check_x, check_sp(check_x), check_sp.derivative()(check_x)))
+    threshold = float(np.quantile(check_spline[:, 1], 0.25))
+    check_spline[:, 2] = np.where(check_spline[:, 1] < threshold, np.nan, check_spline[:, 2])
 
-    try:
-        sp = UnivariateSpline(x, y, k=3, s=10)
-        xs = np.arange(lo, hi + 1, 1, dtype=np.float64)
-        ys = sp(xs)
-        dys = sp.derivative()(xs)
-        finite_ys = ys[np.isfinite(ys)]
-        if finite_ys.size == 0:
-            return 431, grand_profile
-        threshold = np.quantile(finite_ys, 0.25)
-        dys = np.where(ys < threshold, np.nan, dys)
-
-        pos = np.where(dys > 0)[0]
-        if len(pos) > 0:
-            vertex = int(xs[pos[-1]] + 1)
-        else:
-            finite_dys = dys[np.isfinite(dys)]
-            if finite_dys.size == 0:
-                return 431, grand_profile
-            adj = dys - np.median(finite_dys)
-            pos2 = np.where(adj >= 0)[0]
-            vertex = int(xs[pos2[-1]] + 1) if len(pos2) > 0 else 431
-    except Exception:
-        vertex = 431
+    positive = np.where(check_spline[:, 2] > 0)[0]
+    if positive.size > 0:
+        vertex = int(check_spline[positive[-1], 0] + 1.0)
+    else:
+        check_spline[:, 2] = check_spline[:, 2] - np.nanmedian(check_spline[:, 2])
+        nonnegative = np.where(check_spline[:, 2] >= 0)[0]
+        vertex = int(check_spline[nonnegative[-1], 0] + 1.0) if nonnegative.size else 431
 
     return vertex, grand_profile
 
@@ -1684,11 +1724,6 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
     light_final = light_rrc[:, c0:c1, :]
     markers_final = markers_rrc[:, c0:c1]
 
-    # Visual polish: reduce residual row-wise jaggedness after flattening.
-    # Apply only along depth axis so lateral structure stays intact.
-    smooth_sigma = 1.6
-    dark_final = gaussian_filter1d(dark_final, sigma=smooth_sigma, axis=1, mode='nearest')
-    light_final = gaussian_filter1d(light_final, sigma=smooth_sigma, axis=1, mode='nearest')
     if diff_logger is not None:
         dark_export = np.transpose(np.nan_to_num(np.transpose(dark_final, (2, 0, 1)), nan=0.0), (0, 2, 1)).astype(np.float32)
         light_export = np.transpose(np.nan_to_num(np.transpose(light_final, (2, 0, 1)), nan=0.0), (0, 2, 1)).astype(np.float32)
@@ -1748,6 +1783,7 @@ class Step3Frame(ttk.Frame):
         self.results = None
         self.figure = None
         self.canvas = None
+        self.more_outputs_button = None
         self._busy = False
         self.last_diff_log_dir = None
 
@@ -1782,6 +1818,13 @@ class Step3Frame(ttk.Frame):
         ).pack(fill="x", pady=(2, 8))
 
         ttk.Button(left, text="Run Step 3", command=self._run_processing).pack(fill="x", pady=2)
+        self.more_outputs_button = ttk.Button(
+            left,
+            text="More Process",
+            command=self._run_more_outputs,
+            state="disabled",
+        )
+        self.more_outputs_button.pack(fill="x", pady=2)
 
         self.progress = ttk.Progressbar(left, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=2)
@@ -1916,6 +1959,8 @@ class Step3Frame(ttk.Frame):
         self.current_sdb_dir = selected_folder
         self.dir_var.set(selected_folder)
         self.status_var.set("Loading selected folder...")
+        if self.more_outputs_button is not None:
+            self.more_outputs_button.configure(state="disabled")
 
         dark_marked = self._existing_basepath(self.current_sdb_dir, ["Dark_MARKED", "DARK_MARKED"])
         light_marked = self._existing_basepath(self.current_sdb_dir, ["Light_MARKED", "LIGHT_MARKED"])
@@ -1979,6 +2024,8 @@ class Step3Frame(ttk.Frame):
             return
 
         self._busy = True
+        if self.more_outputs_button is not None:
+            self.more_outputs_button.configure(state="disabled")
         self.progress.configure(value=0)
         self.progress_text_var.set("Starting...")
         self.status_var.set("Running Step 3 pipeline...")
@@ -2019,10 +2066,14 @@ class Step3Frame(ttk.Frame):
         if error is not None:
             self.status_var.set(f"Step 3 failed: {error}")
             self.progress_text_var.set("Failed")
+            if self.more_outputs_button is not None:
+                self.more_outputs_button.configure(state="disabled")
             messagebox.showerror("Step 3", f"Processing failed.\n{error}")
             return
 
         self.results = results
+        if self.more_outputs_button is not None:
+            self.more_outputs_button.configure(state="normal")
         if summary_path is not None:
             self.last_diff_log_dir = str(Path(summary_path).parent)
         self.progress.configure(value=100)
@@ -2137,6 +2188,44 @@ class Step3Frame(ttk.Frame):
         except Exception as exc:
             messagebox.showerror("Export", f"Export failed.\n{exc}")
 
+    def _run_more_outputs(self):
+        if self.results is None:
+            messagebox.showwarning("More Process", "Run Step 3 first.")
+            return
+        if not self.current_sdb_dir:
+            messagebox.showwarning("More Process", "Choose an output folder first.")
+            return
+
+        try:
+            output_dir = Path(self.current_sdb_dir)
+            flat_npz = output_dir / "DARK__and__LIGHT__flat.npz"
+            done_npz = output_dir / "_done_DARK__and__LIGHT.npz"
+            if not flat_npz.exists() or not done_npz.exists():
+                self.status_var.set("Saving Step 3 checkpoints before more process...")
+                save_error = self._save_generated_outputs(
+                    results=self.results,
+                    output_dir=output_dir,
+                    progress_cb=None,
+                    ui_updates=False,
+                )
+                if save_error is not None:
+                    raise RuntimeError(save_error)
+
+            outputs = _main_run_more_outputs_from_step3_npz(flat_npz, done_npz, output_dir)
+            self.status_var.set(f"More process complete. R-format outputs saved to {output_dir}")
+            self.info_var.set(
+                self.info_var.get()
+                + "\n\nMore process outputs:\n"
+                + "\n".join(str(path.name) for path in outputs.values())
+            )
+            messagebox.showinfo(
+                "More Process",
+                "Generated tissue-border plots and R-format thickness tables.",
+            )
+        except Exception as exc:
+            self.status_var.set(f"More process failed: {exc}")
+            messagebox.showerror("More Process", f"More process failed.\n{exc}")
+
     @staticmethod
     def _prepare_export_volume(volume):
         return np.transpose(np.nan_to_num(volume, nan=0.0), (0, 2, 1)).astype(np.float32)
@@ -2184,7 +2273,8 @@ class Step3Frame(ttk.Frame):
                 check_spline = None
 
             vertex_plot_path = os.path.join(output_dir, "DARK_MARKED_vertex.png")
-            _save_profile_plot(gp_slice, vertex_plot_path, "Vertex", verticals=(results['vertex'],), spline_xy=(check_spline[:, 0:2] if check_spline is not None else None))
+            if gp_slice.size:
+                _save_profile_plot(gp_slice, vertex_plot_path, "Vertex", verticals=(results['vertex'],), spline_xy=(check_spline[:, 0:2] if check_spline is not None else None))
 
             _emit_progress(progress_cb, 100, "Completed")
             if ui_updates:

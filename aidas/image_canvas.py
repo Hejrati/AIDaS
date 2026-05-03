@@ -263,7 +263,7 @@ class ImageCanvas(ttk.Frame):
         self._zoom = min(cw / iw, ch / ih) * 0.95
 
     def _to_display(self, data):
-        """Normalise to uint8 for display using 0.5-99.5 percentile stretch."""
+        """Normalise to uint8 for display using ImageJ-like min/max scaling."""
         if data.dtype == np.uint8:
             return data
         d = np.asarray(data, dtype=np.float64)
@@ -272,7 +272,8 @@ class ImageCanvas(ttk.Frame):
             return np.zeros(data.shape, dtype=np.uint8)
         if not np.all(finite):
             d = np.where(finite, d, np.nan)
-        lo, hi = np.nanpercentile(d, [0.5, 99.5])
+        lo = float(np.nanmin(d))
+        hi = float(np.nanmax(d))
         if hi > lo:
             d = np.clip((d - lo) / (hi - lo) * 255.0, 0, 255)
         else:
