@@ -82,7 +82,7 @@ DARK_MARKED_BASENAME = "Dark_MARKED"
 LIGHT_PREPROCESSED_BASENAME = "Light"
 DARK_PREPROCESSED_BASENAME = "Dark"
 
-# Standard output dimensions (test1 format: 2 slices, 177 height, 2133 width)
+# Standard output dimensions (test1 format: 2 slices, original height, 2133 width)
 STANDARD_OUTPUT_SLICES = 2
 STANDARD_OUTPUT_HEIGHT = 177
 STANDARD_OUTPUT_WIDTH = 2133
@@ -144,21 +144,21 @@ def _polyline_pixels(points):
 def _resize_to_standard_format(volume_3d):
     """Resize a 3-D volume (slices, height, width) to standard output format.
 
-    Standard format: (2 slices, 177 height, 2133 width)
+    Standard format: (2 slices, original height, 2133 width)
     Uses pixel replication scaling (no interpolation) to match ImageJ behavior.
 
     Args:
         volume_3d: numpy array of shape (n_slices, height, width).
 
     Returns:
-        Resized array of shape (STANDARD_OUTPUT_SLICES, STANDARD_OUTPUT_HEIGHT, STANDARD_OUTPUT_WIDTH).
+        Resized array of shape (STANDARD_OUTPUT_SLICES, original height, STANDARD_OUTPUT_WIDTH).
     """
     if volume_3d.ndim != 3:
         raise ValueError(f"Expected 3-D volume, got shape {volume_3d.shape}")
     
     current_slices, current_height, current_width = volume_3d.shape
     target_slices = STANDARD_OUTPUT_SLICES
-    target_height = STANDARD_OUTPUT_HEIGHT
+    target_height = current_height
     target_width = STANDARD_OUTPUT_WIDTH
     
     # If already at target size, return as-is
@@ -168,7 +168,7 @@ def _resize_to_standard_format(volume_3d):
     
     # Resize each slice independently using nearest-neighbor indexing so the
     # original dtype is preserved for 16-bit LIGHT/DARK volumes.
-    y_idx = np.floor(np.arange(target_height) * current_height / target_height).astype(np.int64)
+    y_idx = np.arange(current_height, dtype=np.int64)
     x_idx = np.floor(np.arange(target_width) * current_width / target_width).astype(np.int64)
     y_idx = np.clip(y_idx, 0, current_height - 1)
     x_idx = np.clip(x_idx, 0, current_width - 1)
@@ -1658,17 +1658,21 @@ class Step2Frame(ttk.Frame):
 
         Returns standard output format (test1 format):
           - Slices: 2
-          - Height: 177
+          - Height: current image height
           - Width: 2133
           - Dtype: uint8
 
         This ensures all MARKED images are saved in a consistent, normalized format
-        regardless of input image size.
+        while preserving the input image height.
 
         Returns:
             Tuple (slices, height, width, dtype): Standard dimensions for output Analyze volumes.
         """
-        return (STANDARD_OUTPUT_SLICES, STANDARD_OUTPUT_HEIGHT, STANDARD_OUTPUT_WIDTH, np.dtype(np.uint8))
+        if self.image_data is None:
+            target_height = STANDARD_OUTPUT_HEIGHT
+        else:
+            target_height = int(self.image_data.shape[0])
+        return (STANDARD_OUTPUT_SLICES, target_height, STANDARD_OUTPUT_WIDTH, np.dtype(np.uint8))
 
     def _build_marked_image(self):
         """Create the base marked image with background set to MARKED_BACKGROUND_MAX.
@@ -1750,7 +1754,7 @@ class Step2Frame(ttk.Frame):
         # Get original dimensions before any resize
         orig_h, orig_w = base_marked.shape[:2]
         
-        # Resize image to target standard dimensions if needed
+        # Resize image to target standard width if needed. Height is preserved.
         if (orig_h, orig_w) != (target_h, target_w):
             base_marked = np.array(
                 Image.fromarray(base_marked).resize((target_w, target_h), Image.Resampling.NEAREST),
@@ -1758,7 +1762,7 @@ class Step2Frame(ttk.Frame):
             )
             # Calculate scaling factors for boundary coordinates
             scale_x = target_w / orig_w
-            scale_y = target_h / orig_h
+            scale_y = 1.0
             
             # Create scaled versions of boundary traces
             scaled_traces = {}
@@ -1832,11 +1836,11 @@ class Step2Frame(ttk.Frame):
         if source_image is None:
             return []
 
-        image = np.asarray(source_image)
+        image = self._image_int16_for_original_save(source_image)
         if image.ndim != 2:
             raise ValueError("Current Step 2 image must be 2-D.")
 
-        # Create a 3D stack with 2 identical slices
+        # Create a 16-bit 3D stack with 2 identical slices
         stack = np.stack([image, image], axis=0)
 
         # Resize to standard output format
@@ -2010,6 +2014,32 @@ class Step2Frame(ttk.Frame):
         if hi > lo:
             arr = (arr - lo) / (hi - lo) * 255.0
         return np.clip(arr, 0, 255).astype(np.uint8)
+
+    def _image_int16_for_original_save(self, image):
+        """Convert unmarked LIGHT/DARK save data to a positive 16-bit range.
+
+        Analyze stores datatype 4 as signed 16-bit, so values above 32767 can
+        appear dark or wrapped in readers. Keep saved originals in the positive
+        signed range while still avoiding 0-255-only output.
+        """
+        arr = np.asarray(image)
+        if arr.dtype.byteorder not in ("=", "|"):
+            arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
+
+        if np.issubdtype(arr.dtype, np.integer):
+            arr_int = arr.astype(np.int64)
+            if int(np.min(arr_int)) >= 0 and int(np.max(arr_int)) <= 255:
+                arr_int = np.rint(arr_int * (32767.0 / 255.0)).astype(np.int64)
+            return np.ascontiguousarray(np.clip(arr_int, 0, 32767).astype(np.int16))
+
+        arr_float = arr.astype(np.float64)
+        lo = float(np.nanmin(arr_float))
+        hi = float(np.nanmax(arr_float))
+        if hi > lo:
+            arr_float = (arr_float - lo) / (hi - lo) * 32767.0
+        else:
+            arr_float = np.zeros_like(arr_float)
+        return np.ascontiguousarray(np.clip(arr_float, 0, 32767).astype(np.int16))
 
     def _image_for_annotation(self, image):
         """Return a 2-D image array for Step 2 without changing bit depth.
