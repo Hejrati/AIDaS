@@ -236,7 +236,7 @@ class Step2Frame(ttk.Frame):
       - image_data: current numpy array being annotated
     """
 
-    def __init__(self, parent, preferences=None, source_step=None):
+    def __init__(self, parent, preferences=None, source_step=None, on_output_folder_changed=None):
         """Initialize the Step 2 annotation panel.
 
         Args:
@@ -248,6 +248,7 @@ class Step2Frame(ttk.Frame):
 
         self.preferences = preferences
         self.source_step = source_step
+        self.on_output_folder_changed = on_output_folder_changed
 
         # ─ Image data state ─
         self.current_file = None  # Path to currently loaded image
@@ -800,6 +801,16 @@ class Step2Frame(ttk.Frame):
         self.status_var.set(
             "Image loaded. Left-click to place points only after selecting an incomplete boundary."
         )
+        self._notify_output_folder_changed()
+
+    def _notify_output_folder_changed(self):
+        if self.on_output_folder_changed is None:
+            return
+        if not self.current_file or self.current_file == "Step 1 output":
+            return
+        folder = os.path.dirname(self.current_file)
+        if folder:
+            self.on_output_folder_changed(folder)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Boundary tracing actions

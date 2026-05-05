@@ -91,12 +91,18 @@ class AIDaSApp(tk.Tk):
         self.notebook.add(self.step1, text="  Step 1 — Load, Resize & Crop  ")
 
         # Step 2
-        self.step2 = Step2Frame(self.notebook, preferences=self.preferences, source_step=self.step1)
+        self.step2 = Step2Frame(
+            self.notebook,
+            preferences=self.preferences,
+            source_step=self.step1,
+            on_output_folder_changed=self._on_step2_output_folder_changed,
+        )
         self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
 
         # Step 3
-        self.step3 = Step3Frame(self.notebook, preferences=self.preferences, source_step=self.step2)
+        self.step3 = Step3Frame(self.notebook, preferences=self.preferences)
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         # Placeholder tabs for Steps 4
         for i, title in [
@@ -111,6 +117,11 @@ class AIDaSApp(tk.Tk):
         self.status = ttk.Label(self, text=f"AIDaS v{__version__} — ready",
                                 relief="sunken", anchor="w", padding=2)
         self.status.pack(side="bottom", fill="x")
+
+    def _on_notebook_tab_changed(self, _event=None):
+        selected = self.notebook.nametowidget(self.notebook.select())
+        if hasattr(selected, "on_show"):
+            selected.on_show()
 
     @staticmethod
     def _resource_path(relative_path):
@@ -176,6 +187,11 @@ class AIDaSApp(tk.Tk):
             return
         self.step2.load_external_image(image, source_path=source_path)
 
+    def _on_step2_output_folder_changed(self, folder):
+        """Keep Step 3 pointed at the folder Step 2 will save MARKED files into."""
+        if getattr(self, "step3", None) is None:
+            return
+        self.step3.set_input_folder(folder)
 
     # ── About dialog ──
     @staticmethod

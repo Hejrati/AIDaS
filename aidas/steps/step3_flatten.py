@@ -1772,13 +1772,20 @@ class Step3Frame(ttk.Frame):
     """Step 3 tab UI that runs this module's flattening pipeline inside the app."""
     SIDEBAR_WIDTH = 280
     SIDEBAR_TEXT_WRAP = 250
+    REQUIRED_INPUTS = (
+        ("Dark_MARKED", ("Dark_MARKED", "DARK_MARKED"), "Dark_MARKED.hdr/.img", 8),
+        ("Light_MARKED", ("Light_MARKED", "LIGHT_MARKED"), "Light_MARKED.hdr/.img", 8),
+        ("DARK", ("DARK", "Dark"), "DARK.hdr/.img", 16),
+        ("LIGHT", ("LIGHT", "Light"), "LIGHT.hdr/.img", 16),
+    )
 
-    def __init__(self, parent, preferences=None, source_step=None):
+    def __init__(self, parent, preferences=None):
         super().__init__(parent)
         self.preferences = preferences
-        self.source_step = source_step
 
-        self.current_sdb_dir = None
+        self.current_sdb_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        self.output_sdb_dir = self.current_sdb_dir
+        self._output_dir_user_selected = False
         self.processor = None
         self.results = None
         self.figure = None
@@ -1789,11 +1796,12 @@ class Step3Frame(ttk.Frame):
 
         self.slice_var = tk.StringVar(value="0")
         self.view_var = tk.StringVar(value="comparison")
-        self.status_var = tk.StringVar(value="Ready — load Step 2 MARKED files or choose folder.")
+        self.status_var = tk.StringVar(value="Ready - checking Step 3 input files.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
 
         self._build_ui()
+        self._refresh_input_status()
 
     def _build_ui(self):
         main = ttk.Frame(self)
@@ -1804,41 +1812,62 @@ class Step3Frame(ttk.Frame):
         left.configure(width=self.SIDEBAR_WIDTH)
         left.pack_propagate(False)
 
-        ttk.Button(left, text="Use Step 2 Output", command=self._use_step2_output).pack(fill="x", pady=2)
-        ttk.Button(left, text="Browse Output Folder", command=self._browse_output_folder).pack(fill="x", pady=2)
-        ttk.Button(left, text="Load MARKED + RAW (Choose Folder)", command=self._load_processor).pack(fill="x", pady=2)
+        sources = ttk.LabelFrame(left, text="Input and Output Folders", padding=3)
+        sources.pack(fill="x", pady=(0, 5))
 
-        self.dir_var = tk.StringVar(value="(no folder selected)")
+        ttk.Button(sources, text="Select Input Folder", command=self._load_processor).pack(fill="x", pady=2)
+
+        self.dir_var = tk.StringVar(value=f"Source: {self.current_sdb_dir}")
         ttk.Label(
-            left,
+            sources,
             textvariable=self.dir_var,
+            wraplength=self.SIDEBAR_TEXT_WRAP,
+            foreground="gray",
+            justify="left",
+        ).pack(fill="x", pady=(2, 6))
+
+        ttk.Button(sources, text="Select Output Folder", command=self._browse_output_folder).pack(fill="x", pady=2)
+
+        self.output_dir_var = tk.StringVar(value=f"Output: {self.output_sdb_dir}")
+        ttk.Label(
+            sources,
+            textvariable=self.output_dir_var,
             wraplength=self.SIDEBAR_TEXT_WRAP,
             foreground="gray",
             justify="left",
         ).pack(fill="x", pady=(2, 8))
 
-        ttk.Button(left, text="Run Step 3", command=self._run_processing).pack(fill="x", pady=2)
+        process = ttk.LabelFrame(left, text="Process", padding=3)
+        process.pack(fill="x", pady=(0, 5))
+
+        ttk.Button(process, text="Run Step 3", command=self._run_processing).pack(fill="x", pady=2)
         self.more_outputs_button = ttk.Button(
-            left,
+            process,
             text="More Process",
             command=self._run_more_outputs,
             state="disabled",
         )
         self.more_outputs_button.pack(fill="x", pady=2)
 
-        self.progress = ttk.Progressbar(left, mode="determinate", maximum=100)
+        self.progress = ttk.Progressbar(process, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=2)
+        progress_text_frame = ttk.Frame(process, height=44)
+        progress_text_frame.pack(fill="x", pady=(0, 4))
+        progress_text_frame.pack_propagate(False)
         ttk.Label(
-            left,
+            progress_text_frame,
             textvariable=self.progress_text_var,
             wraplength=self.SIDEBAR_TEXT_WRAP,
             foreground="gray",
             justify="left",
-        ).pack(fill="x", pady=(0, 4))
+        ).pack(fill="both", expand=True)
 
-        ttk.Label(left, text="View").pack(anchor="w", pady=(8, 2))
+        view_results = ttk.LabelFrame(left, text="View Results", padding=3)
+        view_results.pack(fill="x", pady=(0, 5))
+
+        ttk.Label(view_results, text="View").pack(anchor="w", pady=(0, 2))
         view_combo = ttk.Combobox(
-            left,
+            view_results,
             textvariable=self.view_var,
             values=["comparison", "grand_mean"],
             state="readonly",
@@ -1846,16 +1875,18 @@ class Step3Frame(ttk.Frame):
         view_combo.pack(fill="x", pady=2)
         view_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
 
-        ttk.Label(left, text="Slice").pack(anchor="w", pady=(8, 2))
-        slice_combo = ttk.Combobox(left, textvariable=self.slice_var, values=["0", "1"], state="readonly")
+        ttk.Label(view_results, text="Slice").pack(anchor="w", pady=(8, 2))
+        slice_combo = ttk.Combobox(view_results, textvariable=self.slice_var, values=["0", "1"], state="readonly")
         slice_combo.pack(fill="x", pady=2)
         slice_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
 
-        ttk.Button(left, text="Export Flattened", command=self._export_results).pack(fill="x", pady=(10, 2))
+        ttk.Separator(left).pack(fill="x", pady=3)
 
-        ttk.Separator(left).pack(fill="x", pady=8)
+        stats = ttk.LabelFrame(left, text="Stats", padding=3)
+        stats.pack(fill="x", pady=(0, 5))
+
         ttk.Label(
-            left,
+            stats,
             textvariable=self.info_var,
             wraplength=self.SIDEBAR_TEXT_WRAP,
             justify="left",
@@ -1920,90 +1951,170 @@ class Step3Frame(ttk.Frame):
             )
         return shapes
 
-    def _save_step2_marked_outputs(self):
-        if self.source_step is None or not hasattr(self.source_step, "_save_marked_images"):
-            return
-        saved = self.source_step._save_marked_images(require_complete=True)
-        if not saved:
-            raise RuntimeError("Step 2 MARKED outputs were not saved. Complete all Step 2 boundaries first.")
+    def _find_input_paths(self, folder):
+        return {
+            label: self._existing_basepath(folder, names)
+            for label, names, _display_name, _required_bits in self.REQUIRED_INPUTS
+        }
 
-    def _use_step2_output(self):
-        if self.source_step is None or not hasattr(self.source_step, "_marked_output_basepath"):
-            messagebox.showwarning("Step 2 Output", "Step 2 output is not available. Use Browse Output Folder.")
-            return
+    def _missing_input_names(self, input_paths):
+        return [
+            display_name
+            for label, _names, display_name, _required_bits in self.REQUIRED_INPUTS
+            if input_paths.get(label) is None
+        ]
 
-        try:
-            self._save_step2_marked_outputs()
-            dark_base = self.source_step._marked_output_basepath("Dark_MARKED")
-            self.current_sdb_dir = os.path.dirname(dark_base)
-            self.dir_var.set(self.current_sdb_dir)
-            self.status_var.set("Using Step 2 output folder. MARKED files saved.")
-        except Exception as exc:
-            messagebox.showerror("Step 2 Output", f"Could not read Step 2 output path.\n{exc}")
+    def _input_requirement_issues(self, input_paths, input_info):
+        issues = []
+        for label, _names, display_name, required_bits in self.REQUIRED_INPUTS:
+            if input_paths.get(label) is None:
+                issues.append(display_name)
+                continue
+            info = input_info.get(label)
+            if info is None:
+                issues.append(f"{display_name} cannot be read")
+                continue
+            if info["bits"] != required_bits:
+                issues.append(f"{display_name} must be {required_bits}-bit, found {info['bits']}-bit")
+        return issues
+
+    def _read_available_input_info(self, input_paths):
+        input_info = {}
+        read_errors = {}
+        for label, path in input_paths.items():
+            if path is None:
+                continue
+            try:
+                input_info[label] = self._analyze_stack_info(path)
+            except Exception as exc:
+                read_errors[label] = str(exc)
+        return input_info, read_errors
+
+    def _format_input_checklist(self, input_paths, input_info=None, read_errors=None):
+        input_info = {} if input_info is None else input_info
+        read_errors = {} if read_errors is None else read_errors
+        lines = []
+        for label, _names, display_name, required_bits in self.REQUIRED_INPUTS:
+            path = input_paths.get(label)
+            if path is None:
+                lines.append(f"✗ {display_name}")
+            elif label in read_errors:
+                lines.append(f"✗ {display_name} (cannot read)")
+            else:
+                info = input_info.get(label)
+                if info is not None and info["bits"] == required_bits:
+                    lines.append(f"✓ {display_name} ({required_bits}-bit)")
+                elif info is not None:
+                    lines.append(f"✗ {display_name} ({info['bits']}-bit, needs {required_bits}-bit)")
+                else:
+                    lines.append(f"✗ {display_name} (cannot read)")
+        return "\n".join(lines)
+
+    def _refresh_input_status(self):
+        if not self.current_sdb_dir:
+            self.processor = None
+            self.dir_var.set("Source: (no folder selected)")
+            input_paths = {label: None for label, _names, _display_name, _required_bits in self.REQUIRED_INPUTS}
+            self.info_var.set(
+                "Step 3 input files:\n"
+                + self._format_input_checklist(input_paths)
+                + "\n\nSelect a folder containing MARKED and RAW Analyze files."
+            )
+            self.status_var.set("Missing Step 3 input folder.")
+            return None, ["Step 3 input folder"]
+
+        self.dir_var.set(f"Source: {self.current_sdb_dir}")
+        self.output_dir_var.set(f"Output: {self.output_sdb_dir or '(no folder selected)'}")
+        input_paths = self._find_input_paths(self.current_sdb_dir)
+        input_info, read_errors = self._read_available_input_info(input_paths)
+        issues = self._missing_input_names(input_paths)
+        issues.extend(self._input_requirement_issues(input_paths, input_info))
+        issues = list(dict.fromkeys(issues))
+
+        if issues:
+            self.processor = None
+            self.info_var.set(
+                "Step 3 input files:\n"
+                + self._format_input_checklist(input_paths, input_info, read_errors)
+            )
+            self.status_var.set("Step 3 files are missing or do not meet bit-depth requirements.")
+            if self.more_outputs_button is not None:
+                self.more_outputs_button.configure(state="disabled")
+        else:
+            self.info_var.set(
+                "Step 3 is using these files:\n"
+                + self._format_input_checklist(input_paths, input_info, read_errors)
+            )
+            self.status_var.set("All required Step 3 files found with correct bit depth. Ready to run.")
+
+        return input_paths, issues
+
+    def on_show(self):
+        self._refresh_input_status()
+
+    def set_input_folder(self, folder):
+        if not folder:
+            return
+        self.current_sdb_dir = folder
+        if not self._output_dir_user_selected:
+            self.output_sdb_dir = folder
+        self._refresh_input_status()
 
     def _browse_output_folder(self):
-        folder = filedialog.askdirectory(title="Select folder containing MARKED and RAW Analyze files")
+        folder = filedialog.askdirectory(
+            title="Select output folder for Step 3 results",
+            initialdir=self.output_sdb_dir or self.current_sdb_dir or None,
+        )
         if folder:
-            self.current_sdb_dir = folder
-            self.dir_var.set(folder)
-            self.status_var.set("Output folder selected.")
+            self.output_sdb_dir = folder
+            self._output_dir_user_selected = True
+            self.output_dir_var.set(f"Output: {self.output_sdb_dir}")
+            self.status_var.set(f"Step 3 output folder set to {self.output_sdb_dir}.")
 
     def _load_processor(self):
         selected_folder = filedialog.askdirectory(
-            title="Select folder containing MARKED and RAW Analyze files",
+            title="Select input folder containing Step 3 MARKED and RAW Analyze files",
             initialdir=self.current_sdb_dir or None,
         )
         if not selected_folder:
             return
 
         self.current_sdb_dir = selected_folder
-        self.dir_var.set(selected_folder)
+        if not self._output_dir_user_selected:
+            self.output_sdb_dir = selected_folder
         self.status_var.set("Loading selected folder...")
         if self.more_outputs_button is not None:
             self.more_outputs_button.configure(state="disabled")
 
-        dark_marked = self._existing_basepath(self.current_sdb_dir, ["Dark_MARKED", "DARK_MARKED"])
-        light_marked = self._existing_basepath(self.current_sdb_dir, ["Light_MARKED", "LIGHT_MARKED"])
-        dark_raw = self._existing_basepath(self.current_sdb_dir, ["DARK", "Dark"])
-        light_raw = self._existing_basepath(self.current_sdb_dir, ["LIGHT", "Light"])
+        self._load_processor_from_current_folder(show_errors=True)
 
-        missing = []
-        if dark_marked is None:
-            missing.append("Dark_MARKED.hdr/.img")
-        if light_marked is None:
-            missing.append("Light_MARKED.hdr/.img")
-        if dark_raw is None:
-            missing.append("DARK.hdr/.img")
-        if light_raw is None:
-            missing.append("LIGHT.hdr/.img")
+    def _load_processor_from_current_folder(self, show_errors=False):
+        input_paths, input_issues = self._refresh_input_status()
 
-        if missing:
-            messagebox.showerror(
-                "Load",
-                "Cannot load Step 3 from this folder because these files are missing:\n"
-                + "\n".join(f"  • {item}" for item in missing)
-                + "\n\nStep 3 requires both marked references and both raw Analyze volumes.",
-            )
-            return
+        if input_issues:
+            if show_errors:
+                messagebox.showerror(
+                    "Load",
+                    "Cannot load Step 3 because these input requirements are not met:\n"
+                    + "\n".join(f"  - {item}" for item in input_issues)
+                    + "\n\nStep 3 requires 8-bit MARKED Analyze files and 16-bit raw DARK/LIGHT Analyze files.",
+                )
+            return False
 
-        input_paths = {
-            "Dark_MARKED": dark_marked,
-            "Light_MARKED": light_marked,
-            "DARK": dark_raw,
-            "LIGHT": light_raw,
-        }
         try:
             input_info = self._read_input_stack_info(input_paths)
+            self._validate_input_stack_shapes(input_info)
         except Exception as exc:
-            messagebox.showerror("Load", f"Cannot load Step 3 inputs.\n{exc}")
+            if show_errors:
+                messagebox.showerror("Load", f"Cannot load Step 3 inputs.\n{exc}")
             self.status_var.set("Step 3 input dimensions do not match.")
-            return
+            return False
 
         self.processor = OCTFlatteningProcessor(
-            reference_dark_path=dark_marked,
-            reference_light_path=light_marked,
-            dark_path=dark_raw,
-            light_path=light_raw,
+            reference_dark_path=input_paths["Dark_MARKED"],
+            reference_light_path=input_paths["Light_MARKED"],
+            dark_path=input_paths["DARK"],
+            light_path=input_paths["LIGHT"],
             image_index_dark=[0, 1],
             image_index_light=[0, 1],
             pixel_width=3.89,
@@ -2015,11 +2126,12 @@ class Step3Frame(ttk.Frame):
             f"{self._format_stack_info('DARK ', input_info['DARK'])}\n"
             f"{self._format_stack_info('LIGHT ', input_info['LIGHT'])}\n")
         self.status_var.set("Loaded Step 3 inputs with bit depth info. Ready to run.")
+        return True
 
     def _run_processing(self):
         if self.processor is None:
-            messagebox.showwarning("Run", "Load Step 3 inputs first.")
-            return
+            if not self._load_processor_from_current_folder(show_errors=True):
+                return
         if self._busy:
             return
 
@@ -2041,7 +2153,7 @@ class Step3Frame(ttk.Frame):
 
     def _process_worker(self):
         diff_logger = None
-        output_dir = self.current_sdb_dir
+        output_dir = self.output_sdb_dir or self.current_sdb_dir
         try:
             results = run_step3_pipeline(
                 self.processor,
@@ -2090,7 +2202,7 @@ class Step3Frame(ttk.Frame):
                 )
             self.status_var.set(msg)
         else:
-            self.status_var.set(f"Step 3 complete. Outputs saved to {save_dir or self.current_sdb_dir}")
+            self.status_var.set(f"Step 3 complete. Outputs saved to {save_dir or self.output_sdb_dir or self.current_sdb_dir}")
         self._render()
 
     def _render(self):
@@ -2165,39 +2277,16 @@ class Step3Frame(ttk.Frame):
             f"vertex: {self.results['vertex']}"
         )
 
-    def _export_results(self):
-        if self.results is None:
-            messagebox.showwarning("Export", "Run Step 3 first.")
-            return
-
-        out_dir = filedialog.askdirectory(title="Select export folder", initialdir=self.current_sdb_dir or None)
-        if not out_dir:
-            return
-
-        try:
-            # Convert UI/result arrays from (slice, x, y) to Analyze stack order
-            # (slice, y, x). The Analyze writer already applies the repo's file
-            # orientation convention, so we do not add an extra flip here.
-            dark_export = self._prepare_export_volume(self.results['final_dark'])
-            light_export = self._prepare_export_volume(self.results['final_light'])
-            write_analyze(os.path.join(out_dir, "_flat_DARK"), dark_export)
-            write_analyze(os.path.join(out_dir, "_flat_LIGHT"), light_export)
-            _save_main_style_exports(self.results, out_dir)
-            self.status_var.set("Flattened images exported.")
-            messagebox.showinfo("Export", "Exported _flat_DARK and _flat_LIGHT.")
-        except Exception as exc:
-            messagebox.showerror("Export", f"Export failed.\n{exc}")
-
     def _run_more_outputs(self):
         if self.results is None:
             messagebox.showwarning("More Process", "Run Step 3 first.")
             return
-        if not self.current_sdb_dir:
+        if not self.output_sdb_dir:
             messagebox.showwarning("More Process", "Choose an output folder first.")
             return
 
         try:
-            output_dir = Path(self.current_sdb_dir)
+            output_dir = Path(self.output_sdb_dir)
             flat_npz = output_dir / "DARK__and__LIGHT__flat.npz"
             done_npz = output_dir / "_done_DARK__and__LIGHT.npz"
             if not flat_npz.exists() or not done_npz.exists():
@@ -2232,7 +2321,7 @@ class Step3Frame(ttk.Frame):
 
     def _save_generated_outputs(self, results=None, output_dir=None, progress_cb=None, ui_updates=True):
         results = self.results if results is None else results
-        output_dir = self.current_sdb_dir if output_dir is None else output_dir
+        output_dir = self.output_sdb_dir if output_dir is None else output_dir
         if results is None or not output_dir:
             return None
 
