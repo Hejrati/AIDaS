@@ -186,6 +186,36 @@ def _resize_to_standard_format(volume_3d):
     return np.stack(resized_slices[:target_slices], axis=0)
 
 
+def _resize_volume_to_shape(volume_3d, target_shape):
+    """Resize a 3-D volume to an exact (slices, height, width) shape."""
+    if volume_3d.ndim != 3:
+        raise ValueError(f"Expected 3-D volume, got shape {volume_3d.shape}")
+
+    target_slices, target_height, target_width = (int(v) for v in target_shape)
+    current_slices, current_height, current_width = volume_3d.shape
+    if (
+        current_slices == target_slices
+        and current_height == target_height
+        and current_width == target_width
+    ):
+        return volume_3d.copy()
+
+    y_idx = np.floor(np.arange(target_height) * current_height / target_height).astype(np.int64)
+    x_idx = np.floor(np.arange(target_width) * current_width / target_width).astype(np.int64)
+    y_idx = np.clip(y_idx, 0, current_height - 1)
+    x_idx = np.clip(x_idx, 0, current_width - 1)
+
+    resized_slices = []
+    for s in range(min(current_slices, target_slices)):
+        slice_data = volume_3d[s]
+        resized_slices.append(np.ascontiguousarray(slice_data[np.ix_(y_idx, x_idx)]))
+
+    while len(resized_slices) < target_slices:
+        resized_slices.append(np.zeros((target_height, target_width), dtype=volume_3d.dtype))
+
+    return np.stack(resized_slices[:target_slices], axis=0)
+
+
 class Step2Frame(ttk.Frame):
     """GUI panel for tracing boundary lines and exporting pixel coordinates.
 
@@ -222,6 +252,7 @@ class Step2Frame(ttk.Frame):
         # ─ Image data state ─
         self.current_file = None  # Path to currently loaded image
         self.image_data = None  # Current numpy array displayed on canvas
+        self._source_was_8bit = False  # True when an opened 8-bit source was promoted for saving
         
         # ─ Preprocessing pipeline state ─
         self._last_auto_preprocessed_image = None  # Preprocessed image cached for AI segmentation
@@ -1742,8 +1773,8 @@ class Step2Frame(ttk.Frame):
           - Light_MARKED: RPE and Fovea marked on a light background (230)
           - Dark_MARKED: All 6 boundaries + Fovea marked on a dark background
 
-        All output volumes are automatically resized to standard format (177 height × 2133 width, 2 slices).
-        If preprocessing was applied, rescales boundaries back to original image dimensions.
+        All output volumes are automatically resized to standard format (current annotation height × 2133 width, 2 slices).
+        If preprocessing was applied, the annotation crop stays as the coordinate reference.
 
         Returns:
             Tuple (light_volume, dark_volume): Two 3-D uint8 numpy arrays in standard format.
@@ -1822,17 +1853,39 @@ class Step2Frame(ttk.Frame):
         
         return light_volume, dark_volume
 
-    def _save_light_dark_images(self):
+    def _source_image_for_original_save(self):
+        """Return the 16-bit source image that corresponds to current annotations."""
+        if (
+            self._preprocessing_done
+            and self._original_image_for_ai is not None
+            and self._preprocessing_info
+        ):
+            source = np.asarray(self._original_image_for_ai)
+            if source.ndim != 2:
+                raise ValueError("Original Step 2 image must be 2-D.")
+
+            x0 = int(self._preprocessing_info.get("crop_offset_x", 0))
+            y0 = int(self._preprocessing_info.get("crop_offset_y", 0))
+            crop_w = int(self._preprocessing_info.get("crop_w", self.image_data.shape[1]))
+            crop_h = int(self._preprocessing_info.get("crop_h", self.image_data.shape[0]))
+            y1 = min(y0 + crop_h, source.shape[0])
+            x1 = min(x0 + crop_w, source.shape[1])
+            return np.array(source[y0:y1, x0:x1], copy=True)
+
+        return self.image_data
+
+    def _save_light_dark_images(self, reference_shape=None):
         """Export unmarked LIGHT and DARK Analyze volumes from the current image.
 
-        These outputs use the original annotation image dtype. If AI
-        preprocessing temporarily displays an 8-bit model input, save the
-        backed-up original image instead so LIGHT/DARK remain 16-bit.
+        These outputs use the 16-bit image that corresponds to the current
+        annotation coordinates. If AI preprocessing displays an 8-bit crop,
+        save the same crop from the original image, then resize it to the
+        saved MARKED/annotation volume shape.
 
         Returns:
             List of saved file basepaths (without .img/.hdr extension).
         """
-        source_image = self._original_image_for_ai if self._original_image_for_ai is not None else self.image_data
+        source_image = self._source_image_for_original_save()
         if source_image is None:
             return []
 
@@ -1843,8 +1896,11 @@ class Step2Frame(ttk.Frame):
         # Create a 16-bit 3D stack with 2 identical slices
         stack = np.stack([image, image], axis=0)
 
-        # Resize to standard output format
-        stack = _resize_to_standard_format(stack)
+        # Match the annotation/MARKED output shape exactly.
+        if reference_shape is not None:
+            stack = _resize_volume_to_shape(stack, reference_shape)
+        else:
+            stack = _resize_to_standard_format(stack)
 
         saved_paths = []
         for base_path in self._preprocessed_output_basepaths():
@@ -1897,7 +1953,7 @@ class Step2Frame(ttk.Frame):
         write_analyze(dark_base_path, dark_marked)
         saved_paths.append(dark_base_path)
 
-        saved_paths.extend(self._save_light_dark_images())
+        saved_paths.extend(self._save_light_dark_images(reference_shape=light_marked.shape))
 
         self.status_var.set(
             "Saved marked images -> "
@@ -2008,6 +2064,12 @@ class Step2Frame(ttk.Frame):
         """
         if image.dtype == np.uint8:
             return np.array(image, copy=False)
+        if getattr(self, "_source_was_8bit", False) and image.dtype == np.uint16:
+            return np.clip(
+                np.rint(image.astype(np.float64) * (255.0 / 65535.0)),
+                0,
+                255,
+            ).astype(np.uint8)
         arr = image.astype(np.float64)
         lo = float(np.min(arr))
         hi = float(np.max(arr))
@@ -2016,21 +2078,32 @@ class Step2Frame(ttk.Frame):
         return np.clip(arr, 0, 255).astype(np.uint8)
 
     def _image_int16_for_original_save(self, image):
-        """Convert unmarked LIGHT/DARK save data to a positive 16-bit range.
+        """Convert unmarked LIGHT/DARK save data to signed 16-bit for Analyze.
 
-        Analyze stores datatype 4 as signed 16-bit, so values above 32767 can
-        appear dark or wrapped in readers. Keep saved originals in the positive
-        signed range while still avoiding 0-255-only output.
+        Step 1/Analyze data may already be signed int16. Preserve those values
+        exactly; clipping negatives to zero can turn valid OCT signal black.
+        8-bit sources promoted by Step 2 are scaled into the positive signed
+        range before writing.
         """
         arr = np.asarray(image)
         if arr.dtype.byteorder not in ("=", "|"):
             arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
 
+        if arr.dtype == np.int16:
+            return np.ascontiguousarray(arr)
+
+        if getattr(self, "_source_was_8bit", False) and arr.dtype == np.uint16:
+            arr_int = np.rint(arr.astype(np.float64) * (32767.0 / 65535.0)).astype(np.int64)
+            return np.ascontiguousarray(np.clip(arr_int, 0, 32767).astype(np.int16))
+
+        if arr.dtype == np.uint16:
+            return np.ascontiguousarray(arr.astype(np.int16, copy=False))
+
         if np.issubdtype(arr.dtype, np.integer):
             arr_int = arr.astype(np.int64)
             if int(np.min(arr_int)) >= 0 and int(np.max(arr_int)) <= 255:
                 arr_int = np.rint(arr_int * (32767.0 / 255.0)).astype(np.int64)
-            return np.ascontiguousarray(np.clip(arr_int, 0, 32767).astype(np.int16))
+            return np.ascontiguousarray(np.clip(arr_int, -32768, 32767).astype(np.int16))
 
         arr_float = arr.astype(np.float64)
         lo = float(np.nanmin(arr_float))
@@ -2042,16 +2115,20 @@ class Step2Frame(ttk.Frame):
         return np.ascontiguousarray(np.clip(arr_float, 0, 32767).astype(np.int16))
 
     def _image_for_annotation(self, image):
-        """Return a 2-D image array for Step 2 without changing bit depth.
+        """Return a 2-D image array for Step 2 annotation and saving.
 
         SDB data arrives from Step 1 already opened as 16-bit; keep that data
-        as-is instead of promoting or rescaling it here.
+        as-is. If a user opens an 8-bit image directly, promote it to a real
+        16-bit working copy so LIGHT/DARK saves never become 8-bit originals.
         """
         arr = np.asarray(image)
         if arr.ndim != 2:
             raise ValueError("Step 2 expects a 2-D grayscale image.")
         if arr.dtype.byteorder not in ("=", "|"):
             arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
+        self._source_was_8bit = arr.dtype == np.uint8
+        if arr.dtype == np.uint8:
+            arr = np.rint(arr.astype(np.float64) * (65535.0 / 255.0)).astype(np.uint16)
         return np.ascontiguousarray(arr)
 
     def _segmenter_model_size(self):
@@ -2179,22 +2256,21 @@ class Step2Frame(ttk.Frame):
         """Import boundary traces from neural network segmentation output.
 
         Reads the segmentation CSV (generated by oct-segmenter tool) and converts
-        each row of pixel coordinates into boundary traces. If preprocessing was
-        applied during segmentation, rescales the coordinates back to original
-        image space.
+        each row of pixel coordinates into boundary traces in the current
+        annotation image/crop space.
 
         Steps:
           1. Read CSV with columns: [pixel_x0, pixel_y0, pixel_x1, pixel_y1, ...]
             where rows correspond to the preset boundary order (`BOUNDARY_PRESETS`)
           2. For each boundary, reconstruct the polyline from pixel coordinates
-          3. If preprocessing_info exists, inverse-transform coordinates to original space
+          3. Keep coordinates in the current annotation image/crop space
           4. Add boundary to boundary_traces dict with color and pixels
           5. Mark boundary as complete and update UI
           6. Rebuild canvas overlays to show new boundaries
 
         Preprocessing rescaling:
-          - Reverse resize: pixel coords × (original_size / model_size)
-          - Reverse crop: add back crop offsets
+          - None here; saved 16-bit originals are cropped/resized to match the
+            annotation/MARKED output shape.
 
         Args:
             csv_path: Path to boundaries CSV file from oct-segmenter output.
