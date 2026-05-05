@@ -1778,6 +1778,14 @@ class Step3Frame(ttk.Frame):
         ("DARK", ("DARK", "Dark"), "DARK.hdr/.img", 16),
         ("LIGHT", ("LIGHT", "Light"), "LIGHT.hdr/.img", 16),
     )
+    CORE_RESULT_FILES = (
+        "_flat_DARK.hdr",
+        "_flat_DARK.img",
+        "_flat_LIGHT.hdr",
+        "_flat_LIGHT.img",
+        "DARK__and__LIGHT__flat.npz",
+        "_done_DARK__and__LIGHT.npz",
+    )
 
     def __init__(self, parent, preferences=None):
         super().__init__(parent)
@@ -1795,7 +1803,7 @@ class Step3Frame(ttk.Frame):
         self.last_diff_log_dir = None
 
         self.slice_var = tk.StringVar(value="0")
-        self.view_var = tk.StringVar(value="comparison")
+        self.view_var = tk.StringVar(value="Comparison")
         self.status_var = tk.StringVar(value="Ready - checking Step 3 input files.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
@@ -1869,7 +1877,7 @@ class Step3Frame(ttk.Frame):
         view_combo = ttk.Combobox(
             view_results,
             textvariable=self.view_var,
-            values=["comparison", "grand_mean"],
+            values=["Comparison", "DARK_MARKED_find_vertex", "DARK_MARKED_vertex"],
             state="readonly",
         )
         view_combo.pack(fill="x", pady=2)
@@ -2069,6 +2077,9 @@ class Step3Frame(ttk.Frame):
             self.output_sdb_dir = folder
             self._output_dir_user_selected = True
             self.output_dir_var.set(f"Output: {self.output_sdb_dir}")
+            if self._all_core_results_exist(self.output_sdb_dir):
+                self._load_existing_results_from_output_folder(show_errors=True)
+                return
             self.status_var.set(f"Step 3 output folder set to {self.output_sdb_dir}.")
 
     def _load_processor(self):
@@ -2082,11 +2093,71 @@ class Step3Frame(ttk.Frame):
         self.current_sdb_dir = selected_folder
         if not self._output_dir_user_selected:
             self.output_sdb_dir = selected_folder
+
+        if self._all_core_results_exist(self.output_sdb_dir):
+            self._load_existing_results_from_output_folder(show_errors=True)
+            return
+
         self.status_var.set("Loading selected folder...")
         if self.more_outputs_button is not None:
             self.more_outputs_button.configure(state="disabled")
 
         self._load_processor_from_current_folder(show_errors=True)
+
+    def _all_core_results_exist(self, folder):
+        if not folder:
+            return False
+        folder = Path(folder)
+        return all((folder / name).is_file() for name in self.CORE_RESULT_FILES)
+
+    def _load_existing_results_from_output_folder(self, show_errors=False):
+        if not self.output_sdb_dir:
+            return False
+        if not self._load_processor_from_current_folder(show_errors=show_errors):
+            return False
+
+        output_dir = Path(self.output_sdb_dir)
+        flat_npz = output_dir / "DARK__and__LIGHT__flat.npz"
+        try:
+            with np.load(flat_npz) as flat_data:
+                dark_rrc = np.asarray(flat_data["FLATTENED_DARK_RETINA_RRC"], dtype=np.float64)
+                light_rrc = np.asarray(flat_data["FLATTENED_LIGHT_RETINA_RRC"], dtype=np.float64)
+                markers = np.asarray(flat_data["FLATTENED_MARKERS_RRC"], dtype=np.float64)
+                vertex = int(np.ravel(flat_data["VERTEX"])[0])
+                self.results = {
+                    "flattened_dark": np.transpose(dark_rrc, (2, 0, 1)),
+                    "flattened_light": np.transpose(light_rrc, (2, 0, 1)),
+                    "final_dark": np.transpose(dark_rrc, (2, 0, 1)),
+                    "final_light": np.transpose(light_rrc, (2, 0, 1)),
+                    "markers": markers,
+                    "first_grand_mean": np.asarray(flat_data["FIRST_GRAND_MEAN"], dtype=np.float64),
+                    "second_grand_mean": np.asarray(flat_data["SECOND_GRAND_MEAN"], dtype=np.float64),
+                    "final_grand_mean": np.asarray(flat_data["FINAL_GRAND_MEAN"], dtype=np.float64),
+                    "grand_profile": np.asarray(flat_data["GRAND_PROFILE"], dtype=np.float64),
+                    "vertex": vertex,
+                    "shift_dark": np.asarray(flat_data["SHIFT_POSITION_DARK"], dtype=np.float64),
+                    "shift_light": np.asarray(flat_data["SHIFT_POSITION_LIGHT"], dtype=np.float64),
+                    "shift_dark_refined": np.asarray(flat_data["SHIFT_POSITION_DARK_REFINED"], dtype=np.float64),
+                    "shift_light_refined": np.asarray(flat_data["SHIFT_POSITION_LIGHT_REFINED"], dtype=np.float64),
+                    "best_lateral_dark": np.asarray(flat_data["BEST_LAT_MOVE_DARK"], dtype=np.float64),
+                    "best_lateral_light": np.asarray(flat_data["BEST_LAT_MOVE_LIGHT"], dtype=np.float64),
+                    "dark_rrc": dark_rrc,
+                    "light_rrc": light_rrc,
+                    "markers_rrc": markers,
+                }
+        except Exception as exc:
+            if show_errors:
+                messagebox.showerror("Load Results", f"Could not load existing Step 3 results.\n{exc}")
+            self.status_var.set("Could not load existing Step 3 results.")
+            return False
+
+        if self.more_outputs_button is not None:
+            self.more_outputs_button.configure(state="normal")
+        self.progress.configure(value=100)
+        self.progress_text_var.set("Loaded existing results")
+        self.status_var.set(f"Loaded existing Step 3 results from {output_dir}.")
+        self._render()
+        return True
 
     def _load_processor_from_current_folder(self, show_errors=False):
         input_paths, input_issues = self._refresh_input_status()
@@ -2134,6 +2205,14 @@ class Step3Frame(ttk.Frame):
                 return
         if self._busy:
             return
+        if self._all_core_results_exist(self.output_sdb_dir):
+            overwrite = messagebox.askyesno(
+                "Overwrite Step 3 Results",
+                "Step 3 results already exist in the output folder.\n\n"
+                "Running Step 3 will overwrite those files. Are you sure?",
+            )
+            if not overwrite:
+                return
 
         self._busy = True
         if self.more_outputs_button is not None:
@@ -2223,7 +2302,7 @@ class Step3Frame(ttk.Frame):
 
         fig = Figure(figsize=(11, 7), dpi=100)
 
-        if view == "grand_mean":
+        if view == "DARK_MARKED_find_vertex":
             # Row layout: profile on top, image on bottom
             ax1 = fig.add_subplot(211)
             ax2 = fig.add_subplot(212)
@@ -2245,24 +2324,34 @@ class Step3Frame(ttk.Frame):
             ax2.axhline(self.results['vertex'], color="r", linestyle="--", alpha=0.7)
             ax2.set_title("Final Grand Mean")
             ax2.axis("off")
+        elif view == "DARK_MARKED_vertex":
+            vertex_plot_path = Path(self.output_sdb_dir or self.current_sdb_dir) / "DARK_MARKED_vertex.png"
+            ax = fig.add_subplot(111)
+            if vertex_plot_path.is_file():
+                ax.imshow(plt.imread(vertex_plot_path))
+                ax.set_title("DARK_MARKED_vertex")
+                ax.axis("off")
+            else:
+                ax.text(
+                    0.5,
+                    0.5,
+                    "DARK_MARKED_vertex.png not found",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+                ax.axis("off")
+                self.status_var.set(f"DARK_MARKED_vertex.png not found in {vertex_plot_path.parent}.")
         else:
-            ax1 = fig.add_subplot(221)
-            ax2 = fig.add_subplot(222)
-            ax3 = fig.add_subplot(223)
-            ax4 = fig.add_subplot(224)
+            ax1 = fig.add_subplot(211)
+            ax2 = fig.add_subplot(212)
             # Original volumes are (y, x, slice); rotate 90° counter-clockwise for preview
-            ax1.imshow(np.rot90(self.processor.dark[:, :, slice_idx], k=1), cmap="gray", aspect="auto")
-            ax1.set_title("Original DARK")
+            ax1.imshow(np.rot90(self.processor.light[:, :, slice_idx], k=1), cmap="gray", aspect="auto")
+            ax1.set_title("Original LIGHT")
             ax1.axis("off")
-            ax2.imshow(self.results['flattened_dark'][slice_idx].T, cmap="gray", aspect="auto")
-            ax2.set_title("Flattened DARK")
+            ax2.imshow(self.results['flattened_light'][slice_idx].T, cmap="gray", aspect="auto")
+            ax2.set_title("Flattened LIGHT")
             ax2.axis("off")
-            ax3.imshow(np.rot90(self.processor.light[:, :, slice_idx], k=1), cmap="gray", aspect="auto")
-            ax3.set_title("Original LIGHT")
-            ax3.axis("off")
-            ax4.imshow(self.results['flattened_light'][slice_idx].T, cmap="gray", aspect="auto")
-            ax4.set_title("Flattened LIGHT")
-            ax4.axis("off")
 
         fig.tight_layout()
         self.figure = fig
