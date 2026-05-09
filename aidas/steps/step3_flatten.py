@@ -14,7 +14,7 @@ Core steps:
 from __future__ import annotations
 
 import numpy as np
-from scipy.interpolate import BSpline, UnivariateSpline, interp1d
+from scipy.interpolate import BSpline, UnivariateSpline
 from scipy.stats import pearsonr
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -86,16 +86,6 @@ def _build_coordinate_grids(image_2d):
         ys[row, :] = insert_y
 
     return xs, ys
-
-
-def _fit_line_coeffs(points):
-    """Return R-style linear-model coefficients [intercept, slope]."""
-    arr = np.asarray(points, dtype=np.float64)
-    x = arr[:, 0]
-    y = arr[:, 1]
-    design = np.column_stack((np.ones_like(x), x))
-    coeffs, *_ = np.linalg.lstsq(design, y, rcond=None)
-    return coeffs.astype(np.float64)
 
 
 def _fit_smooth_spline_like_r(x, y, df, degree=3):
@@ -271,10 +261,6 @@ class OCTFlatteningProcessor:
         self.image_index_light = image_index_light
         self.pixel_width = pixel_width
         
-        # Spline parameters
-        self.df_initial_spline = 10
-        self.df_second_fit = 10
-        
         # Load images
         self.ref_dark = self._load_analyze(reference_dark_path)
         self.ref_light = self._load_analyze(reference_light_path)
@@ -285,98 +271,6 @@ class OCTFlatteningProcessor:
     def _load_analyze(base_path):
         """Load Analyze data using the same axis convention as main.py."""
         return _load_analyze_volume_r_layout(base_path)
-    
-    def find_rpe_and_fovea(self, slice_idx=0, reference_volume=None):
-        """Extract RPE spline and fovea center using main.py logic."""
-        ref_volume = self.ref_dark if reference_volume is None else reference_volume
-        ref = ref_volume[:, :, slice_idx]
-        xs, ys = _build_coordinate_grids(ref)
-
-        fovea_mask = np.asarray(ref, dtype=np.float64).copy()
-        fovea_mask[fovea_mask < 243] = np.nan
-        fovea_mask[fovea_mask > 243] = np.nan
-        fovea_mask[fovea_mask == 243] = 1.0
-
-        xcoords = xs * fovea_mask
-        ycoords = ys * fovea_mask
-        mask = ~np.isnan(xcoords)
-        fovea_line = np.column_stack((xcoords[mask], ycoords[mask]))
-        if fovea_line.size:
-            fovea_line = fovea_line[np.argsort(fovea_line[:, 0])]
-        else:
-            fovea_line = np.array([[1.0, 1.0], [1.1, 1.0]], dtype=np.float64)
-        if fovea_line.shape[0] > 0 and np.unique(fovea_line[:, 0]).size == 1:
-            fovea_line[0, 0] = fovea_line[0, 0] + 0.1
-
-        rpe_mask = np.asarray(ref, dtype=np.float64).copy()
-        rpe_mask[rpe_mask < 255] = np.nan
-        rpe_mask[rpe_mask > 255] = np.nan
-        rpe_mask[rpe_mask == 255] = 1.0
-
-        xcoords = xs * rpe_mask
-        ycoords = ys * rpe_mask
-        mask = ~np.isnan(xcoords)
-        rpe_line = np.column_stack((xcoords[mask], ycoords[mask]))
-        if rpe_line.size:
-            rpe_line = rpe_line[np.argsort(rpe_line[:, 0])]
-        else:
-            rpe_line = np.array([[1.0, 1.0], [1.1, 1.0]], dtype=np.float64)
-
-        rpe_sp = _fit_smooth_spline_like_r(rpe_line[:, 0], rpe_line[:, 1], df=self.df_initial_spline)
-        pred_x = np.arange(0.0, ref.shape[0] + 0.02, 0.02)
-        pred_y = rpe_sp(pred_x)
-        pred_dy = rpe_sp.derivative()(pred_x)
-        rpe_spline = np.column_stack((pred_x, pred_y, pred_dy))
-
-        rpe_spline_compare = np.vstack((rpe_spline[1:], rpe_spline[-1:]))
-        rpe_spline = np.column_stack((rpe_spline[:, 0], rpe_spline))
-        rpe_spline[:, 0] = np.sqrt(
-            (rpe_spline[:, 1] - rpe_spline_compare[:, 0]) ** 2
-            + (rpe_spline[:, 2] - rpe_spline_compare[:, 1]) ** 2
-        )
-        rpe_spline = np.column_stack((np.cumsum(rpe_spline[:, 0]), rpe_spline))
-
-        fovea_coeffs = _fit_line_coeffs(fovea_line)
-        compare_fovea_and_rpe = rpe_spline[:, [2, 3, 3, 3]].copy()
-        compare_fovea_and_rpe[:, 2] = compare_fovea_and_rpe[:, 0] * fovea_coeffs[1] + fovea_coeffs[0]
-        compare_fovea_and_rpe[:, 3] = np.abs(compare_fovea_and_rpe[:, 1] - compare_fovea_and_rpe[:, 2])
-        center = int(np.where(compare_fovea_and_rpe[:, 3] == np.min(compare_fovea_and_rpe[:, 3]))[0][0] + 1)
-        center_value = float(rpe_spline[center - 1, 0])
-
-        return rpe_spline, fovea_coeffs, center_value
-    
-    def build_retina_points(self, rpe_spline, center_value):
-        """Build the R-style perpendicular sample geometry from main.py."""
-        rpe_info = rpe_spline[:, [2, 3, 4, 0]].copy()
-        rpe_info[:, 3] = np.round((rpe_info[:, 3] - center_value) * self.pixel_width, 0)
-        rpe_info = rpe_info[(rpe_info[:, 3] > -200.9) & (rpe_info[:, 3] < 3000.9)]
-
-        unique_dist = np.unique(rpe_info[:, 3])
-        rpe_info_2 = np.column_stack((unique_dist, unique_dist, unique_dist, unique_dist))
-        for x in range(rpe_info_2.shape[0]):
-            first = np.where(rpe_info[:, 3] == rpe_info_2[x, 3])[0][0]
-            rpe_info_2[x, 0:3] = rpe_info[first, 0:3]
-
-        rpe_info_2[:, 2] = (-1.0) / rpe_info_2[:, 2]
-
-        deltas = rpe_info_2[:, [0, 1]].copy()
-        deltas[:, 0] = np.cos(np.arctan(rpe_info_2[:, 2]))
-        deltas[:, 1] = np.sin(np.arctan(rpe_info_2[:, 2]))
-        pixel_move = round(500 / self.pixel_width, 1)
-        deltas = deltas * pixel_move
-
-        add = deltas.copy()
-        flip = deltas * (-1.0)
-        add[:, 0] = np.where(flip[:, 1] > 0, flip[:, 0], add[:, 0])
-        add[:, 1] = np.where(flip[:, 1] > 0, flip[:, 1], add[:, 1])
-        sub = add / (-10.0)
-        add = add - (add / 10.0)
-
-        retina_points = rpe_info_2[:, [3, 0, 1, 2, 2, 2, 2, 2]].copy()
-        retina_points[:, 4:6] = add + retina_points[:, 1:3]
-        retina_points[:, 6:8] = sub + retina_points[:, 1:3]
-
-        return retina_points
     
     def sample_perpendiculars(self, image_2d, retina_points, n_samples=500, progress_cb=None):
         """Sample image intensities using the same floor-based logic as main.py."""
@@ -472,95 +366,6 @@ class OCTFlatteningProcessor:
                 out.append(idx)
                 seen.add(idx)
         return out
-    
-    def compute_alignment_shift(self, flattened_volume, grand_mean, window_width=400):
-        """Compute optimal vertical shift to align image to grand mean.
-        
-        Returns:
-            Array of optimal shifts for each perpendicular
-        """
-        start_move = 200
-        end_move = flattened_volume.shape[0] - start_move - 1
-        
-        shifts = np.full(flattened_volume.shape[0], np.nan)
-        
-        for x_idx in range(start_move, min(end_move, flattened_volume.shape[0] - window_width), 50):
-            # Extract window
-            x_start = max(0, x_idx - window_width // 2)
-            x_end = min(flattened_volume.shape[0], x_idx + window_width // 2)
-            
-            profile = np.nanmean(flattened_volume[x_start:x_end, :], axis=0)
-            comparison = np.nanmean(grand_mean[x_start:x_end, :], axis=0)
-            
-            # Try shifts from -10 to +10 microns
-            best_corr = -np.inf
-            best_shift = 0
-            
-            for shift in range(-10, 11):
-                shift_px = int(np.round(shift * 10 / self.pixel_width))
-                
-                if shift_px == 0:
-                    corr = pearsonr(profile[~np.isnan(profile)], 
-                                   comparison[~np.isnan(comparison)])[0]
-                elif shift_px > 0:
-                    if len(profile[shift_px:]) > 10 and len(comparison[:-shift_px]) > 10:
-                        valid = ~(np.isnan(profile[shift_px:]) | np.isnan(comparison[:-shift_px]))
-                        if valid.sum() > 10:
-                            corr = pearsonr(profile[shift_px:][valid], 
-                                          comparison[:-shift_px][valid])[0]
-                        else:
-                            corr = -np.inf
-                    else:
-                        corr = -np.inf
-                else:
-                    shift_px = -shift_px
-                    if len(profile[:-shift_px]) > 10 and len(comparison[shift_px:]) > 10:
-                        valid = ~(np.isnan(profile[:-shift_px]) | np.isnan(comparison[shift_px:]))
-                        if valid.sum() > 10:
-                            corr = pearsonr(profile[:-shift_px][valid], 
-                                          comparison[shift_px:][valid])[0]
-                        else:
-                            corr = -np.inf
-                    else:
-                        corr = -np.inf
-                
-                if not np.isnan(corr) and corr > best_corr:
-                    best_corr = corr
-                    best_shift = shift
-            
-            shifts[x_idx] = best_shift
-        
-        # Interpolate shifts
-        valid_shifts = ~np.isnan(shifts)
-        if valid_shifts.sum() > 1:
-            shifts_interp = interp1d(np.where(valid_shifts)[0], 
-                                     shifts[valid_shifts],
-                                     kind='linear', 
-                                     fill_value='extrapolate')
-            shifts = shifts_interp(np.arange(shifts.shape[0]))
-        
-        return shifts
-    
-    def apply_shift_to_volume(self, volume, shifts, markers=None):
-        """Apply computed shifts to flatten volume.
-        
-        Returns:
-            Shifted volume
-        """
-        shifted = np.full_like(volume, np.nan)
-        
-        for x_idx in range(volume.shape[0]):
-            if not np.isnan(shifts[x_idx]):
-                shift_px = int(np.round(shifts[x_idx] * 10 / self.pixel_width))
-                
-                if shift_px == 0:
-                    shifted[x_idx, :] = volume[x_idx, :]
-                elif shift_px > 0:
-                    shifted[x_idx, shift_px:] = volume[x_idx, :-shift_px]
-                else:
-                    shifted[x_idx, :shift_px] = volume[x_idx, -shift_px:]
-        
-        return shifted
     
     def process_all_slices(self, progress_cb=None):
         """Process all slices and return flattened volumes.
