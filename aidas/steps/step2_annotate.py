@@ -38,7 +38,7 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageDraw
 
-from aidas.image_canvas import ImageCanvas
+from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.ui_utils import apply_app_icon_to
 
@@ -1799,7 +1799,7 @@ class Step2Frame(ttk.Frame):
         # Resize image to target standard width if needed. Height is preserved.
         if (orig_h, orig_w) != (target_h, target_w):
             base_marked = np.array(
-                Image.fromarray(base_marked).resize((target_w, target_h), Image.Resampling.NEAREST),
+                Image.fromarray(base_marked).resize((target_w, target_h), RESAMPLE_NEAREST),
                 dtype=np.uint8,
             )
             # Calculate scaling factors for boundary coordinates
