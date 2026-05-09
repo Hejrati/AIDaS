@@ -22,7 +22,8 @@ dependencies:
   - unicodedata2=17.0.1
   - pip
   - pip:
-    - C:/Users/behzad/Desktop/AIDaS/OCT%20Segmenter/oct_segmenter-0.8.4-py3-none-any.whl
+    - ./OCT Segmenter/oct_segmenter-0.8.4-py3-none-any.whl
+    - ./OCT Segmenter/oct_image_segmentation_models-0.8.4-py3-none-any.whl
     - imgviz==1.8.0
     - prettytable==3.17.0
     - art==6.5
@@ -32,7 +33,7 @@ dependencies:
 
 # Notes:
 # - This file pins key conda packages (preferred from conda-forge) and
-#   installs a local wheel for `oct-segmenter` plus a few pip-only packages.
+#   installs local wheels for `oct-segmenter` and its image segmentation models
 # - If you prefer everything via pip, run `pip install -r requirements.txt`.
 # - To create the environment locally:
 #
