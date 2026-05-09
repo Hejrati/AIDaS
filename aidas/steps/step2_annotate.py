@@ -2057,6 +2057,69 @@ class Step2Frame(ttk.Frame):
         # Fallback: run as module when not frozen (developer machine with Python).
         return [sys.executable, "-m", "oct_segmenter"]
 
+    def _segmenter_subprocess_env(self):
+        """Return an environment suitable for launching Windows CLI tools."""
+        env = os.environ.copy()
+        if os.name != "nt":
+            return env
+
+        system_root = env.get("SystemRoot") or env.get("WINDIR") or r"C:\Windows"
+
+        def set_default_env(name, value):
+            if not value:
+                return
+            for key in env:
+                if key.lower() == name.lower():
+                    return
+            env[name] = value
+
+        set_default_env("SystemRoot", system_root)
+        set_default_env("WINDIR", system_root)
+
+        system32 = os.path.join(system_root, "System32")
+        cmd_exe = os.path.join(system32, "cmd.exe")
+        if os.path.exists(cmd_exe):
+            set_default_env("ComSpec", cmd_exe)
+
+        path_key = next((key for key in env if key.lower() == "path"), "PATH")
+        existing_path = env.get(path_key, "")
+        existing_parts = [part for part in existing_path.split(os.pathsep) if part]
+        existing_norms = {
+            os.path.normcase(os.path.normpath(part))
+            for part in existing_parts
+        }
+        windows_dirs = [
+            system32,
+            system_root,
+            os.path.join(system32, "Wbem"),
+            os.path.join(system32, "WindowsPowerShell", "v1.0"),
+        ]
+        appdata = env.get("APPDATA")
+        if not appdata:
+            userprofile = env.get("USERPROFILE")
+            if userprofile:
+                appdata = os.path.join(userprofile, "AppData", "Roaming")
+        user_python_root = os.path.join(appdata, "Python") if appdata else None
+        if user_python_root and os.path.isdir(user_python_root):
+            for name in sorted(os.listdir(user_python_root), reverse=True):
+                scripts_dir = os.path.join(user_python_root, name, "Scripts")
+                if os.path.isdir(scripts_dir):
+                    windows_dirs.append(scripts_dir)
+
+        prepend_parts = []
+        for path in windows_dirs:
+            if not os.path.isdir(path):
+                continue
+            norm_path = os.path.normcase(os.path.normpath(path))
+            if norm_path not in existing_norms:
+                prepend_parts.append(path)
+                existing_norms.add(norm_path)
+
+        if prepend_parts:
+            env[path_key] = os.pathsep.join(prepend_parts + existing_parts)
+
+        return env
+
     def _image_uint8(self, image):
         """Convert image to 8-bit (0-255) range with auto-scaling.
 
@@ -2511,6 +2574,7 @@ class Step2Frame(ttk.Frame):
                 cmd,
                 capture_output=True,
                 text=True,
+                env=self._segmenter_subprocess_env(),
                 creationflags=creationflags,
                 startupinfo=startupinfo,
             )
