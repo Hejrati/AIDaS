@@ -1577,6 +1577,12 @@ class Step3Frame(ttk.Frame):
     """Step 3 tab UI that runs this module's flattening pipeline inside the app."""
     SIDEBAR_WIDTH = 280
     SIDEBAR_TEXT_WRAP = 250
+    PIXEL_WIDTH_UM = 3.89
+    MIN_NEGATIVE_UM = 200.0
+    MIN_POSITIVE_UM = 3000.0
+    MIN_DEPTH_OUTWARD_UM = 50.0
+    MIN_DEPTH_INWARD_UM = 450.0
+    CENTERED_FOVEA_GUARD_PX = 100
     REQUIRED_INPUTS = (
         ("Dark_MARKED", ("Dark_MARKED", "DARK_MARKED"), "Dark_MARKED.hdr/.img", 8),
         ("Light_MARKED", ("Light_MARKED", "LIGHT_MARKED"), "Light_MARKED.hdr/.img", 8),
@@ -1608,7 +1614,7 @@ class Step3Frame(ttk.Frame):
         self.last_diff_log_dir = None
 
         self.slice_var = tk.StringVar(value="0")
-        self.view_var = tk.StringVar(value="Comparison")
+        self.view_var = tk.StringVar(value="Tutorial")
         self.status_var = tk.StringVar(value="Ready - checking Step 3 input files.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
@@ -1657,7 +1663,7 @@ class Step3Frame(ttk.Frame):
         self.more_outputs_button = ttk.Button(
             process,
             text="More Process",
-            command=self._run_more_outputs,
+            # command=self._run_more_outputs,
             state="disabled",
         )
         self.more_outputs_button.pack(fill="x", pady=2)
@@ -1682,7 +1688,7 @@ class Step3Frame(ttk.Frame):
         view_combo = ttk.Combobox(
             view_results,
             textvariable=self.view_var,
-            values=["Comparison", "DARK_MARKED_find_vertex", "DARK_MARKED_vertex"],
+            values=["Tutorial", "Comparison", "DARK_MARKED_find_vertex", "DARK_MARKED_vertex"],
             state="readonly",
         )
         view_combo.pack(fill="x", pady=2)
@@ -1713,6 +1719,7 @@ class Step3Frame(ttk.Frame):
         ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=3).pack(
             side="bottom", fill="x"
         )
+        self._render()
 
     @staticmethod
     def _existing_basepath(folder, names):
@@ -2090,17 +2097,30 @@ class Step3Frame(ttk.Frame):
         self._render()
 
     def _render(self):
-        if self.results is None:
-            return
-
         if Figure is None or FigureCanvasTkAgg is None:
             self.status_var.set("Matplotlib is unavailable in this environment; preview rendering is disabled.")
+            return
+
+        view = self.view_var.get()
+        if view != "Tutorial" and self.results is None:
+            self.status_var.set("Run Step 3 first, or choose Tutorial for the fovea spacing example.")
             return
 
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
 
-        view = self.view_var.get()
+        if view == "Tutorial":
+            fig = Figure(figsize=(11, 7), dpi=100)
+            self._draw_step3_tutorial(fig)
+            self.info_var.set(self._tutorial_info_text())
+            self.status_var.set("Step 3 tutorial: fovea spacing and source-depth minimums.")
+            fig.tight_layout()
+            self.figure = fig
+            self.canvas = FigureCanvasTkAgg(fig, master=self.plot_holder)
+            self.canvas.draw()
+            self.canvas.get_tk_widget().pack(fill="both", expand=True)
+            return
+
         slice_idx = int(self.slice_var.get())
         max_slice = self.results['flattened_dark'].shape[0] - 1
         slice_idx = max(0, min(slice_idx, max_slice))
@@ -2169,6 +2189,208 @@ class Step3Frame(ttk.Frame):
             f"flattened_light: {self.results['flattened_light'].shape}\n"
             f"final_grand_mean: {self.results['final_grand_mean'].shape}\n"
             f"vertex: {self.results['vertex']}"
+        )
+
+    @staticmethod
+    def _dimension_arrow(ax, start, end, y, label, color="black", text_offset=0.04):
+        ax.annotate(
+            "",
+            xy=(end, y),
+            xytext=(start, y),
+            arrowprops={"arrowstyle": "<->", "color": color, "linewidth": 1.4},
+        )
+        ax.text(
+            (start + end) / 2.0,
+            y + text_offset,
+            label,
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            color=color,
+        )
+
+    def _tutorial_info_text(self):
+        left_px = int(np.ceil(self.MIN_NEGATIVE_UM / self.PIXEL_WIDTH_UM))
+        right_px = int(np.ceil(self.MIN_POSITIVE_UM / self.PIXEL_WIDTH_UM))
+        source_width_px = int(np.ceil((self.MIN_NEGATIVE_UM + self.MIN_POSITIVE_UM) / self.PIXEL_WIDTH_UM))
+        outward_px = int(np.ceil(self.MIN_DEPTH_OUTWARD_UM / self.PIXEL_WIDTH_UM))
+        inward_px = int(np.ceil(self.MIN_DEPTH_INWARD_UM / self.PIXEL_WIDTH_UM))
+        safe_centered_side_px = right_px + self.CENTERED_FOVEA_GUARD_PX
+        return (
+            "Step 3 tutorial minimums:\n"
+            f"Pixel width: {self.PIXEL_WIDTH_UM:g} um/input px\n"
+            f"Fovea to near side: >= {left_px} px ({self.MIN_NEGATIVE_UM:g} um)\n"
+            f"Fovea to far side: >= {right_px} px ({self.MIN_POSITIVE_UM:g} um)\n"
+            f"Minimum RPE marker coverage: about {source_width_px} px\n"
+            f"Centered fovea minimum: >= {right_px * 2} px\n"
+            f"Centered fovea recommended: >= {safe_centered_side_px * 2} px "
+            f"({safe_centered_side_px} px per side)\n"
+            f"Height around RPE: >= {inward_px} px from top and >= {outward_px} px from bottom\n"
+            f"Centered RPE height: >= {inward_px * 2} px"
+        )
+
+    def _draw_step3_tutorial(self, fig):
+        left_px = int(np.ceil(self.MIN_NEGATIVE_UM / self.PIXEL_WIDTH_UM))
+        right_px = int(np.ceil(self.MIN_POSITIVE_UM / self.PIXEL_WIDTH_UM))
+        source_width_px = int(np.ceil((self.MIN_NEGATIVE_UM + self.MIN_POSITIVE_UM) / self.PIXEL_WIDTH_UM))
+        centered_width_px = right_px * 2
+        safe_centered_side_px = right_px + self.CENTERED_FOVEA_GUARD_PX
+        safe_centered_width_px = safe_centered_side_px * 2
+        outward_px = int(np.ceil(self.MIN_DEPTH_OUTWARD_UM / self.PIXEL_WIDTH_UM))
+        inward_px = int(np.ceil(self.MIN_DEPTH_INWARD_UM / self.PIXEL_WIDTH_UM))
+        depth_px = int(np.ceil((self.MIN_DEPTH_OUTWARD_UM + self.MIN_DEPTH_INWARD_UM) / self.PIXEL_WIDTH_UM))
+        centered_height_px = inward_px * 2
+
+        ax1 = fig.add_subplot(311)
+        ax2 = fig.add_subplot(312)
+        ax3 = fig.add_subplot(313)
+
+        for ax in (ax1, ax2, ax3):
+            ax.set_xlim(0.0, 1.0)
+            ax.set_ylim(0.0, 1.0)
+            ax.axis("off")
+
+        x0, x1 = 0.06, 0.95
+        fovea_x = x0 + ((x1 - x0) * self.MIN_NEGATIVE_UM / (self.MIN_NEGATIVE_UM + self.MIN_POSITIVE_UM))
+        y = 0.44
+        ax1.set_title("Minimum RPE marker coverage for Step 3", loc="left", fontsize=12, fontweight="bold")
+        ax1.fill_between([x0, fovea_x], 0.34, 0.55, color="#f3b562", alpha=0.28)
+        ax1.fill_between([fovea_x, x1], 0.34, 0.55, color="#7cb7e8", alpha=0.24)
+        ax1.plot([x0, x1], [y, y], color="#a31d1d", linewidth=3.0)
+        ax1.plot([fovea_x, fovea_x], [0.22, 0.73], color="#1f5c99", linewidth=2.0)
+        ax1.scatter([fovea_x], [y], s=70, color="#1f5c99", zorder=3)
+        self._dimension_arrow(
+            ax1,
+            x0,
+            fovea_x,
+            0.72,
+            f"-200 um side >= {left_px} px",
+            color="#99621f",
+            text_offset=0.02,
+        )
+        self._dimension_arrow(
+            ax1,
+            fovea_x,
+            x1,
+            0.72,
+            f"+3000 um side >= {right_px} px",
+            color="#1f5c99",
+            text_offset=0.02,
+        )
+        ax1.text(fovea_x, 0.14, "fovea marker 243", ha="center", va="center", fontsize=9, color="#1f5c99")
+        ax1.text(x1, 0.25, "RPE marker 255", ha="right", va="center", fontsize=9, color="#a31d1d")
+        ax1.text(
+            0.5,
+            0.02,
+            f"Smallest useful marked-RPE length is about {source_width_px} input px "
+            f"({self.MIN_NEGATIVE_UM + self.MIN_POSITIVE_UM:g} um).",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+        x0, x1, fovea_x, y = 0.12, 0.88, 0.50, 0.48
+        minimum_left_x = fovea_x - ((fovea_x - x0) * right_px / safe_centered_side_px)
+        minimum_right_x = fovea_x + ((x1 - fovea_x) * right_px / safe_centered_side_px)
+        ax2.set_title("If the fovea is centered in the image", loc="left", fontsize=12, fontweight="bold")
+        ax2.fill_between([x0, minimum_left_x], 0.35, 0.59, color="#f3b562", alpha=0.5)
+        ax2.fill_between([minimum_left_x, minimum_right_x], 0.35, 0.59, color="#d9d9d9", alpha=0.55)
+        ax2.fill_between([minimum_right_x, x1], 0.35, 0.59, color="#f3b562", alpha=0.5)
+        ax2.plot([minimum_left_x, minimum_left_x], [0.33, 0.61], color="#99621f", linewidth=1.0, linestyle="--")
+        ax2.plot([minimum_right_x, minimum_right_x], [0.33, 0.61], color="#99621f", linewidth=1.0, linestyle="--")
+        ax2.plot([x0, x1], [y, y], color="#a31d1d", linewidth=3.0)
+        ax2.plot([fovea_x, fovea_x], [0.27, 0.61], color="#1f5c99", linewidth=2.0)
+        ax2.scatter([fovea_x], [y], s=70, color="#1f5c99", zorder=3)
+        self._dimension_arrow(
+            ax2,
+            x0,
+            x1,
+            0.84,
+            f"recommended full image width = {safe_centered_width_px} px",
+            color="#333333",
+            text_offset=0.015,
+        )
+        self._dimension_arrow(ax2, x0, minimum_left_x, 0.66, "100 px", color="#99621f", text_offset=0.015)
+        self._dimension_arrow(
+            ax2,
+            minimum_left_x,
+            minimum_right_x,
+            0.66,
+            f"actual minimum = {centered_width_px} px",
+            color="#444444",
+            text_offset=0.015,
+        )
+        self._dimension_arrow(ax2, minimum_right_x, x1, 0.66, "100 px", color="#99621f", text_offset=0.015)
+        ax2.text(
+            0.5,
+            0.22,
+            "gold = guard area, gray = actual minimum width",
+            ha="center",
+            va="center",
+            fontsize=9,
+            color="#444444",
+        )
+        ax2.text(fovea_x, 0.17, "centered fovea", ha="center", va="center", fontsize=9, color="#1f5c99")
+        ax2.text(
+            0.5,
+            0.03,
+            f"Minimum centered width is {centered_width_px} input px; recommended with 100 px guard "
+            f"on each side is {safe_centered_width_px} input px.",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+        ax3.set_title("Minimum source-image height/depth around the RPE", loc="left", fontsize=12, fontweight="bold")
+        img_left, img_right = 0.22, 0.50
+        top, bottom = 0.82, 0.15
+        rpe_y = bottom + (
+            (top - bottom)
+            * self.MIN_DEPTH_OUTWARD_UM
+            / (self.MIN_DEPTH_OUTWARD_UM + self.MIN_DEPTH_INWARD_UM)
+        )
+        ax3.fill_between([img_left, img_right], bottom, top, color="#d9d9d9", alpha=0.45)
+        ax3.plot([img_left, img_right, img_right, img_left, img_left], [bottom, bottom, top, top, bottom], color="#666666")
+        ax3.plot([img_left, img_right], [rpe_y, rpe_y], color="#a31d1d", linewidth=3.0)
+        ax3.annotate(
+            "",
+            xy=(0.61, top),
+            xytext=(0.61, rpe_y),
+            arrowprops={"arrowstyle": "<->", "color": "#1f5c99", "linewidth": 1.4},
+        )
+        ax3.annotate(
+            "",
+            xy=(0.61, rpe_y),
+            xytext=(0.61, bottom),
+            arrowprops={"arrowstyle": "<->", "color": "#99621f", "linewidth": 1.4},
+        )
+        ax3.text(
+            0.64,
+            (top + rpe_y) / 2.0,
+            f"450 um from top\n>= {inward_px} px",
+            ha="left",
+            va="center",
+            fontsize=9,
+            color="#1f5c99",
+        )
+        ax3.text(
+            0.64,
+            (rpe_y + bottom) / 2.0,
+            f"50 um from bottom\n>= {outward_px} px",
+            ha="left",
+            va="center",
+            fontsize=9,
+            color="#99621f",
+        )
+        ax3.text(img_left, rpe_y + 0.03, "RPE", ha="left", va="bottom", fontsize=9, color="#a31d1d")
+        ax3.text(
+            0.5,
+            0.02,
+            f"Absolute depth need: about {depth_px} input px. If the RPE is centered vertically, use "
+            f"at least {centered_height_px} input px.",
+            ha="center",
+            va="bottom",
+            fontsize=9,
         )
 
     def _run_more_outputs(self):
