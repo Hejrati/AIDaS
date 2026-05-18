@@ -1663,7 +1663,7 @@ class Step3Frame(ttk.Frame):
         self.more_outputs_button = ttk.Button(
             process,
             text="More Process",
-            # command=self._run_more_outputs,
+            command=self._run_more_outputs,
             state="disabled",
         )
         self.more_outputs_button.pack(fill="x", pady=2)
@@ -1830,9 +1830,19 @@ class Step3Frame(ttk.Frame):
                     lines.append(f"✗ {display_name} (cannot read)")
         return "\n".join(lines)
 
+    def _reset_to_tutorial_state(self):
+        self.processor = None
+        self.results = None
+        self.view_var.set("Tutorial")
+        self.progress.configure(value=0)
+        self.progress_text_var.set("Idle")
+        if self.more_outputs_button is not None:
+            self.more_outputs_button.configure(state="disabled")
+        self._render()
+
     def _refresh_input_status(self):
         if not self.current_sdb_dir:
-            self.processor = None
+            self._reset_to_tutorial_state()
             self.dir_var.set("Source: (no folder selected)")
             input_paths = {label: None for label, _names, _display_name, _required_bits in self.REQUIRED_INPUTS}
             self.info_var.set(
@@ -1852,14 +1862,12 @@ class Step3Frame(ttk.Frame):
         issues = list(dict.fromkeys(issues))
 
         if issues:
-            self.processor = None
+            self._reset_to_tutorial_state()
             self.info_var.set(
                 "Step 3 input files:\n"
                 + self._format_input_checklist(input_paths, input_info, read_errors)
             )
             self.status_var.set("Step 3 files are missing or do not meet bit-depth requirements.")
-            if self.more_outputs_button is not None:
-                self.more_outputs_button.configure(state="disabled")
         else:
             self.info_var.set(
                 "Step 3 is using these files:\n"
@@ -2003,6 +2011,9 @@ class Step3Frame(ttk.Frame):
             pixel_width=3.89,
         )
 
+        self.results = None
+        self.view_var.set("Comparison")
+        self._render()
         self.info_var.set(
             f"{self._format_stack_info('Dark_MARKED ',input_info['Dark_MARKED'])}\n"
             f"{self._format_stack_info('Light_MARKED ', input_info['Light_MARKED'])}\n"
@@ -2102,12 +2113,14 @@ class Step3Frame(ttk.Frame):
             return
 
         view = self.view_var.get()
-        if view != "Tutorial" and self.results is None:
-            self.status_var.set("Run Step 3 first, or choose Tutorial for the fovea spacing example.")
-            return
-
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
+            self.canvas = None
+
+        if view != "Tutorial" and self.results is None:
+            self.figure = None
+            self.status_var.set("Step 3 inputs loaded. Run Step 3 to view results.")
+            return
 
         if view == "Tutorial":
             fig = Figure(figsize=(11, 7), dpi=100)
