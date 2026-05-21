@@ -24,6 +24,7 @@ dependencies:
   - pip:
     - ./OCT Segmenter/oct_segmenter-0.8.4-py3-none-any.whl
     - ./OCT Segmenter/oct_image_segmentation_models-0.8.4-py3-none-any.whl
+    - torch
     - imgviz==1.8.0
     - prettytable==3.17.0
     - art==6.5

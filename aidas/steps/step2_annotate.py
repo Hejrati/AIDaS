@@ -28,6 +28,7 @@ import csv
 import datetime
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -81,6 +82,14 @@ LIGHT_MARKED_BASENAME = "Light_MARKED"
 DARK_MARKED_BASENAME = "Dark_MARKED"
 LIGHT_PREPROCESSED_BASENAME = "Light"
 DARK_PREPROCESSED_BASENAME = "Dark"
+AI_BACKEND_OCT_SEGMENTER = "oct_segmenter"
+AI_BACKEND_AIDAS = "ai_for_aidas"
+AI_BACKEND_LABELS = {
+    AI_BACKEND_OCT_SEGMENTER: "OCT Segmenter (.h5)",
+    AI_BACKEND_AIDAS: "AI_ForAIDAS (.pth)",
+}
+AI_BACKEND_BY_LABEL = {label: key for key, label in AI_BACKEND_LABELS.items()}
+AI_DEVICE_OPTIONS = ("auto", "cpu", "cuda")
 
 # Standard output dimensions (test1 format: 2 slices, original height, 2133 width)
 STANDARD_OUTPUT_SLICES = 2
@@ -294,6 +303,9 @@ class Step2Frame(ttk.Frame):
         segmenter_root = os.path.join(app_root, "OCT Segmenter")
         self.segmenter_default_config = os.path.join(segmenter_root, "config.json")
         self.segmenter_default_model = os.path.join(segmenter_root, "Model", "human_OCT.h5")
+        self.ai_for_aidas_root = os.path.join(segmenter_root, "AI_ForAIDAS")
+        self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.pth")
+        self.ai_for_aidas_default_vline_model = os.path.join(self.ai_for_aidas_root, "vline_model.pth")
 
         main = ttk.Frame(self)
         main.pack(fill="both", expand=True)
@@ -360,14 +372,14 @@ class Step2Frame(ttk.Frame):
         """Open a separate dialog for AI segmentation configuration.
 
         This dialog allows users to:
-          - Set conda environment name for running oct-segmenter
-          - Select segmentation config (.json) file
-          - Select neural network model (.h5) file
+          - Choose the AI backend used by the AI Assist button
+          - Set conda/config/model settings for oct-segmenter
+          - Select PyTorch model files for AI_ForAIDAS
           - Specify output directory for segmentation results
         """
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title("AI Segmentation Settings")
-        dialog.geometry("500x350")
+        dialog.geometry("620x620")
         dialog.resizable(True, True)
 
         # Apply shared helper to propagate the app icon to this dialog
@@ -376,24 +388,77 @@ class Step2Frame(ttk.Frame):
         main = ttk.Frame(dialog, padding=10)
         main.pack(fill="both", expand=True)
 
-        ttk.Label(main, text="Conda Environment:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
-        env_frame = ttk.Frame(main)
+        ttk.Label(main, text="AI Version:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        backend_combo = ttk.Combobox(
+            main,
+            textvariable=self.ai_backend_var,
+            values=[AI_BACKEND_LABELS[AI_BACKEND_OCT_SEGMENTER], AI_BACKEND_LABELS[AI_BACKEND_AIDAS]],
+            state="readonly",
+        )
+        backend_combo.pack(fill="x", pady=(0, 8))
+        backend_combo.bind("<<ComboboxSelected>>", self._on_ai_backend_changed)
+
+        legacy = ttk.LabelFrame(main, text="OCT Segmenter (.h5)", padding=6)
+        legacy.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(legacy, text="Conda Environment:").pack(anchor="w", pady=(0, 2))
+        env_frame = ttk.Frame(legacy)
         env_frame.pack(fill="x", pady=(0, 6))
         ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
 
-        ttk.Label(main, text="Config (.json):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        cfg_frame = ttk.Frame(main)
+        ttk.Label(legacy, text="Config (.json):").pack(anchor="w", pady=(2, 2))
+        cfg_frame = ttk.Frame(legacy)
         cfg_frame.pack(fill="x", pady=(0, 6))
         ttk.Entry(cfg_frame, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
         ttk.Button(cfg_frame, text="Browse", width=10, command=self._browse_segmenter_config).pack(side="right", padx=(4, 0))
 
-        ttk.Label(main, text="Model (.h5):", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
-        model_frame = ttk.Frame(main)
+        ttk.Label(legacy, text="Model (.h5):").pack(anchor="w", pady=(2, 2))
+        model_frame = ttk.Frame(legacy)
         model_frame.pack(fill="x", pady=(0, 6))
         ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
         ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
 
-        ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(6, 2))
+        aidas = ttk.LabelFrame(main, text="AI_ForAIDAS (.pth)", padding=6)
+        aidas.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(aidas, text="Boundary Model (.pth):").pack(anchor="w", pady=(0, 2))
+        aidas_model_frame = ttk.Frame(aidas)
+        aidas_model_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(aidas_model_frame, textvariable=self.aidas_model_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(aidas_model_frame, text="Browse", width=10, command=self._browse_aidas_model).pack(side="right", padx=(4, 0))
+
+        ttk.Label(aidas, text="Fovea/VLine Model (.pth):").pack(anchor="w", pady=(2, 2))
+        aidas_vline_frame = ttk.Frame(aidas)
+        aidas_vline_frame.pack(fill="x", pady=(0, 6))
+        ttk.Entry(aidas_vline_frame, textvariable=self.aidas_vline_model_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(aidas_vline_frame, text="Browse", width=10, command=self._browse_aidas_vline_model).pack(side="right", padx=(4, 0))
+
+        aidas_options = ttk.Frame(aidas)
+        aidas_options.pack(fill="x", pady=(0, 2))
+        ttk.Checkbutton(
+            aidas_options,
+            text="Predict foveal center when vline model exists",
+            variable=self.aidas_predict_fovea_var,
+        ).pack(side="left", fill="x", expand=True)
+        ttk.Label(aidas_options, text="Device:").pack(side="left", padx=(8, 4))
+        ttk.Combobox(
+            aidas_options,
+            textvariable=self.aidas_device_var,
+            values=AI_DEVICE_OPTIONS,
+            state="readonly",
+            width=7,
+        ).pack(side="right")
+
+        ttk.Label(aidas, text="PyTorch Conda Environment:").pack(anchor="w", pady=(6, 2))
+        ttk.Entry(aidas, textvariable=self.aidas_env_var).pack(fill="x", pady=(0, 6))
+
+        ttk.Label(aidas, text="Python Executable (optional, overrides Conda):").pack(anchor="w", pady=(2, 2))
+        aidas_python_frame = ttk.Frame(aidas)
+        aidas_python_frame.pack(fill="x", pady=(0, 2))
+        ttk.Entry(aidas_python_frame, textvariable=self.aidas_python_var).pack(side="left", fill="x", expand=True)
+        ttk.Button(aidas_python_frame, text="Browse", width=10, command=self._browse_aidas_python).pack(side="right", padx=(4, 0))
+
+        ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
         out_frame = ttk.Frame(main)
         out_frame.pack(fill="x", pady=(0, 12))
         ttk.Entry(out_frame, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
@@ -454,6 +519,13 @@ class Step2Frame(ttk.Frame):
         self.segmenter_model_var = tk.StringVar(value=self.segmenter_default_model)
         self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
         self.segmenter_env_var = tk.StringVar(value="oct-segmenter-env")
+        self.ai_backend_var = tk.StringVar(value=AI_BACKEND_LABELS[AI_BACKEND_OCT_SEGMENTER])
+        self.aidas_model_var = tk.StringVar(value=self.ai_for_aidas_default_model)
+        self.aidas_vline_model_var = tk.StringVar(value=self.ai_for_aidas_default_vline_model)
+        self.aidas_predict_fovea_var = tk.BooleanVar(value=True)
+        self.aidas_device_var = tk.StringVar(value=AI_DEVICE_OPTIONS[0])
+        self.aidas_env_var = tk.StringVar(value="oct-segmenter-env")
+        self.aidas_python_var = tk.StringVar(value="")
 
         self.segmentation_frame = ttk.LabelFrame(self.ctrl, text="Segmentation", padding=3)
         self.segmentation_frame.pack(**pad, pady=2)
@@ -507,6 +579,19 @@ class Step2Frame(ttk.Frame):
         self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary)
         self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
 
+        ai_select = ttk.Frame(workflow)
+        ai_select.pack(fill="x", pady=(6, 0))
+        ttk.Label(ai_select, text="AI Version:").pack(side="left")
+        self.ai_backend_combo = ttk.Combobox(
+            ai_select,
+            textvariable=self.ai_backend_var,
+            values=[AI_BACKEND_LABELS[AI_BACKEND_OCT_SEGMENTER], AI_BACKEND_LABELS[AI_BACKEND_AIDAS]],
+            state="readonly",
+            width=20,
+        )
+        self.ai_backend_combo.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.ai_backend_combo.bind("<<ComboboxSelected>>", self._on_ai_backend_changed)
+
         ai_buttons = ttk.Frame(workflow)
         ai_buttons.pack(fill="x", pady=(6, 0))
         self.preprocess_button = ttk.Button(
@@ -521,7 +606,8 @@ class Step2Frame(ttk.Frame):
             command=self._run_neural_segmentation,
         )
         self.segment_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
-        ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog,).pack(side="right", padx=(2, 0))
+        self.ai_settings_btn = ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog)
+        self.ai_settings_btn.pack(side="right", padx=(2, 0))
 
         self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
         self.clear_all_traces_btn.pack(fill="x", pady=(6, 4))
@@ -1466,6 +1552,8 @@ class Step2Frame(ttk.Frame):
         
         if hasattr(self, "segmentation_frame"):
             set_state(self.segmentation_frame, state)
+        if hasattr(self, "ai_backend_combo"):
+            self.ai_backend_combo.configure(state="readonly" if enabled else "disabled")
 
     def _clear_fovea_lock(self):
         """Remove saved fovea lock line, unlock controls, then show default center line."""
@@ -2010,6 +2098,21 @@ class Step2Frame(ttk.Frame):
             root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         return os.path.join(root, "segmenter_output")
 
+    def _selected_ai_backend(self):
+        label = self.ai_backend_var.get().strip()
+        return AI_BACKEND_BY_LABEL.get(label, AI_BACKEND_OCT_SEGMENTER)
+
+    def _is_aidas_ai_backend(self):
+        return self._selected_ai_backend() == AI_BACKEND_AIDAS
+
+    def _on_ai_backend_changed(self, _event=None):
+        if hasattr(self, "ai_backend_combo"):
+            self.ai_backend_combo.set(AI_BACKEND_LABELS[self._selected_ai_backend()])
+        self._update_ai_button_states()
+        if self.image_data is not None:
+            label = AI_BACKEND_LABELS[self._selected_ai_backend()]
+            self.status_var.set(f"AI version set to {label}.")
+
     def _browse_segmenter_config(self):
         path = filedialog.askopenfilename(
             title="Select segmenter config",
@@ -2025,6 +2128,38 @@ class Step2Frame(ttk.Frame):
         )
         if path:
             self.segmenter_model_var.set(path)
+
+    def _browse_aidas_model(self):
+        kwargs = {}
+        if os.path.isdir(self.ai_for_aidas_root):
+            kwargs["initialdir"] = self.ai_for_aidas_root
+        path = filedialog.askopenfilename(
+            title="Select AI_ForAIDAS boundary model",
+            filetypes=[("PyTorch model", "*.pth"), ("All files", "*.*")],
+            **kwargs,
+        )
+        if path:
+            self.aidas_model_var.set(path)
+
+    def _browse_aidas_vline_model(self):
+        kwargs = {}
+        if os.path.isdir(self.ai_for_aidas_root):
+            kwargs["initialdir"] = self.ai_for_aidas_root
+        path = filedialog.askopenfilename(
+            title="Select AI_ForAIDAS fovea/vline model",
+            filetypes=[("PyTorch model", "*.pth"), ("All files", "*.*")],
+            **kwargs,
+        )
+        if path:
+            self.aidas_vline_model_var.set(path)
+
+    def _browse_aidas_python(self):
+        path = filedialog.askopenfilename(
+            title="Select Python executable with PyTorch installed",
+            filetypes=[("Python executable", "python.exe python"), ("All files", "*.*")],
+        )
+        if path:
+            self.aidas_python_var.set(path)
 
     def _browse_segmenter_output_dir(self):
         path = filedialog.askdirectory(title="Select segmentation output folder")
@@ -2119,6 +2254,192 @@ class Step2Frame(ttk.Frame):
             env[path_key] = os.pathsep.join(prepend_parts + existing_parts)
 
         return env
+
+    def _app_root(self):
+        return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+
+    def _aidas_external_python_command(self):
+        """Return a Python command for running AI_ForAIDAS outside this process."""
+        python_cmd = self.aidas_python_var.get().strip()
+        if python_cmd:
+            if os.path.isfile(python_cmd):
+                return [python_cmd]
+            return shlex.split(python_cmd, posix=(os.name != "nt"))
+
+        path_python = self._find_torch_python_on_path()
+        if path_python:
+            return [path_python]
+
+        env_name = self.aidas_env_var.get().strip()
+        conda_bin = shutil.which("conda") or os.environ.get("CONDA_EXE")
+        if env_name and conda_bin:
+            return [conda_bin, "run", "-n", env_name, "--no-capture-output", "python"]
+
+        return None
+
+    def _candidate_path_pythons(self):
+        candidates = []
+        seen = set()
+
+        if os.name == "nt":
+            try:
+                result = subprocess.run(
+                    ["where.exe", "python"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    startupinfo=None,
+                )
+                for line in (result.stdout or "").splitlines():
+                    path = line.strip()
+                    if path and os.path.isfile(path):
+                        norm = os.path.normcase(os.path.abspath(path))
+                        if norm not in seen:
+                            candidates.append(path)
+                            seen.add(norm)
+            except Exception:
+                pass
+
+        which_python = shutil.which("python")
+        if which_python and os.path.isfile(which_python):
+            norm = os.path.normcase(os.path.abspath(which_python))
+            if norm not in seen:
+                candidates.append(which_python)
+                seen.add(norm)
+
+        return candidates
+
+    def _find_torch_python_on_path(self):
+        """Return the first PATH python.exe that can import torch."""
+        for python_path in self._candidate_path_pythons():
+            if "windowsapps" in os.path.normcase(python_path):
+                continue
+            if self._python_command_has_torch([python_path]):
+                return python_path
+        return None
+
+    def _python_command_has_torch(self, python_cmd):
+        try:
+            result = subprocess.run(
+                python_cmd + ["-c", "import torch"],
+                capture_output=True,
+                text=True,
+                cwd=self._app_root(),
+                env=self._segmenter_subprocess_env(),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def _missing_torch_message(self):
+        env_name = self.aidas_env_var.get().strip() or "oct-segmenter-env"
+        return (
+            "AI_ForAIDAS requires PyTorch in the Python environment used to run the .pth model.\n\n"
+            "Install it in the configured AI_ForAIDAS Conda environment:\n"
+            f"  conda activate {env_name}\n"
+            "  python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu\n\n"
+            "Or set AI Settings > AI_ForAIDAS > Python Executable to a python.exe that already has torch installed."
+        )
+
+    @staticmethod
+    def _is_missing_torch_error(exc):
+        text = str(exc).lower()
+        return "requires pytorch" in text or "no module named 'torch'" in text or "no module named torch" in text
+
+    def _run_aidas_external_prediction(
+        self,
+        image,
+        model_path,
+        vline_path,
+        predict_fovea,
+        device_name,
+        output_dir,
+        fallback_reason=None,
+    ):
+        base_cmd = self._aidas_external_python_command()
+        if not base_cmd:
+            raise RuntimeError(self._missing_torch_message())
+
+        temp_dir = tempfile.mkdtemp(prefix="aidas_ai_for_aidas_")
+        try:
+            image_path = os.path.join(temp_dir, "step2_image.npy")
+            result_path = os.path.join(temp_dir, "prediction.npz")
+            np.save(image_path, image)
+
+            cmd = base_cmd + [
+                "-m",
+                "aidas.ai_for_aidas_cli",
+                "--image-npy",
+                image_path,
+                "--model",
+                model_path,
+                "--output-npz",
+                result_path,
+                "--device",
+                device_name,
+            ]
+            if predict_fovea and vline_path:
+                cmd.extend(["--vline-model", vline_path])
+            else:
+                cmd.append("--no-vline")
+
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            startupinfo = None
+            if os.name == "nt":
+                try:
+                    si = subprocess.STARTUPINFO()
+                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                    si.wShowWindow = subprocess.SW_HIDE
+                    startupinfo = si
+                except Exception:
+                    startupinfo = None
+
+            run_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=self._app_root(),
+                env=self._segmenter_subprocess_env(),
+                creationflags=creationflags,
+                startupinfo=startupinfo,
+            )
+            stdout = (run_result.stdout or "").strip()
+            stderr = (run_result.stderr or "").strip()
+            log_content = (
+                "AIDaS Step 2 AI_ForAIDAS External Segmentation\n"
+                f"Fallback reason: {fallback_reason or '(configured external run)'}\n"
+                f"Command: {subprocess.list2cmdline(cmd)}\n"
+                f"Return code: {run_result.returncode}\n\n"
+                f"STDOUT:\n{stdout or '(empty)'}\n\n"
+                f"STDERR:\n{stderr or '(empty)'}\n"
+            )
+            log_path = self._write_segmenter_log_file(output_dir, log_content)
+
+            if run_result.returncode != 0:
+                details = stderr or stdout or "External Python returned a non-zero exit code."
+                if "no module named torch" in details.lower():
+                    details += "\n\n" + self._missing_torch_message()
+                raise RuntimeError(f"{details}\n\nLog saved to:\n{log_path}")
+
+            if not os.path.isfile(result_path):
+                raise RuntimeError(f"External AI_ForAIDAS finished but did not write predictions.\n\nLog saved to:\n{log_path}")
+
+            with np.load(result_path, allow_pickle=False) as npz:
+                boundaries = np.array(npz["boundaries"], copy=True)
+                fovea_values = np.array(npz["fovea_x"], copy=False)
+                fovea_x = int(fovea_values[0]) if fovea_values.size and int(fovea_values[0]) >= 0 else None
+                device_values = np.array(npz["device"], copy=False)
+                device = str(device_values[0]) if device_values.size else "external"
+
+            return {
+                "boundaries": boundaries,
+                "fovea_x": fovea_x,
+                "device": device,
+                "log_path": log_path,
+            }
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _image_uint8(self, image):
         """Convert image to 8-bit (0-255) range with auto-scaling.
@@ -2326,41 +2647,13 @@ class Step2Frame(ttk.Frame):
         except Exception:
             print(entry)
 
-    def _import_segmenter_boundaries(self, csv_path):
-        """Import boundary traces from neural network segmentation output.
-
-        Reads the segmentation CSV (generated by oct-segmenter tool) and converts
-        each row of pixel coordinates into boundary traces in the current
-        annotation image/crop space.
-
-        Steps:
-          1. Read CSV with columns: [pixel_x0, pixel_y0, pixel_x1, pixel_y1, ...]
-            where rows correspond to the preset boundary order (`BOUNDARY_PRESETS`)
-          2. For each boundary, reconstruct the polyline from pixel coordinates
-          3. Keep coordinates in the current annotation image/crop space
-          4. Add boundary to boundary_traces dict with color and pixels
-          5. Mark boundary as complete and update UI
-          6. Rebuild canvas overlays to show new boundaries
-
-        Preprocessing rescaling:
-          - None here; saved 16-bit originals are cropped/resized to match the
-            annotation/MARKED output shape.
-
-        Args:
-            csv_path: Path to boundaries CSV file from oct-segmenter output.
-
-        Raises:
-            RuntimeError: If CSV cannot be read or has incorrect format.
-        """
-        try:
-            data = np.loadtxt(csv_path, delimiter=",", dtype=float)
-        except (OSError, ValueError) as exc:
-            raise RuntimeError(f"Could not read predicted boundaries CSV: {exc}") from exc
-
+    def _import_boundary_rows(self, data, source_label="predicted boundaries"):
+        """Import six boundary rows into the Step 2 trace state."""
+        data = np.asarray(data, dtype=float)
         data = np.atleast_2d(data)
         if data.shape[0] < len(BOUNDARY_PRESETS):
             raise RuntimeError(
-                f"Predicted CSV has {data.shape[0]} rows; expected at least {len(BOUNDARY_PRESETS)} rows."
+                f"{source_label} has {data.shape[0]} rows; expected at least {len(BOUNDARY_PRESETS)} rows."
             )
 
         self.boundary_traces.clear()
@@ -2396,6 +2689,15 @@ class Step2Frame(ttk.Frame):
         self._refresh_boundary_lists()
         self._update_boundary_progress_bar()
 
+    def _import_segmenter_boundaries(self, csv_path):
+        """Import boundary traces from oct-segmenter CSV output."""
+        try:
+            data = np.loadtxt(csv_path, delimiter=",", dtype=float)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(f"Could not read predicted boundaries CSV: {exc}") from exc
+
+        self._import_boundary_rows(data, source_label="Predicted CSV")
+
     def _image_matches_model_input(self):
         """Return True when current image already matches model input size."""
         if self.image_data is None:
@@ -2419,6 +2721,15 @@ class Step2Frame(ttk.Frame):
         is skipped if the image already matches the model's expected input dimensions.
         """
         if not hasattr(self, "preprocess_button") or not hasattr(self, "segment_button"):
+            return
+
+        if self._is_aidas_ai_backend():
+            self.preprocess_button.configure(text="Preprocess Not Needed", command=self._preprocess_image_for_ai)
+            self.preprocess_button.state(["disabled"])
+            if self.image_data is None:
+                self.segment_button.state(["disabled"])
+            else:
+                self.segment_button.state(["!disabled"])
             return
 
         if self._preprocessing_done:
@@ -2461,6 +2772,10 @@ class Step2Frame(ttk.Frame):
         button_state = ["disabled"] if running else ["!disabled"]
         self.preprocess_button.state(button_state)
         self.segment_button.state(button_state)
+        if hasattr(self, "ai_backend_combo"):
+            self.ai_backend_combo.configure(state="disabled" if running else "readonly")
+        if hasattr(self, "ai_settings_btn"):
+            self.ai_settings_btn.state(["disabled"] if running else ["!disabled"])
         
         # Disable/enable boundary listboxes during segmentation
         listbox_state = "disabled" if running else "normal"
@@ -2774,6 +3089,13 @@ class Step2Frame(ttk.Frame):
         self.status_var.set("Preprocessing removed. Original image restored.")
 
     def _run_neural_segmentation(self, auto_preprocess=False):
+        """Launch the selected AI backend."""
+        if self._is_aidas_ai_backend():
+            self._run_aidas_neural_segmentation()
+            return
+        self._run_oct_segmenter_segmentation(auto_preprocess=auto_preprocess)
+
+    def _run_oct_segmenter_segmentation(self, auto_preprocess=False):
         """Launch neural network segmentation in background thread.
 
         Validates inputs, prepares a TIFF file for the segmenter tool, and
@@ -2878,6 +3200,152 @@ class Step2Frame(ttk.Frame):
         self._set_segmentation_running(True, status_message="Running neural segmentation...")
         worker = threading.Thread(target=self._run_segmenter_worker, args=(cmd, output_dir), daemon=True)
         worker.start()
+
+    def _run_aidas_neural_segmentation(self):
+        """Run the AI_ForAIDAS PyTorch backend in a background thread."""
+        if self._segmenter_running:
+            messagebox.showinfo("Please wait", "Segmentation is already running.")
+            return
+        if self.image_data is None:
+            messagebox.showwarning("No image", "Load an image before running neural segmentation.")
+            return
+
+        model_path = self.aidas_model_var.get().strip()
+        if not os.path.isfile(model_path):
+            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
+            return
+
+        predict_fovea = bool(self.aidas_predict_fovea_var.get())
+        vline_path = self.aidas_vline_model_var.get().strip()
+        if predict_fovea and vline_path and not os.path.isfile(vline_path):
+            self._append_segmenter_log(f"AI_ForAIDAS vline model not found; fovea prediction skipped: {vline_path}")
+            vline_path = None
+        if not predict_fovea:
+            vline_path = None
+
+        output_dir = self.segmenter_output_var.get().strip() or self._default_segmenter_output_dir()
+        os.makedirs(output_dir, exist_ok=True)
+        self.segmenter_output_var.set(output_dir)
+
+        image_for_ai = np.array(self.image_data, copy=True)
+        device_name = self.aidas_device_var.get().strip() or AI_DEVICE_OPTIONS[0]
+        height, width = image_for_ai.shape[:2]
+        self._append_segmenter_log(
+            f"Running AI_ForAIDAS on {width}x{height}; model={model_path}; device={device_name}"
+        )
+
+        self._set_segmentation_running(True, status_message="Running AI_ForAIDAS segmentation...")
+        worker = threading.Thread(
+            target=self._run_aidas_segmenter_worker,
+            args=(image_for_ai, model_path, vline_path, predict_fovea, device_name, output_dir),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_aidas_segmenter_worker(self, image, model_path, vline_path, predict_fovea, device_name, output_dir):
+        try:
+            try:
+                from aidas.ai_for_aidas_inference import predict_boundaries_and_fovea
+
+                prediction = predict_boundaries_and_fovea(
+                    image,
+                    boundary_model_path=model_path,
+                    vline_model_path=vline_path,
+                    predict_fovea=predict_fovea and bool(vline_path),
+                    device_name=device_name,
+                )
+                log_content = (
+                    "AIDaS Step 2 AI_ForAIDAS Segmentation\n"
+                    f"Boundary model: {prediction.boundary_model_path}\n"
+                    f"VLine model: {prediction.vline_model_path or '(not used)'}\n"
+                    f"Device: {prediction.device}\n"
+                    f"Image shape: {image.shape[1]}x{image.shape[0]}\n"
+                    f"Boundary rows: {prediction.boundaries.shape}\n"
+                    f"Fovea x: {prediction.fovea_x if prediction.fovea_x is not None else '(not predicted)'}\n"
+                )
+                log_path = self._write_segmenter_log_file(output_dir, log_content)
+                result = {
+                    "boundaries": prediction.boundaries,
+                    "fovea_x": prediction.fovea_x,
+                    "device": prediction.device,
+                    "log_path": log_path,
+                }
+            except Exception as inner_exc:
+                if not self._is_missing_torch_error(inner_exc):
+                    raise
+                result = self._run_aidas_external_prediction(
+                    image,
+                    model_path,
+                    vline_path,
+                    predict_fovea,
+                    device_name,
+                    output_dir,
+                    fallback_reason=str(inner_exc),
+                )
+        except Exception as exc:  # pragma: no cover - defensive runtime error handling
+            result = {
+                "exception": str(exc),
+                "boundaries": None,
+                "fovea_x": None,
+                "device": None,
+                "log_path": None,
+            }
+
+        self.after(0, lambda: self._on_aidas_segmenter_worker_done(result))
+
+    def _on_aidas_segmenter_worker_done(self, result):
+        fovea_locked = False
+        try:
+            if result.get("exception"):
+                self._append_segmenter_log(f"AI_ForAIDAS segmentation failed: {result['exception']}")
+                messagebox.showerror("Segmentation failed", result["exception"])
+                self.status_var.set("AI_ForAIDAS segmentation failed.")
+                return
+
+            log_path = result.get("log_path")
+            if log_path:
+                self._append_segmenter_log(f"Saved run log: {log_path}")
+
+            self._import_boundary_rows(result["boundaries"], source_label="AI_ForAIDAS prediction")
+
+            fovea_x = result.get("fovea_x")
+            if fovea_x is not None:
+                self.fovea_x_entry_var.set(str(int(fovea_x)))
+                self._apply_vertical_line_x()
+                fovea_locked = True
+
+            device = result.get("device") or "unknown"
+            self.status_var.set(f"AI_ForAIDAS segmentation completed on {device}.")
+            self._append_segmenter_log("Loaded AI_ForAIDAS predicted boundaries into Step 2.")
+            msg = "Loaded AI_ForAIDAS predicted boundaries."
+            if fovea_x is not None:
+                msg += f"\nPredicted foveal center: x={int(fovea_x)}"
+            if log_path:
+                msg += f"\n\nLog saved to:\n{log_path}"
+            messagebox.showinfo("Segmentation complete", msg)
+        finally:
+            self._set_segmentation_running(False)
+            if fovea_locked:
+                self._set_drawing_locked(True)
+            try:
+                incomplete_names = self._incomplete_boundary_names()
+                completed_names = self._completed_boundary_names()
+                self._populate_boundary_listbox(self.boundary_incomplete_listbox, incomplete_names, None)
+                self._populate_boundary_listbox(self.boundary_completed_listbox, completed_names, None)
+                if completed_names:
+                    self.boundary_completed_listbox.selection_clear(0, "end")
+                    self.boundary_completed_listbox.selection_set(0)
+                    self.boundary_completed_listbox.see(0)
+                    self._set_active_boundary_target(completed_names[0])
+                elif incomplete_names:
+                    self.boundary_incomplete_listbox.selection_clear(0, "end")
+                    self.boundary_incomplete_listbox.selection_set(0)
+                    self.boundary_incomplete_listbox.see(0)
+            except Exception:
+                pass
+            if not result.get("exception"):
+                device = result.get("device") or "unknown"
+                self.status_var.set(f"AI_ForAIDAS segmentation completed on {device}.")
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Export boundary rows as CSV
