@@ -1609,7 +1609,7 @@ class Step3Frame(ttk.Frame):
         self.results = None
         self.figure = None
         self.canvas = None
-        self.more_outputs_button = None
+        self.run_button = None
         self._busy = False
         self.last_diff_log_dir = None
 
@@ -1659,14 +1659,8 @@ class Step3Frame(ttk.Frame):
         process = ttk.LabelFrame(left, text="Process", padding=3)
         process.pack(fill="x", pady=(0, 5))
 
-        ttk.Button(process, text="Run Step 3", command=self._run_processing).pack(fill="x", pady=2)
-        self.more_outputs_button = ttk.Button(
-            process,
-            text="More Process",
-            command=self._run_more_outputs,
-            state="disabled",
-        )
-        self.more_outputs_button.pack(fill="x", pady=2)
+        self.run_button = ttk.Button(process, text="Run Step 3", command=self._run_processing)
+        self.run_button.pack(fill="x", pady=2)
 
         self.progress = ttk.Progressbar(process, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=2)
@@ -1836,8 +1830,6 @@ class Step3Frame(ttk.Frame):
         self.view_var.set("Tutorial")
         self.progress.configure(value=0)
         self.progress_text_var.set("Idle")
-        if self.more_outputs_button is not None:
-            self.more_outputs_button.configure(state="disabled")
         self._render()
 
     def _refresh_input_status(self):
@@ -1919,8 +1911,6 @@ class Step3Frame(ttk.Frame):
             return
 
         self.status_var.set("Loading selected folder...")
-        if self.more_outputs_button is not None:
-            self.more_outputs_button.configure(state="disabled")
 
         self._load_processor_from_current_folder(show_errors=True)
 
@@ -1971,8 +1961,6 @@ class Step3Frame(ttk.Frame):
             self.status_var.set("Could not load existing Step 3 results.")
             return False
 
-        if self.more_outputs_button is not None:
-            self.more_outputs_button.configure(state="normal")
         self.progress.configure(value=100)
         self.progress_text_var.set("Loaded existing results")
         self.status_var.set(f"Loaded existing Step 3 results from {output_dir}.")
@@ -2038,11 +2026,11 @@ class Step3Frame(ttk.Frame):
                 return
 
         self._busy = True
-        if self.more_outputs_button is not None:
-            self.more_outputs_button.configure(state="disabled")
+        if self.run_button is not None:
+            self.run_button.configure(state="disabled")
         self.progress.configure(value=0)
         self.progress_text_var.set("Starting...")
-        self.status_var.set("Running Step 3 pipeline...")
+        self.status_var.set("Running Step 3 pipeline and final outputs...")
         threading.Thread(target=self._process_worker, daemon=True).start()
 
     def _threadsafe_progress(self, percent, label):
@@ -2070,31 +2058,66 @@ class Step3Frame(ttk.Frame):
                 progress_cb=self._threadsafe_progress,
                 ui_updates=False,
             )
-            self.after(0, lambda: self._on_processing_done(results, None, summary_path, None, save_error, output_dir))
+            more_outputs = None
+            more_error = None
+            if save_error is None:
+                try:
+                    more_outputs = self._generate_more_outputs(
+                        output_dir=output_dir,
+                        results=results,
+                        progress_cb=self._threadsafe_progress,
+                    )
+                except Exception as exc:
+                    more_error = exc
+            self.after(
+                0,
+                lambda: self._on_processing_done(
+                    results,
+                    None,
+                    summary_path,
+                    None,
+                    save_error,
+                    output_dir,
+                    more_outputs,
+                    more_error,
+                ),
+            )
         except Exception as exc:
-            self.after(0, lambda: self._on_processing_done(None, exc, None, None, None, output_dir))
+            self.after(0, lambda error=exc: self._on_processing_done(None, error, None, None, None, output_dir))
 
-    def _on_processing_done(self, results, error, summary_path=None, diff_logger=None, save_error=None, save_dir=None):
+    def _on_processing_done(
+        self,
+        results,
+        error,
+        summary_path=None,
+        diff_logger=None,
+        save_error=None,
+        save_dir=None,
+        more_outputs=None,
+        more_error=None,
+    ):
         self._busy = False
+        if self.run_button is not None:
+            self.run_button.configure(state="normal")
 
         if error is not None:
             self.status_var.set(f"Step 3 failed: {error}")
             self.progress_text_var.set("Failed")
-            if self.more_outputs_button is not None:
-                self.more_outputs_button.configure(state="disabled")
             messagebox.showerror("Step 3", f"Processing failed.\n{error}")
             return
 
         self.results = results
-        if self.more_outputs_button is not None:
-            self.more_outputs_button.configure(state="normal")
         if summary_path is not None:
             self.last_diff_log_dir = str(Path(summary_path).parent)
         self.progress.configure(value=100)
-        self.progress_text_var.set("Completed")
         if save_error is not None:
+            self.progress_text_var.set("Save failed")
             self.status_var.set(f"Step 3 complete, but auto-save failed: {save_error}")
+        elif more_error is not None:
+            self.progress_text_var.set("Final outputs failed")
+            self.status_var.set(f"Step 3 core outputs saved, but final output generation failed: {more_error}")
         elif summary_path is not None:
+            self.progress_text_var.set("Completed")
             msg = "Step 3 complete. Diff log saved."
             if diff_logger is not None and diff_logger.first_divergence is not None:
                 first = diff_logger.first_divergence
@@ -2104,8 +2127,22 @@ class Step3Frame(ttk.Frame):
                 )
             self.status_var.set(msg)
         else:
-            self.status_var.set(f"Step 3 complete. Outputs saved to {save_dir or self.output_sdb_dir or self.current_sdb_dir}")
+            self.progress_text_var.set("Completed")
+            self.status_var.set(
+                f"Step 3 complete. All outputs saved to {save_dir or self.output_sdb_dir or self.current_sdb_dir}"
+            )
         self._render()
+        if more_outputs:
+            self.info_var.set(
+                self.info_var.get()
+                + "\n\nFinal outputs:\n"
+                + "\n".join(str(path.name) for path in more_outputs.values())
+            )
+        if more_error is not None:
+            messagebox.showerror(
+                "Step 3",
+                f"Step 3 core processing completed, but final output generation failed.\n{more_error}",
+            )
 
     def _render(self):
         if Figure is None or FigureCanvasTkAgg is None:
@@ -2406,43 +2443,26 @@ class Step3Frame(ttk.Frame):
             fontsize=9,
         )
 
-    def _run_more_outputs(self):
-        if self.results is None:
-            messagebox.showwarning("More Process", "Run Step 3 first.")
-            return
-        if not self.output_sdb_dir:
-            messagebox.showwarning("More Process", "Choose an output folder first.")
-            return
+    def _generate_more_outputs(self, output_dir, results=None, progress_cb=None):
+        output_dir = Path(output_dir)
+        flat_npz = output_dir / "DARK__and__LIGHT__flat.npz"
+        done_npz = output_dir / "_done_DARK__and__LIGHT.npz"
 
-        try:
-            output_dir = Path(self.output_sdb_dir)
-            flat_npz = output_dir / "DARK__and__LIGHT__flat.npz"
-            done_npz = output_dir / "_done_DARK__and__LIGHT.npz"
-            if not flat_npz.exists() or not done_npz.exists():
-                self.status_var.set("Saving Step 3 checkpoints before more process...")
-                save_error = self._save_generated_outputs(
-                    results=self.results,
-                    output_dir=output_dir,
-                    progress_cb=None,
-                    ui_updates=False,
-                )
-                if save_error is not None:
-                    raise RuntimeError(save_error)
+        if not flat_npz.exists() or not done_npz.exists():
+            _emit_progress(progress_cb, 98, "Saving Step 3 checkpoints before final outputs")
+            save_error = self._save_generated_outputs(
+                results=results,
+                output_dir=output_dir,
+                progress_cb=progress_cb,
+                ui_updates=False,
+            )
+            if save_error is not None:
+                raise RuntimeError(save_error)
 
-            outputs = _main_run_more_outputs_from_step3_npz(flat_npz, done_npz, output_dir)
-            self.status_var.set(f"More process complete. R-format outputs saved to {output_dir}")
-            self.info_var.set(
-                self.info_var.get()
-                + "\n\nMore process outputs:\n"
-                + "\n".join(str(path.name) for path in outputs.values())
-            )
-            messagebox.showinfo(
-                "More Process",
-                "Generated tissue-border plots and R-format thickness tables.",
-            )
-        except Exception as exc:
-            self.status_var.set(f"More process failed: {exc}")
-            messagebox.showerror("More Process", f"More process failed.\n{exc}")
+        _emit_progress(progress_cb, 99, "Generating tissue-border plots and R-format tables")
+        outputs = _main_run_more_outputs_from_step3_npz(flat_npz, done_npz, output_dir)
+        _emit_progress(progress_cb, 100, "Completed")
+        return outputs
 
     @staticmethod
     def _prepare_export_volume(volume):

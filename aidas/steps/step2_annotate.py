@@ -85,8 +85,8 @@ DARK_PREPROCESSED_BASENAME = "Dark"
 AI_BACKEND_OCT_SEGMENTER = "oct_segmenter"
 AI_BACKEND_AIDAS = "ai_for_aidas"
 AI_BACKEND_LABELS = {
-    AI_BACKEND_OCT_SEGMENTER: "OCT Segmenter (.h5)",
-    AI_BACKEND_AIDAS: "AI_ForAIDAS (.pth)",
+    AI_BACKEND_OCT_SEGMENTER: "OCT Segmenter (old, Keras-based)",
+    AI_BACKEND_AIDAS: "AI_ForAIDAS (New, PyTorch-based)",
 }
 AI_BACKEND_BY_LABEL = {label: key for key, label in AI_BACKEND_LABELS.items()}
 AI_DEVICE_OPTIONS = ("auto", "cpu", "cuda")
@@ -451,12 +451,6 @@ class Step2Frame(ttk.Frame):
 
         ttk.Label(aidas, text="PyTorch Conda Environment:").pack(anchor="w", pady=(6, 2))
         ttk.Entry(aidas, textvariable=self.aidas_env_var).pack(fill="x", pady=(0, 6))
-
-        ttk.Label(aidas, text="Python Executable (optional, overrides Conda):").pack(anchor="w", pady=(2, 2))
-        aidas_python_frame = ttk.Frame(aidas)
-        aidas_python_frame.pack(fill="x", pady=(0, 2))
-        ttk.Entry(aidas_python_frame, textvariable=self.aidas_python_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(aidas_python_frame, text="Browse", width=10, command=self._browse_aidas_python).pack(side="right", padx=(4, 0))
 
         ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
         out_frame = ttk.Frame(main)
@@ -2153,13 +2147,6 @@ class Step2Frame(ttk.Frame):
         if path:
             self.aidas_vline_model_var.set(path)
 
-    def _browse_aidas_python(self):
-        path = filedialog.askopenfilename(
-            title="Select Python executable with PyTorch installed",
-            filetypes=[("Python executable", "python.exe python"), ("All files", "*.*")],
-        )
-        if path:
-            self.aidas_python_var.set(path)
 
     def _browse_segmenter_output_dir(self):
         path = filedialog.askdirectory(title="Select segmentation output folder")
@@ -3227,22 +3214,72 @@ class Step2Frame(ttk.Frame):
         os.makedirs(output_dir, exist_ok=True)
         self.segmenter_output_var.set(output_dir)
 
+        model_input_uses_stored_y = self._aidas_should_use_stored_analyze_y()
         image_for_ai = np.array(self.image_data, copy=True)
+        if model_input_uses_stored_y:
+            image_for_ai = np.ascontiguousarray(np.flipud(image_for_ai))
         device_name = self.aidas_device_var.get().strip() or AI_DEVICE_OPTIONS[0]
-        height, width = image_for_ai.shape[:2]
+        height, width = self.image_data.shape[:2]
         self._append_segmenter_log(
             f"Running AI_ForAIDAS on {width}x{height}; model={model_path}; device={device_name}"
         )
+        if model_input_uses_stored_y:
+            self._append_segmenter_log(
+                "AI_ForAIDAS Analyze compatibility: using stored .img vertical orientation to match app.py."
+            )
 
         self._set_segmentation_running(True, status_message="Running AI_ForAIDAS segmentation...")
         worker = threading.Thread(
             target=self._run_aidas_segmenter_worker,
-            args=(image_for_ai, model_path, vline_path, predict_fovea, device_name, output_dir),
+            args=(
+                image_for_ai,
+                model_path,
+                vline_path,
+                predict_fovea,
+                device_name,
+                output_dir,
+                model_input_uses_stored_y,
+            ),
             daemon=True,
         )
         worker.start()
 
-    def _run_aidas_segmenter_worker(self, image, model_path, vline_path, predict_fovea, device_name, output_dir):
+    def _aidas_should_use_stored_analyze_y(self):
+        """Return True when AI_ForAIDAS should mimic app.py's Analyze input orientation."""
+        if self.image_data is None:
+            return False
+        if self._input_analyze_template is not None:
+            return True
+        current_file = str(self.current_file or "")
+        return os.path.splitext(current_file)[1].lower() in {".hdr", ".img"}
+
+    @staticmethod
+    def _aidas_boundaries_from_model_to_display(boundaries, image_height, model_input_uses_stored_y):
+        boundaries = np.asarray(boundaries, dtype=np.float32)
+        if not model_input_uses_stored_y:
+            return boundaries
+
+        height = int(image_height)
+        if height <= 0:
+            return boundaries
+
+        # AIDaS read_analyze() flips Analyze slices for display, while the
+        # standalone AI_ForAIDAS app runs on the stored .img rows directly.
+        # Flip rows back into Step 2 display coordinates and reverse boundary
+        # order so the imported traces remain top-to-bottom on the displayed image.
+        converted = (height - 1) - boundaries[::-1]
+        return np.clip(converted, 0, height - 1).astype(np.float32, copy=False)
+
+    def _run_aidas_segmenter_worker(
+        self,
+        image,
+        model_path,
+        vline_path,
+        predict_fovea,
+        device_name,
+        output_dir,
+        model_input_uses_stored_y=False,
+    ):
         try:
             try:
                 from aidas.ai_for_aidas_inference import predict_boundaries_and_fovea
@@ -3265,7 +3302,11 @@ class Step2Frame(ttk.Frame):
                 )
                 log_path = self._write_segmenter_log_file(output_dir, log_content)
                 result = {
-                    "boundaries": prediction.boundaries,
+                    "boundaries": self._aidas_boundaries_from_model_to_display(
+                        prediction.boundaries,
+                        image.shape[0],
+                        model_input_uses_stored_y,
+                    ),
                     "fovea_x": prediction.fovea_x,
                     "device": prediction.device,
                     "log_path": log_path,
@@ -3281,6 +3322,11 @@ class Step2Frame(ttk.Frame):
                     device_name,
                     output_dir,
                     fallback_reason=str(inner_exc),
+                )
+                result["boundaries"] = self._aidas_boundaries_from_model_to_display(
+                    result["boundaries"],
+                    image.shape[0],
+                    model_input_uses_stored_y,
                 )
         except Exception as exc:  # pragma: no cover - defensive runtime error handling
             result = {
