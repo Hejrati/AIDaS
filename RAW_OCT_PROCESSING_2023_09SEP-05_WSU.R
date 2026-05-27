@@ -130,38 +130,6 @@ PIXEL.WIDTH=as.numeric(arg.or.env(9, "AIDAS_PIXEL_WIDTH", "3.89")) #<-- microns 
 PYEXPORTDIR <- file.path(OUTDIR, "step3_r_arrays")
 dir.create(PYEXPORTDIR, showWarnings=FALSE, recursive=TRUE)
 
-save.current.plot <- function(filename) {
-  target <- file.path(OUTDIR, filename)
-  ok <- FALSE
-  tryCatch({
-    snapshot <- recordPlot()
-    if(grepl("\\.png$", target, ignore.case=TRUE)) png(filename=target, width=1200, height=900)
-    else jpeg(filename=target, width=1200, height=900, quality=95)
-    replayPlot(snapshot)
-    dev.off()
-    ok <<- TRUE
-  }, error=function(e) {
-    tryCatch({
-      if(grepl("\\.png$", target, ignore.case=TRUE)) {
-        dev.copy(png, filename=target, width=1200, height=900)
-      } else {
-        dev.copy(jpeg, filename=target, width=1200, height=900, quality=95)
-      }
-      dev.off()
-      ok <<- TRUE
-    }, error=function(e2) {
-      tryCatch({
-        plot.type <- if(grepl("\\.png$", target, ignore.case=TRUE)) "png" else "jpg"
-        savePlot(filename=target, type=plot.type)
-        ok <<- TRUE
-      }, error=function(e3) {
-        cat(paste0("WARN: Could not save plot '", target, "': ", conditionMessage(e3), "\n"))
-      })
-    })
-  })
-  invisible(ok)
-}
-
 write.python.array <- function(name, value) {
   if(is.null(value)) return(invisible(FALSE))
   target <- file.path(PYEXPORTDIR, paste0(name, ".bin"))
@@ -1191,7 +1159,12 @@ plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2],type="l")
 abline(v=450)
 abline(v=434)
 abline(v=466)
-save.current.plot(paste(REFERENCE.DARK,"_find_vertex.png",sep=""))
+png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_find_vertex.png",sep="")), width=1200, height=900)
+plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2],type="l")
+abline(v=450)
+abline(v=434)
+abline(v=466)
+dev.off()
 ## </new for 2023-SEP-05>
 ### isolate 450 +/- 16 pixels (the drawer should have been within 4 original-pixel-widths of the RPE).
 GRAND.PROFILE=GRAND.PROFILE[434:466,]
@@ -1212,7 +1185,11 @@ vertex=check.spline[which(check.spline[,3]>0)[length(which(check.spline[,3]>0))]
 abline(v=vertex)
 ## 
 ## so, we're selecting the farthest-out positive value
-save.current.plot(paste(REFERENCE.DARK,"_vertex.png",sep=""))
+png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
+plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2])
+matlines(check.spline[,1],check.spline[,2])
+abline(v=vertex)
+dev.off()
 ##
 ##
 ## and, now, crop vertically so that vertex is at the same spot across subjects...
@@ -1233,7 +1210,11 @@ if(length(vertex)==0)
   check.spline[,3]=check.spline[,3]-median(na.rm=T,check.spline[,3]);
   vertex=check.spline[which(check.spline[,3]>=0)[length(which(check.spline[,3]>=0))],1]+1;
   abline(v=vertex,col="red");
-  save.current.plot(paste(REFERENCE.DARK,"_vertex.png",sep=""))}
+  png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
+  plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2])
+  matlines(check.spline[,1],check.spline[,2])
+  abline(v=vertex,col="red")
+  dev.off()}
 ## </new for 2023-AUG-11>
 ##
 ##
