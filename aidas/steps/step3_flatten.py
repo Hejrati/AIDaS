@@ -13,6 +13,9 @@ Core steps:
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import re
 import numpy as np
 from scipy.interpolate import BSpline, UnivariateSpline
 from scipy.stats import pearsonr
@@ -25,6 +28,11 @@ import os
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+
+try:
+    import pyreadr
+except Exception:
+    pyreadr = None
 
 from aidas.utils.io_utils import read_analyze, write_analyze
 from main import (
@@ -1597,6 +1605,55 @@ class Step3Frame(ttk.Frame):
         "DARK__and__LIGHT__flat.npz",
         "_done_DARK__and__LIGHT.npz",
     )
+    R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
+    R_WORKSPACE_FILES = (
+        "DARK__and__LIGHT__flat.RData",
+        "_done_DARK__and__LIGHT.RData",
+    )
+    R_DISPLAY_FILES = (
+        "DARK_MARKED_find_vertex.png",
+        "DARK_MARKED_vertex.png",
+    )
+    R_ANALYZE_FILES = (
+        "_flat_DARK.hdr",
+        "_flat_DARK.img",
+        "_flat_LIGHT.hdr",
+        "_flat_LIGHT.img",
+        "_flat-normed_DARK.hdr",
+        "_flat-normed_DARK.img",
+        "_flat-normed_LIGHT.hdr",
+        "_flat-normed_LIGHT.img",
+    )
+    R_TABLE_FILES = (
+        "_dark_profiles_DARK.txt",
+        "_light_profiles_LIGHT.txt",
+        "_fovea_dark_profiles_DARK.txt",
+        "_fovea_light_profiles_LIGHT.txt",
+    )
+    R_OUTPUT_FILES = R_ANALYZE_FILES + R_WORKSPACE_FILES + R_DISPLAY_FILES + R_TABLE_FILES
+    R_ARRAY_EXPORT_DIR = "step3_r_arrays"
+    R_PROGRESS_BY_STEP = {
+        "startup": (1, "Starting R script"),
+        "input-config": (2, "Reading R input configuration"),
+        "load-images": (5, "Loading Analyze volumes in R"),
+        "fovea-center": (8, "Finding fovea center"),
+        "rpe-line": (11, "Reading RPE line"),
+        "rpe-spline": (14, "Fitting RPE spline"),
+        "apparent-angle": (17, "Computing apparent angles"),
+        "perpendiculars": (21, "Building perpendicular sampling lines"),
+        "flattened-markers": (25, "Flattening marker image"),
+        "dark-loop": (36, "Flattening DARK slices"),
+        "light-loop": (47, "Flattening LIGHT slices"),
+        "post-log-convert": (54, "Converting flattened data to raw scale"),
+        "grand-mean": (59, "Building grand mean image"),
+        "rough-vit-loop": (63, "Aligning retina profiles"),
+        "python-export": (72, "Exporting R arrays for app loading"),
+        "layer-borders": (78, "Identifying retinal layer borders"),
+        "main-normalization": (86, "Spatially normalizing main retina"),
+        "fovea-normalization": (92, "Spatially normalizing fovea"),
+        "final-export": (97, "Writing final R outputs"),
+        "done": (100, "R processing complete"),
+    }
 
     def __init__(self, parent, preferences=None):
         super().__init__(parent)
@@ -1609,7 +1666,9 @@ class Step3Frame(ttk.Frame):
         self.results = None
         self.figure = None
         self.canvas = None
-        self.run_button = None
+        self.run_button_python = None
+        self.run_button_r_script = None
+        self.slice_combo = None
         self._busy = False
         self.last_diff_log_dir = None
 
@@ -1659,8 +1718,11 @@ class Step3Frame(ttk.Frame):
         process = ttk.LabelFrame(left, text="Process", padding=3)
         process.pack(fill="x", pady=(0, 5))
 
-        self.run_button = ttk.Button(process, text="Run Step 3", command=self._run_processing)
-        self.run_button.pack(fill="x", pady=2)
+        self.run_button_r_script = ttk.Button(process, text="Run Step 3 (Original R Script)", command=self._run_r_script)
+        self.run_button_r_script.pack(fill="x", pady=2)
+
+        self.run_button_python = ttk.Button(process, text="Run Step 3 (Python, experimental)", command=self._run_processing)
+        self.run_button_python.pack(fill="x", pady=2)
 
         self.progress = ttk.Progressbar(process, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=2)
@@ -1689,9 +1751,9 @@ class Step3Frame(ttk.Frame):
         view_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
 
         ttk.Label(view_results, text="Slice").pack(anchor="w", pady=(8, 2))
-        slice_combo = ttk.Combobox(view_results, textvariable=self.slice_var, values=["0", "1"], state="readonly")
-        slice_combo.pack(fill="x", pady=2)
-        slice_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
+        self.slice_combo = ttk.Combobox(view_results, textvariable=self.slice_var, values=["0", "1"], state="readonly")
+        self.slice_combo.pack(fill="x", pady=2)
+        self.slice_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
 
         ttk.Separator(left).pack(fill="x", pady=3)
 
@@ -1714,6 +1776,436 @@ class Step3Frame(ttk.Frame):
             side="bottom", fill="x"
         )
         self._render()
+
+    def _set_process_buttons(self, state):
+        if self.run_button_python is not None:
+            self.run_button_python.configure(state=state)
+        if self.run_button_r_script is not None:
+            self.run_button_r_script.configure(state=state)
+
+    @staticmethod
+    def _script_path():
+        return Path(__file__).resolve().parents[2] / Step3Frame.R_SCRIPT_NAME
+
+    def _resolve_rscript_executable(self):
+        configured = None if self.preferences is None else self.preferences.get("rscript_path")
+        candidates = []
+        if configured:
+            candidates.append(Path(configured))
+
+        env_override = os.environ.get("RSCRIPT_PATH") or os.environ.get("R_SCRIPT_PATH")
+        if env_override:
+            candidates.append(Path(env_override))
+
+        for name in ("Rscript", "Rscript.exe"):
+            found = shutil.which(name)
+            if found:
+                candidates.append(Path(found))
+
+        if os.name == "nt":
+            for root in (Path(r"C:\Program Files\R"), Path(r"C:\Program Files (x86)\R")):
+                if root.is_dir():
+                    candidates.extend(root.glob("R*/bin/x64/Rscript.exe"))
+                    candidates.extend(root.glob("R*/bin/Rscript.exe"))
+
+        for candidate in candidates:
+            candidate = self._normalize_r_executable(candidate)
+            if candidate and candidate.is_file():
+                return candidate
+        return None
+
+    @staticmethod
+    def _normalize_r_executable(path):
+        """Return a non-interactive R executable, preferring Rscript.exe.
+
+        Users often select R.exe or Rgui.exe from the file dialog. Rgui/RStudio
+        opens an interactive program and does not run this script as intended.
+        If possible, convert those selections to the adjacent Rscript.exe.
+        """
+        if not path:
+            return None
+        path = Path(path)
+        if not path.is_file():
+            return None
+
+        name = path.name.lower()
+        if name in {"rscript.exe", "rscript"}:
+            return path
+
+        sibling_name = "Rscript.exe" if name.endswith(".exe") else "Rscript"
+        sibling = path.with_name(sibling_name)
+        if sibling.is_file():
+            return sibling
+
+        if name in {"r.exe", "rterm.exe", "r", "rterm"}:
+            return path
+
+        return None
+
+    @staticmethod
+    def _build_r_run_command(r_executable, script_path, script_args):
+        name = Path(r_executable).name.lower()
+        if name in {"rscript.exe", "rscript"}:
+            return [str(r_executable), "--vanilla", str(script_path), *script_args]
+        if name in {"r.exe", "rterm.exe", "r", "rterm"}:
+            return [
+                str(r_executable),
+                "--vanilla",
+                "--slave",
+                f"--file={script_path}",
+                "--args",
+                *script_args,
+            ]
+        raise RuntimeError(
+            "Select Rscript.exe, not the interactive R/RStudio program. "
+            "Typical path: C:\\Program Files\\R\\R-x.x.x\\bin\\x64\\Rscript.exe"
+        )
+
+    @staticmethod
+    def _analyze_base_name(base_path):
+        return Path(str(base_path)).name
+
+    @staticmethod
+    def _r_index_string(slice_count):
+        return ",".join(str(idx) for idx in range(1, int(slice_count) + 1))
+
+    def _r_script_config_from_current_folder(self):
+        input_paths, input_issues = self._refresh_input_status()
+        if input_issues:
+            raise RuntimeError(
+                "Cannot run the R script because Step 3 inputs are incomplete:\n"
+                + "\n".join(f"  - {item}" for item in input_issues)
+            )
+
+        input_info = self._read_input_stack_info(input_paths)
+        self._validate_input_stack_shapes(input_info)
+        output_dir = Path(self.output_sdb_dir or self.current_sdb_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        return {
+            "input_dir": str(Path(self.current_sdb_dir).resolve()),
+            "output_dir": str(output_dir.resolve()),
+            "reference_dark": self._analyze_base_name(input_paths["Dark_MARKED"]),
+            "reference_light": self._analyze_base_name(input_paths["Light_MARKED"]),
+            "to_process_dark": self._analyze_base_name(input_paths["DARK"]),
+            "to_process_light": self._analyze_base_name(input_paths["LIGHT"]),
+            "image_index_light": self._r_index_string(input_info["LIGHT"]["shape"][0]),
+            "image_index_dark": self._r_index_string(input_info["DARK"]["shape"][0]),
+            "pixel_width": str(self.PIXEL_WIDTH_UM),
+        }
+
+    @staticmethod
+    def _short_process_text(text, max_lines=24):
+        lines = [line for line in str(text or "").splitlines() if line.strip()]
+        if len(lines) <= max_lines:
+            return "\n".join(lines)
+        return "\n".join(lines[-max_lines:])
+
+    def _progress_from_r_line(self, line):
+        match = re.search(r"DEBUG \[([^\]]+)\]\s*(.*)", str(line))
+        if not match:
+            return None
+        step = match.group(1).strip()
+        detail = match.group(2).strip()
+        progress = self.R_PROGRESS_BY_STEP.get(step)
+        if progress is None:
+            return None
+        percent, label = progress
+        if detail and step in {"dark-loop", "light-loop"}:
+            match_slice = re.search(r"Processing z=\s*(\d+)\s*of\s*(\d+)", detail)
+            if match_slice:
+                current = int(match_slice.group(1))
+                total = max(1, int(match_slice.group(2)))
+                span = 10.0
+                percent = min(99.0, float(percent) + (span * (current - 1) / total))
+                label = f"{label}: slice {current}/{total}"
+        return percent, label
+
+    def _handle_r_progress_line(self, line):
+        progress = self._progress_from_r_line(line)
+        if progress is None:
+            return
+        percent, label = progress
+        self.after(0, lambda p=percent, text=label: self._update_progress(p, text))
+
+    @staticmethod
+    def _to_numpy(value):
+        if hasattr(value, "values"):
+            value = value.values
+        if hasattr(value, "to_numpy"):
+            value = value.to_numpy()
+        return np.asarray(value)
+
+    def _load_r_workspace_results(self, output_dir):
+        if pyreadr is None:
+            raise RuntimeError("pyreadr is not installed, so R workspace files cannot be loaded.")
+
+        output_dir = Path(output_dir)
+        flat_rdata = output_dir / self.R_WORKSPACE_FILES[0]
+        done_rdata = output_dir / self.R_WORKSPACE_FILES[1]
+        if not flat_rdata.is_file() or not done_rdata.is_file():
+            missing = [name for name in self.R_WORKSPACE_FILES if not (output_dir / name).is_file()]
+            raise FileNotFoundError("Missing R workspace file(s): " + ", ".join(missing))
+
+        flat_data = pyreadr.read_r(str(flat_rdata))
+        done_data = pyreadr.read_r(str(done_rdata))
+
+        def require(dataset, key):
+            if key not in dataset:
+                raise KeyError(f"R workspace file is missing required object: {key}")
+            return self._to_numpy(dataset[key])
+
+        flattened_dark = require(flat_data, "FLATTENED.DARK.RETINA.RRC")
+        flattened_light = require(flat_data, "FLATTENED.LIGHT.RETINA.RRC")
+        markers = require(flat_data, "FLATTENED.MARKERS.RRC")
+
+        first_grand_mean = require(done_data, "FIRST.GRAND.MEAN") if "FIRST.GRAND.MEAN" in done_data else None
+        second_grand_mean = require(done_data, "SECOND.GRAND.MEAN") if "SECOND.GRAND.MEAN" in done_data else None
+
+        final_grand_mean = np.array(flattened_dark[:, :, 0], copy=True)
+        for z in range(1, flattened_dark.shape[2]):
+            final_grand_mean = final_grand_mean + flattened_dark[:, :, z]
+        for z in range(1, flattened_light.shape[2]):
+            final_grand_mean = final_grand_mean + flattened_light[:, :, z]
+        final_grand_mean = final_grand_mean / (flattened_dark.shape[2] + flattened_light.shape[2])
+
+        shift_dark = require(done_data, "SHIFT.POSITION.DARK") if "SHIFT.POSITION.DARK" in done_data else None
+        shift_light = require(done_data, "SHIFT.POSITION.LIGHT") if "SHIFT.POSITION.LIGHT" in done_data else None
+        shift_dark_refined = require(done_data, "SHIFT.POSITION.DARK.REFINED") if "SHIFT.POSITION.DARK.REFINED" in done_data else None
+        shift_light_refined = require(done_data, "SHIFT.POSITION.LIGHT.REFINED") if "SHIFT.POSITION.LIGHT.REFINED" in done_data else None
+        best_lateral_dark = require(done_data, "BEST.LAT.MOVE.DARK") if "BEST.LAT.MOVE.DARK" in done_data else None
+        best_lateral_light = require(done_data, "BEST.LAT.MOVE.LIGHT") if "BEST.LAT.MOVE.LIGHT" in done_data else None
+        if "APPARENT.ANGLES.FOR.DARK" in flat_data:
+            apparent_angles_for_dark = require(flat_data, "APPARENT.ANGLES.FOR.DARK")
+        else:
+            dark_indices = np.arange(1, flattened_dark.shape[2] + 1, dtype=np.float64)
+            apparent_angles_for_dark = np.column_stack((dark_indices, dark_indices, dark_indices))
+        if "APPARENT.ANGLES.FOR.LIGHT" in flat_data:
+            apparent_angles_for_light = require(flat_data, "APPARENT.ANGLES.FOR.LIGHT")
+        else:
+            light_indices = np.arange(1, flattened_light.shape[2] + 1, dtype=np.float64)
+            apparent_angles_for_light = np.column_stack((light_indices, light_indices, light_indices))
+
+        if "vertex" in done_data:
+            vertex = int(np.ravel(self._to_numpy(done_data["vertex"]))[0])
+        elif "vertex" in flat_data:
+            vertex = int(np.ravel(self._to_numpy(flat_data["vertex"]))[0])
+        else:
+            vertex, _ = _detect_vertex(final_grand_mean)
+
+        grand_profile = np.column_stack(
+            (
+                np.arange(1.0, final_grand_mean.shape[1] + 1.0, 1.0),
+                np.nanmean(final_grand_mean, axis=0),
+            )
+        )
+
+        results = {
+            "flattened_dark": np.transpose(flattened_dark, (2, 0, 1)),
+            "flattened_light": np.transpose(flattened_light, (2, 0, 1)),
+            "final_dark": np.transpose(flattened_dark, (2, 0, 1)),
+            "final_light": np.transpose(flattened_light, (2, 0, 1)),
+            "markers": markers,
+            "first_grand_mean": first_grand_mean,
+            "second_grand_mean": second_grand_mean,
+            "final_grand_mean": final_grand_mean,
+            "grand_profile": grand_profile,
+            "vertex": vertex,
+            "shift_dark": shift_dark,
+            "shift_light": shift_light,
+            "shift_dark_refined": shift_dark_refined,
+            "shift_light_refined": shift_light_refined,
+            "best_lateral_dark": best_lateral_dark,
+            "best_lateral_light": best_lateral_light,
+            "apparent_angles_for_dark": apparent_angles_for_dark,
+            "apparent_angles_for_light": apparent_angles_for_light,
+            "dark_rrc": flattened_dark,
+            "light_rrc": flattened_light,
+            "markers_rrc": markers,
+        }
+        return results
+
+    def _load_r_array_export(self, output_dir):
+        export_dir = Path(output_dir) / self.R_ARRAY_EXPORT_DIR
+        if not export_dir.is_dir():
+            raise FileNotFoundError(f"Missing R array export folder: {export_dir}")
+
+        def load_array(name, required=True):
+            bin_path = export_dir / f"{name}.bin"
+            shape_path = export_dir / f"{name}.shape"
+            if not bin_path.is_file() or not shape_path.is_file():
+                if required:
+                    raise FileNotFoundError(f"Missing R array export: {name}")
+                return None
+            shape_text = shape_path.read_text(encoding="utf-8").strip()
+            shape = tuple(int(part) for part in shape_text.split(",") if part.strip())
+            data = np.fromfile(bin_path, dtype="<f8")
+            expected = int(np.prod(shape)) if shape else 1
+            if data.size != expected:
+                raise ValueError(f"R array export {name} has {data.size} values; expected {expected}.")
+            if not shape:
+                return data
+            return data.reshape(shape, order="F")
+
+        flattened_dark = np.asarray(load_array("FLATTENED_DARK_RETINA_RRC"), dtype=np.float64)
+        flattened_light = np.asarray(load_array("FLATTENED_LIGHT_RETINA_RRC"), dtype=np.float64)
+        markers = np.asarray(load_array("FLATTENED_MARKERS_RRC"), dtype=np.float64)
+
+        first_grand_mean = load_array("FIRST_GRAND_MEAN", required=False)
+        second_grand_mean = load_array("SECOND_GRAND_MEAN", required=False)
+        final_grand_mean = load_array("FINAL_GRAND_MEAN", required=False)
+        if final_grand_mean is None:
+            final_grand_mean = np.nanmean(np.concatenate((flattened_dark, flattened_light), axis=2), axis=2)
+        if first_grand_mean is None:
+            first_grand_mean = np.array(final_grand_mean, copy=True)
+        if second_grand_mean is None:
+            second_grand_mean = np.array(final_grand_mean, copy=True)
+
+        grand_profile = load_array("GRAND_PROFILE", required=False)
+        if grand_profile is None or grand_profile.shape[0] != final_grand_mean.shape[1]:
+            grand_profile = np.column_stack(
+                (
+                    np.arange(1.0, final_grand_mean.shape[1] + 1.0, 1.0),
+                    np.nanmean(final_grand_mean, axis=0),
+                )
+            )
+
+        vertex_data = load_array("VERTEX", required=False)
+        if vertex_data is not None and np.ravel(vertex_data).size:
+            vertex = int(np.ravel(vertex_data)[0])
+        else:
+            vertex, _ = _detect_vertex(final_grand_mean)
+
+        apparent_angles_for_dark = load_array("APPARENT_ANGLES_FOR_DARK", required=False)
+        if apparent_angles_for_dark is None:
+            dark_indices = np.arange(1, flattened_dark.shape[2] + 1, dtype=np.float64)
+            apparent_angles_for_dark = np.column_stack((dark_indices, dark_indices, dark_indices))
+        apparent_angles_for_light = load_array("APPARENT_ANGLES_FOR_LIGHT", required=False)
+        if apparent_angles_for_light is None:
+            light_indices = np.arange(1, flattened_light.shape[2] + 1, dtype=np.float64)
+            apparent_angles_for_light = np.column_stack((light_indices, light_indices, light_indices))
+
+        def optional_or_empty(name):
+            value = load_array(name, required=False)
+            return np.empty((0, 0), dtype=np.float64) if value is None else value
+
+        return {
+            "flattened_dark": np.transpose(flattened_dark, (2, 0, 1)),
+            "flattened_light": np.transpose(flattened_light, (2, 0, 1)),
+            "final_dark": np.transpose(flattened_dark, (2, 0, 1)),
+            "final_light": np.transpose(flattened_light, (2, 0, 1)),
+            "markers": markers,
+            "first_grand_mean": first_grand_mean,
+            "second_grand_mean": second_grand_mean,
+            "final_grand_mean": final_grand_mean,
+            "grand_profile": grand_profile,
+            "vertex": vertex,
+            "shift_dark": optional_or_empty("SHIFT_POSITION_DARK"),
+            "shift_light": optional_or_empty("SHIFT_POSITION_LIGHT"),
+            "shift_dark_refined": optional_or_empty("SHIFT_POSITION_DARK_REFINED"),
+            "shift_light_refined": optional_or_empty("SHIFT_POSITION_LIGHT_REFINED"),
+            "best_lateral_dark": optional_or_empty("BEST_LAT_MOVE_DARK"),
+            "best_lateral_light": optional_or_empty("BEST_LAT_MOVE_LIGHT"),
+            "apparent_angles_for_dark": apparent_angles_for_dark,
+            "apparent_angles_for_light": apparent_angles_for_light,
+            "dark_rrc": flattened_dark,
+            "light_rrc": flattened_light,
+            "markers_rrc": markers,
+        }
+
+    def _load_r_analyze_results(self, output_dir):
+        output_dir = Path(output_dir)
+        dark_base = output_dir / "_flat_DARK"
+        light_base = output_dir / "_flat_LIGHT"
+        if not (dark_base.with_suffix(".hdr").is_file() and light_base.with_suffix(".hdr").is_file()):
+            raise FileNotFoundError("Missing R Analyze outputs _flat_DARK.hdr and _flat_LIGHT.hdr.")
+
+        flattened_dark = _load_analyze_volume_r_layout(dark_base)
+        flattened_light = _load_analyze_volume_r_layout(light_base)
+        final_grand_mean = np.nanmean(np.concatenate((flattened_dark, flattened_light), axis=2), axis=2)
+        grand_profile = np.column_stack(
+            (
+                np.arange(1.0, final_grand_mean.shape[1] + 1.0, 1.0),
+                np.nanmean(final_grand_mean, axis=0),
+            )
+        )
+        vertex, _ = _detect_vertex(final_grand_mean)
+        dark_indices = np.arange(1, flattened_dark.shape[2] + 1, dtype=np.float64)
+        light_indices = np.arange(1, flattened_light.shape[2] + 1, dtype=np.float64)
+
+        return {
+            "flattened_dark": np.transpose(flattened_dark, (2, 0, 1)),
+            "flattened_light": np.transpose(flattened_light, (2, 0, 1)),
+            "final_dark": np.transpose(flattened_dark, (2, 0, 1)),
+            "final_light": np.transpose(flattened_light, (2, 0, 1)),
+            "markers": None,
+            "first_grand_mean": final_grand_mean,
+            "second_grand_mean": final_grand_mean,
+            "final_grand_mean": final_grand_mean,
+            "grand_profile": grand_profile,
+            "vertex": vertex,
+            "shift_dark": np.empty((0, 0), dtype=np.float64),
+            "shift_light": np.empty((0, 0), dtype=np.float64),
+            "shift_dark_refined": np.empty((0, 0), dtype=np.float64),
+            "shift_light_refined": np.empty((0, 0), dtype=np.float64),
+            "best_lateral_dark": np.empty((0, 0), dtype=np.float64),
+            "best_lateral_light": np.empty((0, 0), dtype=np.float64),
+            "apparent_angles_for_dark": np.column_stack((dark_indices, dark_indices, dark_indices)),
+            "apparent_angles_for_light": np.column_stack((light_indices, light_indices, light_indices)),
+            "dark_rrc": flattened_dark,
+            "light_rrc": flattened_light,
+            "markers_rrc": None,
+        }
+
+    def _load_r_results_with_fallbacks(self, output_dir):
+        errors = []
+        for loader in (self._load_r_workspace_results, self._load_r_array_export, self._load_r_analyze_results):
+            try:
+                results = loader(output_dir)
+                return results, loader.__name__, errors
+            except Exception as exc:
+                errors.append(f"{loader.__name__}: {exc}")
+        raise RuntimeError("Could not load R outputs using any supported method:\n" + "\n".join(errors))
+
+    def _mirror_r_outputs(self, source_dir, destination_dir):
+        source_dir = Path(source_dir)
+        destination_dir = Path(destination_dir)
+        if source_dir == destination_dir:
+            return
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        for name in self.R_OUTPUT_FILES:
+            src = source_dir / name
+            dst = destination_dir / name
+            if src.is_file() and not dst.is_file():
+                shutil.copy2(src, dst)
+
+    def _load_r_script_results_into_ui(self, working_dir):
+        results, loader_name, loader_errors = self._load_r_results_with_fallbacks(working_dir)
+        self.results = results
+        self._update_slice_options_from_results()
+        self.progress.configure(value=100)
+        self.progress_text_var.set("Completed")
+        self.status_var.set(f"R script complete. Results loaded from {working_dir}.")
+        self.info_var.set(
+            f"flattened_dark: {results['flattened_dark'].shape}\n"
+            f"flattened_light: {results['flattened_light'].shape}\n"
+            f"final_grand_mean: {results['final_grand_mean'].shape}\n"
+            f"vertex: {results['vertex']}\n"
+            f"loaded via: {loader_name}"
+        )
+        if loader_errors:
+            self.info_var.set(self.info_var.get() + "\n\nLoader fallbacks:\n" + "\n".join(loader_errors))
+        self._render()
+        return results
+
+    def _update_slice_options_from_results(self):
+        if self.slice_combo is None or self.results is None:
+            return
+        count = int(self.results["flattened_dark"].shape[0])
+        values = [str(idx) for idx in range(max(1, count))]
+        self.slice_combo.configure(values=values)
+        if self.slice_var.get() not in values:
+            self.slice_var.set(values[0])
 
     @staticmethod
     def _existing_basepath(folder, names):
@@ -1828,6 +2320,9 @@ class Step3Frame(ttk.Frame):
         self.processor = None
         self.results = None
         self.view_var.set("Tutorial")
+        if self.slice_combo is not None:
+            self.slice_combo.configure(values=["0", "1"])
+        self.slice_var.set("0")
         self.progress.configure(value=0)
         self.progress_text_var.set("Idle")
         self._render()
@@ -1918,7 +2413,9 @@ class Step3Frame(ttk.Frame):
         if not folder:
             return False
         folder = Path(folder)
-        return all((folder / name).is_file() for name in self.CORE_RESULT_FILES)
+        npz_ready = all((folder / name).is_file() for name in self.CORE_RESULT_FILES)
+        r_ready = all((folder / name).is_file() for name in self.R_WORKSPACE_FILES)
+        return npz_ready or r_ready
 
     def _load_existing_results_from_output_folder(self, show_errors=False):
         if not self.output_sdb_dir:
@@ -1927,34 +2424,46 @@ class Step3Frame(ttk.Frame):
             return False
 
         output_dir = Path(self.output_sdb_dir)
-        flat_npz = output_dir / "DARK__and__LIGHT__flat.npz"
         try:
-            with np.load(flat_npz) as flat_data:
-                dark_rrc = np.asarray(flat_data["FLATTENED_DARK_RETINA_RRC"], dtype=np.float64)
-                light_rrc = np.asarray(flat_data["FLATTENED_LIGHT_RETINA_RRC"], dtype=np.float64)
-                markers = np.asarray(flat_data["FLATTENED_MARKERS_RRC"], dtype=np.float64)
-                vertex = int(np.ravel(flat_data["VERTEX"])[0])
-                self.results = {
-                    "flattened_dark": np.transpose(dark_rrc, (2, 0, 1)),
-                    "flattened_light": np.transpose(light_rrc, (2, 0, 1)),
-                    "final_dark": np.transpose(dark_rrc, (2, 0, 1)),
-                    "final_light": np.transpose(light_rrc, (2, 0, 1)),
-                    "markers": markers,
-                    "first_grand_mean": np.asarray(flat_data["FIRST_GRAND_MEAN"], dtype=np.float64),
-                    "second_grand_mean": np.asarray(flat_data["SECOND_GRAND_MEAN"], dtype=np.float64),
-                    "final_grand_mean": np.asarray(flat_data["FINAL_GRAND_MEAN"], dtype=np.float64),
-                    "grand_profile": np.asarray(flat_data["GRAND_PROFILE"], dtype=np.float64),
-                    "vertex": vertex,
-                    "shift_dark": np.asarray(flat_data["SHIFT_POSITION_DARK"], dtype=np.float64),
-                    "shift_light": np.asarray(flat_data["SHIFT_POSITION_LIGHT"], dtype=np.float64),
-                    "shift_dark_refined": np.asarray(flat_data["SHIFT_POSITION_DARK_REFINED"], dtype=np.float64),
-                    "shift_light_refined": np.asarray(flat_data["SHIFT_POSITION_LIGHT_REFINED"], dtype=np.float64),
-                    "best_lateral_dark": np.asarray(flat_data["BEST_LAT_MOVE_DARK"], dtype=np.float64),
-                    "best_lateral_light": np.asarray(flat_data["BEST_LAT_MOVE_LIGHT"], dtype=np.float64),
-                    "dark_rrc": dark_rrc,
-                    "light_rrc": light_rrc,
-                    "markers_rrc": markers,
-                }
+            flat_rdata = output_dir / self.R_WORKSPACE_FILES[0]
+            done_rdata = output_dir / self.R_WORKSPACE_FILES[1]
+            flat_npz = output_dir / "DARK__and__LIGHT__flat.npz"
+            done_npz = output_dir / "_done_DARK__and__LIGHT.npz"
+            if (
+                (flat_rdata.is_file() and done_rdata.is_file())
+                or (output_dir / self.R_ARRAY_EXPORT_DIR).is_dir()
+                or (output_dir / "_flat_DARK.hdr").is_file()
+            ):
+                self.results, _loader_name, _loader_errors = self._load_r_results_with_fallbacks(output_dir)
+            elif flat_npz.is_file() and done_npz.is_file():
+                with np.load(flat_npz) as flat_data:
+                    dark_rrc = np.asarray(flat_data["FLATTENED_DARK_RETINA_RRC"], dtype=np.float64)
+                    light_rrc = np.asarray(flat_data["FLATTENED_LIGHT_RETINA_RRC"], dtype=np.float64)
+                    markers = np.asarray(flat_data["FLATTENED_MARKERS_RRC"], dtype=np.float64)
+                    vertex = int(np.ravel(flat_data["VERTEX"])[0])
+                    self.results = {
+                        "flattened_dark": np.transpose(dark_rrc, (2, 0, 1)),
+                        "flattened_light": np.transpose(light_rrc, (2, 0, 1)),
+                        "final_dark": np.transpose(dark_rrc, (2, 0, 1)),
+                        "final_light": np.transpose(light_rrc, (2, 0, 1)),
+                        "markers": markers,
+                        "first_grand_mean": np.asarray(flat_data["FIRST_GRAND_MEAN"], dtype=np.float64),
+                        "second_grand_mean": np.asarray(flat_data["SECOND_GRAND_MEAN"], dtype=np.float64),
+                        "final_grand_mean": np.asarray(flat_data["FINAL_GRAND_MEAN"], dtype=np.float64),
+                        "grand_profile": np.asarray(flat_data["GRAND_PROFILE"], dtype=np.float64),
+                        "vertex": vertex,
+                        "shift_dark": np.asarray(flat_data["SHIFT_POSITION_DARK"], dtype=np.float64),
+                        "shift_light": np.asarray(flat_data["SHIFT_POSITION_LIGHT"], dtype=np.float64),
+                        "shift_dark_refined": np.asarray(flat_data["SHIFT_POSITION_DARK_REFINED"], dtype=np.float64),
+                        "shift_light_refined": np.asarray(flat_data["SHIFT_POSITION_LIGHT_REFINED"], dtype=np.float64),
+                        "best_lateral_dark": np.asarray(flat_data["BEST_LAT_MOVE_DARK"], dtype=np.float64),
+                        "best_lateral_light": np.asarray(flat_data["BEST_LAT_MOVE_LIGHT"], dtype=np.float64),
+                        "dark_rrc": dark_rrc,
+                        "light_rrc": light_rrc,
+                        "markers_rrc": markers,
+                    }
+            else:
+                raise FileNotFoundError("No usable Step 3 result files were found in the output folder.")
         except Exception as exc:
             if show_errors:
                 messagebox.showerror("Load Results", f"Could not load existing Step 3 results.\n{exc}")
@@ -1964,6 +2473,7 @@ class Step3Frame(ttk.Frame):
         self.progress.configure(value=100)
         self.progress_text_var.set("Loaded existing results")
         self.status_var.set(f"Loaded existing Step 3 results from {output_dir}.")
+        self._update_slice_options_from_results()
         self._render()
         return True
 
@@ -2000,6 +2510,10 @@ class Step3Frame(ttk.Frame):
         )
 
         self.results = None
+        if self.slice_combo is not None:
+            slice_count = int(input_info["DARK"]["shape"][0])
+            self.slice_combo.configure(values=[str(idx) for idx in range(max(1, slice_count))])
+            self.slice_var.set("0")
         self.view_var.set("Comparison")
         self._render()
         self.info_var.set(
@@ -2026,12 +2540,183 @@ class Step3Frame(ttk.Frame):
                 return
 
         self._busy = True
-        if self.run_button is not None:
-            self.run_button.configure(state="disabled")
+        self._set_process_buttons("disabled")
         self.progress.configure(value=0)
         self.progress_text_var.set("Starting...")
         self.status_var.set("Running Step 3 pipeline and final outputs...")
         threading.Thread(target=self._process_worker, daemon=True).start()
+
+    def _run_r_script(self):
+        if self.processor is None:
+            if not self._load_processor_from_current_folder(show_errors=True):
+                return
+        if self._busy:
+            return
+
+        script_path = self._script_path()
+        if not script_path.is_file():
+            messagebox.showerror(
+                "Run Step 3 (R Script)",
+                f"Could not find the R script:\n{script_path}",
+            )
+            return
+
+        try:
+            r_config = self._r_script_config_from_current_folder()
+        except Exception as exc:
+            messagebox.showerror("Run Step 3 (R Script)", str(exc))
+            self.status_var.set("Step 3 R script inputs are not ready.")
+            return
+
+        rscript = self._resolve_rscript_executable()
+        if rscript is None:
+            selected = filedialog.askopenfilename(
+                title="Locate Rscript executable",
+                initialdir=self.current_sdb_dir or None,
+                filetypes=[("Rscript executable", "Rscript*.exe"), ("All files", "*.*")],
+            )
+            if not selected:
+                self.status_var.set("Rscript was not found. Select an Rscript executable to continue.")
+                return
+            rscript = self._normalize_r_executable(Path(selected))
+            if rscript is None:
+                messagebox.showerror(
+                    "Locate Rscript executable",
+                    "The selected program cannot run Step 3 non-interactively.\n\n"
+                    "Please select Rscript.exe, not R.exe, Rgui.exe, or RStudio.\n"
+                    "Typical path:\n"
+                    "C:\\Program Files\\R\\R-x.x.x\\bin\\x64\\Rscript.exe",
+                )
+                self.status_var.set("Select Rscript.exe to run the original Step 3 R script.")
+                return
+            if self.preferences is not None:
+                self.preferences.set("rscript_path", str(rscript))
+
+        if self._all_core_results_exist(self.output_sdb_dir):
+            overwrite = messagebox.askyesno(
+                "Overwrite Step 3 Results",
+                "Step 3 results already exist in the output folder.\n\n"
+                "Running the R script will overwrite those files. Are you sure?",
+            )
+            if not overwrite:
+                return
+
+        self._busy = True
+        self._set_process_buttons("disabled")
+        self.progress.configure(value=0)
+        self.progress_text_var.set("Launching Rscript...")
+        self.status_var.set("Running Step 3 R script in the background...")
+        threading.Thread(
+            target=self._r_script_worker,
+            args=(Path(rscript), script_path, r_config),
+            daemon=True,
+        ).start()
+
+    def _r_script_worker(self, rscript_path, script_path, r_config):
+        input_dir = Path(r_config["input_dir"])
+        output_dir = Path(r_config["output_dir"])
+        script_args = [
+            r_config["input_dir"],
+            r_config["output_dir"],
+            r_config["reference_dark"],
+            r_config["reference_light"],
+            r_config["to_process_dark"],
+            r_config["to_process_light"],
+            r_config["image_index_light"],
+            r_config["image_index_dark"],
+            r_config["pixel_width"],
+        ]
+        try:
+            cmd = self._build_r_run_command(rscript_path, script_path, script_args)
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            process = subprocess.Popen(
+                cmd,
+                cwd=str(input_dir),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=creationflags,
+                bufsize=1,
+            )
+            output_lines = []
+            if process.stdout is not None:
+                for line in process.stdout:
+                    output_lines.append(line)
+                    self._handle_r_progress_line(line)
+            returncode = process.wait()
+            stdout = "".join(output_lines)
+            self.after(
+                0,
+                lambda: self._on_r_script_done(
+                    returncode,
+                    stdout,
+                    "",
+                    input_dir,
+                    output_dir,
+                    cmd,
+                ),
+            )
+        except Exception as exc:
+            try:
+                cmd
+            except NameError:
+                cmd = [str(rscript_path), str(script_path), *script_args]
+            self.after(0, lambda: self._on_r_script_done(1, "", str(exc), input_dir, output_dir, cmd))
+
+    def _write_r_run_log(self, output_dir, returncode, stdout, stderr, cmd):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        log_path = output_dir / "step3_rscript.log"
+        log_path.write_text(
+            "Command:\n"
+            + " ".join(str(part) for part in cmd)
+            + f"\n\nReturn code: {returncode}\n\nSTDOUT:\n{stdout or ''}\n\nSTDERR:\n{stderr or ''}\n",
+            encoding="utf-8",
+        )
+        return log_path
+
+    def _on_r_script_done(self, returncode, stdout, stderr, input_dir, output_dir, cmd):
+        self._busy = False
+        self._set_process_buttons("normal")
+
+        output_dir = Path(output_dir)
+        log_path = self._write_r_run_log(output_dir, returncode, stdout, stderr, cmd)
+
+        if returncode != 0:
+            self.progress_text_var.set("Failed")
+            self.status_var.set("Step 3 R script failed.")
+            message = ["The R script did not complete successfully."]
+            if stdout.strip():
+                message.append("\nSTDOUT (last lines):\n" + self._short_process_text(stdout))
+            if stderr.strip():
+                message.append("\nSTDERR (last lines):\n" + self._short_process_text(stderr))
+            message.append(f"\nInput directory: {input_dir}")
+            message.append(f"Output directory: {output_dir}")
+            message.append(f"Full log saved to:\n{log_path}")
+            messagebox.showerror("Step 3 (R Script)", "\n".join(message))
+            return
+
+        try:
+            self._mirror_r_outputs(input_dir, output_dir)
+            self._load_r_script_results_into_ui(output_dir)
+        except Exception as exc:
+            self.progress_text_var.set("Completed, but load failed")
+            self.status_var.set(f"R script completed, but the results could not be loaded: {exc}")
+            messagebox.showerror(
+                "Step 3 (R Script)",
+                f"The R script finished, but the app could not load its results.\n{exc}\n\nFull log saved to:\n{log_path}",
+            )
+            return
+
+        if stdout.strip() or stderr.strip():
+            log_text = []
+            if stdout.strip():
+                log_text.append(self._short_process_text(stdout, max_lines=12))
+            if stderr.strip():
+                log_text.append(self._short_process_text(stderr, max_lines=12))
+            self.info_var.set(self.info_var.get() + "\n\nR output log:\n" + str(log_path) + "\n" + "\n".join(log_text))
 
     def _threadsafe_progress(self, percent, label):
         self.after(0, lambda: self._update_progress(percent, label))
@@ -2097,8 +2782,7 @@ class Step3Frame(ttk.Frame):
         more_error=None,
     ):
         self._busy = False
-        if self.run_button is not None:
-            self.run_button.configure(state="normal")
+        self._set_process_buttons("normal")
 
         if error is not None:
             self.status_var.set(f"Step 3 failed: {error}")
@@ -2107,6 +2791,7 @@ class Step3Frame(ttk.Frame):
             return
 
         self.results = results
+        self._update_slice_options_from_results()
         if summary_path is not None:
             self.last_diff_log_dir = str(Path(summary_path).parent)
         self.progress.configure(value=100)

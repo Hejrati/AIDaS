@@ -40,6 +40,7 @@
 dbg <- function(step, ...) {
   .DEBUG.STEP <<- step
   cat(paste0("DEBUG [", step, "] ", paste(..., collapse=" "), "\n"))
+  flush.console()
 }
 
 stop.at.boundary <- function(step, ...) {
@@ -90,23 +91,129 @@ options(error = function() {
 dbg("startup", "Script started")
 
 
-REFERENCE.DARK="DARK_MARKED"
-REFERENCE.LIGHT="LIGHT_MARKED"
-TO.PROCESS.DARK="DARK"
-TO.PROCESS.LIGHT="LIGHT"
-PIXEL.WIDTH=3.89 #<-- microns per pixel
+args <- commandArgs(trailingOnly=TRUE)
 
-IMAGE.INDEX.LIGHT=c(1,
-2)
+arg.or.env <- function(position, env.name, default="") {
+  value <- ""
+  if(length(args) >= position) value <- args[[position]]
+  if(!nzchar(value)) value <- Sys.getenv(env.name, unset="")
+  if(!nzchar(value)) value <- default
+  value
+}
 
-IMAGE.INDEX.DARK=c(1,
-2)
+strip.analyze.extension <- function(value) {
+  sub("\\.(hdr|img)$", "", value, ignore.case=TRUE)
+}
 
-OUTDIR <- getwd()
+parse.index <- function(value) {
+  if(!nzchar(value)) return(NULL)
+  parsed <- as.integer(strsplit(value, ",", fixed=TRUE)[[1]])
+  parsed <- parsed[!is.na(parsed)]
+  if(!length(parsed)) return(NULL)
+  parsed
+}
+
+INPUTDIR <- arg.or.env(1, "AIDAS_STEP3_INPUT_DIR", getwd())
+OUTDIR <- arg.or.env(2, "AIDAS_STEP3_OUTPUT_DIR", INPUTDIR)
+INPUTDIR <- normalizePath(INPUTDIR, mustWork=TRUE)
+dir.create(OUTDIR, showWarnings=FALSE, recursive=TRUE)
+OUTDIR <- normalizePath(OUTDIR, mustWork=TRUE)
+setwd(INPUTDIR)
+
+REFERENCE.DARK=strip.analyze.extension(arg.or.env(3, "AIDAS_REFERENCE_DARK", "DARK_MARKED"))
+REFERENCE.LIGHT=strip.analyze.extension(arg.or.env(4, "AIDAS_REFERENCE_LIGHT", "LIGHT_MARKED"))
+TO.PROCESS.DARK=strip.analyze.extension(arg.or.env(5, "AIDAS_TO_PROCESS_DARK", "DARK"))
+TO.PROCESS.LIGHT=strip.analyze.extension(arg.or.env(6, "AIDAS_TO_PROCESS_LIGHT", "LIGHT"))
+IMAGE.INDEX.LIGHT=parse.index(arg.or.env(7, "AIDAS_IMAGE_INDEX_LIGHT", ""))
+IMAGE.INDEX.DARK=parse.index(arg.or.env(8, "AIDAS_IMAGE_INDEX_DARK", ""))
+PIXEL.WIDTH=as.numeric(arg.or.env(9, "AIDAS_PIXEL_WIDTH", "3.89")) #<-- microns per pixel
+PYEXPORTDIR <- file.path(OUTDIR, "step3_r_arrays")
+dir.create(PYEXPORTDIR, showWarnings=FALSE, recursive=TRUE)
+
+save.current.plot <- function(filename) {
+  target <- file.path(OUTDIR, filename)
+  ok <- FALSE
+  tryCatch({
+    snapshot <- recordPlot()
+    if(grepl("\\.png$", target, ignore.case=TRUE)) png(filename=target, width=1200, height=900)
+    else jpeg(filename=target, width=1200, height=900, quality=95)
+    replayPlot(snapshot)
+    dev.off()
+    ok <<- TRUE
+  }, error=function(e) {
+    tryCatch({
+      if(grepl("\\.png$", target, ignore.case=TRUE)) {
+        dev.copy(png, filename=target, width=1200, height=900)
+      } else {
+        dev.copy(jpeg, filename=target, width=1200, height=900, quality=95)
+      }
+      dev.off()
+      ok <<- TRUE
+    }, error=function(e2) {
+      tryCatch({
+        plot.type <- if(grepl("\\.png$", target, ignore.case=TRUE)) "png" else "jpg"
+        savePlot(filename=target, type=plot.type)
+        ok <<- TRUE
+      }, error=function(e3) {
+        cat(paste0("WARN: Could not save plot '", target, "': ", conditionMessage(e3), "\n"))
+      })
+    })
+  })
+  invisible(ok)
+}
+
+write.python.array <- function(name, value) {
+  if(is.null(value)) return(invisible(FALSE))
+  target <- file.path(PYEXPORTDIR, paste0(name, ".bin"))
+  dims <- dim(value)
+  if(is.null(dims)) dims <- length(value)
+  con <- file(target, "wb")
+  on.exit(close(con), add=TRUE)
+  writeBin(as.numeric(value), con, size=8, endian="little")
+  writeLines(paste(as.integer(dims), collapse=","), file.path(PYEXPORTDIR, paste0(name, ".shape")))
+  invisible(TRUE)
+}
+
+export.python.core.arrays <- function() {
+  dbg("python-export", "Writing core Python-readable R arrays")
+  write.python.array("FLATTENED_DARK_RETINA_RRC", FLATTENED.DARK.RETINA.RRC)
+  write.python.array("FLATTENED_LIGHT_RETINA_RRC", FLATTENED.LIGHT.RETINA.RRC)
+  write.python.array("FLATTENED_MARKERS_RRC", FLATTENED.MARKERS.RRC)
+  write.python.array("FIRST_GRAND_MEAN", FIRST.GRAND.MEAN)
+  write.python.array("SECOND_GRAND_MEAN", SECOND.GRAND.MEAN)
+  write.python.array("FINAL_GRAND_MEAN", FINAL.GRAND.MEAN)
+  write.python.array("GRAND_PROFILE", GRAND.PROFILE)
+  write.python.array("APPARENT_ANGLES_FOR_DARK", APPARENT.ANGLES.FOR.DARK)
+  write.python.array("APPARENT_ANGLES_FOR_LIGHT", APPARENT.ANGLES.FOR.LIGHT)
+  write.python.array("SHIFT_POSITION_DARK", SHIFT.POSITION.DARK)
+  write.python.array("SHIFT_POSITION_LIGHT", SHIFT.POSITION.LIGHT)
+  write.python.array("SHIFT_POSITION_DARK_REFINED", SHIFT.POSITION.DARK.REFINED)
+  write.python.array("SHIFT_POSITION_LIGHT_REFINED", SHIFT.POSITION.LIGHT.REFINED)
+  write.python.array("BEST_LAT_MOVE_DARK", BEST.LAT.MOVE.DARK)
+  write.python.array("BEST_LAT_MOVE_LIGHT", BEST.LAT.MOVE.LIGHT)
+  write.python.array("VERTEX", vertex)
+}
+
+export.python.final.arrays <- function() {
+  dbg("python-export", "Writing final Python-readable R arrays")
+  write.python.array("FLATTENED_DARK_RETINA_RRC_N", FLATTENED.DARK.RETINA.RRC.N)
+  write.python.array("FLATTENED_LIGHT_RETINA_RRC_N", FLATTENED.LIGHT.RETINA.RRC.N)
+  write.python.array("FLATTENED_DARK_RETINA_RRC_N_PROFILES", FLATTENED.DARK.RETINA.RRC.N.profiles)
+  write.python.array("FLATTENED_LIGHT_RETINA_RRC_N_PROFILES", FLATTENED.LIGHT.RETINA.RRC.N.profiles)
+  write.python.array("FLATTENED_DARK_RETINA_RRC_N_FOVEA_PROFILES", FLATTENED.DARK.RETINA.RRC.N.fovea.profiles)
+  write.python.array("FLATTENED_LIGHT_RETINA_RRC_N_FOVEA_PROFILES", FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles)
+}
 
 
-dbg("input-config", "Working directory:", OUTDIR)
-dbg("input-config", "length(IMAGE.INDEX.LIGHT)=", length(IMAGE.INDEX.LIGHT), "length(IMAGE.INDEX.DARK)=", length(IMAGE.INDEX.DARK))
+dbg("input-config", "Input directory:", INPUTDIR)
+dbg("input-config", "Output directory:", OUTDIR)
+dbg(
+  "input-config",
+  "length(IMAGE.INDEX.LIGHT)=",
+  if(is.null(IMAGE.INDEX.LIGHT)) "auto" else length(IMAGE.INDEX.LIGHT),
+  "length(IMAGE.INDEX.DARK)=",
+  if(is.null(IMAGE.INDEX.DARK)) "auto" else length(IMAGE.INDEX.DARK)
+)
 
 ########################################################################################
 ########################################################################################
@@ -172,6 +279,14 @@ if(length(dim(DARK))==4) DARK=DARK[,,,1]
 if(length(dim(LIGHT))==4) LIGHT=LIGHT[,,,1]
 dbg("load-images", "REF.DARK dim:", paste(dim(REF.DARK), collapse="x"), "REF.LIGHT dim:", paste(dim(REF.LIGHT), collapse="x"))
 dbg("load-images", "DARK dim:", paste(dim(DARK), collapse="x"), "LIGHT dim:", paste(dim(LIGHT), collapse="x"))
+if(is.null(IMAGE.INDEX.LIGHT)) IMAGE.INDEX.LIGHT=seq(1, dim(LIGHT)[3], 1)
+if(is.null(IMAGE.INDEX.DARK)) IMAGE.INDEX.DARK=seq(1, dim(DARK)[3], 1)
+if(length(IMAGE.INDEX.LIGHT) != dim(LIGHT)[3]) {
+  stop(paste0("IMAGE.INDEX.LIGHT length ", length(IMAGE.INDEX.LIGHT), " does not match LIGHT slices ", dim(LIGHT)[3], "."))
+}
+if(length(IMAGE.INDEX.DARK) != dim(DARK)[3]) {
+  stop(paste0("IMAGE.INDEX.DARK length ", length(IMAGE.INDEX.DARK), " does not match DARK slices ", dim(DARK)[3], "."))
+}
 dbg("variable-stats", "Printing summary statistics for current variables")
 show.scalar.stats("REFERENCE.DARK", REFERENCE.DARK)
 show.scalar.stats("REFERENCE.LIGHT", REFERENCE.LIGHT)
@@ -1076,7 +1191,7 @@ plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2],type="l")
 abline(v=450)
 abline(v=434)
 abline(v=466)
-savePlot(filename=paste(REFERENCE.DARK,"_find_vertex.png",sep=""),type="jpg")
+save.current.plot(paste(REFERENCE.DARK,"_find_vertex.png",sep=""))
 ## </new for 2023-SEP-05>
 ### isolate 450 +/- 16 pixels (the drawer should have been within 4 original-pixel-widths of the RPE).
 GRAND.PROFILE=GRAND.PROFILE[434:466,]
@@ -1097,7 +1212,7 @@ vertex=check.spline[which(check.spline[,3]>0)[length(which(check.spline[,3]>0))]
 abline(v=vertex)
 ## 
 ## so, we're selecting the farthest-out positive value
-savePlot(filename=paste(REFERENCE.DARK,"_vertex.png",sep=""),type="jpg")
+save.current.plot(paste(REFERENCE.DARK,"_vertex.png",sep=""))
 ##
 ##
 ## and, now, crop vertically so that vertex is at the same spot across subjects...
@@ -1118,7 +1233,7 @@ if(length(vertex)==0)
   check.spline[,3]=check.spline[,3]-median(na.rm=T,check.spline[,3]);
   vertex=check.spline[which(check.spline[,3]>=0)[length(which(check.spline[,3]>=0))],1]+1;
   abline(v=vertex,col="red");
-  savePlot(filename=paste(REFERENCE.DARK,"_vertex.png",sep=""),type="jpg")}
+  save.current.plot(paste(REFERENCE.DARK,"_vertex.png",sep=""))}
 ## </new for 2023-AUG-11>
 ##
 ##
@@ -1142,6 +1257,7 @@ f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat_",TO.PROCESS.LIGHT,sep="
 
 #FLATTENED.DARK.RETINA.RRC
 
+export.python.core.arrays()
 
 ### NOW, CLEAN UP A BIT
 rm(A,BEST.LAT.MOVE.DARK,BEST.LAT.MOVE.LIGHT,bestmove,border)
@@ -1157,7 +1273,7 @@ rm(start.move,threshold,top.range,vertex,window.factor,window.width.in.pixels,x,
 
 # b.Rdata
 
-save.image(paste(TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,"__flat.RData",sep=""))
+save.image(file.path(OUTDIR, paste(TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,"__flat.RData",sep="")))
 
 
 #################################################
@@ -1170,6 +1286,7 @@ save.image(paste(TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,"__flat.RData",sep="
 
 
 ## first, we're going to strip the relevant info out of FLATTENED.MARKERS.RRC (grab the mean position)
+dbg("layer-borders", "Reading hand-marked borders and identifying retinal layers")
 
 ## default RPE position is 431, can liberate slightly towards the end...
 
@@ -2929,6 +3046,7 @@ for(x in 1:nrow(MAIN.LIGHT.OUTPUTS))
 ##  SINCE THE VITREOUS IS BORING, we'll define each of these markers as the back end of the layer of interesy... so 
 ##  if we have values for... -10,0,10,20,...80,90,100,110,... those values represent "from -20 to -10","from -10 to -0",etc. 
 ## so, we'll end up with a 90 pixel-thick strip of retina
+dbg("main-normalization", "Building spatially normalized main retinal strips")
 FLATTENED.DARK.RETINA.RRC.N=FLATTENED.DARK.RETINA.RRC[,1:90,]
 FLATTENED.DARK.RETINA.RRC.N[,,]<-0
 
@@ -3127,6 +3245,7 @@ abline(v=c(0,10,37.5,57.5,77.5,100))
 
 
 ################################################# #so, I have my outputs (MAIN.LIGHT.OUTPUTS,MAIN.DARK.OUTPUTS), and the data on angles (e.g., APPARENT.ANGLES.FOR.LIGHT)
+dbg("fovea-normalization", "Building fovea-normalized retinal strips")
 ################################################# # and my flattened images... so I'm almost done... but I want some info from the fovea 
 #################################################
 #################################################   ## now, we need to identify each layer
@@ -3514,19 +3633,20 @@ rm(VITREOUS.RETINA.POSITION.DARK,VITREOUS.RETINA.POSITION.LIGHT)
 #REFERENCE.DARK=filename of the marked up file; saving just to ensure appropriate/redundant labeling of data within this file                             
 #TO.PROCESS.DARK=filename of the RAW data file; saving just to ensure appropriate/redundant labeling of data within this file   
 
+dbg("final-export", "Writing final Step 3 profile tables")
 EXPORT=as.data.frame(cbind(MAIN.DARK.OUTPUTS,t(FLATTENED.DARK.RETINA.RRC.N.profiles[,2:ncol(FLATTENED.DARK.RETINA.RRC.N.profiles)])))
 EXPORT=round(EXPORT,3)
 EXPORT=rbind(EXPORT[1,],EXPORT)
 EXPORT[1,]=t(as.data.frame(c(TO.PROCESS.DARK,"angle","whole","RPEtoOLM","RNFL",seq(-3.75,107.5,1.25))))
 EXPORT=t(EXPORT)
-write(t(EXPORT),ncol=ncol(EXPORT),file=paste("_dark_profiles_",TO.PROCESS.DARK,".txt",sep=""))
+write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_dark_profiles_",TO.PROCESS.DARK,".txt",sep="")))
 
 EXPORT=as.data.frame(cbind(MAIN.LIGHT.OUTPUTS,t(FLATTENED.LIGHT.RETINA.RRC.N.profiles[,2:ncol(FLATTENED.LIGHT.RETINA.RRC.N.profiles)])))
 EXPORT=round(EXPORT,3)
 EXPORT=rbind(EXPORT[1,],EXPORT)
 EXPORT[1,]=t(as.data.frame(c(TO.PROCESS.LIGHT,"angle","whole","RPEtoOLM","RNFL",seq(-3.75,107.5,1.25))))
 EXPORT=t(EXPORT)
-write(t(EXPORT),ncol=ncol(EXPORT),file=paste("_light_profiles_",TO.PROCESS.LIGHT,".txt",sep=""))
+write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_light_profiles_",TO.PROCESS.LIGHT,".txt",sep="")))
 
 EXPORT=MAIN.DARK.OUTPUTS.fovea[,c(1,2,2,3,3)]
 EXPORT[,3]<-NA
@@ -3540,7 +3660,7 @@ EXPORT=round(EXPORT,3)
 EXPORT=rbind(EXPORT[1,],EXPORT)
 EXPORT[1,]=t(as.data.frame(c(paste("fovea",TO.PROCESS.DARK,sep=""),"angle","whole","RPEtoOLM","RNFL",seq(-3.75,107.5,1.25))))
 EXPORT=t(EXPORT)
-write(t(EXPORT),ncol=ncol(EXPORT),file=paste("_fovea_dark_profiles_",TO.PROCESS.DARK,".txt",sep=""))
+write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_fovea_dark_profiles_",TO.PROCESS.DARK,".txt",sep="")))
 
 EXPORT=MAIN.LIGHT.OUTPUTS.fovea[,c(1,2,2,3,3)]
 EXPORT[,3]<-NA
@@ -3554,12 +3674,15 @@ EXPORT=round(EXPORT,3)
 EXPORT=rbind(EXPORT[1,],EXPORT)
 EXPORT[1,]=t(as.data.frame(c(paste("fovea",TO.PROCESS.LIGHT,sep=""),"angle","whole","RPEtoOLM","RNFL",seq(-3.75,107.5,1.25))))
 EXPORT=t(EXPORT)
-write(t(EXPORT),ncol=ncol(EXPORT),file=paste("_fovea_light_profiles_",TO.PROCESS.LIGHT,".txt",sep=""))
+write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_fovea_light_profiles_",TO.PROCESS.LIGHT,".txt",sep="")))
+
+export.python.final.arrays()
 
 ## and cleanup before a final Save
 rm(EXPORT.2.buff,EXPORT.2,EXPORT)
 
-save.image(paste("_done_",TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,".RData",sep=""))
+save.image(file.path(OUTDIR, paste("_done_",TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,".RData",sep="")))
+dbg("done", "R processing complete")
 
 
 
