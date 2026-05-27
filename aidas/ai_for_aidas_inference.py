@@ -26,6 +26,60 @@ class PredictionResult:
     vline_model_path: Optional[str]
 
 
+class AIForAIDASPredictor:
+    """Reusable AI_ForAIDAS predictor that keeps models loaded in memory."""
+
+    def __init__(
+        self,
+        *,
+        boundary_model_path: str,
+        vline_model_path: Optional[str] = None,
+        predict_fovea: bool = True,
+        device_name: str = "auto",
+    ):
+        torch, nn, F = _import_torch()
+        self._torch = torch
+        self.device = _resolve_device(torch, device_name)
+        self.boundary_model_path = boundary_model_path
+        self.boundary_model = _load_boundary_model(boundary_model_path, self.device, torch, nn, F)
+
+        self.vline_model_path = None
+        self.vline_model = None
+        if predict_fovea and vline_model_path:
+            self.vline_model_path = vline_model_path
+            self.vline_model = _load_vline_model(vline_model_path, self.device, torch, nn)
+
+    def predict(self, image: np.ndarray) -> PredictionResult:
+        image_norm = _normalize_for_model(image)
+        height, width = image_norm.shape
+
+        x = self._torch.from_numpy(image_norm[np.newaxis, np.newaxis]).to(self.device)
+        with self._torch.inference_mode():
+            pred_y = _soft_argmax_y(self.boundary_model(x), self._torch)[0].detach().cpu().numpy()
+
+        if pred_y.shape[0] < NUM_BOUNDARIES:
+            raise RuntimeError(
+                f"AI_ForAIDAS returned {pred_y.shape[0]} boundary rows; expected {NUM_BOUNDARIES}."
+            )
+
+        boundaries = np.sort(pred_y[:NUM_BOUNDARIES], axis=0).astype(np.float32, copy=False)
+        boundaries = np.clip(boundaries, 0, height - 1)
+
+        fovea_x = None
+        if self.vline_model is not None:
+            with self._torch.inference_mode():
+                x_norm = float(self.vline_model(x).item())
+            fovea_x = int(np.clip(round(x_norm * width), 0, width - 1))
+
+        return PredictionResult(
+            boundaries=boundaries,
+            fovea_x=fovea_x,
+            device=str(self.device),
+            boundary_model_path=self.boundary_model_path,
+            vline_model_path=self.vline_model_path,
+        )
+
+
 def _import_torch():
     try:
         import torch
@@ -227,39 +281,10 @@ def predict_boundaries_and_fovea(
     device_name: str = "auto",
 ) -> PredictionResult:
     """Run AI_ForAIDAS inference on a 2-D OCT image."""
-    torch, nn, F = _import_torch()
-
-    device = _resolve_device(torch, device_name)
-    image_norm = _normalize_for_model(image)
-    height, width = image_norm.shape
-
-    boundary_model = _load_boundary_model(boundary_model_path, device, torch, nn, F)
-    x = torch.from_numpy(image_norm[np.newaxis, np.newaxis]).to(device)
-
-    with torch.inference_mode():
-        pred_y = _soft_argmax_y(boundary_model(x), torch)[0].detach().cpu().numpy()
-
-    if pred_y.shape[0] < NUM_BOUNDARIES:
-        raise RuntimeError(
-            f"AI_ForAIDAS returned {pred_y.shape[0]} boundary rows; expected {NUM_BOUNDARIES}."
-        )
-
-    boundaries = np.sort(pred_y[:NUM_BOUNDARIES], axis=0).astype(np.float32, copy=False)
-    boundaries = np.clip(boundaries, 0, height - 1)
-
-    fovea_x = None
-    resolved_vline_path = None
-    if predict_fovea and vline_model_path:
-        resolved_vline_path = vline_model_path
-        vline_model = _load_vline_model(vline_model_path, device, torch, nn)
-        with torch.inference_mode():
-            x_norm = float(vline_model(x).item())
-        fovea_x = int(np.clip(round(x_norm * width), 0, width - 1))
-
-    return PredictionResult(
-        boundaries=boundaries,
-        fovea_x=fovea_x,
-        device=str(device),
+    predictor = AIForAIDASPredictor(
         boundary_model_path=boundary_model_path,
-        vline_model_path=resolved_vline_path,
+        vline_model_path=vline_model_path,
+        predict_fovea=predict_fovea,
+        device_name=device_name,
     )
+    return predictor.predict(image)

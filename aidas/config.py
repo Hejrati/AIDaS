@@ -13,6 +13,7 @@ class Config:
     # Default preferences
     DEFAULTS = {
         "theme": "clam",
+        "rscript_path": "",
     }
     
     def __init__(self):

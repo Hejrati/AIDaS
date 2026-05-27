@@ -205,3 +205,12 @@ class AIDaSApp(tk.Tk):
             "https://github.com/Hejrati\n\n"
             f"Python {sys.version.split()[0]}",
         )
+
+
+def main():
+    app = AIDaSApp()
+    app.mainloop()
+
+
+if __name__ == "__main__":
+    main()

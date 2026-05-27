@@ -8,6 +8,7 @@ dependencies:
   - scipy=1.15.2
   - matplotlib=3.10.8
   - pillow>=10.0
+  - xarray
   - pyside6
   - contourpy=1.3.2
   - cycler=0.12.1
@@ -24,6 +25,7 @@ dependencies:
   - pip:
     - ./OCT Segmenter/oct_segmenter-0.8.4-py3-none-any.whl
     - ./OCT Segmenter/oct_image_segmentation_models-0.8.4-py3-none-any.whl
+    - pyreadr
     - torch
     - imgviz==1.8.0
     - prettytable==3.17.0

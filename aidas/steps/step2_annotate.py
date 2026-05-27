@@ -90,6 +90,12 @@ AI_BACKEND_LABELS = {
 }
 AI_BACKEND_BY_LABEL = {label: key for key, label in AI_BACKEND_LABELS.items()}
 AI_DEVICE_OPTIONS = ("auto", "cpu", "cuda")
+IMG_DEFAULT_DIR = os.path.expanduser("~/Desktop")
+SUPPORTED_IMAGE_EXTENSIONS = (".img",)
+SUPPORTED_IMAGE_FILETYPES = [
+    ("Analyze image", "*.img"),
+    ("All files", "*.*"),
+]
 
 # Standard output dimensions (test1 format: 2 slices, original height, 2133 width)
 STANDARD_OUTPUT_SLICES = 2
@@ -298,6 +304,7 @@ class Step2Frame(ttk.Frame):
         
         # Initialize completion tracking for all 6 preset boundaries
         self.boundary_completion_vars = {name: tk.BooleanVar(value=False) for name in BOUNDARY_NAMES}
+        self.source_label_var = tk.StringVar(value="No source selected")
 
         app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         segmenter_root = os.path.join(app_root, "OCT Segmenter")
@@ -344,12 +351,22 @@ class Step2Frame(ttk.Frame):
         )
         info_label.pack(fill="x")
 
+        self.canvas_area = ttk.Frame(right)
+        self.canvas_area.pack(fill="both", expand=True)
+        self.batch_results_notebook = None
+        self._batch_result_canvases = []
+        self._batch_result_tab_canvases = {}
+        self._batch_result_states = {}
+        self._active_batch_result_tab = None
+        self._single_editor_state = None
+
         self.image_canvas = ImageCanvas(
-            right,
+            self.canvas_area,
             on_mouse_move=self._on_mouse_moved,
             on_line_change=self._on_active_line_changed,
             on_vertical_line_change=self._on_vertical_line_changed,
         )
+        self.single_image_canvas = self.image_canvas
         self.image_canvas.enable_line(True)
         self.image_canvas.enable_roi(False)
         self.image_canvas.enable_vertical_line(False)
@@ -372,7 +389,7 @@ class Step2Frame(ttk.Frame):
         """Open a separate dialog for AI segmentation configuration.
 
         This dialog allows users to:
-          - Choose the AI backend used by the AI Assist button
+          - Choose the AI backend used by the single-image AI segmentation button
           - Set conda/config/model settings for oct-segmenter
           - Select PyTorch model files for AI_ForAIDAS
           - Specify output directory for segmentation results
@@ -388,17 +405,7 @@ class Step2Frame(ttk.Frame):
         main = ttk.Frame(dialog, padding=10)
         main.pack(fill="both", expand=True)
 
-        ttk.Label(main, text="AI Version:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
-        backend_combo = ttk.Combobox(
-            main,
-            textvariable=self.ai_backend_var,
-            values=[AI_BACKEND_LABELS[AI_BACKEND_OCT_SEGMENTER], AI_BACKEND_LABELS[AI_BACKEND_AIDAS]],
-            state="readonly",
-        )
-        backend_combo.pack(fill="x", pady=(0, 8))
-        backend_combo.bind("<<ComboboxSelected>>", self._on_ai_backend_changed)
-
-        legacy = ttk.LabelFrame(main, text="OCT Segmenter (.h5)", padding=6)
+        legacy = ttk.LabelFrame(main, text="OCT Segmenter (old)", padding=6)
         legacy.pack(fill="x", pady=(0, 8))
 
         ttk.Label(legacy, text="Conda Environment:").pack(anchor="w", pady=(0, 2))
@@ -418,8 +425,10 @@ class Step2Frame(ttk.Frame):
         ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
         ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
 
-        aidas = ttk.LabelFrame(main, text="AI_ForAIDAS (.pth)", padding=6)
+        aidas = ttk.LabelFrame(main, text="AI_ForAIDAS (new)", padding=6)
         aidas.pack(fill="x", pady=(0, 8))
+        ttk.Label(aidas, text="Conda Environment:").pack(anchor="w", pady=(6, 2))
+        ttk.Entry(aidas, textvariable=self.aidas_env_var).pack(fill="x", pady=(0, 6))
 
         ttk.Label(aidas, text="Boundary Model (.pth):").pack(anchor="w", pady=(0, 2))
         aidas_model_frame = ttk.Frame(aidas)
@@ -449,8 +458,6 @@ class Step2Frame(ttk.Frame):
             width=7,
         ).pack(side="right")
 
-        ttk.Label(aidas, text="PyTorch Conda Environment:").pack(anchor="w", pady=(6, 2))
-        ttk.Entry(aidas, textvariable=self.aidas_env_var).pack(fill="x", pady=(0, 6))
 
         ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
         out_frame = ttk.Frame(main)
@@ -486,7 +493,6 @@ class Step2Frame(ttk.Frame):
         load = ttk.LabelFrame(self.ctrl, text="Image Source", padding=3)
         load.pack(**pad, pady=5)
 
-        ttk.Button(load, text="Open Image...", command=self._open_image).pack(fill="x", pady=(0, 2))
         self.step1_button = ttk.Button(load, text="Load from Step 1", command=self._load_from_step1)
         self.step1_button.pack(fill="x")
         if self.source_step is None:
@@ -496,13 +502,63 @@ class Step2Frame(ttk.Frame):
             self._step1_watcher_active = True
             self.after(100, self._update_step1_button_state)
 
-        self.source_label_var = tk.StringVar(value="No source selected")
-        ttk.Label(load, textvariable=self.source_label_var, wraplength=240, justify="left").pack(
-            fill="x",
-            pady=(4, 0),
-        )
+        # browser = ttk.LabelFrame(load, text="IMG Files", padding=3)
+        # browser.pack(fill="x", pady=(6, 0))
 
-        ttk.Label(load, text="Step 2 keeps 16-bit image data when available; MARKED outputs are 8-bit.", wraplength=240, justify="left").pack(
+        ttk.Label(load, text="Input dir:").pack(anchor="w")
+        dir_frame = ttk.Frame(load)
+        dir_frame.pack(fill="x")
+        self.image_browser_dir_var = tk.StringVar(value=IMG_DEFAULT_DIR)
+        self.image_browser_dir_entry = ttk.Entry(dir_frame, textvariable=self.image_browser_dir_var)
+        self.image_browser_dir_entry.pack(side="left", fill="x", expand=True)
+        self.image_browser_dir_entry.bind("<Return>", lambda _e: self._refresh_directory_image_list())
+        self.image_browser_reset_btn = ttk.Button(
+            dir_frame,
+            text="⌂",
+            width=2,
+            command=self._reset_image_browser_dir_to_default,
+        )
+        self.image_browser_reset_btn.pack(side="right", padx=(2, 0))
+        self.image_browser_refresh_btn = ttk.Button(
+            dir_frame,
+            text="↻",
+            width=3,
+            command=self._refresh_directory_image_list,
+        )
+        self.image_browser_refresh_btn.pack(side="right", padx=(2, 0))
+        self.image_browser_folder_btn = ttk.Button(
+            dir_frame,
+            text="…",
+            width=3,
+            command=self._choose_image_browser_directory,
+        )
+        self.image_browser_folder_btn.pack(side="right")
+
+
+        browser_list_frame = ttk.Frame(load)
+        browser_list_frame.pack(fill="both", expand=True, pady=(2, 0))
+        self.directory_image_listbox = tk.Listbox(
+            browser_list_frame,
+            height=8,
+            selectmode="extended",
+            exportselection=False,
+        )
+        image_scroll = ttk.Scrollbar(browser_list_frame, orient="vertical", command=self.directory_image_listbox.yview)
+        self.directory_image_listbox.configure(yscrollcommand=image_scroll.set)
+        self.directory_image_listbox.pack(side="left", fill="both", expand=True)
+        image_scroll.pack(side="right", fill="y")
+        self.directory_image_listbox.bind("<<ListboxSelect>>", self._on_directory_image_selected)
+        self.directory_image_listbox.bind("<Double-Button-1>", self._open_selected_directory_image)
+
+        nav_frame = ttk.Frame(load)
+        nav_frame.pack(fill="x", pady=(4, 0))
+        ttk.Button(nav_frame, text="◀ Prev",
+                   command=self._prev_directory_image).pack(side="left", expand=True, fill="x", padx=(0, 2))
+        ttk.Button(nav_frame, text="Next ▶",
+                   command=self._next_directory_image).pack(side="right", expand=True, fill="x", padx=(2, 0))
+
+        self.image_browser_status_var = tk.StringVar(value="Open a directory to show images")
+        ttk.Label(load, textvariable=self.image_browser_status_var, wraplength=240, justify="left").pack(
             fill="x",
             pady=(4, 0),
         )
@@ -513,7 +569,7 @@ class Step2Frame(ttk.Frame):
         self.segmenter_model_var = tk.StringVar(value=self.segmenter_default_model)
         self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
         self.segmenter_env_var = tk.StringVar(value="oct-segmenter-env")
-        self.ai_backend_var = tk.StringVar(value=AI_BACKEND_LABELS[AI_BACKEND_OCT_SEGMENTER])
+        self.ai_backend_var = tk.StringVar(value=AI_BACKEND_LABELS[AI_BACKEND_AIDAS])
         self.aidas_model_var = tk.StringVar(value=self.ai_for_aidas_default_model)
         self.aidas_vline_model_var = tk.StringVar(value=self.ai_for_aidas_default_vline_model)
         self.aidas_predict_fovea_var = tk.BooleanVar(value=True)
@@ -594,14 +650,24 @@ class Step2Frame(ttk.Frame):
             command=self._preprocess_image_for_ai,
         )
         self.preprocess_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self.ai_settings_btn = ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog)
+        self.ai_settings_btn.pack(side="left", fill="x", expand=True, padx=(2, 0))
+
+        ai_run_buttons = ttk.Frame(workflow)
+        ai_run_buttons.pack(fill="x", pady=(4, 0))
         self.segment_button = ttk.Button(
-            ai_buttons,
-            text="AI Assist",
+            ai_run_buttons,
+            text="AI Segmentation Single Image",
             command=self._run_neural_segmentation,
         )
-        self.segment_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
-        self.ai_settings_btn = ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog)
-        self.ai_settings_btn.pack(side="right", padx=(2, 0))
+        self.segment_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self.batch_ai_button = ttk.Button(
+            ai_run_buttons,
+            text="AI Batch Segmentation",
+            command=self._segment_selected_directory_images,
+        )
+        self.batch_ai_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
+        self.aidas_model_var.trace_add("write", lambda *_: self._update_batch_ai_button_state())
 
         self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
         self.clear_all_traces_btn.pack(fill="x", pady=(6, 4))
@@ -669,13 +735,19 @@ class Step2Frame(ttk.Frame):
         saved_buttons = ttk.Frame(segmentation)
         saved_buttons.pack(fill="x", pady=(6, 0))
         self.saved_buttons_frame = saved_buttons  # Store reference for later state management
-        ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv).pack(
+        # ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv).pack(
+        #     side="left",
+        #     expand=True,
+        #     fill="x",
+        #     padx=(0, 2),
+        # )
+        ttk.Button(saved_buttons, text="Save this image", command=self._save_current_marked_image_button).pack(
             side="left",
             expand=True,
             fill="x",
-            padx=(0, 2),
+            padx=2,
         )
-        ttk.Button(saved_buttons, text="Save MARKED Images", command=self._save_marked_images_button).pack(
+        ttk.Button(saved_buttons, text="Save all", command=self._save_marked_images_button).pack(
             side="right",
             expand=True,
             fill="x",
@@ -689,7 +761,7 @@ class Step2Frame(ttk.Frame):
         ttk.Label(
             help_box,
             text=(
-                "1. Load an image.\n"
+                "1. Open a directory and choose an .img image.\n"
                 "2. Pick a boundary name.\n"
                 "3. Left-click points along the boundary.\n"
                 "4. Press Finish Boundary to save all pixels on the line.\n"
@@ -700,10 +772,246 @@ class Step2Frame(ttk.Frame):
 
         self._refresh_boundary_lists(auto_select=False)
         self._set_segmentation_frame_enabled(False)
+        self._directory_image_paths_cache = []
+        self._image_browser_dir = ""
+        self._update_batch_ai_button_state()
+        self._set_image_browser_directory(IMG_DEFAULT_DIR, preserve_selection=False)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Image loading
     # ═══════════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _is_supported_image_path(path):
+        return os.path.splitext(path)[1].lower() in SUPPORTED_IMAGE_EXTENSIONS
+
+    @staticmethod
+    def _image_pair_key(path):
+        ext = os.path.splitext(path)[1].lower()
+        key_path = os.path.splitext(path)[0] if ext in {".hdr", ".img"} else path
+        return os.path.normcase(os.path.abspath(key_path))
+
+    @staticmethod
+    def _preferred_analyze_pair_path(path):
+        base, ext = os.path.splitext(path)
+        if ext.lower() in {".hdr", ".img"}:
+            img_path = base + ".img"
+            hdr_path = base + ".hdr"
+            if os.path.isfile(img_path):
+                return img_path
+            if os.path.isfile(hdr_path):
+                return hdr_path
+        return path
+
+    def _directory_image_paths(self, folder):
+        """Return .img images in a folder."""
+        if not folder or not os.path.isdir(folder):
+            return []
+
+        selected_by_key = {}
+        for name in sorted(os.listdir(folder), key=str.lower):
+            path = os.path.join(folder, name)
+            if not os.path.isfile(path) or not self._is_supported_image_path(path):
+                continue
+            path = self._preferred_analyze_pair_path(path)
+            key = self._image_pair_key(path)
+            current = selected_by_key.get(key)
+            if current is None or os.path.splitext(path)[1].lower() == ".img":
+                selected_by_key[key] = path
+
+        return sorted(selected_by_key.values(), key=lambda item: os.path.basename(item).lower())
+
+    def _set_image_browser_directory(self, folder, select_path=None, preserve_selection=True):
+        folder = os.path.abspath(folder) if folder else ""
+        self._image_browser_dir = folder
+        if hasattr(self, "image_browser_dir_var"):
+            self.image_browser_dir_var.set(folder)
+        self._refresh_directory_image_list(select_path=select_path, preserve_selection=preserve_selection)
+
+    def _refresh_directory_image_list(self, select_path=None, preserve_selection=True):
+        listbox = getattr(self, "directory_image_listbox", None)
+        if listbox is None:
+            return
+
+        folder = self.image_browser_dir_var.get().strip() if hasattr(self, "image_browser_dir_var") else ""
+        if not folder:
+            self._image_browser_dir = ""
+            self._directory_image_paths_cache = []
+            listbox.delete(0, "end")
+            self.image_browser_status_var.set("Open a directory to list .img images")
+            if self.image_data is None:
+                self._set_segmentation_frame_enabled(False)
+            self._update_batch_ai_button_state()
+            return
+        folder = os.path.abspath(folder)
+        self._image_browser_dir = folder
+        if self.image_browser_dir_var.get() != folder:
+            self.image_browser_dir_var.set(folder)
+        if not os.path.isdir(folder):
+            self._directory_image_paths_cache = []
+            listbox.delete(0, "end")
+            self.image_browser_status_var.set("Folder not found")
+            if self.image_data is None:
+                self._set_segmentation_frame_enabled(False)
+            self._update_batch_ai_button_state()
+            return
+
+        selected_keys = set()
+        if preserve_selection:
+            for index in listbox.curselection():
+                try:
+                    selected_keys.add(self._image_pair_key(self._directory_image_paths_cache[int(index)]))
+                except (AttributeError, IndexError, ValueError):
+                    pass
+        if select_path:
+            selected_keys.add(self._image_pair_key(select_path))
+
+        paths = self._directory_image_paths(folder)
+        filter_text = self.image_browser_filter_var.get().strip().lower() if hasattr(self, "image_browser_filter_var") else ""
+        if filter_text:
+            paths = [
+                path for path in paths
+                if filter_text in os.path.basename(path).lower()
+            ]
+        self._directory_image_paths_cache = paths
+
+        self._updating_image_browser = True
+        try:
+            listbox.delete(0, "end")
+            for path in paths:
+                listbox.insert("end", os.path.basename(path))
+            for index, path in enumerate(paths):
+                if self._image_pair_key(path) in selected_keys:
+                    listbox.selection_set(index)
+                    listbox.see(index)
+        finally:
+            self._updating_image_browser = False
+
+        count = len(paths)
+        suffix = " matching filter" if filter_text else ""
+        self.image_browser_status_var.set(f"{count} image(s){suffix}")
+        if paths:
+            self._set_segmentation_frame_enabled(True)
+            self._update_ai_button_states()
+        elif self.image_data is None:
+            self._set_segmentation_frame_enabled(False)
+        self._update_batch_ai_button_state()
+
+    def _choose_image_browser_directory(self):
+        typed_dir = self.image_browser_dir_var.get().strip() if hasattr(self, "image_browser_dir_var") else ""
+        initialdir = typed_dir if os.path.isdir(typed_dir) else (getattr(self, "_image_browser_dir", "") or self._app_root())
+        file_path = filedialog.askopenfilename(
+            title="Select IMG file (directory will be used)",
+            initialdir=initialdir,
+            filetypes=SUPPORTED_IMAGE_FILETYPES,
+        )
+        if file_path:
+            self._set_image_browser_directory(os.path.dirname(file_path), select_path=file_path, preserve_selection=False)
+
+    def _reset_image_browser_dir_to_default(self):
+        self._set_image_browser_directory(IMG_DEFAULT_DIR, preserve_selection=False)
+        self.status_var.set(f"IMG directory reset to default: {IMG_DEFAULT_DIR}")
+
+    def _selected_directory_image_paths(self):
+        listbox = getattr(self, "directory_image_listbox", None)
+        paths = getattr(self, "_directory_image_paths_cache", [])
+        if listbox is None:
+            return []
+        selected = []
+        for index in listbox.curselection():
+            try:
+                selected.append(paths[int(index)])
+            except (IndexError, ValueError):
+                pass
+        return selected
+
+    def _on_directory_image_selected(self, _event=None):
+        if getattr(self, "_updating_image_browser", False) or self._segmenter_running:
+            return
+        paths = self._selected_directory_image_paths()
+        self._update_batch_ai_button_state()
+        if len(paths) != 1:
+            if paths:
+                self.status_var.set(f"{len(paths)} IMG files selected for batch segmentation.")
+            elif getattr(self, "_directory_image_paths_cache", []):
+                self.status_var.set("Select an IMG file to load, or select several for batch segmentation.")
+            return
+
+        path = paths[0]
+        self.status_var.set(f"Selected IMG: {os.path.basename(path)}")
+        pending = getattr(self, "_image_browser_open_after", None)
+        if pending:
+            self.after_cancel(pending)
+        self._image_browser_open_after = self.after(
+            120,
+            lambda p=path: self._open_directory_image_path_if_still_single(p),
+        )
+
+    def _open_directory_image_path_if_still_single(self, path):
+        self._image_browser_open_after = None
+        paths = self._selected_directory_image_paths()
+        if len(paths) == 1 and self._image_pair_key(paths[0]) == self._image_pair_key(path):
+            self._open_directory_image_path(path)
+
+    def _open_selected_directory_image(self, _event=None):
+        paths = self._selected_directory_image_paths()
+        if not paths:
+            messagebox.showinfo("No image selected", "Select an image from the current directory list first.")
+            return
+        self._open_directory_image_path(paths[0])
+
+    def _prev_directory_image(self):
+        paths = getattr(self, "_directory_image_paths_cache", [])
+        if not paths:
+            return
+        selection = self.directory_image_listbox.curselection()
+        index = max(0, selection[0] - 1) if selection else 0
+        self.directory_image_listbox.selection_clear(0, "end")
+        self.directory_image_listbox.selection_set(index)
+        self.directory_image_listbox.see(index)
+        self._open_directory_image_path(paths[index])
+
+    def _next_directory_image(self):
+        paths = getattr(self, "_directory_image_paths_cache", [])
+        if not paths:
+            return
+        selection = self.directory_image_listbox.curselection()
+        index = min(len(paths) - 1, selection[0] + 1) if selection else 0
+        self.directory_image_listbox.selection_clear(0, "end")
+        self.directory_image_listbox.selection_set(index)
+        self.directory_image_listbox.see(index)
+        self._open_directory_image_path(paths[index])
+
+    def _open_directory_image_path(self, path):
+        try:
+            image = self._load_image_from_path(path)
+        except (OSError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Open error", str(exc))
+            return
+
+        self._loading_from_image_browser = True
+        try:
+            self._show_image(image, path)
+        finally:
+            self._loading_from_image_browser = False
+        self.image_browser_status_var.set(f"Loaded {os.path.basename(path)}")
+
+    def _segment_selected_directory_images(self):
+        paths = self._selected_directory_image_paths()
+        if not self._is_aidas_ai_backend():
+            messagebox.showinfo(
+                "AI_ForAIDAS required",
+                "Select AI_ForAIDAS (New, PyTorch-based) before running batch segmentation.",
+            )
+            return
+        model_path = self.aidas_model_var.get().strip()
+        if not os.path.isfile(model_path):
+            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
+            return
+        if len(paths) < 2:
+            messagebox.showinfo("Select multiple images", "Select at least two .img files for batch segmentation.")
+            return
+        self._run_aidas_batch_segmentation(image_paths=paths)
+
     def _open_image(self):
         """Show open-file dialog and load the selected image.
 
@@ -717,12 +1025,7 @@ class Step2Frame(ttk.Frame):
         """
         path = filedialog.askopenfilename(
             title="Select an OCT image",
-            filetypes=[
-                ("Supported images", "*.tif *.tiff *.hdr *.img *.png *.jpg *.jpeg"),
-                ("TIFF", "*.tif *.tiff"),
-                ("Analyze 7.5", "*.hdr *.img"),
-                ("All files", "*.*"),
-            ],
+            filetypes=SUPPORTED_IMAGE_FILETYPES,
         )
         if not path:
             return
@@ -798,35 +1101,62 @@ class Step2Frame(ttk.Frame):
         (PNG/JPEG). For multi-frame inputs a single slice is returned
         (the first frame). 16-bit sources are preserved for annotation.
         """
+        image, template, source_was_8bit = self._read_image_for_annotation(path)
+        self._input_analyze_template = template
+        self._source_was_8bit = source_was_8bit
+        return image
+
+    @classmethod
+    def _read_image_for_annotation(cls, path):
+        """Read an image file without mutating Step 2 UI state."""
         ext = os.path.splitext(path)[1].lower()
+        template = None
         if ext in {".hdr", ".img"}:
             data = read_analyze(path)
-            template_data = np.array(data, copy=False)
-            if template_data.ndim == 2:
-                slices = 1
-                height, width = template_data.shape
-            elif template_data.ndim == 3:
-                slices, height, width = template_data.shape
-            else:
-                raise ValueError("Analyze image must be 2-D or 3-D.")
-            self._input_analyze_template = {
-                "slices": int(slices),
-                "height": int(height),
-                "width": int(width),
-                "dtype": np.dtype(template_data.dtype),
-            }
+            template = cls._analyze_template_from_data(data)
         elif ext in {".tif", ".tiff"}:
             data = read_tiff(path)
-            self._input_analyze_template = None
         else:
             data = np.array(Image.open(path).convert("L"))
-            self._input_analyze_template = None
 
         if data.ndim == 3:
             data = data[0]
         if data.ndim != 2:
             raise ValueError("Step 2 expects a 2-D grayscale image or a 2-D slice from a stack.")
-        return self._image_for_annotation(data)
+        image, source_was_8bit = cls._coerce_image_for_annotation(data)
+        return image, template, source_was_8bit
+
+    @staticmethod
+    def _analyze_template_from_data(data):
+        template_data = np.array(data, copy=False)
+        if template_data.ndim == 2:
+            slices = 1
+            height, width = template_data.shape
+        elif template_data.ndim == 3:
+            slices, height, width = template_data.shape
+        else:
+            raise ValueError("Analyze image must be 2-D or 3-D.")
+        return {
+            "slices": int(slices),
+            "height": int(height),
+            "width": int(width),
+            "dtype": np.dtype(template_data.dtype),
+        }
+
+    def _show_single_image_canvas(self):
+        notebook = getattr(self, "batch_results_notebook", None)
+        if notebook is not None:
+            notebook.pack_forget()
+        self.image_canvas = self.single_image_canvas
+        self._active_batch_result_tab = None
+        if self.single_image_canvas.winfo_manager() != "pack":
+            self.single_image_canvas.pack(fill="both", expand=True)
+
+    def _show_batch_results_canvas(self):
+        self.single_image_canvas.pack_forget()
+        notebook = getattr(self, "batch_results_notebook", None)
+        if notebook is not None and notebook.winfo_manager() != "pack":
+            notebook.pack(fill="both", expand=True)
 
     def _show_image(self, image, path):
         """Load a new image and reset the annotation UI.
@@ -849,11 +1179,12 @@ class Step2Frame(ttk.Frame):
         self._original_file_for_ai = None
         self._preprocessing_done = False
         self._preprocessing_info = None
+        self._show_single_image_canvas()
         self.current_file = path
         self.image_data = image
         self.active_boundary = None
-        self.boundary_traces.clear()
-        self.boundary_order.clear()
+        self.boundary_traces = {}
+        self.boundary_order = []
         self.fovea_x = None
 
         self.image_canvas.set_image(image)
@@ -884,13 +1215,159 @@ class Step2Frame(ttk.Frame):
         self._notify_output_folder_changed()
 
     def _notify_output_folder_changed(self):
-        if self.on_output_folder_changed is None:
-            return
         if not self.current_file or self.current_file == "Step 1 output":
             return
         folder = os.path.dirname(self.current_file)
         if folder:
-            self.on_output_folder_changed(folder)
+            if not getattr(self, "_loading_from_image_browser", False):
+                self._set_image_browser_directory(folder, select_path=self.current_file)
+            if self.on_output_folder_changed is not None:
+                self.on_output_folder_changed(folder)
+
+    @staticmethod
+    def _copy_trace_dict(traces):
+        copied = {}
+        for name, trace in (traces or {}).items():
+            copied[name] = {
+                "points": list(trace.get("points", [])),
+                "pixels": list(trace.get("pixels", [])),
+                "color": trace.get("color", ""),
+            }
+        return copied
+
+    @staticmethod
+    def _vertical_line_trace(x, height):
+        x = int(x)
+        max_y = max(0, int(height) - 1)
+        points = [(x, 0), (x, max_y)]
+        return {
+            "points": points,
+            "pixels": _polyline_pixels(points),
+            "color": BOUNDARY_COLORS.get(FOVEA_BOUNDARY_NAME, "#ffd500"),
+        }
+
+    def _set_fovea_from_prediction(self, x):
+        if self.image_data is None:
+            return
+        width = int(self.image_data.shape[1])
+        height = int(self.image_data.shape[0])
+        fovea_x = int(np.clip(int(x), 0, max(0, width - 1)))
+
+        self.fovea_x = fovea_x
+        self.boundary_traces[FOVEA_BOUNDARY_NAME] = self._vertical_line_trace(fovea_x, height)
+        if FOVEA_BOUNDARY_NAME not in self.boundary_order:
+            self.boundary_order.append(FOVEA_BOUNDARY_NAME)
+
+        self.vertical_mode_var.set(True)
+        self._updating_fovea_entry = True
+        try:
+            self.fovea_x_entry_var.set(str(fovea_x))
+        finally:
+            self._updating_fovea_entry = False
+        self.fovea_line_var.set(f"Fovea line: x={fovea_x}")
+        self.image_canvas.enable_vertical_line(False)
+        self._set_fovea_controls_enabled(True)
+        self._rebuild_saved_overlays()
+        self._refresh_trace_list()
+        self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
+        self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
+        self._sync_boundary_canvas_state()
+
+    def _has_saved_fovea_trace(self):
+        return FOVEA_BOUNDARY_NAME in self.boundary_traces
+
+    def _fovea_live_edit_mode(self):
+        return bool(self.vertical_mode_var.get() and not self._has_saved_fovea_trace())
+
+    def _capture_current_editor_state(self):
+        return {
+            "input": self.current_file,
+            "image": self.image_data,
+            "traces": self._copy_trace_dict(self.boundary_traces),
+            "order": list(self.boundary_order),
+            "fovea_x": self.fovea_x,
+            "template": self._input_analyze_template,
+            "source_was_8bit": getattr(self, "_source_was_8bit", False),
+        }
+
+    def _set_completion_from_traces(self):
+        for name in BOUNDARY_NAMES:
+            if name in self.boundary_completion_vars:
+                self.boundary_completion_vars[name].set(name in self.boundary_traces)
+
+    def _load_editor_state(self, state, canvas, status_message=None):
+        if not state or canvas is None:
+            return
+
+        self.image_canvas = canvas
+        self.current_file = state.get("input")
+        self.image_data = state.get("image")
+        self.boundary_traces = state.setdefault("traces", {})
+        self.boundary_order = state.setdefault("order", [])
+        self.fovea_x = state.get("fovea_x")
+        if self.fovea_x is None and FOVEA_BOUNDARY_NAME in self.boundary_traces:
+            points = self.boundary_traces.get(FOVEA_BOUNDARY_NAME, {}).get("points", [])
+            if points:
+                self.fovea_x = int(points[0][0])
+                state["fovea_x"] = self.fovea_x
+        self._input_analyze_template = state.get("template")
+        self._source_was_8bit = bool(state.get("source_was_8bit", False))
+        self._last_auto_preprocessed_image = None
+        self._original_image_for_ai = None
+        self._original_file_for_ai = None
+        self._preprocessing_done = False
+        self._preprocessing_info = None
+        self.active_boundary = None
+
+        self.image_canvas.enable_roi(False)
+        self.image_canvas.clear_active_line()
+        self._rebuild_saved_overlays()
+        self._set_completion_from_traces()
+
+        if self.fovea_x is not None:
+            self._set_fovea_from_prediction(self.fovea_x)
+        else:
+            self.vertical_mode_var.set(False)
+            self.image_canvas.clear_vertical_line()
+            self._set_fovea_controls_enabled(False)
+            self._updating_fovea_entry = True
+            try:
+                self.fovea_x_entry_var.set("")
+            finally:
+                self._updating_fovea_entry = False
+            self.fovea_line_var.set("Fovea line: not set")
+
+        filename = (
+            os.path.basename(self.current_file)
+            if self.current_file and self.current_file != "Step 1 output"
+            else "Step 1 output"
+        )
+        if self.image_data is not None:
+            self.source_label_var.set(self.current_file or "")
+            self.image_info_var.set(
+                f"{filename} | Size: {self.image_data.shape[1]} x {self.image_data.shape[0]} px | "
+                f"Type: {self.image_data.dtype}"
+            )
+
+        self.trace_detail_var.set("No saved boundary")
+        self.active_trace_var.set("No active boundary")
+        self._refresh_trace_list()
+        selected_trace = None
+        if self.fovea_x is not None and FOVEA_BOUNDARY_NAME in self.boundary_traces:
+            selected_trace = FOVEA_BOUNDARY_NAME
+        elif self.boundary_order:
+            selected_trace = self.boundary_order[0]
+        if selected_trace is not None:
+            self._select_trace_by_name(selected_trace)
+            self._update_saved_trace_summary(selected_trace)
+        self._refresh_boundary_lists(auto_select=False)
+        self._set_drawing_locked(False)
+        self._set_segmentation_frame_enabled(True)
+        self._update_ai_button_states()
+        self._sync_boundary_canvas_state()
+        self.image_canvas.fit_to_window()
+        if status_message:
+            self.status_var.set(status_message)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Boundary tracing actions
@@ -964,7 +1441,7 @@ class Step2Frame(ttk.Frame):
         if name not in BOUNDARY_NAMES:
             return
 
-        if self.vertical_mode_var.get():
+        if self._fovea_live_edit_mode():
             self.vertical_mode_var.set(False)
             self._on_vertical_mode_toggled()
 
@@ -1000,7 +1477,7 @@ class Step2Frame(ttk.Frame):
         if name not in BOUNDARY_NAMES or self.image_data is None:
             return
 
-        if self.vertical_mode_var.get():
+        if self._fovea_live_edit_mode():
             self.vertical_mode_var.set(False)
             self._on_vertical_mode_toggled()
 
@@ -1069,11 +1546,11 @@ class Step2Frame(ttk.Frame):
         drawing_enabled = (
             active_name is not None
             and is_incomplete
-            and not self.vertical_mode_var.get()
+            and not self._fovea_live_edit_mode()
             and not self._segmenter_running
         )
         self.image_canvas.enable_line(drawing_enabled)
-        self.image_canvas.enable_vertical_line(self.vertical_mode_var.get() and not self._segmenter_running)
+        self.image_canvas.enable_vertical_line(self._fovea_live_edit_mode() and not self._segmenter_running)
 
     def _start_boundary(self):
         """Begin drawing the currently selected boundary from the incomplete list.
@@ -1155,6 +1632,11 @@ class Step2Frame(ttk.Frame):
             self.status_var.set(f"Saved '{name}'. Next boundary: {next_name}.")
         else:
             self.boundary_workflow_status_var.set("All preset boundaries are complete.")
+            if getattr(self, "_active_batch_result_tab", None):
+                self.status_var.set(
+                    f"Saved '{name}'. All preset boundaries are complete. Use Save current MARKED Image when ready."
+                )
+                return
             try:
                 self._save_marked_images(require_complete=True)
             except OSError as exc:
@@ -1287,6 +1769,7 @@ class Step2Frame(ttk.Frame):
         """Update progress bar to show completed boundaries out of 6."""
         completed_count = len(self._completed_boundary_names())
         if hasattr(self, "segmenter_progress"):
+            self.segmenter_progress.configure(maximum=len(BOUNDARY_NAMES), mode="determinate")
             self.segmenter_progress["value"] = completed_count
 
     def _next_incomplete_boundary(self, current_name=None):
@@ -1320,14 +1803,13 @@ class Step2Frame(ttk.Frame):
         """Toggle foveal center line mode on/off.
 
         When enabled:
-          - Switches to vertical-line drawing mode on the canvas
-          - Disables polyline drawing for boundaries
-          - Centers the vertical line at image center
+          - Shows the saved fovea trace as complete when it already exists
+          - Otherwise switches to vertical-line drawing mode on the canvas
           - Enables foveal center nudge controls (left/right buttons, X entry)
 
         When disabled:
-          - Removes the foveal center line from display
-          - Clears the FOVEA_BOUNDARY_NAME trace
+          - Disables foveal center editing
+          - Keeps an existing saved fovea trace visible
           - Re-enables polyline drawing for boundaries
           - Disables foveal center controls
 
@@ -1337,25 +1819,40 @@ class Step2Frame(ttk.Frame):
             self.vertical_mode_var.set(False)
             return
         enabled = self.vertical_mode_var.get()
+        has_saved_fovea = self._has_saved_fovea_trace()
+        live_fovea = bool(enabled and not has_saved_fovea)
         self._set_fovea_controls_enabled(enabled)
-        self.image_canvas.enable_vertical_line(enabled)
-        self.image_canvas.enable_line(not enabled)
+        self.image_canvas.enable_vertical_line(live_fovea)
+        self.image_canvas.enable_line(not live_fovea)
         if enabled:
             if self.image_data is not None:
-                self._center_vertical_line()
-                self.status_var.set("Vertical line mode enabled. Foveal center line set to image center.")
+                if has_saved_fovea:
+                    if self.fovea_x is None:
+                        points = self.boundary_traces.get(FOVEA_BOUNDARY_NAME, {}).get("points", [])
+                        if points:
+                            self.fovea_x = int(points[0][0])
+                    self._rebuild_saved_overlays()
+                    self.status_var.set("Foveal center is complete in the segmentation map.")
+                elif self.fovea_x is not None:
+                    self.image_canvas.set_vertical_line_x(int(self.fovea_x))
+                    self.status_var.set(f"Vertical line mode enabled. Foveal center line set to x={int(self.fovea_x)}.")
+                else:
+                    self._center_vertical_line()
+                    self.status_var.set("Vertical line mode enabled. Foveal center line set to image center.")
             else:
                 self.status_var.set("Vertical line mode enabled. Load an image to place the foveal center line.")
         else:
-            # When fovea mode is off, clear fovea line/data and saved fovea boundary.
-            self.boundary_traces.pop(FOVEA_BOUNDARY_NAME, None)
-            if FOVEA_BOUNDARY_NAME in self.boundary_order:
-                self.boundary_order.remove(FOVEA_BOUNDARY_NAME)
-            self.image_canvas.clear_vertical_line()
+            if not has_saved_fovea:
+                self.image_canvas.clear_vertical_line()
             self._rebuild_saved_overlays()
             self._refresh_trace_list()
-            self.trace_detail_var.set("No saved boundary")
-            self.status_var.set("Boundary tracing mode enabled. Left-click to place boundary points.")
+            if has_saved_fovea:
+                self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
+                self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
+                self.status_var.set("Boundary tracing mode enabled. Saved foveal center line is preserved.")
+            else:
+                self.trace_detail_var.set("No saved boundary")
+                self.status_var.set("Boundary tracing mode enabled. Left-click to place boundary points.")
 
     def _populate_boundary_listbox(self, listbox, names, selected_name):
         """Populate a boundary listbox with names, marking the selected one."""
@@ -1412,8 +1909,10 @@ class Step2Frame(ttk.Frame):
             self.boundary_completed_listbox.see(index)
         self._syncing_boundary_selection = False
 
+        fovea_status = " | Fovea center: done" if self._has_saved_fovea_trace() else ""
         self.boundary_workflow_status_var.set(
             f"Incomplete: {len(incomplete_names)} | Completed: {len(completed_names)}/{len(BOUNDARY_NAMES)}"
+            f"{fovea_status}"
         )
         self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
@@ -1449,7 +1948,10 @@ class Step2Frame(ttk.Frame):
             return
         width = int(self.image_data.shape[1])
         center_x = width // 2
-        self.image_canvas.set_vertical_line_x(center_x)
+        if self._has_saved_fovea_trace():
+            self._set_fovea_from_prediction(center_x)
+        else:
+            self.image_canvas.set_vertical_line_x(center_x)
 
     def _clear_vertical_line(self):
         self.image_canvas.clear_vertical_line()
@@ -1473,32 +1975,17 @@ class Step2Frame(ttk.Frame):
         if x < 0 or x >= width:
             messagebox.showerror("Out of range", f"Center X must be between 0 and {width - 1}.")
             return
-        self.image_canvas.set_vertical_line_x(x)
 
-        # Save the foveal center line as a boundary entry so it appears in the list.
+        # Save the foveal center line into the segmentation map so there is one
+        # fovea marker source for the editor and MARKED output.
         if height >= 2:
-            points = [(x, 0), (x, height - 1)]
-            pixels = _polyline_pixels(points)
-            color = self._boundary_color(FOVEA_BOUNDARY_NAME)
-            self.boundary_traces[FOVEA_BOUNDARY_NAME] = {
-                "points": points,
-                "pixels": pixels,
-                "color": color,
-            }
-            if FOVEA_BOUNDARY_NAME not in self.boundary_order:
-                self.boundary_order.append(FOVEA_BOUNDARY_NAME)
-            self._rebuild_saved_overlays()
-            self._refresh_trace_list()
-            self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
-            self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
-
-        self._set_drawing_locked(True)
+            self._set_fovea_from_prediction(x)
 
         next_name = self._next_incomplete_boundary()
         if next_name is not None:
             self._set_active_boundary_target(next_name)
 
-        self.status_var.set(f"Foveal center line set to x={x} and saved to boundary list.")
+        self.status_var.set(f"Foveal center line set to x={x} and saved in the segmentation map.")
 
     def _set_drawing_locked(self, locked):
         self._drawing_locked = bool(locked)
@@ -1513,8 +2000,9 @@ class Step2Frame(ttk.Frame):
             # Keep boundary tracing active while fovea controls are locked.
             self.image_canvas.enable_line(True)
         else:
-            self.image_canvas.enable_vertical_line(self.vertical_mode_var.get())
-            self.image_canvas.enable_line(not self.vertical_mode_var.get())
+            live_fovea = self._fovea_live_edit_mode()
+            self.image_canvas.enable_vertical_line(live_fovea)
+            self.image_canvas.enable_line(not live_fovea)
 
     def _set_fovea_controls_enabled(self, enabled):
         """Enable/disable fovea-specific controls based on mode and lock state."""
@@ -1530,12 +2018,11 @@ class Step2Frame(ttk.Frame):
             widget.configure(state=state)
 
     def _set_segmentation_frame_enabled(self, enabled):
-        """Enable/disable all controls in the segmentation frame, except Finish/Revert buttons."""
+        """Enable/disable segmentation controls, keeping batch available from the directory list."""
         state = "normal" if enabled else "disabled"
         # Recursively disable/enable all children in the segmentation frame
         def set_state(widget, s):
-            # Skip the Finish and Revert buttons - they manage their own state
-            if widget in (self.finish_boundary_btn, self.revert_boundary_btn):
+            if widget in (self.finish_boundary_btn, self.revert_boundary_btn, getattr(self, "batch_ai_button", None)):
                 return
             try:
                 widget.configure(state=s)
@@ -1584,6 +2071,9 @@ class Step2Frame(ttk.Frame):
             self._updating_fovea_entry = True
             self.fovea_x_entry_var.set(str(x))
             self._updating_fovea_entry = False
+        if self._has_saved_fovea_trace():
+            self._set_fovea_from_prediction(x)
+            return
         self.image_canvas.set_vertical_line_x(x)
 
     def _nudge_fovea_x(self, delta):
@@ -1602,6 +2092,9 @@ class Step2Frame(ttk.Frame):
         self._updating_fovea_entry = True
         self.fovea_x_entry_var.set(str(next_x))
         self._updating_fovea_entry = False
+        if self._has_saved_fovea_trace():
+            self._set_fovea_from_prediction(next_x)
+            return
         self.image_canvas.set_vertical_line_x(next_x)
 
     def _bind_fovea_nudge_button(self, button, delta):
@@ -1705,6 +2198,11 @@ class Step2Frame(ttk.Frame):
             trace = self.boundary_traces.get(name)
             if not trace:
                 continue
+            if name == FOVEA_BOUNDARY_NAME:
+                points = trace.get("points", [])
+                x_value = int(points[0][0]) if points else self.fovea_x
+                trace_listbox.insert("end", f"{name} - done, x={x_value}")
+                continue
             trace_listbox.insert(
                 "end",
                 f"{name} — {len(trace['points'])} vertices, {len(trace['pixels'])} pixels",
@@ -1748,6 +2246,17 @@ class Step2Frame(ttk.Frame):
         trace = self.boundary_traces.get(name)
         if not trace:
             self.trace_detail_var.set("No saved boundary")
+            return
+        if name == FOVEA_BOUNDARY_NAME:
+            x_value = self.fovea_x
+            if x_value is None:
+                points = trace.get("points", [])
+                if points:
+                    x_value = int(points[0][0])
+            suffix = f" at x={int(x_value)}" if x_value is not None else ""
+            self.trace_detail_var.set(
+                f"{name}: done{suffix}; populated from the segmentation map."
+            )
             return
         self.trace_detail_var.set(
             f"{name}: {len(trace['points'])} vertices, {len(trace['pixels'])} pixels saved."
@@ -1812,7 +2321,8 @@ class Step2Frame(ttk.Frame):
         marked = np.minimum(marked, np.uint8(MARKED_BACKGROUND_MAX))
         return marked
 
-    def _render_trace_mask(self, trace, width, height, boundary_name=None):
+    @staticmethod
+    def _render_trace_mask(trace, width, height, boundary_name=None):
         """Rasterize a boundary trace into a binary mask for marking.
 
         Converts polyline vertices to pixel coordinates, applies anti-aliasing via
@@ -1848,16 +2358,20 @@ class Step2Frame(ttk.Frame):
 
         return np.asarray(mask, dtype=np.uint8) > 0
 
-    def _apply_mark_values(self, target_image, mark_values):
+    @staticmethod
+    def _apply_mark_values_to_image(target_image, traces, mark_values):
         height, width = target_image.shape[:2]
         for name, mark_value in mark_values.items():
-            trace = self.boundary_traces.get(name)
+            trace = traces.get(name)
             if not trace:
                 continue
-            trace_mask = self._render_trace_mask(trace, width, height, boundary_name=name)
+            trace_mask = Step2Frame._render_trace_mask(trace, width, height, boundary_name=name)
             if trace_mask is None:
                 continue
             target_image[trace_mask] = np.uint8(mark_value)
+
+    def _apply_mark_values(self, target_image, mark_values):
+        self._apply_mark_values_to_image(target_image, self.boundary_traces, mark_values)
 
     def _build_marked_volumes(self):
         """Generate Light_MARKED and Dark_MARKED 8-bit Analyze volumes from traced boundaries.
@@ -2054,12 +2568,181 @@ class Step2Frame(ttk.Frame):
         )
         return True
 
+    def _current_marked_output_basepath(self):
+        if self.current_file and self.current_file != "Step 1 output":
+            return os.path.splitext(self.current_file)[0] + "_MARKED"
+        return self._marked_output_basepath("Current_MARKED")
+
+    def _build_current_marked_volume(self):
+        if self.image_data is None:
+            raise ValueError("No image is loaded.")
+
+        target_slices, target_h, target_w, _target_dtype = self._reference_marked_volume_spec()
+        base_marked = self._build_marked_image()
+        orig_h, orig_w = base_marked.shape[:2]
+        traces = self._copy_trace_dict(self.boundary_traces)
+
+        if (orig_h, orig_w) != (target_h, target_w):
+            base_marked = np.array(
+                Image.fromarray(base_marked).resize((target_w, target_h), RESAMPLE_NEAREST),
+                dtype=np.uint8,
+            )
+            traces = self._scale_traces_to_shape(traces, (orig_h, orig_w), (target_h, target_w))
+
+        marked_slice = np.array(base_marked, copy=True)
+        self._apply_mark_values_to_image(marked_slice, traces, COMMON_MARK_VALUES)
+        self._apply_mark_values_to_image(marked_slice, traces, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
+
+        nslices = max(1, int(target_slices))
+        volume = np.stack([marked_slice] * nslices, axis=0).astype(np.uint8, copy=False)
+        return _resize_to_standard_format(volume)
+
+    def _save_current_marked_image(self, prompt_on_incomplete=False, sync_active=True):
+        if self.image_data is None or not self.boundary_traces:
+            return None
+
+        if sync_active:
+            self._sync_active_batch_result_state()
+        complete = self._all_required_boundaries_complete()
+        if prompt_on_incomplete and not complete:
+            proceed = messagebox.askyesno(
+                "Boundaries incomplete",
+                "Not all six preset boundaries are complete. Save the current MARKED image with current traces anyway?",
+            )
+            if not proceed:
+                return None
+
+        out_base = self._current_marked_output_basepath()
+        write_analyze(out_base, self._build_current_marked_volume())
+        self.status_var.set(f"Saved current MARKED image -> {out_base}.img")
+        return out_base
+
+    def _batch_state_complete(self, state):
+        traces = state.get("traces") if state else None
+        return bool(traces) and all(name in traces for name in BOUNDARY_NAMES)
+
+    def _save_batch_result_state(self, tab_key):
+        state = self._batch_result_states.get(tab_key)
+        if not state:
+            return None
+
+        if tab_key == getattr(self, "_active_batch_result_tab", None):
+            self._sync_active_batch_result_state()
+            return self._save_current_marked_image(sync_active=False)
+
+        saved_context = {
+            "current_file": self.current_file,
+            "image_data": self.image_data,
+            "boundary_traces": self.boundary_traces,
+            "boundary_order": self.boundary_order,
+            "fovea_x": self.fovea_x,
+            "template": self._input_analyze_template,
+            "source_was_8bit": getattr(self, "_source_was_8bit", False),
+            "completion": {
+                name: var.get()
+                for name, var in self.boundary_completion_vars.items()
+            },
+        }
+        try:
+            self.current_file = state.get("input")
+            self.image_data = state.get("image")
+            self.boundary_traces = state.get("traces") or {}
+            self.boundary_order = state.get("order") or []
+            self.fovea_x = state.get("fovea_x")
+            self._input_analyze_template = state.get("template")
+            self._source_was_8bit = bool(state.get("source_was_8bit", False))
+            self._set_completion_from_traces()
+            return self._save_current_marked_image(sync_active=False)
+        finally:
+            self.current_file = saved_context["current_file"]
+            self.image_data = saved_context["image_data"]
+            self.boundary_traces = saved_context["boundary_traces"]
+            self.boundary_order = saved_context["boundary_order"]
+            self.fovea_x = saved_context["fovea_x"]
+            self._input_analyze_template = saved_context["template"]
+            self._source_was_8bit = saved_context["source_was_8bit"]
+            for name, value in saved_context["completion"].items():
+                if name in self.boundary_completion_vars:
+                    self.boundary_completion_vars[name].set(value)
+
+    def _save_all_batch_result_tabs(self):
+        self._sync_active_batch_result_state()
+        tab_keys = [
+            tab
+            for tab in (self.batch_results_notebook.tabs() if self.batch_results_notebook is not None else [])
+            if tab in self._batch_result_states
+        ]
+        if not tab_keys:
+            return []
+
+        incomplete = [
+            os.path.basename(self._batch_result_states[key].get("input") or "")
+            for key in tab_keys
+            if not self._batch_state_complete(self._batch_result_states[key])
+        ]
+        if incomplete:
+            preview = "\n".join(incomplete[:6])
+            if len(incomplete) > 6:
+                preview += f"\n...and {len(incomplete) - 6} more"
+            proceed = messagebox.askyesno(
+                "Boundaries incomplete",
+                "Some open tabs do not have all six preset boundaries complete.\n\n"
+                f"{preview}\n\nSave all open tabs anyway?",
+            )
+            if not proceed:
+                return []
+
+        saved = []
+        failures = []
+        for tab_key in tab_keys:
+            state = self._batch_result_states.get(tab_key)
+            try:
+                out_base = self._save_batch_result_state(tab_key)
+                if out_base:
+                    saved.append(out_base)
+            except (OSError, ValueError, RuntimeError) as exc:
+                name = os.path.basename((state or {}).get("input") or tab_key)
+                failures.append(f"{name}: {exc}")
+
+        if failures:
+            messagebox.showerror("Save error", "Could not save some open tabs:\n" + "\n".join(failures[:8]))
+        if saved:
+            self.status_var.set(f"Saved {len(saved)} open batch tab(s).")
+        return saved
+
+    def _save_current_marked_image_button(self):
+        if self.image_data is None:
+            messagebox.showwarning("No image", "Load or select an image before saving a MARKED output.")
+            return
+        if not self.boundary_traces:
+            messagebox.showinfo("Nothing to save", "Trace or load boundaries before saving a MARKED output.")
+            return
+
+        try:
+            out_base = self._save_current_marked_image(prompt_on_incomplete=True)
+        except (OSError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Save error", f"Could not save current MARKED image:\n{exc}")
+            return
+
+        if out_base:
+            messagebox.showinfo("Saved", f"Saved current MARKED image:\n{out_base}.img")
+
     def _save_marked_images_button(self):
         """Button callback to manually save MARKED Analyze volumes.
 
         Provides user-facing save functionality with confirmation if boundaries
         are incomplete. Handles errors gracefully and shows save location.
         """
+        if getattr(self, "batch_results_notebook", None) is not None and self._batch_result_states:
+            saved = self._save_all_batch_result_tabs()
+            if saved:
+                message_lines = ["Saved open batch tabs:"]
+                message_lines.extend(path + ".img" for path in saved[:12])
+                if len(saved) > 12:
+                    message_lines.append(f"...and {len(saved) - 12} more.")
+                messagebox.showinfo("Saved", "\n".join(message_lines))
+            return
+
         if self.image_data is None:
             messagebox.showwarning("No image", "Load an image before saving MARKED outputs.")
             return
@@ -2085,6 +2768,40 @@ class Step2Frame(ttk.Frame):
     # ═══════════════════════════════════════════════════════════════════════
     #  Neural segmentation
     # ═══════════════════════════════════════════════════════════════════════
+    @staticmethod
+    def _scale_traces_to_shape(traces, source_shape, target_shape):
+        source_h, source_w = int(source_shape[0]), int(source_shape[1])
+        target_h, target_w = int(target_shape[0]), int(target_shape[1])
+        if source_h <= 0 or source_w <= 0:
+            return {}
+        if (source_h, source_w) == (target_h, target_w):
+            return {
+                name: {
+                    "points": list(trace.get("points", [])),
+                    "pixels": list(trace.get("pixels", [])),
+                    "color": trace.get("color", ""),
+                }
+                for name, trace in traces.items()
+            }
+
+        scale_x = target_w / source_w
+        scale_y = target_h / source_h
+        scaled = {}
+        for name, trace in traces.items():
+            scaled_points = []
+            for x, y in trace.get("points", []):
+                sx = int(np.round(float(x) * scale_x))
+                sy = int(np.round(float(y) * scale_y))
+                sx = max(0, min(sx, target_w - 1))
+                sy = max(0, min(sy, target_h - 1))
+                scaled_points.append((sx, sy))
+            scaled[name] = {
+                "points": scaled_points,
+                "pixels": _polyline_pixels(scaled_points),
+                "color": trace.get("color", ""),
+            }
+        return scaled
+
     def _default_segmenter_output_dir(self):
         if self.current_file and self.current_file != "Step 1 output":
             root = os.path.dirname(self.current_file)
@@ -2444,9 +3161,16 @@ class Step2Frame(ttk.Frame):
         Returns:
             8-bit uint8 numpy array.
         """
+        return self._image_uint8_for_save(
+            image,
+            source_was_8bit=getattr(self, "_source_was_8bit", False),
+        )
+
+    @staticmethod
+    def _image_uint8_for_save(image, source_was_8bit=False):
         if image.dtype == np.uint8:
             return np.array(image, copy=False)
-        if getattr(self, "_source_was_8bit", False) and image.dtype == np.uint16:
+        if source_was_8bit and image.dtype == np.uint16:
             return np.clip(
                 np.rint(image.astype(np.float64) * (255.0 / 65535.0)),
                 0,
@@ -2503,15 +3227,21 @@ class Step2Frame(ttk.Frame):
         as-is. If a user opens an 8-bit image directly, promote it to a real
         16-bit working copy so LIGHT/DARK saves never become 8-bit originals.
         """
+        arr, source_was_8bit = self._coerce_image_for_annotation(image)
+        self._source_was_8bit = source_was_8bit
+        return arr
+
+    @staticmethod
+    def _coerce_image_for_annotation(image):
         arr = np.asarray(image)
         if arr.ndim != 2:
             raise ValueError("Step 2 expects a 2-D grayscale image.")
         if arr.dtype.byteorder not in ("=", "|"):
             arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
-        self._source_was_8bit = arr.dtype == np.uint8
-        if arr.dtype == np.uint8:
+        source_was_8bit = arr.dtype == np.uint8
+        if source_was_8bit:
             arr = np.rint(arr.astype(np.float64) * (65535.0 / 255.0)).astype(np.uint16)
-        return np.ascontiguousarray(arr)
+        return np.ascontiguousarray(arr), source_was_8bit
 
     def _segmenter_model_size(self):
         """Extract target input size (height, width) from model_config.json.
@@ -2634,8 +3364,9 @@ class Step2Frame(ttk.Frame):
         except Exception:
             print(entry)
 
-    def _import_boundary_rows(self, data, source_label="predicted boundaries"):
-        """Import six boundary rows into the Step 2 trace state."""
+    @staticmethod
+    def _boundary_traces_from_rows(data, image_shape, source_label="predicted boundaries"):
+        """Convert model boundary rows into Step 2 trace dictionaries."""
         data = np.asarray(data, dtype=float)
         data = np.atleast_2d(data)
         if data.shape[0] < len(BOUNDARY_PRESETS):
@@ -2643,15 +3374,12 @@ class Step2Frame(ttk.Frame):
                 f"{source_label} has {data.shape[0]} rows; expected at least {len(BOUNDARY_PRESETS)} rows."
             )
 
-        self.boundary_traces.clear()
-        self.boundary_order.clear()
-        self.image_canvas.clear_active_line()
-        self.image_canvas.clear_line_overlays()
-
-        width = int(self.image_data.shape[1])
-        height = int(self.image_data.shape[0])
+        height = int(image_shape[0])
+        width = int(image_shape[1])
         max_x = min(width, data.shape[1])
 
+        traces = {}
+        order = []
         for row_idx, (name, _) in enumerate(BOUNDARY_PRESETS):
             y_row = np.rint(data[row_idx, :max_x]).astype(int)
             y_row = np.clip(y_row, 0, height - 1)
@@ -2659,10 +3387,28 @@ class Step2Frame(ttk.Frame):
             if len(points) < 2:
                 continue
             pixels = _polyline_pixels(points)
-            color = self._boundary_color(name)
-            self.boundary_traces[name] = {"points": points, "pixels": pixels, "color": color}
-            self.boundary_order.append(name)
-            self.image_canvas.add_line_overlay(points, color=color, label=name)
+            traces[name] = {
+                "points": points,
+                "pixels": pixels,
+                "color": BOUNDARY_COLORS.get(name, "#ffb703"),
+            }
+            order.append(name)
+        return traces, order
+
+    def _import_boundary_rows(self, data, source_label="predicted boundaries"):
+        """Import six boundary rows into the Step 2 trace state."""
+        traces, order = self._boundary_traces_from_rows(data, self.image_data.shape, source_label=source_label)
+
+        self.boundary_traces.clear()
+        self.boundary_order.clear()
+        self.image_canvas.clear_active_line()
+        self.image_canvas.clear_line_overlays()
+
+        self.boundary_traces.update(traces)
+        self.boundary_order.extend(order)
+        for name in self.boundary_order:
+            trace = self.boundary_traces[name]
+            self.image_canvas.add_line_overlay(trace["points"], color=trace["color"], label=name)
 
         self._refresh_trace_list()
         if self.boundary_order:
@@ -2696,6 +3442,24 @@ class Step2Frame(ttk.Frame):
         image_h, image_w = self.image_data.shape[:2]
         return int(image_h) == int(target_h) and int(image_w) == int(target_w)
 
+    def _batch_ai_button_enabled(self):
+        if self._segmenter_running:
+            return False
+        if not self._is_aidas_ai_backend():
+            return False
+        model_path = self.aidas_model_var.get().strip()
+        if not model_path or not os.path.isfile(model_path):
+            return False
+        return len(self._selected_directory_image_paths()) >= 2
+
+    def _update_batch_ai_button_state(self):
+        if not hasattr(self, "batch_ai_button"):
+            return
+        if self._batch_ai_button_enabled():
+            self.batch_ai_button.state(["!disabled"])
+        else:
+            self.batch_ai_button.state(["disabled"])
+
     def _update_ai_button_states(self):
         """Update AI button states based on preprocessing and input readiness.
 
@@ -2710,36 +3474,52 @@ class Step2Frame(ttk.Frame):
         if not hasattr(self, "preprocess_button") or not hasattr(self, "segment_button"):
             return
 
+        if self.image_data is None:
+            self.preprocess_button.configure(text="Preprocess Image", command=self._preprocess_image_for_ai)
+            self.preprocess_button.state(["disabled"])
+            self.segment_button.state(["disabled"])
+            self._update_batch_ai_button_state()
+            return
+
         if self._is_aidas_ai_backend():
             self.preprocess_button.configure(text="Preprocess Not Needed", command=self._preprocess_image_for_ai)
             self.preprocess_button.state(["disabled"])
-            if self.image_data is None:
-                self.segment_button.state(["disabled"])
-            else:
-                self.segment_button.state(["!disabled"])
+            self.segment_button.state(["!disabled"])
+            self._update_batch_ai_button_state()
             return
 
         if self._preprocessing_done:
             self.preprocess_button.configure(text="Remove Preprocess", command=self._remove_preprocess)
             self.preprocess_button.state(["!disabled"])
             self.segment_button.state(["!disabled"])
+            self._update_batch_ai_button_state()
             return
 
         if self._image_matches_model_input():
             self.preprocess_button.configure(text="Preprocess Not Needed", command=self._preprocess_image_for_ai)
             self.preprocess_button.state(["disabled"])
             self.segment_button.state(["!disabled"])
+            self._update_batch_ai_button_state()
             return
 
         self.preprocess_button.configure(text="Preprocess Image", command=self._preprocess_image_for_ai)
         self.preprocess_button.state(["!disabled"])
         self.segment_button.state(["disabled"])
+        self._update_batch_ai_button_state()
 
-    def _set_segmentation_running(self, running, status_message=None):
+    def _set_segmentation_running(
+        self,
+        running,
+        status_message=None,
+        *,
+        progress_max=None,
+        animate_progress=True,
+        restore_boundary_progress=True,
+    ):
         """Lock/unlock UI controls while AI segmentation is running.
 
         During segmentation (running=True):
-          - Disables all AI buttons (Preprocess, AI Assist)
+          - Disables all AI buttons
           - Disables boundary listboxes to prevent selection changes
           - Disables vertical line mode and fovea controls
           - Starts animated progress bar showing activity
@@ -2763,6 +3543,19 @@ class Step2Frame(ttk.Frame):
             self.ai_backend_combo.configure(state="disabled" if running else "readonly")
         if hasattr(self, "ai_settings_btn"):
             self.ai_settings_btn.state(["disabled"] if running else ["!disabled"])
+        if hasattr(self, "batch_ai_button"):
+            if running:
+                self.batch_ai_button.state(["disabled"])
+            else:
+                self._update_batch_ai_button_state()
+        for widget_name in (
+            "image_browser_reset_btn",
+            "image_browser_folder_btn",
+            "image_browser_refresh_btn",
+        ):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.state(["disabled"] if running else ["!disabled"])
         
         # Disable/enable boundary listboxes during segmentation
         listbox_state = "disabled" if running else "normal"
@@ -2770,6 +3563,8 @@ class Step2Frame(ttk.Frame):
             self.boundary_incomplete_listbox.configure(state=listbox_state)
         if hasattr(self, "boundary_completed_listbox"):
             self.boundary_completed_listbox.configure(state=listbox_state)
+        if hasattr(self, "directory_image_listbox"):
+            self.directory_image_listbox.configure(state=listbox_state)
         
         # Disable/enable entire fovea frame during segmentation
         if running:
@@ -2794,7 +3589,7 @@ class Step2Frame(ttk.Frame):
                         disable_widget(child)
                 disable_widget(self.saved_buttons_frame)
             # If vertical mode is currently on, turn it off during segmentation
-            if self.vertical_mode_var.get():
+            if self._fovea_live_edit_mode():
                 self.vertical_mode_var.set(False)
                 self._on_vertical_mode_toggled()
         else:
@@ -2823,18 +3618,22 @@ class Step2Frame(ttk.Frame):
                 enable_widget(self.saved_buttons_frame)
         
         if running:
-            # Start gradually filling progress bar
             if hasattr(self, "segmenter_progress"):
+                self._cancel_progress_animation()
+                maximum = progress_max if progress_max is not None else len(BOUNDARY_NAMES)
+                self.segmenter_progress.configure(maximum=max(1, int(maximum)), mode="determinate")
                 self.segmenter_progress["value"] = 0
-                self._animate_progress_bar()
+                if animate_progress:
+                    self._animate_progress_bar()
         else:
             # Stop animation and show actual boundary count
-            if hasattr(self, "_progress_animation_job"):
-                self.after_cancel(self._progress_animation_job)
-            if hasattr(self, "segmenter_progress"):
+            self._cancel_progress_animation()
+            if hasattr(self, "segmenter_progress") and restore_boundary_progress:
                 self._update_boundary_progress_bar()
             # Update button states after segmentation finishes
             self._update_ai_button_states()
+            if self.image_data is None and not getattr(self, "_directory_image_paths_cache", []):
+                self._set_segmentation_frame_enabled(False)
 
         # Update canvas state to disable/enable drawing based on segmentation status
         self._sync_boundary_canvas_state()
@@ -2842,19 +3641,39 @@ class Step2Frame(ttk.Frame):
         if status_message:
             self.status_var.set(status_message)
 
+    def _cancel_progress_animation(self):
+        job = getattr(self, "_progress_animation_job", None)
+        if job is None:
+            return
+        try:
+            self.after_cancel(job)
+        except tk.TclError:
+            pass
+        self._progress_animation_job = None
+
+    def _set_segmenter_progress_value(self, value, maximum=None):
+        if not hasattr(self, "segmenter_progress"):
+            return
+        if maximum is not None:
+            self.segmenter_progress.configure(maximum=max(1, int(maximum)), mode="determinate")
+        max_value = float(self.segmenter_progress.cget("maximum") or 1)
+        self.segmenter_progress["value"] = max(0, min(float(value), max_value))
+
     def _animate_progress_bar(self):
         """Gradually fill progress bar during segmentation to show activity."""
         if not self._segmenter_running or not hasattr(self, "segmenter_progress"):
+            self._progress_animation_job = None
             return
         
-        current = self.segmenter_progress["value"]
-        # Gradually increase but slow down as it approaches 6 (leaving room for the final result)
-        if current < 6:
-            increment = max(0.02, (6 - current) * 0.08)
-            self.segmenter_progress["value"] = min(current + increment, 6)
+        current = float(self.segmenter_progress["value"])
+        maximum = float(self.segmenter_progress.cget("maximum") or len(BOUNDARY_NAMES))
+        # Gradually increase but slow down as it approaches the max.
+        if current < maximum:
+            increment = max(0.02, (maximum - current) * 0.08)
+            self.segmenter_progress["value"] = min(current + increment, maximum)
             self._progress_animation_job = self.after(500, self._animate_progress_bar)
         else:
-            # Keep it near 6 until segmentation finishes
+            # Keep it near max until segmentation finishes.
             self._progress_animation_job = self.after(500, self._animate_progress_bar)
 
     def _run_segmenter_worker(self, cmd, output_dir):
@@ -3047,7 +3866,7 @@ class Step2Frame(ttk.Frame):
             self._update_ai_button_states()
             self.status_var.set(
                 f"Image preprocessed: cropped {source_w}x{source_h} → {crop_w}x{crop_h}, "
-                "no resizing/downsampling. Ready for AI Assist."
+                "no resizing/downsampling. Ready for AI segmentation."
             )
         except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Preprocess failed", str(exc))
@@ -3081,6 +3900,563 @@ class Step2Frame(ttk.Frame):
             self._run_aidas_neural_segmentation()
             return
         self._run_oct_segmenter_segmentation(auto_preprocess=auto_preprocess)
+
+    def _run_aidas_batch_segmentation(self, image_paths=None):
+        """Run AI_ForAIDAS predictions for multiple images and preview them in tabs."""
+        if self._segmenter_running:
+            messagebox.showinfo("Please wait", "Segmentation is already running.")
+            return
+
+        model_path = self.aidas_model_var.get().strip()
+        if not os.path.isfile(model_path):
+            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
+            return
+
+        paths = image_paths
+        if paths is None:
+            paths = filedialog.askopenfilenames(
+                title="Select OCT images for AI_ForAIDAS batch segmentation",
+                filetypes=SUPPORTED_IMAGE_FILETYPES,
+            )
+        if not paths:
+            return
+
+        image_paths = []
+        seen = set()
+        for path in paths:
+            ext = os.path.splitext(path)[1].lower()
+            dedupe_path = os.path.splitext(path)[0] if ext in {".hdr", ".img"} else path
+            norm = os.path.normcase(os.path.abspath(dedupe_path))
+            if norm in seen:
+                continue
+            seen.add(norm)
+            image_paths.append(path)
+
+        predict_fovea = bool(self.aidas_predict_fovea_var.get())
+        vline_path = self.aidas_vline_model_var.get().strip()
+        if predict_fovea and vline_path and not os.path.isfile(vline_path):
+            self._append_segmenter_log(f"AI_ForAIDAS vline model not found; batch fovea prediction skipped: {vline_path}")
+            vline_path = None
+        if not predict_fovea:
+            vline_path = None
+
+        output_dir = self.segmenter_output_var.get().strip() or self._default_segmenter_output_dir()
+        os.makedirs(output_dir, exist_ok=True)
+        self.segmenter_output_var.set(output_dir)
+
+        device_name = self.aidas_device_var.get().strip() or AI_DEVICE_OPTIONS[0]
+        self._append_segmenter_log(
+            f"Starting AI_ForAIDAS batch for {len(image_paths)} image(s); model={model_path}; device={device_name}"
+        )
+        self._set_segmentation_running(
+            True,
+            status_message=f"Running AI_ForAIDAS batch on {len(image_paths)} image(s)...",
+            progress_max=len(image_paths),
+            animate_progress=False,
+        )
+
+        worker = threading.Thread(
+            target=self._run_aidas_batch_segmenter_worker,
+            args=(image_paths, model_path, vline_path, predict_fovea, device_name, output_dir),
+            daemon=True,
+        )
+        worker.start()
+
+    def _run_aidas_batch_segmenter_worker(
+        self,
+        image_paths,
+        model_path,
+        vline_path,
+        predict_fovea,
+        device_name,
+        output_dir,
+    ):
+        results = []
+        failures = []
+        log_lines = [
+            "AIDaS Step 2 AI_ForAIDAS Batch Segmentation",
+            f"Boundary model: {model_path}",
+            f"VLine model: {vline_path or '(not used)'}",
+            f"Requested device: {device_name}",
+            f"Images: {len(image_paths)}",
+            "",
+        ]
+        device = None
+        batch_exception = None
+
+        def report_status(index, path):
+            total = len(image_paths)
+            name = os.path.basename(path)
+            self.after(0, lambda i=index, t=total: self._set_segmenter_progress_value(i - 1, t))
+            self.after(0, lambda: self.status_var.set(f"AI_ForAIDAS batch {index}/{total}: {name}"))
+            self.after(0, lambda: self._append_segmenter_log(f"Batch {index}/{total}: {path}"))
+
+        try:
+            try:
+                from aidas.ai_for_aidas_inference import AIForAIDASPredictor
+
+                predictor = AIForAIDASPredictor(
+                    boundary_model_path=model_path,
+                    vline_model_path=vline_path,
+                    predict_fovea=predict_fovea and bool(vline_path),
+                    device_name=device_name,
+                )
+                device = str(predictor.device)
+
+                def run_prediction_with_result(image_for_ai):
+                    prediction = predictor.predict(image_for_ai)
+                    return {
+                        "boundaries": prediction.boundaries,
+                        "fovea_x": prediction.fovea_x,
+                        "device": prediction.device,
+                    }
+
+            except Exception as inner_exc:
+                if not self._is_missing_torch_error(inner_exc):
+                    raise
+                fallback_reason_text = str(inner_exc)
+                log_lines.append(f"Internal PyTorch unavailable; using external Python fallback: {fallback_reason_text}")
+
+                def run_prediction_with_result(image_for_ai):
+                    return self._run_aidas_external_prediction(
+                        image_for_ai,
+                        model_path,
+                        vline_path,
+                        predict_fovea,
+                        device_name,
+                        output_dir,
+                        fallback_reason=fallback_reason_text,
+                    )
+
+            for index, path in enumerate(image_paths, start=1):
+                report_status(index, path)
+                try:
+                    image, template, _source_was_8bit = self._read_image_for_annotation(path)
+                    model_input_uses_stored_y = template is not None
+                    image_for_ai = np.array(image, copy=True)
+                    if model_input_uses_stored_y:
+                        image_for_ai = np.ascontiguousarray(np.flipud(image_for_ai))
+
+                    prediction = run_prediction_with_result(image_for_ai)
+                    if prediction.get("device"):
+                        device = prediction["device"]
+                    boundaries = self._aidas_boundaries_from_model_to_display(
+                        prediction["boundaries"],
+                        image_for_ai.shape[0],
+                        model_input_uses_stored_y,
+                    )
+                    traces, _order = self._boundary_traces_from_rows(
+                        boundaries,
+                        image.shape,
+                        source_label=f"AI_ForAIDAS prediction for {os.path.basename(path)}",
+                    )
+                    results.append({
+                        "input": path,
+                        "boundaries": np.asarray(boundaries, dtype=np.float32),
+                        "traces": traces,
+                        "fovea_x": prediction.get("fovea_x"),
+                    })
+                    log_lines.append(f"OK: {path}")
+                    log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
+                    if prediction.get("fovea_x") is not None:
+                        log_lines.append(f"  Fovea x: {int(prediction['fovea_x'])}")
+                except Exception as exc:
+                    failures.append({"input": path, "error": str(exc)})
+                    log_lines.append(f"FAILED: {path}")
+                    log_lines.append(f"  Error: {exc}")
+                finally:
+                    self.after(0, lambda i=index, t=len(image_paths): self._set_segmenter_progress_value(i, t))
+        except Exception as exc:
+            batch_exception = str(exc)
+            log_lines.append(f"FATAL: {batch_exception}")
+
+        log_lines.append("")
+        log_lines.append(f"Completed: {len(results)}")
+        log_lines.append(f"Failed: {len(failures)}")
+        if device:
+            log_lines.append(f"Device: {device}")
+
+        try:
+            log_path = self._write_segmenter_log_file(output_dir, "\n".join(log_lines) + "\n")
+        except Exception:
+            log_path = None
+
+        result = {
+            "results": results,
+            "failures": failures,
+            "exception": batch_exception,
+            "device": device,
+            "log_path": log_path,
+            "total": len(image_paths),
+        }
+        self.after(0, lambda: self._on_aidas_batch_segmenter_worker_done(result))
+
+    def _on_aidas_batch_segmenter_worker_done(self, result):
+        running_cleared = False
+        try:
+            log_path = result.get("log_path")
+            if log_path:
+                self._append_segmenter_log(f"Saved batch run log: {log_path}")
+
+            completed = len(result.get("results") or [])
+            failed = len(result.get("failures") or [])
+            total = int(result.get("total") or (completed + failed) or 1)
+            self._set_segmenter_progress_value(completed + failed, total)
+            self._set_segmentation_running(False, restore_boundary_progress=False)
+            running_cleared = True
+
+            if result.get("exception") and completed == 0:
+                message = result["exception"]
+                if log_path:
+                    message += f"\n\nLog saved to:\n{log_path}"
+                messagebox.showerror("Batch segmentation failed", message)
+                self.status_var.set("AI_ForAIDAS batch segmentation failed.")
+                return
+
+            device = result.get("device") or "unknown"
+            self.status_var.set(
+                f"AI_ForAIDAS batch complete on {device}: {completed} processed, {failed} failed."
+            )
+            self._append_segmenter_log(
+                f"AI_ForAIDAS batch complete: {completed} processed, {failed} failed."
+            )
+
+            if completed:
+                self._open_aidas_batch_results_viewer(result.get("results") or [])
+
+            message_lines = [f"Processed {completed} image(s)."]
+            shown_results = (result.get("results") or [])[:6]
+            if shown_results:
+                message_lines.append("")
+                message_lines.append("Processed:")
+                message_lines.extend(os.path.basename(item["input"]) for item in shown_results)
+                if completed > len(shown_results):
+                    message_lines.append(f"...and {completed - len(shown_results)} more.")
+            if failed:
+                message_lines.append("")
+                message_lines.append(f"Failed: {failed}")
+                for failure in (result.get("failures") or [])[:3]:
+                    message_lines.append(f"{os.path.basename(failure['input'])}: {failure['error']}")
+            if log_path:
+                message_lines.append("")
+                message_lines.append(f"Log saved to:\n{log_path}")
+
+            if failed:
+                messagebox.showwarning("Batch segmentation complete with errors", "\n".join(message_lines))
+            else:
+                messagebox.showinfo("Batch segmentation complete", "\n".join(message_lines))
+        finally:
+            if not running_cleared:
+                self._set_segmentation_running(False)
+
+    def _open_aidas_batch_results_viewer(self, results):
+        viewable_results = [
+            item for item in results
+            if item.get("input") and (item.get("traces") or item.get("boundaries") is not None)
+        ]
+        if not viewable_results:
+            return
+
+        if self._active_batch_result_tab is None:
+            self._single_editor_state = self._capture_current_editor_state()
+
+        previous_notebook = getattr(self, "batch_results_notebook", None)
+        if previous_notebook is not None:
+            previous_notebook.destroy()
+
+        notebook = ttk.Notebook(self.canvas_area)
+        self.batch_results_notebook = notebook
+        self._batch_result_canvases = []
+        self._batch_result_tab_canvases = {}
+        self._batch_result_states = {}
+        self._active_batch_result_tab = None
+        notebook.bind("<Button-1>", self._on_batch_result_notebook_click, add="+")
+        notebook.bind("<Motion>", self._on_batch_result_notebook_motion, add="+")
+        notebook.bind("<Leave>", lambda event: event.widget.configure(cursor=""), add="+")
+        notebook.bind("<<NotebookTabChanged>>", self._on_batch_result_tab_changed, add="+")
+
+        for index, item in enumerate(viewable_results, start=1):
+            frame = ttk.Frame(notebook)
+            input_path = item["input"]
+            input_name = os.path.splitext(os.path.basename(input_path))[0]
+            tab_text = self._batch_result_tab_text(input_name or f"Result {index}")
+            notebook.add(frame, text=tab_text)
+
+            info_var = tk.StringVar(value=input_path)
+            ttk.Label(frame, textvariable=info_var, anchor="w", padding=4).pack(fill="x")
+
+            canvas = ImageCanvas(
+                frame,
+                on_mouse_move=self._on_mouse_moved,
+                on_line_change=self._on_active_line_changed,
+                on_vertical_line_change=self._on_vertical_line_changed,
+            )
+            canvas.enable_roi(False)
+            canvas.enable_line(False)
+            canvas.enable_vertical_line(False)
+            canvas.pack(fill="both", expand=True)
+            self._batch_result_canvases.append(canvas)
+            self._batch_result_tab_canvases[str(frame)] = canvas
+
+            try:
+                data, _template, _source_was_8bit = self._read_image_for_annotation(input_path)
+                canvas.set_image(data)
+                traces = item.get("traces")
+                if traces is None:
+                    traces, _order = self._boundary_traces_from_rows(
+                        item["boundaries"],
+                        data.shape,
+                        source_label=f"AI_ForAIDAS prediction for {os.path.basename(input_path)}",
+                    )
+                traces = self._copy_trace_dict(traces)
+                order = [name for name in BOUNDARY_NAMES if name in traces]
+                for name in BOUNDARY_NAMES:
+                    trace = traces.get(name)
+                    if trace:
+                        canvas.add_line_overlay(trace["points"], color=trace.get("color"), label=name)
+                fovea_x = item.get("fovea_x")
+                if fovea_x is not None:
+                    fovea_trace = self._vertical_line_trace(int(fovea_x), data.shape[0])
+                    traces[FOVEA_BOUNDARY_NAME] = fovea_trace
+                    if FOVEA_BOUNDARY_NAME not in order:
+                        order.append(FOVEA_BOUNDARY_NAME)
+                    canvas.add_line_overlay(fovea_trace["points"], color=fovea_trace.get("color"), label=FOVEA_BOUNDARY_NAME)
+                self._batch_result_states[str(frame)] = {
+                    "input": input_path,
+                    "image": data,
+                    "traces": traces,
+                    "order": order,
+                    "fovea_x": None if fovea_x is None else int(fovea_x),
+                    "template": _template,
+                    "source_was_8bit": _source_was_8bit,
+                    "canvas": canvas,
+                }
+                canvas.fit_to_window()
+            except (OSError, ValueError, RuntimeError) as exc:
+                info_var.set(f"Could not load {input_path}: {exc}")
+
+        self._show_batch_results_canvas()
+        if notebook.tabs():
+            first_tab = notebook.nametowidget(notebook.tabs()[0])
+            notebook.select(first_tab)
+            self._activate_batch_result_tab(first_tab)
+        self.status_var.set(f"AI batch results opened: {len(viewable_results)} image(s). Select a tab to edit its boundaries.")
+        self.after(100, self._fit_batch_result_canvases)
+
+    @staticmethod
+    def _batch_result_tab_text(title):
+        return f"{str(title)[:24]}\tx"
+
+    def _sync_active_batch_result_state(self):
+        tab_key = getattr(self, "_active_batch_result_tab", None)
+        if not tab_key:
+            return
+        state = self._batch_result_states.get(tab_key)
+        if not state:
+            return
+        state["input"] = self.current_file
+        state["image"] = self.image_data
+        if (
+            self.fovea_x is not None
+            and self.image_data is not None
+            and FOVEA_BOUNDARY_NAME in self.boundary_traces
+        ):
+            self.boundary_traces[FOVEA_BOUNDARY_NAME] = self._vertical_line_trace(
+                int(self.fovea_x),
+                self.image_data.shape[0],
+            )
+            if FOVEA_BOUNDARY_NAME not in self.boundary_order:
+                self.boundary_order.append(FOVEA_BOUNDARY_NAME)
+        state["traces"] = self.boundary_traces
+        state["order"] = self.boundary_order
+        state["fovea_x"] = self.fovea_x if FOVEA_BOUNDARY_NAME in self.boundary_traces else None
+
+    def _activate_batch_result_tab(self, tab):
+        if tab is None:
+            return
+        self._sync_active_batch_result_state()
+        tab_key = str(tab)
+        state = self._batch_result_states.get(tab_key)
+        if not state:
+            return
+        canvas = state.get("canvas") or self._batch_result_tab_canvases.get(tab_key)
+        self._active_batch_result_tab = tab_key
+        self._load_editor_state(
+            state,
+            canvas,
+            status_message=f"Editing batch result: {os.path.basename(state.get('input') or '')}",
+        )
+
+    def _on_batch_result_tab_changed(self, event):
+        notebook = event.widget
+        selected = notebook.select()
+        if not selected:
+            return
+        try:
+            self._activate_batch_result_tab(notebook.nametowidget(selected))
+        except tk.TclError:
+            return
+
+    def _batch_result_close_tab_at(self, notebook, x, y):
+        try:
+            index = notebook.index(f"@{x},{y}")
+        except tk.TclError:
+            return None
+
+        tab_bounds = self._batch_result_tab_bounds(notebook, index, y)
+        if tab_bounds is None:
+            return None
+        left, right = tab_bounds
+
+        close_width = min(15, max(1, right - left + 1))
+        if right - close_width <= x <= right:
+            return notebook.nametowidget(notebook.tabs()[index])
+        return None
+
+    @staticmethod
+    def _batch_result_tab_bounds(notebook, index, y):
+        try:
+            x0, _y0, width, _height = notebook.bbox(index)
+            if width > 0:
+                return x0, x0 + width
+        except tk.TclError:
+            pass
+
+        first_x = None
+        last_x = None
+        probe_y = max(1, int(y))
+        for probe_x in range(max(1, notebook.winfo_width())):
+            try:
+                probe_index = notebook.index(f"@{probe_x},{probe_y}")
+            except tk.TclError:
+                if first_x is not None:
+                    break
+                continue
+            if probe_index != index:
+                if first_x is not None:
+                    break
+                continue
+            if first_x is None:
+                first_x = probe_x
+            last_x = probe_x
+
+        if first_x is None or last_x is None:
+            return None
+        return first_x, last_x
+
+    def _on_batch_result_notebook_click(self, event):
+        notebook = event.widget
+        tab = self._batch_result_close_tab_at(notebook, event.x, event.y)
+        if tab is None:
+            return None
+        canvas = self._batch_result_tab_canvases.get(str(tab))
+        if canvas is None:
+            return None
+        self._close_batch_result_tab(notebook, tab, canvas)
+        return "break"
+
+    def _on_batch_result_notebook_motion(self, event):
+        notebook = event.widget
+        cursor = "hand2" if self._batch_result_close_tab_at(notebook, event.x, event.y) is not None else ""
+        try:
+            notebook.configure(cursor=cursor)
+        except tk.TclError:
+            pass
+
+    def _fit_batch_result_canvases(self):
+        for canvas in list(getattr(self, "_batch_result_canvases", [])):
+            try:
+                if canvas.winfo_exists():
+                    canvas.fit_to_window()
+            except tk.TclError:
+                pass
+
+    def _close_batch_result_tab(self, notebook, tab, canvas):
+        if tab is None:
+            return
+        tab_key = str(tab)
+        closing_active = tab_key == getattr(self, "_active_batch_result_tab", None)
+        if closing_active:
+            self._sync_active_batch_result_state()
+
+        if not self._confirm_close_batch_result_tab(tab_key):
+            return
+
+        self._batch_result_tab_canvases.pop(tab_key, None)
+        self._batch_result_states.pop(tab_key, None)
+        try:
+            if canvas in self._batch_result_canvases:
+                self._batch_result_canvases.remove(canvas)
+        except ValueError:
+            pass
+
+        try:
+            notebook.forget(tab)
+        except tk.TclError:
+            pass
+        tab.destroy()
+
+        remaining_tabs = len(notebook.tabs())
+        if remaining_tabs:
+            self.image_info_var.set(f"AI batch results | {remaining_tabs} image(s)")
+            if closing_active:
+                try:
+                    selected = notebook.select()
+                    if selected:
+                        self._activate_batch_result_tab(notebook.nametowidget(selected))
+                except tk.TclError:
+                    pass
+            return
+
+        if not remaining_tabs:
+            notebook.destroy()
+            if getattr(self, "batch_results_notebook", None) is notebook:
+                self.batch_results_notebook = None
+            self._batch_result_canvases = []
+            self._batch_result_tab_canvases = {}
+            self._batch_result_states = {}
+            self._active_batch_result_tab = None
+            self._show_single_image_canvas()
+            if self._single_editor_state is not None:
+                self._load_editor_state(self._single_editor_state, self.single_image_canvas)
+            if self.image_data is None:
+                self.image_info_var.set("No image loaded")
+            else:
+                filename = (
+                    os.path.basename(self.current_file)
+                    if self.current_file and self.current_file != "Step 1 output"
+                    else "Step 1 output"
+                )
+                self.image_info_var.set(
+                    f"{filename} | Size: {self.image_data.shape[1]} x {self.image_data.shape[0]} px | "
+                    f"Type: {self.image_data.dtype}"
+                )
+            self.status_var.set("Batch result tabs closed.")
+
+    def _confirm_close_batch_result_tab(self, tab_key):
+        state = self._batch_result_states.get(tab_key)
+        if not state:
+            return True
+
+        name = os.path.basename(state.get("input") or "this tab")
+        answer = messagebox.askyesnocancel(
+            "Close result tab",
+            f"Save MARKED image for {name} before closing this tab?",
+        )
+        if answer is None:
+            return False
+        if not answer:
+            return True
+
+        try:
+            out_base = self._save_batch_result_state(tab_key)
+        except (OSError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Save error", f"Could not save {name}:\n{exc}")
+            return False
+
+        if out_base:
+            self.status_var.set(f"Saved {out_base}.img")
+        return True
 
     def _run_oct_segmenter_segmentation(self, auto_preprocess=False):
         """Launch neural network segmentation in background thread.
@@ -3340,7 +4716,7 @@ class Step2Frame(ttk.Frame):
         self.after(0, lambda: self._on_aidas_segmenter_worker_done(result))
 
     def _on_aidas_segmenter_worker_done(self, result):
-        fovea_locked = False
+        predicted_fovea_x = None
         try:
             if result.get("exception"):
                 self._append_segmenter_log(f"AI_ForAIDAS segmentation failed: {result['exception']}")
@@ -3354,31 +4730,30 @@ class Step2Frame(ttk.Frame):
 
             self._import_boundary_rows(result["boundaries"], source_label="AI_ForAIDAS prediction")
 
-            fovea_x = result.get("fovea_x")
-            if fovea_x is not None:
-                self.fovea_x_entry_var.set(str(int(fovea_x)))
-                self._apply_vertical_line_x()
-                fovea_locked = True
+            predicted_fovea_x = result.get("fovea_x")
+            if predicted_fovea_x is not None:
+                self._set_fovea_from_prediction(predicted_fovea_x)
 
             device = result.get("device") or "unknown"
             self.status_var.set(f"AI_ForAIDAS segmentation completed on {device}.")
             self._append_segmenter_log("Loaded AI_ForAIDAS predicted boundaries into Step 2.")
             msg = "Loaded AI_ForAIDAS predicted boundaries."
-            if fovea_x is not None:
-                msg += f"\nPredicted foveal center: x={int(fovea_x)}"
+            if predicted_fovea_x is not None:
+                msg += f"\nPredicted foveal center: x={int(predicted_fovea_x)}"
             if log_path:
                 msg += f"\n\nLog saved to:\n{log_path}"
             messagebox.showinfo("Segmentation complete", msg)
         finally:
             self._set_segmentation_running(False)
-            if fovea_locked:
-                self._set_drawing_locked(True)
             try:
                 incomplete_names = self._incomplete_boundary_names()
                 completed_names = self._completed_boundary_names()
                 self._populate_boundary_listbox(self.boundary_incomplete_listbox, incomplete_names, None)
                 self._populate_boundary_listbox(self.boundary_completed_listbox, completed_names, None)
-                if completed_names:
+                if predicted_fovea_x is not None and FOVEA_BOUNDARY_NAME in self.boundary_traces:
+                    self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
+                    self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
+                elif completed_names:
                     self.boundary_completed_listbox.selection_clear(0, "end")
                     self.boundary_completed_listbox.selection_set(0)
                     self.boundary_completed_listbox.see(0)

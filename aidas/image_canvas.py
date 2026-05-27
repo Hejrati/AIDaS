@@ -72,7 +72,7 @@ class ImageCanvas(ttk.Frame):
         # Vertical line marker state
         self._vertical_line_on = False
         self._vertical_line_x = None
-        self._vertical_line_color = "#1e90ff"
+        self._vertical_line_color = "#ffd500"
         self._drag_vertical_line = False
         self._vertical_line_items = []
 
@@ -427,7 +427,7 @@ class ImageCanvas(ttk.Frame):
             x_bottom,
             y_bottom,
             fill=self._vertical_line_color,
-            width=2,
+            width=4,
             dash=(5, 3),
             tags=("vertical_overlay",),
         )
