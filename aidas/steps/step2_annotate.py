@@ -37,7 +37,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageTk
 
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
@@ -231,6 +231,119 @@ def _resize_volume_to_shape(volume_3d, target_shape):
     return np.stack(resized_slices[:target_slices], axis=0)
 
 
+class _FoveaLinePicker(tk.Toplevel):
+    """Modal image viewer for choosing one foveal center x-coordinate."""
+
+    DISPLAY_W = 1100
+    DISPLAY_H = 320
+
+    def __init__(self, parent, image, *, title=None, initial_x=None):
+        super().__init__(parent)
+        self.title(title or "Mark Foveal Center")
+        self.resizable(False, False)
+        self.transient(parent)
+        apply_app_icon_to(self)
+
+        arr = np.asarray(image)
+        if arr.ndim != 2:
+            raise ValueError("Fovea picker expects a 2-D grayscale image.")
+        height, width = arr.shape
+        self._orig_w = int(width)
+        self._orig_h = int(height)
+        self.result = None
+        self.cancelled = False
+
+        scale = min(self.DISPLAY_W / max(1, width), self.DISPLAY_H / max(1, height))
+        self._scale = max(scale, 1e-6)
+        self._display_w = max(1, int(round(width * self._scale)))
+        self._display_h = max(1, int(round(height * self._scale)))
+
+        display = arr.astype(np.float32, copy=False)
+        lo = float(np.nanmin(display))
+        hi = float(np.nanmax(display))
+        if hi <= lo:
+            u8 = np.zeros(display.shape, dtype=np.uint8)
+        else:
+            u8 = ((display - lo) / (hi - lo + 1e-8) * 255).clip(0, 255).astype(np.uint8)
+        try:
+            resample_bilinear = Image.Resampling.BILINEAR
+        except AttributeError:
+            resample_bilinear = Image.BILINEAR
+        pil = Image.fromarray(u8, mode="L").resize((self._display_w, self._display_h), resample_bilinear)
+        self._tk_img = ImageTk.PhotoImage(pil)
+
+        self._canvas = tk.Canvas(
+            self,
+            width=self._display_w,
+            height=self._display_h,
+            cursor="sb_h_double_arrow",
+            highlightthickness=0,
+        )
+        self._canvas.pack(fill="both", expand=True)
+        self._canvas.create_image(0, 0, anchor="nw", image=self._tk_img)
+
+        start_x = self._orig_w // 2 if initial_x is None else int(initial_x)
+        self._line_x = int(np.clip(round(start_x * self._scale), 0, max(0, self._display_w - 1)))
+        self._canvas.create_line(
+            self._line_x,
+            0,
+            self._line_x,
+            self._display_h,
+            fill="#ffd500",
+            width=2,
+            tags="vline",
+        )
+
+        self._label_var = tk.StringVar()
+        ttk.Label(self, textvariable=self._label_var, font=("Consolas", 10)).pack(pady=4)
+
+        buttons = ttk.Frame(self)
+        buttons.pack(pady=(0, 8))
+        ttk.Button(buttons, text="Confirm", command=self._confirm).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Skip", command=self._skip).pack(side="left", padx=6)
+        ttk.Button(buttons, text="Cancel Folder", command=self._cancel).pack(side="left", padx=6)
+
+        self._canvas.bind("<ButtonPress-1>", self._on_press)
+        self._canvas.bind("<B1-Motion>", self._on_drag)
+        self._canvas.bind("<ButtonRelease-1>", self._on_drag)
+        self._canvas.bind("<Left>", lambda _event: self._move_line(self._line_x - 1))
+        self._canvas.bind("<Right>", lambda _event: self._move_line(self._line_x + 1))
+        self._canvas.bind("<Shift-Left>", lambda _event: self._move_line(self._line_x - 10))
+        self._canvas.bind("<Shift-Right>", lambda _event: self._move_line(self._line_x + 10))
+        self.bind("<Return>", lambda _event: self._confirm())
+        self.bind("<Escape>", lambda _event: self._skip())
+        self.protocol("WM_DELETE_WINDOW", self._skip)
+
+        self._move_line(self._line_x)
+        self.grab_set()
+        self._canvas.focus_set()
+
+    def _move_line(self, x):
+        x = int(np.clip(int(x), 0, max(0, self._display_w - 1)))
+        self._line_x = x
+        self._canvas.coords("vline", x, 0, x, self._display_h)
+        orig_col = int(np.clip(round(x / self._scale), 0, max(0, self._orig_w - 1)))
+        self._label_var.set(f"Fovea center column: {orig_col}")
+
+    def _on_press(self, event):
+        self._move_line(event.x)
+
+    def _on_drag(self, event):
+        self._move_line(event.x)
+
+    def _confirm(self):
+        self.result = int(np.clip(round(self._line_x / self._scale), 0, max(0, self._orig_w - 1)))
+        self.destroy()
+
+    def _skip(self):
+        self.result = None
+        self.destroy()
+
+    def _cancel(self):
+        self.cancelled = True
+        self.destroy()
+
+
 class Step2Frame(SidebarStepFrame):
     """GUI panel for tracing boundary lines and exporting pixel coordinates.
 
@@ -260,6 +373,8 @@ class Step2Frame(SidebarStepFrame):
             source_step: Reference to Step 1 panel for linked image loading (optional).
         """
         super().__init__(parent)
+        self._step1_after_id = None
+        self._step1_watcher_active = False
 
         self.preferences = preferences
         self.source_step = source_step
@@ -356,6 +471,14 @@ class Step2Frame(SidebarStepFrame):
         self.add_status_bar(self.status_var, parent=right)
 
         self._build_controls()
+
+    def destroy(self):
+        """Clean up when the panel is destroyed."""
+        self._step1_watcher_active = False
+        if getattr(self, "_step1_after_id", None) is not None:
+            self.after_cancel(self._step1_after_id)
+            self._step1_after_id = None
+        super().destroy()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  AI Settings Dialog
@@ -628,16 +751,26 @@ class Step2Frame(SidebarStepFrame):
         ai_run_buttons.pack(fill="x", pady=(4, 0))
         self.segment_button = ttk.Button(
             ai_run_buttons,
-            text="AI Segmentation Single Image",
+            text="AI Single Image Seg",
             command=self._run_neural_segmentation,
         )
-        self.segment_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
+        self.segment_button.pack(fill="x")
+
+        ai_folder_buttons = ttk.Frame(workflow)
+        ai_folder_buttons.pack(fill="x", pady=(4, 0))
+        self.folder_segment_button = ttk.Button(
+            ai_folder_buttons,
+            text="AI Folder Seg",
+            command=self._run_folder_segmentation,
+        )
+        self.folder_segment_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
         self.batch_ai_button = ttk.Button(
-            ai_run_buttons,
-            text="AI Batch Segmentation",
+            ai_folder_buttons,
+            text="AI Batch Seg",
             command=self._segment_selected_directory_images,
         )
         self.batch_ai_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
+
         self.aidas_model_var.trace_add("write", lambda *_: self._update_batch_ai_button_state())
 
         self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
@@ -788,6 +921,30 @@ class Step2Frame(SidebarStepFrame):
                 selected_by_key[key] = path
 
         return sorted(selected_by_key.values(), key=lambda item: os.path.basename(item).lower())
+
+    def _recursive_directory_image_paths(self, folder):
+        """Return supported images in a folder tree."""
+        if not folder or not os.path.isdir(folder):
+            return []
+
+        selected_by_key = {}
+        for dirpath, dirnames, filenames in os.walk(folder):
+            dirnames.sort(key=str.lower)
+            for name in sorted(filenames, key=str.lower):
+                path = os.path.join(dirpath, name)
+                if not os.path.isfile(path) or not self._is_supported_image_path(path):
+                    continue
+                path = self._preferred_analyze_pair_path(path)
+                key = self._image_pair_key(path)
+                current = selected_by_key.get(key)
+                if current is None or os.path.splitext(path)[1].lower() == ".img":
+                    selected_by_key[key] = path
+
+        root = os.path.abspath(folder)
+        return sorted(
+            selected_by_key.values(),
+            key=lambda item: os.path.relpath(os.path.abspath(item), root).lower(),
+        )
 
     def _set_image_browser_directory(self, folder, select_path=None, preserve_selection=True):
         folder = os.path.abspath(folder) if folder else ""
@@ -981,6 +1138,199 @@ class Step2Frame(SidebarStepFrame):
             return
         self._run_aidas_batch_segmentation(image_paths=paths)
 
+    def _run_folder_segmentation(self):
+        """Select a folder, recursively find images, and run AI_ForAIDAS batch segmentation."""
+        if self._segmenter_running:
+            messagebox.showinfo("Please wait", "Segmentation is already running.")
+            return
+        if not self._is_aidas_ai_backend():
+            messagebox.showinfo(
+                "AI_ForAIDAS required",
+                "Select AI_ForAIDAS (New, PyTorch-based) before running folder segmentation.",
+            )
+            return
+        model_path = self.aidas_model_var.get().strip()
+        if not os.path.isfile(model_path):
+            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
+            return
+
+        current_dir = getattr(self, "_image_browser_dir", "") or self.image_browser_dir_var.get().strip()
+        if not os.path.isdir(current_dir):
+            current_dir = IMG_DEFAULT_DIR if os.path.isdir(IMG_DEFAULT_DIR) else self._app_root()
+        folder = filedialog.askdirectory(
+            title="Select folder for AI folder segmentation",
+            initialdir=current_dir,
+        )
+        if not folder:
+            return
+
+        image_paths = []
+        found_any = False
+        all_completed = True
+
+        for root_dir, _, files in os.walk(folder):
+            lower_files = {f.lower(): f for f in files}
+            
+            has_light = "light.img" in lower_files
+            has_dark = "dark.img" in lower_files
+            has_light_marked = "light_marked.img" in lower_files
+            has_dark_marked = "dark_marked.img" in lower_files
+
+            if not has_light and not has_dark:
+                continue
+
+            found_any = True
+
+            complete_light = has_light_marked if has_light else True
+            complete_dark = has_dark_marked if has_dark else True
+
+            if complete_light and complete_dark:
+                continue
+
+            all_completed = False
+            if has_light and not has_light_marked:
+                image_paths.append(os.path.join(root_dir, lower_files["light.img"]))
+            if has_dark and not has_dark_marked:
+                image_paths.append(os.path.join(root_dir, lower_files["dark.img"]))
+
+        if not found_any:
+            messagebox.showwarning(
+                "No images found",
+                f"No Light.img or Dark.img files were found in:\n{folder}",
+            )
+            return
+
+        if all_completed:
+            messagebox.showinfo("Completed", "They all completed.")
+            return
+
+        self._set_image_browser_directory(folder, preserve_selection=False)
+        self.status_var.set(f"Found {len(image_paths)} target image(s) in folder tree for AI segmentation.")
+        
+        manual_fovea_by_path = self._collect_folder_fovea_lines(image_paths)
+        if manual_fovea_by_path is None:
+            self.status_var.set("AI folder segmentation cancelled before running.")
+            return
+
+        # Keep only the images that were not skipped
+        image_paths = [p for p in image_paths if p in manual_fovea_by_path]
+        if not image_paths:
+            self.status_var.set("AI folder segmentation cancelled: all images were skipped.")
+            return
+
+        self._run_aidas_batch_segmentation(
+            image_paths=image_paths,
+            manual_fovea_by_path=manual_fovea_by_path,
+        )
+
+    def _collect_folder_fovea_lines(self, image_paths):
+        """Prompt for a fovea center line for each image before folder segmentation in the main canvas."""
+        fovea_by_path = {}
+        total = len(image_paths)
+
+        next_var = tk.StringVar(value="")
+        
+        # Disable batch buttons to prevent duplicate triggers
+        if hasattr(self, "folder_segment_button"):
+            self.folder_segment_button.state(["disabled"])
+        if hasattr(self, "batch_ai_button"):
+            self.batch_ai_button.state(["disabled"])
+
+        # Create a temporary top toolbar to manage interactive fovea selection
+        temp_frame = ttk.Frame(self.canvas_area, relief="solid", borderwidth=1)
+        temp_frame.pack(side="top", fill="x", pady=(0, 4), before=self.image_canvas)
+        
+        prompt_label_var = tk.StringVar(value="")
+        ttk.Label(temp_frame, textvariable=prompt_label_var, font=("", 10, "bold"), padding=4).pack(side="left")
+        
+        def on_skip():
+            next_var.set("skip")
+
+        def on_set():
+            next_var.set("set")
+            
+        def on_cancel():
+            next_var.set("cancel")
+            
+        btn_cancel = ttk.Button(temp_frame, text="Cancel AI Batch", command=on_cancel)
+        btn_cancel.pack(side="right", padx=4, pady=4)
+        
+        btn_skip = ttk.Button(temp_frame, text="Skip Image", command=on_skip)
+        btn_skip.pack(side="right", padx=4, pady=4)
+
+        btn_set = ttk.Button(temp_frame, text="Set Fovea & Process", command=on_set)
+        btn_set.pack(side="right", padx=4, pady=4)
+        
+        # Save current editor state to restore later if canceled (optional, but good practice)
+        saved_state = self._capture_current_editor_state()
+
+        try:
+            for index, path in enumerate(image_paths, start=1):
+                name = os.path.basename(path)
+                msg = f"Select fovea {index}/{total}: {path}"
+                prompt_label_var.set(msg)
+                self.status_var.set(msg)
+                self.update_idletasks()
+                
+                try:
+                    image_data = self._load_image_from_path(path)
+                except (OSError, ValueError, RuntimeError) as exc:
+                    messagebox.showwarning(
+                        "Fovea picker skipped",
+                        f"Could not open this image for fovea selection:\n{path}\n\n{exc}",
+                    )
+                    fovea_by_path[path] = None
+                    continue
+
+                self._show_image(image_data, path)
+                self.vertical_mode_var.set(True)
+                self._on_vertical_mode_toggled()
+                
+                # Predict fovea centrally if enabled
+                if self.aidas_predict_fovea_var.get():
+                    vline_path = self.aidas_vline_model_var.get().strip()
+                    if os.path.isfile(vline_path):
+                        try:
+                            from aidas.ai_for_aidas_inference import AIForAIDASPredictor
+                            device_name = self.aidas_device_var.get().strip() or "cpu"
+                            import torch
+                            device = torch.device(device_name if torch.cuda.is_available() else "cpu")
+                            pred = AIForAIDASPredictor(None, vline_path, device)
+                            fovea_x, _ = pred.predict_fovea([image_data])
+                            if fovea_x is not None:
+                                self.fovea_x_entry_var.set(str(int(fovea_x[0])))
+                                self.image_canvas.vertical_line_x = int(fovea_x[0])
+                                self.image_canvas._draw_vertical_line()
+                        except Exception as e:
+                            print("Auto-predict fovea failed:", e)
+
+                self.wait_variable(next_var)
+                
+                action = next_var.get()
+                if action == "cancel":
+                    self._load_editor_state(saved_state, self.image_canvas)
+                    return None
+                elif action == "skip":
+                    # Do not add it to fovea_by_path, which explicitly drops it from the batch list
+                    continue
+                else:  # "set"
+                    # Read whatever they left in the entry
+                    try:
+                        x_val = int(float(self.fovea_x_entry_var.get()))
+                    except ValueError:
+                        x_val = None
+                    fovea_by_path[path] = x_val
+                
+        finally:
+            temp_frame.destroy()
+            if hasattr(self, "folder_segment_button"):
+                self.folder_segment_button.state(["!disabled"])
+            self._update_batch_ai_button_state()
+            self.vertical_mode_var.set(False)
+            self._on_vertical_mode_toggled()
+
+        return fovea_by_path
+
     def _open_image(self):
         """Show open-file dialog and load the selected image.
 
@@ -1049,6 +1399,9 @@ class Step2Frame(SidebarStepFrame):
 
         This method re-schedules itself via `after` while the frame exists.
         """
+        if not self.winfo_exists():
+            return
+            
         try:
             has = self.source_step is not None and getattr(self.source_step, "processed_image", None) is not None
         except Exception:
@@ -1060,8 +1413,8 @@ class Step2Frame(SidebarStepFrame):
             self.step1_button.state(["disabled"])
 
         # continue polling as long as this frame is mapped
-        if getattr(self, "_step1_watcher_active", False):
-            self.after(500, self._update_step1_button_state)
+        if getattr(self, "_step1_watcher_active", False) and self.winfo_exists():
+            self._step1_after_id = self.after(500, self._update_step1_button_state)
 
     def _load_image_from_path(self, path):
         """Read an image file from disk and return a 2-D numpy array.
@@ -1987,11 +2340,18 @@ class Step2Frame(SidebarStepFrame):
             widget.configure(state=state)
 
     def _set_segmentation_frame_enabled(self, enabled):
-        """Enable/disable segmentation controls, keeping batch available from the directory list."""
+        """Enable/disable segmentation controls, keeping folder/batch AI buttons available."""
         state = "normal" if enabled else "disabled"
         # Recursively disable/enable all children in the segmentation frame
         def set_state(widget, s):
-            if widget in (self.finish_boundary_btn, self.revert_boundary_btn, getattr(self, "batch_ai_button", None)):
+            if widget in (
+                self.finish_boundary_btn,
+                self.revert_boundary_btn,
+                getattr(self, "ai_backend_combo", None),
+                getattr(self, "ai_settings_btn", None),
+                getattr(self, "folder_segment_button", None),
+                getattr(self, "batch_ai_button", None),
+            ):
                 return
             try:
                 widget.configure(state=s)
@@ -2003,7 +2363,10 @@ class Step2Frame(SidebarStepFrame):
         if hasattr(self, "segmentation_frame"):
             set_state(self.segmentation_frame, state)
         if hasattr(self, "ai_backend_combo"):
-            self.ai_backend_combo.configure(state="readonly" if enabled else "disabled")
+            self.ai_backend_combo.configure(state="disabled" if self._segmenter_running else "readonly")
+        if hasattr(self, "ai_settings_btn"):
+            self.ai_settings_btn.state(["disabled"] if self._segmenter_running else ["!disabled"])
+        self._update_batch_ai_button_state()
 
     def _clear_fovea_lock(self):
         """Remove saved fovea lock line, unlock controls, then show default center line."""
@@ -3411,17 +3774,26 @@ class Step2Frame(SidebarStepFrame):
         image_h, image_w = self.image_data.shape[:2]
         return int(image_h) == int(target_h) and int(image_w) == int(target_w)
 
-    def _batch_ai_button_enabled(self):
+    def _aidas_batch_model_ready(self):
         if self._segmenter_running:
             return False
         if not self._is_aidas_ai_backend():
             return False
         model_path = self.aidas_model_var.get().strip()
-        if not model_path or not os.path.isfile(model_path):
-            return False
-        return len(self._selected_directory_image_paths()) >= 2
+        return bool(model_path) and os.path.isfile(model_path)
+
+    def _folder_ai_button_enabled(self):
+        return not self._segmenter_running and self._is_aidas_ai_backend()
+
+    def _batch_ai_button_enabled(self):
+        return self._aidas_batch_model_ready() and len(self._selected_directory_image_paths()) >= 2
 
     def _update_batch_ai_button_state(self):
+        if hasattr(self, "folder_segment_button"):
+            if self._folder_ai_button_enabled():
+                self.folder_segment_button.state(["!disabled"])
+            else:
+                self.folder_segment_button.state(["disabled"])
         if not hasattr(self, "batch_ai_button"):
             return
         if self._batch_ai_button_enabled():
@@ -3512,11 +3884,13 @@ class Step2Frame(SidebarStepFrame):
             self.ai_backend_combo.configure(state="disabled" if running else "readonly")
         if hasattr(self, "ai_settings_btn"):
             self.ai_settings_btn.state(["disabled"] if running else ["!disabled"])
-        if hasattr(self, "batch_ai_button"):
-            if running:
+        if running:
+            if hasattr(self, "folder_segment_button"):
+                self.folder_segment_button.state(["disabled"])
+            if hasattr(self, "batch_ai_button"):
                 self.batch_ai_button.state(["disabled"])
-            else:
-                self._update_batch_ai_button_state()
+        else:
+            self._update_batch_ai_button_state()
         for widget_name in (
             "image_browser_reset_btn",
             "image_browser_folder_btn",
@@ -3870,7 +4244,7 @@ class Step2Frame(SidebarStepFrame):
             return
         self._run_oct_segmenter_segmentation(auto_preprocess=auto_preprocess)
 
-    def _run_aidas_batch_segmentation(self, image_paths=None):
+    def _run_aidas_batch_segmentation(self, image_paths=None, manual_fovea_by_path=None):
         """Run AI_ForAIDAS predictions for multiple images and preview them in tabs."""
         if self._segmenter_running:
             messagebox.showinfo("Please wait", "Segmentation is already running.")
@@ -3901,13 +4275,22 @@ class Step2Frame(SidebarStepFrame):
             seen.add(norm)
             image_paths.append(path)
 
-        predict_fovea = bool(self.aidas_predict_fovea_var.get())
-        vline_path = self.aidas_vline_model_var.get().strip()
-        if predict_fovea and vline_path and not os.path.isfile(vline_path):
-            self._append_segmenter_log(f"AI_ForAIDAS vline model not found; batch fovea prediction skipped: {vline_path}")
+        manual_fovea_by_key = None
+        if manual_fovea_by_path is not None:
+            manual_fovea_by_key = {
+                self._image_pair_key(path): (None if x is None else int(x))
+                for path, x in manual_fovea_by_path.items()
+            }
+            predict_fovea = False
             vline_path = None
-        if not predict_fovea:
-            vline_path = None
+        else:
+            predict_fovea = bool(self.aidas_predict_fovea_var.get())
+            vline_path = self.aidas_vline_model_var.get().strip()
+            if predict_fovea and vline_path and not os.path.isfile(vline_path):
+                self._append_segmenter_log(f"AI_ForAIDAS vline model not found; batch fovea prediction skipped: {vline_path}")
+                vline_path = None
+            if not predict_fovea:
+                vline_path = None
 
         output_dir = self.segmenter_output_var.get().strip() or self._default_segmenter_output_dir()
         os.makedirs(output_dir, exist_ok=True)
@@ -3926,7 +4309,7 @@ class Step2Frame(SidebarStepFrame):
 
         worker = threading.Thread(
             target=self._run_aidas_batch_segmenter_worker,
-            args=(image_paths, model_path, vline_path, predict_fovea, device_name, output_dir),
+            args=(image_paths, model_path, vline_path, predict_fovea, device_name, output_dir, manual_fovea_by_key),
             daemon=True,
         )
         worker.start()
@@ -3939,6 +4322,7 @@ class Step2Frame(SidebarStepFrame):
         predict_fovea,
         device_name,
         output_dir,
+        manual_fovea_by_key=None,
     ):
         results = []
         failures = []
@@ -3946,6 +4330,7 @@ class Step2Frame(SidebarStepFrame):
             "AIDaS Step 2 AI_ForAIDAS Batch Segmentation",
             f"Boundary model: {model_path}",
             f"VLine model: {vline_path or '(not used)'}",
+            f"Manual fovea lines: {'yes' if manual_fovea_by_key is not None else 'no'}",
             f"Requested device: {device_name}",
             f"Images: {len(image_paths)}",
             "",
@@ -4009,6 +4394,13 @@ class Step2Frame(SidebarStepFrame):
                     prediction = run_prediction_with_result(image_for_ai)
                     if prediction.get("device"):
                         device = prediction["device"]
+                    fovea_x = prediction.get("fovea_x")
+                    manual_fovea = False
+                    if manual_fovea_by_key is not None:
+                        manual_fovea = True
+                        fovea_x = manual_fovea_by_key.get(self._image_pair_key(path))
+                    if fovea_x is not None:
+                        fovea_x = int(np.clip(int(fovea_x), 0, max(0, image.shape[1] - 1)))
                     boundaries = self._aidas_boundaries_from_model_to_display(
                         prediction["boundaries"],
                         image_for_ai.shape[0],
@@ -4023,12 +4415,15 @@ class Step2Frame(SidebarStepFrame):
                         "input": path,
                         "boundaries": np.asarray(boundaries, dtype=np.float32),
                         "traces": traces,
-                        "fovea_x": prediction.get("fovea_x"),
+                        "fovea_x": fovea_x,
                     })
                     log_lines.append(f"OK: {path}")
                     log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
-                    if prediction.get("fovea_x") is not None:
-                        log_lines.append(f"  Fovea x: {int(prediction['fovea_x'])}")
+                    if fovea_x is not None:
+                        source = "manual" if manual_fovea else "predicted"
+                        log_lines.append(f"  Fovea x ({source}): {int(fovea_x)}")
+                    elif manual_fovea:
+                        log_lines.append("  Fovea x: skipped by user")
                 except Exception as exc:
                     failures.append({"input": path, "error": str(exc)})
                     log_lines.append(f"FAILED: {path}")
