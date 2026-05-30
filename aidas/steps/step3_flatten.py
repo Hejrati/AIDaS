@@ -35,6 +35,7 @@ except Exception:
     pyreadr = None
 
 from aidas.utils.io_utils import read_analyze, write_analyze
+from aidas.utils.ui_utils import CollapsibleSection, ScrollableSidebar
 from main import (
     build_fovea_normalized_strip as _main_build_fovea_normalized_strip,
     build_main_normalized_strip as _main_build_main_normalized_strip,
@@ -1685,13 +1686,13 @@ class Step3Frame(ttk.Frame):
         main = ttk.Frame(self)
         main.pack(fill="both", expand=True)
 
-        left = ttk.Frame(main)
-        left.pack(side="left", fill="y", padx=6, pady=6)
-        left.configure(width=self.SIDEBAR_WIDTH)
-        left.pack_propagate(False)
+        self.sidebar = ScrollableSidebar(main, width=self.SIDEBAR_WIDTH)
+        self.sidebar.pack(side="left", fill="y", padx=(2, 6), pady=6)
+        left = self.sidebar.content
 
-        sources = ttk.LabelFrame(left, text="Input and Output Folders", padding=3)
-        sources.pack(fill="x", pady=(0, 5))
+        sources_section = CollapsibleSection(left, "Input and Output Folders", padding=3)
+        sources_section.pack(fill="x", pady=(0, 5))
+        sources = sources_section.body
 
         ttk.Button(sources, text="Select Input Folder", command=self._load_processor).pack(fill="x", pady=2)
 
@@ -1715,8 +1716,9 @@ class Step3Frame(ttk.Frame):
             justify="left",
         ).pack(fill="x", pady=(2, 8))
 
-        process = ttk.LabelFrame(left, text="Process", padding=3)
-        process.pack(fill="x", pady=(0, 5))
+        process_section = CollapsibleSection(left, "Process", padding=3)
+        process_section.pack(fill="x", pady=(0, 5))
+        process = process_section.body
 
         self.run_button_r_script = ttk.Button(process, text="Run Step 3 (Original R Script)", command=self._run_r_script)
         self.run_button_r_script.pack(fill="x", pady=2)
@@ -1737,8 +1739,9 @@ class Step3Frame(ttk.Frame):
             justify="left",
         ).pack(fill="both", expand=True)
 
-        view_results = ttk.LabelFrame(left, text="View Results", padding=3)
-        view_results.pack(fill="x", pady=(0, 5))
+        view_results_section = CollapsibleSection(left, "View Results", padding=3)
+        view_results_section.pack(fill="x", pady=(0, 5))
+        view_results = view_results_section.body
 
         ttk.Label(view_results, text="View").pack(anchor="w", pady=(0, 2))
         view_combo = ttk.Combobox(
@@ -1755,10 +1758,9 @@ class Step3Frame(ttk.Frame):
         self.slice_combo.pack(fill="x", pady=2)
         self.slice_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
 
-        ttk.Separator(left).pack(fill="x", pady=3)
-
-        stats = ttk.LabelFrame(left, text="Stats", padding=3)
-        stats.pack(fill="x", pady=(0, 5))
+        stats_section = CollapsibleSection(left, "Stats", padding=3)
+        stats_section.pack(fill="x", pady=(0, 5))
+        stats = stats_section.body
 
         ttk.Label(
             stats,

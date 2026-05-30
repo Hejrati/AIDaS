@@ -56,7 +56,6 @@ class AIDaSApp(tk.Tk):
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="Browse SDB Directory",
                       command=self._menu_browse_sdb)
-        file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.destroy,
                       accelerator="Alt+F4")
         menubar.add_cascade(label="File", menu=file_menu)
@@ -71,7 +70,6 @@ class AIDaSApp(tk.Tk):
 
         help_menu = tk.Menu(menubar, tearoff=0)
         help_menu.add_cascade(label="Theme", menu=theme_menu)
-        help_menu.add_separator()
         help_menu.add_command(label="About", command=self._show_about)
 
         menubar.add_cascade(label="Help", menu=help_menu)
@@ -81,7 +79,7 @@ class AIDaSApp(tk.Tk):
 
         # ── Notebook (tabs for each Step) ──
         self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=5, pady=(5, 1))
+        self.notebook.pack(fill="both", expand=True, padx=(2, 5), pady=(5, 1))
 
         # Step 1
         self.step1 = Step1Frame(

@@ -15,7 +15,7 @@ import numpy as np
 
 from aidas.image_canvas import ImageCanvas
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
-from aidas.utils.ui_utils import HoverToolTip
+from aidas.utils.ui_utils import CollapsibleSection, HoverToolTip, ScrollableSidebar
 
 SDB_PREF_KEY = "sdb_dir"
 SDB_DEFAULT_DIR = os.path.expanduser("~/Desktop")
@@ -73,22 +73,9 @@ class Step1Frame(ttk.Frame):
         main.pack(fill="both", expand=True)
 
         # Left — scrollable control panel (content-driven width)
-        left_outer = ttk.Frame(main)
-        left_outer.pack(side="left", fill="y")
-
-        ctrl_canvas = tk.Canvas(left_outer, highlightthickness=0, bd=0)
-        ctrl_scroll = ttk.Scrollbar(left_outer, orient="vertical", command=ctrl_canvas.yview)
-        self.ctrl = ttk.Frame(ctrl_canvas)
-        self.ctrl.bind("<Configure>",
-                       lambda e: ctrl_canvas.configure(scrollregion=ctrl_canvas.bbox("all")))
-        ctrl_window = ctrl_canvas.create_window((0, 0), window=self.ctrl, anchor="nw")
-        ctrl_canvas.bind(
-            "<Configure>",
-            lambda e: ctrl_canvas.itemconfigure(ctrl_window, width=e.width),
-        )
-        ctrl_canvas.configure(yscrollcommand=ctrl_scroll.set)
-        ctrl_canvas.pack(side="left", fill="both", expand=True)
-        ctrl_scroll.pack(side="right", fill="y")
+        self.sidebar = ScrollableSidebar(main)
+        self.sidebar.pack(side="left", fill="y")
+        self.ctrl = self.sidebar.content
 
         # Right — image canvas + status
         right = ttk.Frame(main)
@@ -121,13 +108,14 @@ class Step1Frame(ttk.Frame):
     # ═══════════════════════════════════════════════════════════════════════
     def _build_controls(self):
         """Create and lay out the full left-side control panel."""
-        pad = dict(fill="x", padx=(14, 8))
+        pad = dict(fill="x", padx=(6, 8))
         numeric_vcmd = (self.register(self._validate_digits_only), "%P")
 
 
         # ── SDB Image Parameters ──
-        self.sdb_params_frame = ttk.LabelFrame(self.ctrl, text="SDB Image Parameters", padding=1)
-        self.sdb_params_frame.pack(**pad, pady=5)
+        self.sdb_params_section = CollapsibleSection(self.ctrl, "SDB Image Parameters", padding=1)
+        self.sdb_params_section.pack(**pad, pady=5)
+        self.sdb_params_frame = self.sdb_params_section.body
 
         self.width_var = tk.StringVar(value=str(DEFAULT_RAW_WIDTH))
         self.height_var = tk.StringVar(value=str(DEFAULT_RAW_HEIGHT))
@@ -188,11 +176,10 @@ class Step1Frame(ttk.Frame):
         self.endian_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
         self._endian_tooltip = HoverToolTip(self.endian_checkbox, "Can affect visualization for some offsets")
 
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
-
         # ── SDB Files ──
-        sdb = ttk.LabelFrame(self.ctrl, text="SDB Files", padding=3)
-        sdb.pack(**pad, pady=2)
+        sdb_section = CollapsibleSection(self.ctrl, "SDB Files", padding=3)
+        sdb_section.pack(**pad, pady=2)
+        sdb = sdb_section.body
 
         ttk.Label(sdb, text="Input dir:").pack(anchor="w")
         dir_frame = ttk.Frame(sdb)
@@ -240,11 +227,10 @@ class Step1Frame(ttk.Frame):
         self._sdb_files = []
         self.refresh_sdb_list()
 
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
-
         # ── ROI Selection ──
-        roi = ttk.LabelFrame(self.ctrl, text="ROI Selection (crop and save)", padding=3)
-        roi.pack(**pad, pady=2)
+        roi_section = CollapsibleSection(self.ctrl, "ROI Selection (crop and save)", padding=3)
+        roi_section.pack(**pad, pady=2)
+        roi = roi_section.body
         for col in range(4):
             roi.grid_columnconfigure(col, weight=1)
 
@@ -357,11 +343,10 @@ class Step1Frame(ttk.Frame):
         )
         self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(2, 2))
 
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
-
         # ── View ──
-        view = ttk.LabelFrame(self.ctrl, text="View", padding=3)
-        view.pack(**pad, pady=(2, 6))
+        view_section = CollapsibleSection(self.ctrl, "View", padding=3)
+        view_section.pack(**pad, pady=(2, 6))
+        view = view_section.body
 
         zf = ttk.Frame(view)
         zf.pack(fill="x")

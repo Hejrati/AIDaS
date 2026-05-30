@@ -3,4 +3,4 @@
 Converts ImageJ/R OCT processing workflows into a cross-platform Python/Tkinter GUI.
 """
 
-__version__ = "1.3.8"
+__version__ = "1.3.8b"

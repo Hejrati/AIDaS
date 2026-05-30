@@ -68,6 +68,10 @@ class ImageCanvas(ttk.Frame):
         self._line_preview = None  # canvas-coordinate preview point
         self._line_color = "#00E5FF"
         self._line_width = 2
+        self._label_font_family = "TkDefaultFont"
+        self._label_font_size = 4
+        self._label_fill = "#ffffff"
+        self._label_background = "#111827"
 
         # Vertical line marker state
         self._vertical_line_on = False
@@ -421,25 +425,69 @@ class ImageCanvas(ttk.Frame):
         ih, _iw = self._data.shape[:2]
         x_top, y_top = self._i2c(self._vertical_line_x, 0)
         x_bottom, y_bottom = self._i2c(self._vertical_line_x, ih - 1)
+        width = self._scaled_line_width(4)
         line_id = self.canvas.create_line(
             x_top,
             y_top,
             x_bottom,
             y_bottom,
             fill=self._vertical_line_color,
-            width=4,
+            width=width,
             dash=(5, 3),
             tags=("vertical_overlay",),
         )
-        text_id = self.canvas.create_text(
+        label_ids = self._draw_text_label(
             x_top + 8,
             y_top + 6,
-            anchor="nw",
             text=f"Fovea x={self._vertical_line_x}",
-            fill=self._vertical_line_color,
+            accent=self._vertical_line_color,
             tags=("vertical_overlay",),
         )
-        self._vertical_line_items = [line_id, text_id]
+        self._vertical_line_items = [line_id, *label_ids]
+
+    def _overlay_zoom_scale(self):
+        return max(0.75, min(float(self._zoom), 4.0))
+
+    def _scaled_line_width(self, base_width=None):
+        base_width = self._line_width if base_width is None else base_width
+        return max(1, min(24, int(round(base_width * self._overlay_zoom_scale()))))
+
+    def _scaled_vertex_radius(self):
+        return max(2, min(10, int(round(2 * self._overlay_zoom_scale()))))
+
+    def _scaled_label_font(self):
+        size = max(8, min(32, int(round(self._label_font_size * self._overlay_zoom_scale()))))
+        return (self._label_font_family, size, "bold")
+
+    def _scaled_label_padding(self):
+        return max(0.25, min(1, int(round(10 * self._overlay_zoom_scale()))))
+
+    def _draw_text_label(self, x, y, *, text, accent, tags):
+        text_id = self.canvas.create_text(
+            x,
+            y,
+            anchor="nw",
+            text=str(text),
+            fill=self._label_fill,
+            font=self._scaled_label_font(),
+            tags=tags,
+        )
+        bbox = self.canvas.bbox(text_id)
+        if bbox is None:
+            return [text_id]
+        pad = self._scaled_label_padding()
+        rect_id = self.canvas.create_rectangle(
+            bbox[0] - pad,
+            bbox[1] - pad,
+            bbox[2] + pad,
+            bbox[3] + pad,
+            fill=self._label_background,
+            outline=accent,
+            width=max(1, min(4, self._scaled_line_width(1))),
+            tags=tags,
+        )
+        self.canvas.tag_lower(rect_id, text_id)
+        return [rect_id, text_id]
 
     def _draw_polyline(self, points, color, label=None, preview=None, show_vertices=True):
         if not points:
@@ -452,25 +500,35 @@ class ImageCanvas(ttk.Frame):
 
         if len(coords) == 2:
             x, y = coords
-            self.canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill=color, outline=color, tags=("overlay",))
+            radius = self._scaled_vertex_radius() + 1
+            self.canvas.create_oval(
+                x - radius,
+                y - radius,
+                x + radius,
+                y + radius,
+                fill=color,
+                outline=color,
+                tags=("overlay",),
+            )
         else:
             self.canvas.create_line(
                 *coords,
                 fill=color,
-                width=self._line_width,
+                width=self._scaled_line_width(),
                 capstyle="round",
                 joinstyle="round",
                 tags=("overlay",),
             )
 
         if show_vertices:
+            radius = self._scaled_vertex_radius()
             for ix, iy in points:
                 cx, cy = self._i2c(ix, iy)
                 self.canvas.create_oval(
-                    cx - 2,
-                    cy - 2,
-                    cx + 2,
-                    cy + 2,
+                    cx - radius,
+                    cy - radius,
+                    cx + radius,
+                    cy + radius,
                     fill=color,
                     outline=color,
                     tags=("overlay",),
@@ -478,7 +536,11 @@ class ImageCanvas(ttk.Frame):
 
         if label:
             lx, ly = self._i2c(*points[0])
-            self.canvas.create_text(lx + 8, ly - 8, anchor="nw", text=str(label), fill=color, tags=("overlay",))
+            gap = max(6, min(18, int(round(8 * self._overlay_zoom_scale()))))
+            label_y = ly - gap
+            if label_y < self._img_offset_y:
+                label_y = ly + gap
+            self._draw_text_label(lx + gap, label_y, text=label, accent=color, tags=("overlay",))
 
         if preview is not None and len(points) >= 1:
             last_x, last_y = self._i2c(*points[-1])
@@ -488,7 +550,7 @@ class ImageCanvas(ttk.Frame):
                 preview[0],
                 preview[1],
                 fill=color,
-                width=self._line_width,
+                width=self._scaled_line_width(),
                 dash=(4, 3),
                 tags=("overlay",),
             )

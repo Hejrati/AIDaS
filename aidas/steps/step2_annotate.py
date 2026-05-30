@@ -41,7 +41,7 @@ from PIL import Image, ImageDraw
 
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
-from aidas.utils.ui_utils import apply_app_icon_to
+from aidas.utils.ui_utils import CollapsibleSection, ScrollableSidebar, apply_app_icon_to
 
 
 BOUNDARY_PRESETS = [
@@ -317,24 +317,9 @@ class Step2Frame(ttk.Frame):
         main = ttk.Frame(self)
         main.pack(fill="both", expand=True)
 
-        left_outer = ttk.Frame(main)
-        left_outer.pack(side="left", fill="y")
-
-        ctrl_canvas = tk.Canvas(left_outer, highlightthickness=0, bd=0)
-        ctrl_scroll = ttk.Scrollbar(left_outer, orient="vertical", command=ctrl_canvas.yview)
-        self.ctrl = ttk.Frame(ctrl_canvas)
-        self.ctrl.bind(
-            "<Configure>",
-            lambda e: ctrl_canvas.configure(scrollregion=ctrl_canvas.bbox("all")),
-        )
-        ctrl_window = ctrl_canvas.create_window((0, 0), window=self.ctrl, anchor="nw")
-        ctrl_canvas.bind(
-            "<Configure>",
-            lambda e: ctrl_canvas.itemconfigure(ctrl_window, width=e.width),
-        )
-        ctrl_canvas.configure(yscrollcommand=ctrl_scroll.set)
-        ctrl_canvas.pack(side="left", fill="both", expand=True)
-        ctrl_scroll.pack(side="right", fill="y")
+        self.sidebar = ScrollableSidebar(main)
+        self.sidebar.pack(side="left", fill="y")
+        self.ctrl = self.sidebar.content
 
         right = ttk.Frame(main)
         right.pack(side="left", fill="both", expand=True)
@@ -488,10 +473,11 @@ class Step2Frame(ttk.Frame):
         All controls are placed in a scrollable canvas to keep the UI compact
         and accessible even on smaller screens.
         """
-        pad = dict(fill="x", padx=(14, 8))
+        pad = dict(fill="x", padx=(6, 8))
 
-        load = ttk.LabelFrame(self.ctrl, text="Image Source", padding=3)
-        load.pack(**pad, pady=5)
+        load_section = CollapsibleSection(self.ctrl, "Image Source", padding=3)
+        load_section.pack(**pad, pady=5)
+        load = load_section.body
 
         self.step1_button = ttk.Button(load, text="Load from Step 1", command=self._load_from_step1)
         self.step1_button.pack(fill="x")
@@ -563,8 +549,6 @@ class Step2Frame(ttk.Frame):
             pady=(4, 0),
         )
 
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
-
         self.segmenter_config_var = tk.StringVar(value=self.segmenter_default_config)
         self.segmenter_model_var = tk.StringVar(value=self.segmenter_default_model)
         self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
@@ -577,8 +561,9 @@ class Step2Frame(ttk.Frame):
         self.aidas_env_var = tk.StringVar(value="oct-segmenter-env")
         self.aidas_python_var = tk.StringVar(value="")
 
-        self.segmentation_frame = ttk.LabelFrame(self.ctrl, text="Segmentation", padding=3)
-        self.segmentation_frame.pack(**pad, pady=2)
+        self.segmentation_section = CollapsibleSection(self.ctrl, "Segmentation", padding=3)
+        self.segmentation_section.pack(**pad, pady=2)
+        self.segmentation_frame = self.segmentation_section.body
         segmentation = self.segmentation_frame
 
         self.active_trace_var = tk.StringVar(value="No active boundary")
@@ -754,10 +739,9 @@ class Step2Frame(ttk.Frame):
             padx=(2, 0),
         )
 
-        ttk.Separator(self.ctrl).pack(**pad, pady=3)
-
-        help_box = ttk.LabelFrame(self.ctrl, text="How to Trace", padding=3)
-        help_box.pack(**pad, pady=(2, 6))
+        help_section = CollapsibleSection(self.ctrl, "How to Trace", padding=3)
+        help_section.pack(**pad, pady=(2, 6))
+        help_box = help_section.body
         ttk.Label(
             help_box,
             text=(
