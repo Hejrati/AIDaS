@@ -35,7 +35,7 @@ except Exception:
     pyreadr = None
 
 from aidas.utils.io_utils import read_analyze, write_analyze
-from aidas.utils.ui_utils import CollapsibleSection, ScrollableSidebar
+from aidas.utils.ui_utils import SidebarStepFrame
 from main import (
     build_fovea_normalized_strip as _main_build_fovea_normalized_strip,
     build_main_normalized_strip as _main_build_main_normalized_strip,
@@ -1582,7 +1582,7 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
     }
 
 
-class Step3Frame(ttk.Frame):
+class Step3Frame(SidebarStepFrame):
     """Step 3 tab UI that runs this module's flattening pipeline inside the app."""
     SIDEBAR_WIDTH = 280
     SIDEBAR_TEXT_WRAP = 250
@@ -1683,15 +1683,13 @@ class Step3Frame(ttk.Frame):
         self._refresh_input_status()
 
     def _build_ui(self):
-        main = ttk.Frame(self)
-        main.pack(fill="both", expand=True)
-
-        self.sidebar = ScrollableSidebar(main, width=self.SIDEBAR_WIDTH)
-        self.sidebar.pack(side="left", fill="y", padx=(2, 6), pady=6)
-        left = self.sidebar.content
-
-        sources_section = CollapsibleSection(left, "Input and Output Folders", padding=3)
-        sources_section.pack(fill="x", pady=(0, 5))
+        self.build_standard_layout(
+            sidebar_width=self.SIDEBAR_WIDTH,
+            sidebar_pack={"padx": (2, 6), "pady": 6},
+            content_pack={"padx": 6, "pady": 6},
+            status_var=self.status_var,
+        )
+        sources_section = self.add_sidebar_section("Input and Output Folders", padding=3, pady=(0, 5))
         sources = sources_section.body
 
         ttk.Button(sources, text="Select Input Folder", command=self._load_processor).pack(fill="x", pady=2)
@@ -1716,8 +1714,7 @@ class Step3Frame(ttk.Frame):
             justify="left",
         ).pack(fill="x", pady=(2, 8))
 
-        process_section = CollapsibleSection(left, "Process", padding=3)
-        process_section.pack(fill="x", pady=(0, 5))
+        process_section = self.add_sidebar_section("Process", padding=3, pady=(0, 5))
         process = process_section.body
 
         self.run_button_r_script = ttk.Button(process, text="Run Step 3 (Original R Script)", command=self._run_r_script)
@@ -1739,8 +1736,7 @@ class Step3Frame(ttk.Frame):
             justify="left",
         ).pack(fill="both", expand=True)
 
-        view_results_section = CollapsibleSection(left, "View Results", padding=3)
-        view_results_section.pack(fill="x", pady=(0, 5))
+        view_results_section = self.add_sidebar_section("View Results", padding=3, pady=(0, 5))
         view_results = view_results_section.body
 
         ttk.Label(view_results, text="View").pack(anchor="w", pady=(0, 2))
@@ -1758,8 +1754,7 @@ class Step3Frame(ttk.Frame):
         self.slice_combo.pack(fill="x", pady=2)
         self.slice_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
 
-        stats_section = CollapsibleSection(left, "Stats", padding=3)
-        stats_section.pack(fill="x", pady=(0, 5))
+        stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
         stats = stats_section.body
 
         ttk.Label(
@@ -1769,14 +1764,8 @@ class Step3Frame(ttk.Frame):
             justify="left",
         ).pack(fill="x")
 
-        right = ttk.Frame(main)
-        right.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-        self.plot_holder = ttk.Frame(right)
+        self.plot_holder = ttk.Frame(self.content)
         self.plot_holder.pack(fill="both", expand=True)
-
-        ttk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w", padding=3).pack(
-            side="bottom", fill="x"
-        )
         self._render()
 
     def _set_process_buttons(self, state):

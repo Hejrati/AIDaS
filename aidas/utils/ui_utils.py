@@ -397,3 +397,64 @@ class CollapsibleSection(ttk.Frame):
                 queue_refresh()
                 return
             widget = getattr(widget, "master", None)
+
+
+class SidebarStepFrame(ttk.Frame):
+    """Standard left-sidebar/right-content layout for AIDaS step pages."""
+
+    SECTION_PACK = {"fill": "x", "padx": (6, 8), "pady": 2}
+
+    def build_standard_layout(
+        self,
+        *,
+        sidebar_width=None,
+        sidebar_pack=None,
+        content_pack=None,
+        status_var=None,
+    ):
+        """Create a shared step layout with `self.ctrl` and `self.content`.
+
+        `self.ctrl` is the scrollable sidebar content frame. `self.content` is
+        the main right-side work area.
+        """
+        self.main = ttk.Frame(self)
+        self.main.pack(fill="both", expand=True)
+
+        self.sidebar = ScrollableSidebar(self.main, width=sidebar_width)
+        sidebar_options = {"side": "left", "fill": "y"}
+        if sidebar_pack:
+            sidebar_options.update(sidebar_pack)
+        self.sidebar.pack(**sidebar_options)
+        self.ctrl = self.sidebar.content
+
+        self.content = ttk.Frame(self.main)
+        content_options = {"side": "left", "fill": "both", "expand": True}
+        if content_pack:
+            content_options.update(content_pack)
+        self.content.pack(**content_options)
+
+        if status_var is not None:
+            self.add_status_bar(status_var)
+
+        return self.ctrl, self.content
+
+    def add_sidebar_section(self, title, *, padding=3, **pack_options):
+        """Add a collapsible section to the standard sidebar."""
+        section = CollapsibleSection(self.ctrl, title, padding=padding)
+        options = dict(self.SECTION_PACK)
+        options.update(pack_options)
+        section.pack(**options)
+        return section
+
+    def add_status_bar(self, status_var, *, parent=None):
+        """Add a standard sunken status label."""
+        container = parent if parent is not None else self
+        label = ttk.Label(
+            container,
+            textvariable=status_var,
+            relief="sunken",
+            anchor="w",
+            padding=3,
+        )
+        label.pack(side="bottom", fill="x")
+        return label

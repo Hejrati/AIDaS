@@ -15,7 +15,7 @@ import numpy as np
 
 from aidas.image_canvas import ImageCanvas
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
-from aidas.utils.ui_utils import CollapsibleSection, HoverToolTip, ScrollableSidebar
+from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame
 
 SDB_PREF_KEY = "sdb_dir"
 SDB_DEFAULT_DIR = os.path.expanduser("~/Desktop")
@@ -32,7 +32,7 @@ DEFAULT_ROI_WIDTH = 491
 DEFAULT_ROI_HEIGHT = 128
 
 
-class Step1Frame(ttk.Frame):
+class Step1Frame(SidebarStepFrame):
     """GUI panel for Step 1: Resize Raw OCT images.
 
     This view owns all Step 1 controls and state:
@@ -68,19 +68,12 @@ class Step1Frame(ttk.Frame):
         self._target_size_edit_active = False
 
         # ----- layout -----
-        # Fixed sidebar on the left + expandable image area on the right.
-        main = ttk.Frame(self)
-        main.pack(fill="both", expand=True)
+        self.build_standard_layout()
 
         # Left — scrollable control panel (content-driven width)
-        self.sidebar = ScrollableSidebar(main)
-        self.sidebar.pack(side="left", fill="y")
-        self.ctrl = self.sidebar.content
+        right = self.content
 
         # Right — image canvas + status
-        right = ttk.Frame(main)
-        right.pack(side="left", fill="both", expand=True)
-
         # Image info header at top
         info_frame = ttk.Frame(right, relief="solid", borderwidth=1)
         info_frame.pack(fill="x", padx=2, pady=2)
@@ -97,8 +90,7 @@ class Step1Frame(ttk.Frame):
         self.status_var = tk.StringVar(
             value="Ready — open an SDB raw OCT file to begin (left-drag ROI, right-drag pan)"
         )
-        ttk.Label(right, textvariable=self.status_var,
-                  relief="sunken", anchor="w", padding=3).pack(side="bottom", fill="x")
+        self.add_status_bar(self.status_var, parent=right)
 
         # Build control widgets
         self._build_controls()
@@ -108,13 +100,15 @@ class Step1Frame(ttk.Frame):
     # ═══════════════════════════════════════════════════════════════════════
     def _build_controls(self):
         """Create and lay out the full left-side control panel."""
-        pad = dict(fill="x", padx=(6, 8))
         numeric_vcmd = (self.register(self._validate_digits_only), "%P")
 
 
         # ── SDB Image Parameters ──
-        self.sdb_params_section = CollapsibleSection(self.ctrl, "SDB Image Parameters", padding=1)
-        self.sdb_params_section.pack(**pad, pady=5)
+        self.sdb_params_section = self.add_sidebar_section(
+            "SDB Image Parameters",
+            padding=1,
+            pady=5,
+        )
         self.sdb_params_frame = self.sdb_params_section.body
 
         self.width_var = tk.StringVar(value=str(DEFAULT_RAW_WIDTH))
@@ -177,8 +171,7 @@ class Step1Frame(ttk.Frame):
         self._endian_tooltip = HoverToolTip(self.endian_checkbox, "Can affect visualization for some offsets")
 
         # ── SDB Files ──
-        sdb_section = CollapsibleSection(self.ctrl, "SDB Files", padding=3)
-        sdb_section.pack(**pad, pady=2)
+        sdb_section = self.add_sidebar_section("SDB Files", padding=3, pady=2)
         sdb = sdb_section.body
 
         ttk.Label(sdb, text="Input dir:").pack(anchor="w")
@@ -228,8 +221,7 @@ class Step1Frame(ttk.Frame):
         self.refresh_sdb_list()
 
         # ── ROI Selection ──
-        roi_section = CollapsibleSection(self.ctrl, "ROI Selection (crop and save)", padding=3)
-        roi_section.pack(**pad, pady=2)
+        roi_section = self.add_sidebar_section("ROI Selection (crop and save)", padding=3, pady=2)
         roi = roi_section.body
         for col in range(4):
             roi.grid_columnconfigure(col, weight=1)
@@ -344,8 +336,7 @@ class Step1Frame(ttk.Frame):
         self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(2, 2))
 
         # ── View ──
-        view_section = CollapsibleSection(self.ctrl, "View", padding=3)
-        view_section.pack(**pad, pady=(2, 6))
+        view_section = self.add_sidebar_section("View", padding=3, pady=(2, 6))
         view = view_section.body
 
         zf = ttk.Frame(view)

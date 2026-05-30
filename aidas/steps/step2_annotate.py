@@ -41,7 +41,7 @@ from PIL import Image, ImageDraw
 
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
-from aidas.utils.ui_utils import CollapsibleSection, ScrollableSidebar, apply_app_icon_to
+from aidas.utils.ui_utils import SidebarStepFrame, apply_app_icon_to
 
 
 BOUNDARY_PRESETS = [
@@ -231,7 +231,7 @@ def _resize_volume_to_shape(volume_3d, target_shape):
     return np.stack(resized_slices[:target_slices], axis=0)
 
 
-class Step2Frame(ttk.Frame):
+class Step2Frame(SidebarStepFrame):
     """GUI panel for tracing boundary lines and exporting pixel coordinates.
 
     This frame manages the complete Step 2 workflow:
@@ -314,15 +314,8 @@ class Step2Frame(ttk.Frame):
         self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.pth")
         self.ai_for_aidas_default_vline_model = os.path.join(self.ai_for_aidas_root, "vline_model.pth")
 
-        main = ttk.Frame(self)
-        main.pack(fill="both", expand=True)
-
-        self.sidebar = ScrollableSidebar(main)
-        self.sidebar.pack(side="left", fill="y")
-        self.ctrl = self.sidebar.content
-
-        right = ttk.Frame(main)
-        right.pack(side="left", fill="both", expand=True)
+        self.build_standard_layout()
+        right = self.content
 
         info_frame = ttk.Frame(right, relief="solid", borderwidth=1)
         info_frame.pack(fill="x", padx=2, pady=2)
@@ -360,10 +353,7 @@ class Step2Frame(ttk.Frame):
         self.status_var = tk.StringVar(
             value="Ready — load a Step 1 result or any OCT image, then trace boundaries with left-clicks."
         )
-        ttk.Label(right, textvariable=self.status_var, relief="sunken", anchor="w", padding=3).pack(
-            side="bottom",
-            fill="x",
-        )
+        self.add_status_bar(self.status_var, parent=right)
 
         self._build_controls()
 
@@ -473,10 +463,7 @@ class Step2Frame(ttk.Frame):
         All controls are placed in a scrollable canvas to keep the UI compact
         and accessible even on smaller screens.
         """
-        pad = dict(fill="x", padx=(6, 8))
-
-        load_section = CollapsibleSection(self.ctrl, "Image Source", padding=3)
-        load_section.pack(**pad, pady=5)
+        load_section = self.add_sidebar_section("Image Source", padding=3, pady=5)
         load = load_section.body
 
         self.step1_button = ttk.Button(load, text="Load from Step 1", command=self._load_from_step1)
@@ -561,8 +548,7 @@ class Step2Frame(ttk.Frame):
         self.aidas_env_var = tk.StringVar(value="oct-segmenter-env")
         self.aidas_python_var = tk.StringVar(value="")
 
-        self.segmentation_section = CollapsibleSection(self.ctrl, "Segmentation", padding=3)
-        self.segmentation_section.pack(**pad, pady=2)
+        self.segmentation_section = self.add_sidebar_section("Segmentation", padding=3, pady=2)
         self.segmentation_frame = self.segmentation_section.body
         segmentation = self.segmentation_frame
 
@@ -739,8 +725,7 @@ class Step2Frame(ttk.Frame):
             padx=(2, 0),
         )
 
-        help_section = CollapsibleSection(self.ctrl, "How to Trace", padding=3)
-        help_section.pack(**pad, pady=(2, 6))
+        help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
         help_box = help_section.body
         ttk.Label(
             help_box,
