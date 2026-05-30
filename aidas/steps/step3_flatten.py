@@ -1584,8 +1584,6 @@ def run_step3_pipeline(processor, progress_cb=None, diff_logger=None):
 
 class Step3Frame(SidebarStepFrame):
     """Step 3 tab UI that runs this module's flattening pipeline inside the app."""
-    SIDEBAR_WIDTH = 280
-    SIDEBAR_TEXT_WRAP = 250
     PIXEL_WIDTH_UM = 3.89
     MIN_NEGATIVE_UM = 200.0
     MIN_POSITIVE_UM = 3000.0

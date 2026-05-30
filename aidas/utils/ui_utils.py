@@ -402,6 +402,8 @@ class CollapsibleSection(ttk.Frame):
 class SidebarStepFrame(ttk.Frame):
     """Standard left-sidebar/right-content layout for AIDaS step pages."""
 
+    SIDEBAR_WIDTH = 380
+    SIDEBAR_TEXT_WRAP = 350
     SECTION_PACK = {"fill": "x", "padx": (6, 8), "pady": 2}
 
     def build_standard_layout(
@@ -420,6 +422,8 @@ class SidebarStepFrame(ttk.Frame):
         self.main = ttk.Frame(self)
         self.main.pack(fill="both", expand=True)
 
+        if sidebar_width is None:
+            sidebar_width = self.SIDEBAR_WIDTH
         self.sidebar = ScrollableSidebar(self.main, width=sidebar_width)
         sidebar_options = {"side": "left", "fill": "y"}
         if sidebar_pack:
