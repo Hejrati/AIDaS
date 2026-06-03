@@ -19,6 +19,7 @@ import re
 import tempfile
 import urllib.request
 from datetime import datetime
+import concurrent.futures
 import numpy as np
 from scipy.interpolate import BSpline, UnivariateSpline
 from scipy.stats import pearsonr
@@ -2309,6 +2310,267 @@ class RSetupWizard(ttk.Frame):
         return all(self.package_status.get(name) == "installed" for name in self.step_frame.R_REQUIRED_PACKAGES)
 
 
+class RBatchSelectionPanel(ttk.Frame):
+    """Embedded panel for selecting subfolders to run through the Step 3 R script."""
+
+    def __init__(self, step_frame, parent, root_dir):
+        super().__init__(parent)
+        self.step_frame = step_frame
+        self.root_dir = Path(root_dir)
+        self.rows = []
+        self.row_by_iid = {}
+
+        self._build_ui()
+        self._start_scan()
+
+    def _build_ui(self):
+        wrapper = ttk.Frame(self, padding=12)
+        wrapper.pack(fill="both", expand=True)
+
+        ttk.Label(wrapper, text="Batch Step 3 R Processing", style="WizardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            wrapper,
+            text=(
+                "AIDaS will search the selected folder and subfolders for complete Step 3 inputs. "
+                "Folders containing existing RData are shown as skipped and will not be processed."
+            ),
+            style="WizardSubtitle.TLabel",
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 10))
+
+        top = ttk.Frame(wrapper)
+        top.pack(fill="x", pady=(0, 8))
+        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
+
+        table_frame = ttk.Frame(wrapper)
+        table_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=("include", "folder", "status"),
+            show="headings",
+            selectmode="extended",
+        )
+        self.tree.heading("include", text="Use")
+        self.tree.heading("folder", text="Folder")
+        self.tree.heading("status", text="Status")
+        self.tree.column("include", width=70, stretch=False, anchor="center")
+        self.tree.column("folder", width=500, stretch=True)
+        self.tree.column("status", width=180, stretch=False)
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=yscroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        yscroll.pack(side="right", fill="y")
+        self.tree.bind("<Double-1>", lambda _event: self._toggle_selected())
+
+        controls = ttk.Frame(wrapper)
+        controls.pack(fill="x", pady=(10, 0))
+        ttk.Button(controls, text="Include Selected", command=lambda: self._set_selected(True)).pack(side="left", padx=(0, 4))
+        ttk.Button(controls, text="Exclude Selected", command=lambda: self._set_selected(False)).pack(side="left", padx=(0, 10))
+        ttk.Button(controls, text="Include All Ready", command=self._include_all_ready).pack(side="left", padx=(0, 4))
+        ttk.Button(controls, text="Exclude All", command=self._exclude_all).pack(side="left")
+
+        run_box = ttk.Frame(wrapper)
+        run_box.pack(fill="x", pady=(10, 0))
+        ttk.Label(run_box, text="Parallel folders").pack(side="left")
+        max_workers = max(1, min(8, (os.cpu_count() or 2) - 1))
+        self.workers_var = tk.IntVar(value=min(4, max_workers))
+        self.workers_spin = ttk.Spinbox(
+            run_box,
+            from_=1,
+            to=max_workers,
+            textvariable=self.workers_var,
+            width=5,
+        )
+        self.workers_spin.pack(side="left", padx=(6, 12))
+        ttk.Button(run_box, text="Run Selected Folders", command=self._run_selected).pack(side="left")
+        ttk.Button(run_box, text="Back to Preview", command=lambda: self.step_frame._render()).pack(side="right")
+
+    def _start_scan(self):
+        self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+
+    def _scan_worker(self):
+        rows = []
+        scanned = 0
+        missing = 0
+        try:
+            folders = [self.root_dir]
+            folders.extend(path for path in self.root_dir.rglob("*") if path.is_dir())
+            for folder in folders:
+                scanned += 1
+                input_paths = self.step_frame._find_input_paths(folder)
+                if any(input_paths.get(label) is None for label, *_rest in self.step_frame.REQUIRED_INPUTS):
+                    missing += 1
+                    continue
+                has_rdata = self.step_frame._folder_has_r_data(folder)
+                status = "Skipped: RData exists" if has_rdata else "Ready"
+                rows.append(
+                    {
+                        "folder": folder,
+                        "include": not has_rdata,
+                        "locked": has_rdata,
+                        "status": status,
+                    }
+                )
+        except Exception as exc:
+            self.after(0, lambda: self._scan_failed(exc))
+            return
+        self.after(0, lambda: self._scan_done(rows, scanned, missing))
+
+    def _scan_failed(self, exc):
+        self.summary_var.set(f"Scan failed: {exc}")
+        self.step_frame.status_var.set("Batch scan failed.")
+        messagebox.showerror("Batch Step 3", f"Could not scan folders.\n{exc}", parent=self)
+
+    def _scan_done(self, rows, scanned, missing):
+        self.rows = rows
+        self.row_by_iid.clear()
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        for idx, row in enumerate(rows):
+            iid = str(idx)
+            self.row_by_iid[iid] = row
+            self.tree.insert("", "end", iid=iid, values=self._row_values(row))
+        ready = sum(1 for row in rows if not row["locked"])
+        skipped = sum(1 for row in rows if row["locked"])
+        self.summary_var.set(
+            f"Scanned {scanned} folders. Found {ready} ready folder(s), {skipped} skipped folder(s) with RData. "
+            f"{missing} folder(s) did not contain all four required inputs."
+        )
+        max_workers = max(1, min(ready or 1, (os.cpu_count() or 2) - 1, 8))
+        self.workers_spin.configure(to=max_workers)
+        self.workers_var.set(min(4, max_workers))
+        self.step_frame.status_var.set("Batch scan complete. Select folders to process.")
+
+    def _row_values(self, row):
+        include = "--" if row["locked"] else ("[x]" if row["include"] else "[ ]")
+        try:
+            folder_text = str(row["folder"].relative_to(self.root_dir))
+            if folder_text == ".":
+                folder_text = str(self.root_dir)
+        except ValueError:
+            folder_text = str(row["folder"])
+        return (include, folder_text, row["status"])
+
+    def _refresh_row(self, iid):
+        row = self.row_by_iid[iid]
+        self.tree.item(iid, values=self._row_values(row))
+
+    def _toggle_selected(self):
+        for iid in self.tree.selection():
+            row = self.row_by_iid.get(iid)
+            if row and not row["locked"]:
+                row["include"] = not row["include"]
+                self._refresh_row(iid)
+
+    def _set_selected(self, include):
+        for iid in self.tree.selection():
+            row = self.row_by_iid.get(iid)
+            if row and not row["locked"]:
+                row["include"] = bool(include)
+                self._refresh_row(iid)
+
+    def _include_all_ready(self):
+        for iid, row in self.row_by_iid.items():
+            if not row["locked"]:
+                row["include"] = True
+                self._refresh_row(iid)
+
+    def _exclude_all(self):
+        for iid, row in self.row_by_iid.items():
+            if not row["locked"]:
+                row["include"] = False
+                self._refresh_row(iid)
+
+    def _run_selected(self):
+        folders = [row["folder"] for row in self.rows if row["include"] and not row["locked"]]
+        if not folders:
+            messagebox.showwarning("Batch Step 3", "Select at least one ready folder.", parent=self)
+            return
+        try:
+            workers = max(1, int(self.workers_var.get()))
+        except (TypeError, ValueError):
+            workers = 1
+        self.step_frame._start_batch_r_runs(folders, workers)
+
+
+class RBatchRunPanel(ttk.Frame):
+    """Embedded progress panel for concurrent folder-level R script runs."""
+
+    def __init__(self, step_frame, parent, folders, workers):
+        super().__init__(parent)
+        self.step_frame = step_frame
+        self.folders = [Path(folder) for folder in folders]
+        self.workers = workers
+        self.row_by_folder = {}
+        self._build_ui()
+
+    def _build_ui(self):
+        wrapper = ttk.Frame(self, padding=12)
+        wrapper.pack(fill="both", expand=True)
+        ttk.Label(wrapper, text="Running Batch Step 3", style="WizardTitle.TLabel").pack(anchor="w")
+        self.summary_var = tk.StringVar(
+            value=f"Running {len(self.folders)} folder(s) with up to {self.workers} parallel R process(es)."
+        )
+        ttk.Label(wrapper, textvariable=self.summary_var, style="WizardSubtitle.TLabel", wraplength=760).pack(
+            anchor="w", pady=(4, 10)
+        )
+
+        table_frame = ttk.Frame(wrapper)
+        table_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            table_frame,
+            columns=("folder", "status", "progress"),
+            show="headings",
+            selectmode="browse",
+        )
+        self.tree.heading("folder", text="Folder")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("progress", text="Progress")
+        self.tree.column("folder", width=470, stretch=True)
+        self.tree.column("status", width=230, stretch=False)
+        self.tree.column("progress", width=90, stretch=False, anchor="center")
+        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=yscroll.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        yscroll.pack(side="right", fill="y")
+
+        for idx, folder in enumerate(self.folders):
+            iid = str(idx)
+            self.row_by_folder[str(folder)] = iid
+            self.tree.insert("", "end", iid=iid, values=(str(folder), "Queued", "0%"))
+
+        log_frame = ttk.LabelFrame(wrapper, text="Batch log")
+        log_frame.pack(fill="both", expand=False, pady=(10, 0))
+        self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled")
+        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        log_scroll.pack(side="right", fill="y")
+
+    def update_folder(self, folder, status=None, progress=None):
+        iid = self.row_by_folder.get(str(folder))
+        if iid is None:
+            return
+        current = list(self.tree.item(iid, "values"))
+        if status is not None:
+            current[1] = status
+        if progress is not None:
+            current[2] = f"{int(max(0, min(100, float(progress))))}%"
+        self.tree.item(iid, values=current)
+
+    def set_summary(self, text):
+        self.summary_var.set(text)
+
+    def log(self, text):
+        self.log_text.configure(state="normal")
+        self.log_text.insert("end", f"{datetime.now().strftime('%H:%M:%S')}  {text}\n")
+        self.log_text.see("end")
+        self.log_text.configure(state="disabled")
+
+
 class Step3Frame(SidebarStepFrame):
     """Step 3 tab UI that runs this module's flattening pipeline inside the app."""
     PIXEL_WIDTH_UM = 3.89
@@ -2395,9 +2657,12 @@ class Step3Frame(SidebarStepFrame):
         self.figure = None
         self.canvas = None
         self.r_setup_panel = None
+        self.r_batch_panel = None
+        self.r_batch_run_panel = None
         self.run_button_python = None
         self.run_button_r_script = None
         self.r_setup_button = None
+        self.r_batch_button = None
         self.slice_combo = None
         self._busy = False
         self.last_diff_log_dir = None
@@ -2453,6 +2718,9 @@ class Step3Frame(SidebarStepFrame):
         self.run_button_r_script = ttk.Button(process, text="Run Step 3 (Original R Script)", command=self._run_r_script)
         self.run_button_r_script.pack(fill="x", pady=2)
 
+        self.r_batch_button = ttk.Button(process, text="Batch Run R Script...", command=self._open_r_batch_scanner)
+        self.r_batch_button.pack(fill="x", pady=2)
+
         self.run_button_python = ttk.Button(process, text="Run Step 3 (Python, experimental)", command=self._run_processing)
         self.run_button_python.pack(fill="x", pady=2)
 
@@ -2504,6 +2772,8 @@ class Step3Frame(SidebarStepFrame):
     def _set_process_buttons(self, state):
         if self.r_setup_button is not None:
             self.r_setup_button.configure(state=state)
+        if self.r_batch_button is not None:
+            self.r_batch_button.configure(state=state)
         if self.run_button_python is not None:
             self.run_button_python.configure(state=state)
         if self.run_button_r_script is not None:
@@ -3451,6 +3721,8 @@ class Step3Frame(SidebarStepFrame):
             child.destroy()
         self.figure = None
         self.r_setup_panel = None
+        self.r_batch_panel = None
+        self.r_batch_run_panel = None
 
     def _open_r_setup_wizard(self, on_finish=None):
         self._clear_plot_holder()
@@ -3470,6 +3742,216 @@ class Step3Frame(SidebarStepFrame):
                 pass
         if render_previous:
             self._render()
+
+    def _open_r_batch_scanner(self):
+        if self._busy:
+            return
+        root_dir = filedialog.askdirectory(
+            title="Select root folder for batch Step 3 R processing",
+            initialdir=self.current_sdb_dir or None,
+        )
+        if not root_dir:
+            return
+        self._clear_plot_holder()
+        self.r_batch_panel = RBatchSelectionPanel(self, self.plot_holder, Path(root_dir))
+        self.r_batch_panel.pack(fill="both", expand=True)
+        self.progress_text_var.set("Batch scan")
+        self.status_var.set(f"Scanning batch root: {root_dir}")
+
+    def _folder_has_r_data(self, folder):
+        folder = Path(folder)
+        if any((folder / name).is_file() for name in self.R_WORKSPACE_FILES):
+            return True
+        return any(path.is_file() for path in folder.glob("*.RData"))
+
+    def _r_script_config_for_folder(self, folder):
+        folder = Path(folder)
+        input_paths = self._find_input_paths(folder)
+        missing = self._missing_input_names(input_paths)
+        if missing:
+            raise RuntimeError("Missing Step 3 inputs: " + ", ".join(missing))
+        input_info = self._read_input_stack_info(input_paths)
+        requirement_issues = self._input_requirement_issues(input_paths, input_info)
+        if requirement_issues:
+            raise RuntimeError("Input requirement issue(s): " + "; ".join(requirement_issues))
+        self._validate_input_stack_shapes(input_info)
+        return {
+            "input_dir": str(folder.resolve()),
+            "output_dir": str(folder.resolve()),
+            "reference_dark": self._analyze_base_name(input_paths["Dark_MARKED"]),
+            "reference_light": self._analyze_base_name(input_paths["Light_MARKED"]),
+            "to_process_dark": self._analyze_base_name(input_paths["DARK"]),
+            "to_process_light": self._analyze_base_name(input_paths["LIGHT"]),
+            "image_index_light": self._r_index_string(input_info["LIGHT"]["shape"][0]),
+            "image_index_dark": self._r_index_string(input_info["DARK"]["shape"][0]),
+            "pixel_width": str(self.PIXEL_WIDTH_UM),
+        }
+
+    def _start_batch_r_runs(self, folders, workers):
+        folders = [Path(folder) for folder in folders]
+        if not folders:
+            messagebox.showwarning("Batch Step 3", "Select at least one folder to process.")
+            return
+        if self._busy:
+            return
+        script_path = self._script_path()
+        if not script_path.is_file():
+            messagebox.showerror("Batch Step 3", f"Could not find the R script:\n{script_path}")
+            return
+        rscript = self._ensure_r_ready_with_wizard()
+        if rscript is None:
+            self._open_r_setup_wizard(
+                on_finish=lambda result: self._start_batch_r_runs(folders, workers) if result else None
+            )
+            return
+
+        workers = max(1, min(int(workers), len(folders)))
+        self._clear_plot_holder()
+        self.r_batch_run_panel = RBatchRunPanel(self, self.plot_holder, folders, workers)
+        self.r_batch_run_panel.pack(fill="both", expand=True)
+        self._busy = True
+        self._set_process_buttons("disabled")
+        self.progress.configure(value=0)
+        self.progress_text_var.set("Batch running")
+        self.status_var.set(f"Running Step 3 R script for {len(folders)} folder(s).")
+        threading.Thread(
+            target=self._batch_r_worker,
+            args=(Path(rscript), script_path, folders, workers),
+            daemon=True,
+        ).start()
+
+    def _batch_panel_update(self, folder, status=None, progress=None, log=None):
+        panel = self.r_batch_run_panel
+        if panel is None:
+            return
+        if status is not None or progress is not None:
+            panel.update_folder(folder, status=status, progress=progress)
+        if log:
+            panel.log(log)
+
+    def _batch_r_worker(self, rscript_path, script_path, folders, workers):
+        results = []
+        completed = 0
+        total = len(folders)
+
+        def run_folder(folder):
+            folder = Path(folder)
+            self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
+            try:
+                if self._folder_has_r_data(folder):
+                    raise RuntimeError("Skipped because this folder contains RData.")
+                r_config = self._r_script_config_for_folder(folder)
+            except Exception as exc:
+                return {"folder": folder, "returncode": 1, "stdout": "", "stderr": str(exc), "cmd": []}
+            return self._run_r_script_for_config(rscript_path, script_path, r_config, batch_folder=folder)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+            future_map = {executor.submit(run_folder, folder): folder for folder in folders}
+            for future in concurrent.futures.as_completed(future_map):
+                folder = future_map[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {"folder": folder, "returncode": 1, "stdout": "", "stderr": str(exc), "cmd": []}
+                results.append(result)
+                completed += 1
+                overall = (completed / max(1, total)) * 100.0
+                status = "Completed" if result["returncode"] == 0 else "Failed"
+                self.after(
+                    0,
+                    lambda f=folder, s=status, o=overall: (
+                        self._batch_panel_update(f, status=s, progress=100),
+                        self.progress.configure(value=o),
+                    ),
+                )
+
+        self.after(0, lambda: self._on_batch_r_done(results))
+
+    def _run_r_script_for_config(self, rscript_path, script_path, r_config, batch_folder=None):
+        input_dir = Path(r_config["input_dir"])
+        output_dir = Path(r_config["output_dir"])
+        script_args = [
+            r_config["input_dir"],
+            r_config["output_dir"],
+            r_config["reference_dark"],
+            r_config["reference_light"],
+            r_config["to_process_dark"],
+            r_config["to_process_light"],
+            r_config["image_index_light"],
+            r_config["image_index_dark"],
+            r_config["pixel_width"],
+        ]
+        cmd = self._build_r_run_command(rscript_path, script_path, script_args)
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        env = os.environ.copy()
+        if self.r_package_library_path:
+            env["R_LIBS_USER"] = str(self.r_package_library_path)
+        process = subprocess.Popen(
+            cmd,
+            cwd=str(input_dir),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=creationflags,
+            bufsize=1,
+        )
+        output_lines = []
+        if batch_folder is not None:
+            self.after(0, lambda f=batch_folder: self._batch_panel_update(f, status="Running", progress=1))
+        if process.stdout is not None:
+            for line in process.stdout:
+                output_lines.append(line)
+                if batch_folder is not None:
+                    progress = self._progress_from_r_line(line)
+                    if progress is not None:
+                        percent, label = progress
+                        self.after(
+                            0,
+                            lambda f=batch_folder, p=percent, text=label: self._batch_panel_update(
+                                f, status=text, progress=p
+                            ),
+                        )
+        returncode = process.wait()
+        stdout = "".join(output_lines)
+        log_path = self._write_r_run_log(output_dir, returncode, stdout, "", cmd)
+        if batch_folder is not None:
+            self.after(
+                0,
+                lambda f=batch_folder, rc=returncode, lp=log_path: self._batch_panel_update(
+                    f,
+                    log=f"{f}: {'completed' if rc == 0 else 'failed'}; log: {lp}",
+                ),
+            )
+        return {
+            "folder": input_dir,
+            "returncode": returncode,
+            "stdout": stdout,
+            "stderr": "",
+            "cmd": cmd,
+            "log_path": log_path,
+        }
+
+    def _on_batch_r_done(self, results):
+        self._busy = False
+        self._set_process_buttons("normal")
+        success = sum(1 for result in results if result["returncode"] == 0)
+        failed = len(results) - success
+        self.progress.configure(value=100)
+        self.progress_text_var.set("Batch completed")
+        self.status_var.set(f"Batch Step 3 complete: {success} succeeded, {failed} failed.")
+        if self.r_batch_run_panel is not None:
+            self.r_batch_run_panel.set_summary(f"Batch complete: {success} succeeded, {failed} failed.")
+            self.r_batch_run_panel.log(f"Batch complete: {success} succeeded, {failed} failed.")
+        self.info_var.set(
+            "Batch Step 3 R results:\n"
+            + "\n".join(
+                f"{'OK' if result['returncode'] == 0 else 'FAILED'}: {result['folder']}"
+                for result in results
+            )
+        )
 
     def _ensure_r_ready_with_wizard(self):
         rscript = self._resolve_rscript_executable()
