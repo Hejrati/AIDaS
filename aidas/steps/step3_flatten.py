@@ -2318,7 +2318,7 @@ class RBatchSelectionPanel(ttk.Frame):
         self.step_frame = step_frame
         self.root_dir = Path(root_dir)
         self.rows = []
-        self.row_by_iid = {}
+        self.row_widgets = []
 
         self._build_ui()
         self._start_scan()
@@ -2344,32 +2344,34 @@ class RBatchSelectionPanel(ttk.Frame):
         self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
         ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
 
-        table_frame = ttk.Frame(wrapper)
-        table_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(
-            table_frame,
-            columns=("include", "folder", "status"),
-            show="headings",
-            selectmode="extended",
+        list_frame = ttk.Frame(wrapper)
+        list_frame.pack(fill="both", expand=True)
+        header = ttk.Frame(list_frame)
+        header.pack(fill="x", padx=(0, 14), pady=(0, 2))
+        ttk.Label(header, text="Select", width=8, anchor="center").pack(side="left")
+        ttk.Label(header, text="Folder").pack(side="left", fill="x", expand=True)
+        ttk.Label(header, text="Status", width=24).pack(side="right")
+
+        self.list_canvas = tk.Canvas(list_frame, highlightthickness=0, borderwidth=0)
+        yscroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.list_canvas.yview)
+        self.list_canvas.configure(yscrollcommand=yscroll.set)
+        self.row_container = ttk.Frame(self.list_canvas)
+        self.row_window = self.list_canvas.create_window((0, 0), window=self.row_container, anchor="nw")
+        self.row_container.bind(
+            "<Configure>",
+            lambda _event: self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all")),
         )
-        self.tree.heading("include", text="Use")
-        self.tree.heading("folder", text="Folder")
-        self.tree.heading("status", text="Status")
-        self.tree.column("include", width=70, stretch=False, anchor="center")
-        self.tree.column("folder", width=500, stretch=True)
-        self.tree.column("status", width=180, stretch=False)
-        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=yscroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
+        self.list_canvas.bind(
+            "<Configure>",
+            lambda event: self.list_canvas.itemconfigure(self.row_window, width=event.width),
+        )
+        self.list_canvas.pack(side="left", fill="both", expand=True)
         yscroll.pack(side="right", fill="y")
-        self.tree.bind("<Double-1>", lambda _event: self._toggle_selected())
 
         controls = ttk.Frame(wrapper)
         controls.pack(fill="x", pady=(10, 0))
-        ttk.Button(controls, text="Include Selected", command=lambda: self._set_selected(True)).pack(side="left", padx=(0, 4))
-        ttk.Button(controls, text="Exclude Selected", command=lambda: self._set_selected(False)).pack(side="left", padx=(0, 10))
-        ttk.Button(controls, text="Include All Ready", command=self._include_all_ready).pack(side="left", padx=(0, 4))
-        ttk.Button(controls, text="Exclude All", command=self._exclude_all).pack(side="left")
+        ttk.Button(controls, text="Select All Ready", command=self._select_all_ready).pack(side="left", padx=(0, 4))
+        ttk.Button(controls, text="Deselect All", command=self._deselect_all).pack(side="left")
 
         run_box = ttk.Frame(wrapper)
         run_box.pack(fill="x", pady=(10, 0))
@@ -2426,13 +2428,11 @@ class RBatchSelectionPanel(ttk.Frame):
 
     def _scan_done(self, rows, scanned, missing):
         self.rows = rows
-        self.row_by_iid.clear()
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
+        self.row_widgets.clear()
+        for child in self.row_container.winfo_children():
+            child.destroy()
         for idx, row in enumerate(rows):
-            iid = str(idx)
-            self.row_by_iid[iid] = row
-            self.tree.insert("", "end", iid=iid, values=self._row_values(row))
+            self._add_row_widget(idx, row)
         ready = sum(1 for row in rows if not row["locked"])
         skipped = sum(1 for row in rows if row["locked"])
         self.summary_var.set(
@@ -2444,45 +2444,52 @@ class RBatchSelectionPanel(ttk.Frame):
         self.workers_var.set(min(4, max_workers))
         self.step_frame.status_var.set("Batch scan complete. Select folders to process.")
 
-    def _row_values(self, row):
-        include = "--" if row["locked"] else ("[x]" if row["include"] else "[ ]")
+    def _add_row_widget(self, idx, row):
+        var = tk.BooleanVar(value=bool(row["include"]))
+        row["var"] = var
+        frame = ttk.Frame(self.row_container)
+        frame.pack(fill="x", pady=1)
+
+        check = ttk.Checkbutton(
+            frame,
+            variable=var,
+            command=lambda item=row: self._sync_row_selection(item),
+        )
+        check.pack(side="left", padx=(16, 18))
+        if row["locked"]:
+            check.configure(state="disabled")
+
         try:
             folder_text = str(row["folder"].relative_to(self.root_dir))
             if folder_text == ".":
                 folder_text = str(self.root_dir)
         except ValueError:
             folder_text = str(row["folder"])
-        return (include, folder_text, row["status"])
 
-    def _refresh_row(self, iid):
-        row = self.row_by_iid[iid]
-        self.tree.item(iid, values=self._row_values(row))
+        ttk.Label(frame, text=folder_text, wraplength=520, justify="left").pack(side="left", fill="x", expand=True)
+        ttk.Label(frame, text=row["status"], width=24).pack(side="right", padx=(8, 0))
+        self.row_widgets.append((frame, check))
 
-    def _toggle_selected(self):
-        for iid in self.tree.selection():
-            row = self.row_by_iid.get(iid)
-            if row and not row["locked"]:
-                row["include"] = not row["include"]
-                self._refresh_row(iid)
+    def _sync_row_selection(self, row):
+        if row["locked"]:
+            row["include"] = False
+            row["var"].set(False)
+            return
+        row["include"] = bool(row["var"].get())
 
-    def _set_selected(self, include):
-        for iid in self.tree.selection():
-            row = self.row_by_iid.get(iid)
-            if row and not row["locked"]:
-                row["include"] = bool(include)
-                self._refresh_row(iid)
-
-    def _include_all_ready(self):
-        for iid, row in self.row_by_iid.items():
+    def _select_all_ready(self):
+        for row in self.rows:
             if not row["locked"]:
                 row["include"] = True
-                self._refresh_row(iid)
+                if "var" in row:
+                    row["var"].set(True)
 
-    def _exclude_all(self):
-        for iid, row in self.row_by_iid.items():
+    def _deselect_all(self):
+        for row in self.rows:
             if not row["locked"]:
                 row["include"] = False
-                self._refresh_row(iid)
+                if "var" in row:
+                    row["var"].set(False)
 
     def _run_selected(self):
         folders = [row["folder"] for row in self.rows if row["include"] and not row["locked"]]
