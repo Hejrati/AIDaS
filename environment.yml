@@ -3,7 +3,7 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.10
+  - python=3.11
   - numpy=2.2.6
   - scipy=1.15.2
   - matplotlib=3.10.8
@@ -27,6 +27,7 @@ dependencies:
     - ./OCT Segmenter/oct_image_segmentation_models-0.8.4-py3-none-any.whl
     - pyreadr
     - torch
+    - torchvision
     - imgviz==1.8.0
     - prettytable==3.17.0
     - art==6.5
