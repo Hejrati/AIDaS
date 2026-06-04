@@ -975,19 +975,19 @@ class Step2Frame(SidebarStepFrame):
             padx=(2, 0),
         )
 
-        help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
-        help_box = help_section.body
-        ttk.Label(
-            help_box,
-            text=(
-                "1. Open a directory and choose an .img image.\n"
-                "2. Pick a boundary name.\n"
-                "3. Left-click points along the boundary.\n"
-                "4. Press Finish Boundary to save all pixels on the line.\n"
-                "5. Enable Vertical line mode to place/drag the foveal center line."
-            ),
-            justify="left",
-        ).pack(anchor="w")
+        # help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
+        # help_box = help_section.body
+        # ttk.Label(
+        #     help_box,
+        #     text=(
+        #         "1. Open a directory and choose an .img image.\n"
+        #         "2. Pick a boundary name.\n"
+        #         "3. Left-click points along the boundary.\n"
+        #         "4. Press Finish Boundary to save all pixels on the line.\n"
+        #         "5. Enable Vertical line mode to place/drag the foveal center line."
+        #     ),
+        #     justify="left",
+        # ).pack(anchor="w")
 
         self._refresh_boundary_lists(auto_select=False)
         self._set_segmentation_frame_enabled(False)

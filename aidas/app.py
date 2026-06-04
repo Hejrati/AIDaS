@@ -101,12 +101,12 @@ class AIDaSApp(tk.Tk):
         # Step 3
         self.step3 = Step3Frame(self.notebook, preferences=self.preferences)
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
-        # self.step4 = Step4Frame(
-        #     self.notebook,
-        #     preferences=self.preferences,
-        #     source_step=self.step3,
-        # )
-        # self.notebook.add(self.step4, text="  Step 4 - Analyze ISez  ")
+        self.step4 = Step4Frame(
+            self.notebook,
+            preferences=self.preferences,
+            source_step=self.step3,
+        )
+        self.notebook.add(self.step4, text="  Step 4 - Analyze ISez  ")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
 

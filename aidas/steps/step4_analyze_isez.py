@@ -488,7 +488,7 @@ class Step4Frame(SidebarStepFrame):
         self.slice_var = tk.StringVar(value="0")
         self.start_var = tk.StringVar(value="")
         self.end_var = tk.StringVar(value="")
-        self.auto_advance_var = tk.BooleanVar(value=True)
+        # self.auto_advance_var = tk.BooleanVar(value=True)
 
         self._build_ui()
         self._refresh_roi_list()
@@ -533,7 +533,7 @@ class Step4Frame(SidebarStepFrame):
         out_row.pack(fill="x")
         ttk.Entry(out_row, textvariable=self.output_dir_var).pack(side="left", fill="x", expand=True)
         ttk.Button(out_row, text="...", width=3, command=self._browse_output_folder).pack(side="right", padx=(2, 0))
-        ttk.Button(output, text="Build Stacks / Max Projection", command=self._build_stack_outputs).pack(fill="x", pady=(6, 2))
+        ttk.Button(output, text="Build Stacks", command=self._build_stack_outputs).pack(fill="x", pady=(6, 2))
 
         roi_section = self.add_sidebar_section("ROIs", padding=3, fill="both", expand=True, pady=(0, 5))
         roi_box = roi_section.body
@@ -551,33 +551,29 @@ class Step4Frame(SidebarStepFrame):
         ttk.Button(nav, text="Prev", command=lambda: self._move_roi(-1)).pack(side="left", expand=True, fill="x", padx=(0, 2))
         ttk.Button(nav, text="Next", command=lambda: self._move_roi(1)).pack(side="right", expand=True, fill="x", padx=(2, 0))
 
-        selection_section = self.add_sidebar_section("Profile Selection", padding=3, pady=(0, 5))
-        selection = selection_section.body
-        start_row = ttk.Frame(selection)
+        start_row = ttk.Frame(roi_box)
         start_row.pack(fill="x", pady=1)
         ttk.Label(start_row, text="Start").pack(side="left")
         ttk.Entry(start_row, textvariable=self.start_var, width=8).pack(side="right")
-        end_row = ttk.Frame(selection)
+        end_row = ttk.Frame(roi_box)
         end_row.pack(fill="x", pady=1)
         ttk.Label(end_row, text="End").pack(side="left")
         ttk.Entry(end_row, textvariable=self.end_var, width=8).pack(side="right")
-        action_row = ttk.Frame(selection)
+        action_row = ttk.Frame(roi_box)
         action_row.pack(fill="x", pady=(6, 0))
         ttk.Button(action_row, text="Apply", command=self._apply_entry_clicks).pack(side="left", expand=True, fill="x", padx=(0, 2))
         ttk.Button(action_row, text="Clear", command=self._clear_clicks).pack(side="right", expand=True, fill="x", padx=(2, 0))
-        ttk.Checkbutton(selection, text="Auto-save and advance", variable=self.auto_advance_var).pack(anchor="w", pady=(4, 0))
-        ttk.Button(selection, text="Save Current ROI", command=lambda: self._save_current_roi(auto_advance=False)).pack(fill="x", pady=(6, 0))
         ttk.Label(
-            selection,
+            roi_box,
             textvariable=self.profile_status_var,
             wraplength=self.SIDEBAR_TEXT_WRAP,
             foreground="gray",
             justify="left",
         ).pack(fill="x", pady=(6, 0))
 
-        stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
-        stats = stats_section.body
-        ttk.Label(stats, textvariable=self.stats_var, wraplength=self.SIDEBAR_TEXT_WRAP, justify="left").pack(fill="x")
+        # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
+        # stats = stats_section.body
+        # ttk.Label(stats, textvariable=self.stats_var, wraplength=self.SIDEBAR_TEXT_WRAP, justify="left").pack(fill="x")
 
         self.plot_holder = ttk.Frame(self.content)
         self.plot_holder.pack(fill="both", expand=True)
@@ -865,7 +861,7 @@ class Step4Frame(SidebarStepFrame):
             self.end_var.set(str(_clamp_profile_index(self.profile_clicks[1], self._current_profile_size())))
 
         self._render_current_roi()
-        if len(self.profile_clicks) == 2 and self.auto_advance_var.get():
+        if len(self.profile_clicks) == 2: # and self.auto_advance_var.get():
             self.after(50, lambda: self._save_current_roi(auto_advance=True))
 
     def _current_profile_size(self) -> int:
@@ -885,6 +881,7 @@ class Step4Frame(SidebarStepFrame):
             return
         self.profile_clicks = [start, end]
         self._render_current_roi()
+        self._save_current_roi(auto_advance=True)
 
     def _clear_clicks(self) -> None:
         self.profile_clicks.clear()

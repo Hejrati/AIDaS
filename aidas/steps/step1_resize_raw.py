@@ -18,7 +18,7 @@ from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_
 from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame
 
 SDB_PREF_KEY = "sdb_dir"
-SDB_DEFAULT_DIR = os.path.expanduser("~/Desktop")
+SDB_DEFAULT_DIR = os.path.abspath(os.path.expanduser("~/Desktop"))
 DEFAULT_RAW_WIDTH = 768
 DEFAULT_RAW_HEIGHT = 1200
 DEFAULT_RAW_OFFSET = 1050
@@ -335,18 +335,18 @@ class Step1Frame(SidebarStepFrame):
         )
         self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(2, 2))
 
-        # ── View ──
-        view_section = self.add_sidebar_section("View", padding=3, pady=(2, 6))
-        view = view_section.body
+        # # ── View ──
+        # view_section = self.add_sidebar_section("View", padding=3, pady=(2, 6))
+        # view = view_section.body
 
-        zf = ttk.Frame(view)
-        zf.pack(fill="x")
-        ttk.Button(zf, text="−", width=3, command=self._zoom_out).pack(side="left")
-        self.zoom_lbl = ttk.Label(zf, text="100 %", anchor="center")
-        self.zoom_lbl.pack(side="left", expand=True)
-        ttk.Button(zf, text="+", width=3, command=self._zoom_in).pack(side="right")
-        ttk.Button(view, text="Fit to Window",
-                   command=self._fit_zoom).pack(fill="x", pady=2)
+        # zf = ttk.Frame(view)
+        # zf.pack(fill="x")
+        # ttk.Button(zf, text="−", width=3, command=self._zoom_out).pack(side="left")
+        # self.zoom_lbl = ttk.Label(zf, text="100 %", anchor="center")
+        # self.zoom_lbl.pack(side="left", expand=True)
+        # ttk.Button(zf, text="+", width=3, command=self._zoom_in).pack(side="right")
+        # ttk.Button(view, text="Fit to Window",
+        #            command=self._fit_zoom).pack(fill="x", pady=2)
 
     def _save_all_formats(self):
         """Save the current cropped image as TIFF, HDR, and IMG in one click."""
