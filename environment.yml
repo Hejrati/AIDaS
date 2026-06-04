@@ -1,4 +1,4 @@
-name: oct-segmenter-env
+name: aidas-env
 channels:
   - conda-forge
   - defaults
@@ -23,23 +23,16 @@ dependencies:
   - unicodedata2=17.0.1
   - pip
   - pip:
-    - ./OCT Segmenter/oct_segmenter-0.8.4-py3-none-any.whl
-    - ./OCT Segmenter/oct_image_segmentation_models-0.8.4-py3-none-any.whl
     - pyreadr
     - torch
     - torchvision
-    - imgviz==1.8.0
-    - prettytable==3.17.0
-    - art==6.5
-    - cmap==0.7.2
-    - munkres==1.1.4
-    - wcwidth==0.6.0
 
 # Notes:
-# - This file pins key conda packages (preferred from conda-forge) and
-#   installs local wheels for `oct-segmenter` and its image segmentation models
+# - This file is for the main AIDaS app and the newer AI_ForAIDAS PyTorch model.
+# - The legacy OCT Segmenter wheels require Python 3.10 and TensorFlow 2.9;
+#   install them with `environment-oct-segmenter-legacy.yml` instead.
 # - If you prefer everything via pip, run `pip install -r requirements.txt`.
 # - To create the environment locally:
 #
 # conda env create -f environment.yml
-# conda activate oct-segmenter-env
+# conda activate aidas-env

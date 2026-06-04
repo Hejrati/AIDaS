@@ -34,7 +34,7 @@ import subprocess
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
@@ -344,6 +344,490 @@ class _FoveaLinePicker(tk.Toplevel):
         self.destroy()
 
 
+class Step2BatchSegmentationSelectionPanel(ttk.Frame):
+    """Embedded panel for selecting folders to run through Step 2 AI segmentation."""
+
+    TABLE_COLUMNS = (
+        ("select", "", 42, "center"),
+        ("folder", "Folder", 560, "w"),
+        ("status", "Status", 380, "w"),
+        ("images", "Images", 92, "center"),
+    )
+    COLUMN_MIN_WIDTHS = {
+        "select": 42,
+        "folder": 320,
+        "status": 96,
+        "images": 64,
+    }
+    COLUMN_MAX_WIDTHS = {
+        "images": 92,
+    }
+    HEADER_HEIGHT = 34
+    ROW_HEIGHT = 34
+    GRID_COLOR = "#d1d5db"
+    HEADER_BG = "#f3f4f6"
+    ROW_BG = "#ffffff"
+    ALT_ROW_BG = "#f9fafb"
+    TEXT_COLOR = "#111827"
+    MUTED_COLOR = "#6b7280"
+
+    def __init__(self, step_frame, parent, root_dir):
+        super().__init__(parent)
+        self.step_frame = step_frame
+        self.root_dir = os.path.abspath(root_dir)
+        self.rows = []
+        self.header_cells = {}
+        self.empty_message_cell = None
+        self.table_filler_cells = []
+        self._table_resize_after_id = None
+        self._table_font = tkfont.nametofont("TkDefaultFont")
+        self._header_font = self._table_font.copy()
+        self._header_font.configure(weight="bold")
+        self.select_all_ready_var = tk.BooleanVar(value=False)
+        self.column_widths = {key: width for key, _title, width, _anchor in self.TABLE_COLUMNS}
+        self.table_width = sum(self.column_widths.values()) + len(self.TABLE_COLUMNS)
+
+        self._build_ui()
+        self._start_scan()
+
+    def _build_ui(self):
+        wrapper = ttk.Frame(self, padding=12)
+        wrapper.pack(fill="both", expand=True)
+
+        ttk.Label(wrapper, text="Batch Segmentation", font=("", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            wrapper,
+            text=(
+                "AIDaS will search the selected folder and subfolders for Light.img and Dark.img."
+                "Folders with existing MARKED segmentation are shown as already segmented and skipped."
+            ),
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 10))
+
+        top = ttk.Frame(wrapper)
+        top.pack(fill="x", pady=(0, 8))
+        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(
+            side="left",
+            fill="x",
+            expand=True,
+        )
+
+        self.table_outer = ttk.Frame(wrapper)
+        self.table_outer.pack(fill="both", expand=True)
+        self.table_canvas = tk.Canvas(
+            self.table_outer,
+            bg=self.ROW_BG,
+            highlightthickness=1,
+            highlightbackground=self.GRID_COLOR,
+        )
+        self.table_yscroll = ttk.Scrollbar(self.table_outer, orient="vertical", command=self.table_canvas.yview)
+        self.table_xscroll = ttk.Scrollbar(self.table_outer, orient="horizontal", command=self._table_xview)
+
+        self.table_inner = tk.Frame(self.table_canvas, bg=self.GRID_COLOR)
+        self.table_window = self.table_canvas.create_window((0, 0), window=self.table_inner, anchor="nw")
+
+        self.table_canvas.configure(yscrollcommand=self.table_yscroll.set, xscrollcommand=self.table_xscroll.set)
+
+        self.table_canvas.grid(row=0, column=0, sticky="nsew")
+        self.table_yscroll.grid(row=0, column=1, sticky="ns")
+        self.table_outer.rowconfigure(0, weight=1)
+        self.table_outer.columnconfigure(0, weight=1)
+
+        self._build_table_header()
+        self.table_inner.bind("<Configure>", lambda _event: self._refresh_scrollregion())
+        self.table_canvas.bind("<Configure>", self._on_table_canvas_configure, add="+")
+        self.table_canvas.bind("<MouseWheel>", self._on_table_mousewheel, add="+")
+
+        run_box = ttk.Frame(wrapper)
+        run_box.pack(fill="x", pady=(10, 0))
+        ttk.Button(run_box, text="Run Selected Folders", command=self._run_selected).pack(side="left")
+        ttk.Button(run_box, text="Exit", command=self._cancel).pack(side="right")
+        self.after_idle(self._fit_table_to_window)
+
+    def _build_table_header(self):
+        for col, (key, title, _width, anchor) in enumerate(self.TABLE_COLUMNS):
+            cell = self._make_table_cell(
+                self.table_inner,
+                row=0,
+                col=col,
+                width=self._column_width(key),
+                height=self.HEADER_HEIGHT,
+                bg=self.HEADER_BG,
+            )
+            self.header_cells[key] = cell
+            if key == "select":
+                self.select_all_ready_check = ttk.Checkbutton(
+                    cell,
+                    variable=self.select_all_ready_var,
+                    command=self._toggle_all_ready,
+                )
+                self.select_all_ready_check.pack(anchor="center", expand=True)
+                self.select_all_ready_check.state(["disabled"])
+                continue
+
+            label = tk.Label(
+                cell,
+                text=title,
+                anchor=anchor,
+                bg=self.HEADER_BG,
+                fg=self.TEXT_COLOR,
+                font=self._header_font,
+                padx=8,
+            )
+            label.pack(fill="both", expand=True)
+
+    def _make_table_cell(self, parent, row, col, width, height, bg):
+        cell = tk.Frame(parent, bg=bg, width=width, height=height)
+        cell.grid(row=row, column=col, sticky="nsew", padx=(0, 1), pady=(0, 1))
+        cell.grid_propagate(False)
+        return cell
+
+    def _column_width(self, key):
+        return int(self.column_widths.get(key, self.COLUMN_MIN_WIDTHS.get(key, 80)))
+
+    def _text_width(self, text, *, header=False, padding=18):
+        font = self._header_font if header else self._table_font
+        return int(font.measure(str(text or ""))) + int(padding)
+
+    def _fit_content_column_width(self, key, title, values):
+        measured = [self._text_width(title, header=True)]
+        measured.extend(self._text_width(value) for value in values)
+        width = max([self.COLUMN_MIN_WIDTHS.get(key, 80), *measured])
+        max_width = self.COLUMN_MAX_WIDTHS.get(key)
+        if max_width is not None:
+            width = min(width, max_width)
+        return int(width)
+
+    def _on_table_canvas_configure(self, _event=None):
+        if self._table_resize_after_id is not None:
+            try:
+                self.after_cancel(self._table_resize_after_id)
+            except tk.TclError:
+                pass
+        self._table_resize_after_id = self.after_idle(self._fit_table_to_window)
+
+    def _fit_table_to_window(self):
+        self._table_resize_after_id = None
+        try:
+            available = max(1, int(self.table_canvas.winfo_width()) - 2)
+            visible_height = max(1, int(self.table_canvas.winfo_height()) - 2)
+        except tk.TclError:
+            return
+
+        gap_width = len(self.TABLE_COLUMNS)
+        select_width = self.COLUMN_MIN_WIDTHS["select"]
+        images_width = self._fit_content_column_width(
+            "images",
+            "Images",
+            [len(row.get("image_paths") or []) for row in self.rows],
+        )
+        status_width = self._fit_content_column_width(
+            "status",
+            "Status",
+            [row.get("status", "") for row in self.rows],
+        )
+
+        fixed_width = select_width + status_width + images_width + gap_width
+        min_table_width = fixed_width + self.COLUMN_MIN_WIDTHS["folder"]
+        target_width = max(min_table_width, available)
+        folder_width = max(self.COLUMN_MIN_WIDTHS["folder"], target_width - fixed_width)
+
+        self.column_widths = {
+            "select": select_width,
+            "folder": folder_width,
+            "status": status_width,
+            "images": images_width,
+        }
+        self.table_width = sum(self.column_widths.values()) + gap_width
+        self._set_horizontal_scrollbar_visible(self.table_width > available + 1)
+        self._apply_table_size(visible_height)
+
+    def _set_vertical_scrollbar_visible(self, visible):
+        try:
+            managed = bool(self.table_yscroll.winfo_manager())
+            changed = False
+            if visible and not managed:
+                self.table_yscroll.grid(row=0, column=1, sticky="ns")
+                changed = True
+            elif not visible and managed:
+                self.table_yscroll.grid_remove()
+                self.table_canvas.yview_moveto(0)
+                changed = True
+            if changed and self._table_resize_after_id is None:
+                self._table_resize_after_id = self.after_idle(self._fit_table_to_window)
+        except tk.TclError:
+            pass
+
+    def _set_horizontal_scrollbar_visible(self, visible):
+        try:
+            managed = bool(self.table_xscroll.winfo_manager())
+            if visible and not managed:
+                self.table_xscroll.grid(row=1, column=0, sticky="ew")
+            elif not visible and managed:
+                self.table_xscroll.grid_remove()
+        except tk.TclError:
+            pass
+
+    def _apply_table_size(self, visible_height=None):
+        try:
+            if visible_height is None:
+                visible_height = max(1, int(self.table_canvas.winfo_height()) - 2)
+        except tk.TclError:
+            return
+
+        for key, cell in self.header_cells.items():
+            try:
+                cell.configure(width=self._column_width(key))
+            except tk.TclError:
+                pass
+        for row in self.rows:
+            for key, cell in (row.get("cells") or {}).items():
+                try:
+                    cell.configure(width=self._column_width(key))
+                except tk.TclError:
+                    pass
+        if self.empty_message_cell is not None:
+            try:
+                self.empty_message_cell.configure(width=self.table_width)
+            except tk.TclError:
+                pass
+        content_overflows = self._update_table_filler(visible_height)
+        self._set_vertical_scrollbar_visible(content_overflows)
+        try:
+            table_height = max(visible_height, self._table_content_height())
+            self.table_canvas.itemconfigure(
+                self.table_window,
+                width=self.table_width,
+                height=table_height,
+            )
+        except tk.TclError:
+            return
+        self._refresh_scrollregion()
+
+    def _table_content_height(self):
+        try:
+            self.table_inner.update_idletasks()
+            return int(self.table_inner.grid_bbox()[3])
+        except tk.TclError:
+            return 0
+
+    def _visible_body_row_count(self):
+        if self.rows:
+            return len(self.rows)
+        return 1 if self.empty_message_cell is not None else 0
+
+    def _update_table_filler(self, viewport_height):
+        for cell in self.table_filler_cells:
+            try:
+                cell.destroy()
+            except tk.TclError:
+                pass
+        self.table_filler_cells = []
+
+        content_rows = self._visible_body_row_count()
+        used_height = self._table_content_height()
+        filler_height = max(0, int(viewport_height) - used_height - 1)
+        content_overflows = used_height > int(viewport_height) + 1
+        if filler_height <= 0:
+            return content_overflows
+
+        filler_row = content_rows + 1
+        for col, (key, _title, _width, _anchor) in enumerate(self.TABLE_COLUMNS):
+            cell = self._make_table_cell(
+                self.table_inner,
+                row=filler_row,
+                col=col,
+                width=self._column_width(key),
+                height=filler_height,
+                bg=self.ROW_BG,
+            )
+            self.table_filler_cells.append(cell)
+        return content_overflows
+
+    def _refresh_scrollregion(self):
+        try:
+            self.table_canvas.configure(scrollregion=self.table_canvas.bbox("all"))
+        except tk.TclError:
+            pass
+
+    def _table_xview(self, *args):
+        self.table_canvas.xview(*args)
+
+    def _on_table_mousewheel(self, event):
+        if event.state & 0x0001:
+            self._table_xview("scroll", -1 * int(event.delta / 120), "units")
+        else:
+            self.table_canvas.yview_scroll(-1 * int(event.delta / 120), "units")
+        return "break"
+
+    def _start_scan(self):
+        self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+
+    def _scan_worker(self):
+        try:
+            rows, scanned, skipped = self.step_frame._scan_step2_batch_segmentation_folders(self.root_dir)
+        except Exception as exc:
+            self.after(0, lambda exc=exc: self._scan_failed(exc))
+            return
+        self.after(0, lambda: self._scan_done(rows, scanned, skipped))
+
+    def _scan_failed(self, exc):
+        self.summary_var.set(f"Scan failed: {exc}")
+        self.step_frame.status_var.set("Batch segmentation scan failed.")
+        messagebox.showerror("Batch Step 2", f"Could not scan folders.\n{exc}", parent=self)
+
+    def _scan_done(self, rows, scanned, skipped):
+        self._clear_table_body()
+        self.rows = rows
+        self.empty_message_cell = None
+        for idx, row in enumerate(rows):
+            self._add_row(idx, row)
+
+        ready = sum(1 for row in rows if not row["locked"])
+        already_segmented = sum(1 for row in rows if row["locked"])
+        ready_images = sum(len(row.get("image_paths") or []) for row in rows if not row["locked"])
+        self.summary_var.set(
+            f"Scanned {scanned} folder(s). Found {ready} ready folder(s) with {ready_images} image(s) to segment, "
+            f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img or Dark.img."
+        )
+        if not rows:
+            self._add_empty_message()
+        self._refresh_select_all_ready_checkbox()
+        self._fit_table_to_window()
+        self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
+
+    def _clear_table_body(self):
+        for child in self.table_inner.winfo_children():
+            try:
+                row = int(child.grid_info().get("row", 0))
+            except (TypeError, ValueError):
+                row = 0
+            if row > 0:
+                child.destroy()
+        self.table_filler_cells = []
+
+    def _add_empty_message(self):
+        cell = self._make_table_cell(
+            self.table_inner,
+            row=1,
+            col=0,
+            width=self.table_width,
+            height=self.ROW_HEIGHT,
+            bg=self.ROW_BG,
+        )
+        cell.grid(columnspan=len(self.TABLE_COLUMNS))
+        self.empty_message_cell = cell
+        tk.Label(
+            cell,
+            text="No folders with Light.img or Dark.img were found.",
+            anchor="w",
+            bg=self.ROW_BG,
+            fg=self.MUTED_COLOR,
+            padx=10,
+        ).pack(fill="both", expand=True)
+
+    def _add_row(self, idx, row):
+        row["var"] = tk.BooleanVar(value=bool(row.get("include")))
+        row["widgets"] = {}
+        row["cells"] = {}
+        bg = self.ROW_BG if idx % 2 == 0 else self.ALT_ROW_BG
+
+        try:
+            folder_text = os.path.relpath(row["folder"], self.root_dir)
+            if folder_text == ".":
+                folder_text = self.root_dir
+        except ValueError:
+            folder_text = row["folder"]
+
+        values = {
+            "folder": folder_text,
+            "status": row.get("status", ""),
+            "images": str(len(row.get("image_paths") or [])),
+        }
+
+        for col, (key, _title, width, anchor) in enumerate(self.TABLE_COLUMNS):
+            cell = self._make_table_cell(
+                self.table_inner,
+                row=idx + 1,
+                col=col,
+                width=self._column_width(key),
+                height=self.ROW_HEIGHT,
+                bg=bg,
+            )
+            row["cells"][key] = cell
+            if key == "select":
+                checkbutton = ttk.Checkbutton(
+                    cell,
+                    variable=row["var"],
+                    command=lambda item=row: self._on_row_checkbutton_toggled(item),
+                )
+                checkbutton.pack(anchor="center", expand=True)
+                if row.get("locked"):
+                    checkbutton.state(["disabled"])
+                row["widgets"]["checkbutton"] = checkbutton
+                continue
+
+            label = tk.Label(
+                cell,
+                text=values.get(key, ""),
+                anchor=anchor,
+                bg=bg,
+                fg=self.MUTED_COLOR if row.get("locked") else self.TEXT_COLOR,
+                padx=8,
+            )
+            label.pack(fill="both", expand=True)
+            row["widgets"][key] = label
+
+    def _refresh_row(self, row):
+        if "var" in row:
+            row["var"].set(bool(row.get("include")))
+        widgets = row.get("widgets") or {}
+        checkbutton = widgets.get("checkbutton")
+        if checkbutton is not None:
+            checkbutton.state(["disabled"] if row.get("locked") else ["!disabled"])
+
+    def _on_row_checkbutton_toggled(self, row):
+        if row.get("locked"):
+            row["include"] = False
+            if "var" in row:
+                row["var"].set(False)
+            return
+        row["include"] = bool(row.get("var").get()) if row.get("var") is not None else False
+        self._refresh_select_all_ready_checkbox()
+
+    def _toggle_all_ready(self):
+        self._set_all_ready_selection(bool(self.select_all_ready_var.get()))
+
+    def _set_all_ready_selection(self, include):
+        for row in self.rows:
+            if not row["locked"]:
+                row["include"] = bool(include)
+                self._refresh_row(row)
+        self._refresh_select_all_ready_checkbox()
+
+    def _refresh_select_all_ready_checkbox(self):
+        ready_rows = [row for row in self.rows if not row["locked"]]
+        if not ready_rows:
+            self.select_all_ready_var.set(False)
+            self.select_all_ready_check.state(["disabled"])
+            return
+        self.select_all_ready_check.state(["!disabled"])
+        self.select_all_ready_var.set(all(bool(row.get("include")) for row in ready_rows))
+
+    def _run_selected(self):
+        rows = [row for row in self.rows if row["include"] and not row["locked"]]
+        if not rows:
+            messagebox.showwarning("Batch Step 2", "Select at least one ready folder.", parent=self)
+            return
+        self.step_frame._start_step2_batch_segmentation_from_rows(rows, self.root_dir)
+
+    def _cancel(self):
+        self.step_frame._close_step2_batch_segmentation_panel(restore_previous=True)
+
+
 class Step2Frame(SidebarStepFrame):
     """GUI panel for tracing boundary lines and exporting pixel coordinates.
 
@@ -434,6 +918,7 @@ class Step2Frame(SidebarStepFrame):
 
         info_frame = ttk.Frame(right, relief="solid", borderwidth=1)
         info_frame.pack(fill="x", padx=2, pady=2)
+        self.image_info_frame = info_frame
         self.image_info_var = tk.StringVar(value="No image loaded")
         info_label = ttk.Label(
             info_frame,
@@ -447,6 +932,7 @@ class Step2Frame(SidebarStepFrame):
         self.canvas_area = ttk.Frame(right)
         self.canvas_area.pack(fill="both", expand=True)
         self.batch_results_notebook = None
+        self.batch_segmentation_panel = None
         self._batch_result_canvases = []
         self._batch_result_tab_canvases = {}
         self._batch_result_states = {}
@@ -662,13 +1148,13 @@ class Step2Frame(SidebarStepFrame):
         self.segmenter_config_var = tk.StringVar(value=self.segmenter_default_config)
         self.segmenter_model_var = tk.StringVar(value=self.segmenter_default_model)
         self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
-        self.segmenter_env_var = tk.StringVar(value="oct-segmenter-env")
+        self.segmenter_env_var = tk.StringVar(value="oct-segmenter-legacy-env")
         self.ai_backend_var = tk.StringVar(value=AI_BACKEND_LABELS[AI_BACKEND_AIDAS])
         self.aidas_model_var = tk.StringVar(value=self.ai_for_aidas_default_model)
         self.aidas_vline_model_var = tk.StringVar(value=self.ai_for_aidas_default_vline_model)
         self.aidas_predict_fovea_var = tk.BooleanVar(value=True)
         self.aidas_device_var = tk.StringVar(value=AI_DEVICE_OPTIONS[0])
-        self.aidas_env_var = tk.StringVar(value="oct-segmenter-env")
+        self.aidas_env_var = tk.StringVar(value="aidas-env")
         self.aidas_python_var = tk.StringVar(value="")
 
         self.segmentation_section = self.add_sidebar_section("Segmentation", padding=3, pady=2)
@@ -758,18 +1244,12 @@ class Step2Frame(SidebarStepFrame):
 
         ai_folder_buttons = ttk.Frame(workflow)
         ai_folder_buttons.pack(fill="x", pady=(4, 0))
-        self.folder_segment_button = ttk.Button(
-            ai_folder_buttons,
-            text="AI Folder Seg",
-            command=self._run_folder_segmentation,
-        )
-        self.folder_segment_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
         self.batch_ai_button = ttk.Button(
             ai_folder_buttons,
-            text="AI Batch Seg",
-            command=self._segment_selected_directory_images,
+            text="Run Batch Segmentation",
+            command=self._open_batch_segmentation_scanner,
         )
-        self.batch_ai_button.pack(side="left", fill="x", expand=True, padx=(2, 0))
+        self.batch_ai_button.pack(fill="x")
 
         self.aidas_model_var.trace_add("write", lambda *_: self._update_batch_ai_button_state())
 
@@ -1057,9 +1537,9 @@ class Step2Frame(SidebarStepFrame):
         self._update_batch_ai_button_state()
         if len(paths) != 1:
             if paths:
-                self.status_var.set(f"{len(paths)} IMG files selected for batch segmentation.")
+                self.status_var.set(f"{len(paths)} IMG files selected.")
             elif getattr(self, "_directory_image_paths_cache", []):
-                self.status_var.set("Select an IMG file to load, or select several for batch segmentation.")
+                self.status_var.set("Select an IMG file to load, or use Run Batch Segmentation for folder processing.")
             return
 
         path = paths[0]
@@ -1137,6 +1617,181 @@ class Step2Frame(SidebarStepFrame):
             messagebox.showinfo("Select multiple images", "Select at least two .img files for batch segmentation.")
             return
         self._run_aidas_batch_segmentation(image_paths=paths)
+
+    def _open_batch_segmentation_scanner(self):
+        """Open an embedded folder scanner before running Step 2 batch segmentation."""
+        if self._segmenter_running:
+            messagebox.showinfo("Please wait", "Segmentation is already running.")
+            return
+        if not self._is_aidas_ai_backend():
+            messagebox.showinfo(
+                "AI_ForAIDAS required",
+                "Select AI_ForAIDAS (New, PyTorch-based) before running batch segmentation.",
+            )
+            return
+        model_path = self.aidas_model_var.get().strip()
+        if not os.path.isfile(model_path):
+            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
+            return
+
+        current_dir = getattr(self, "_image_browser_dir", "") or self.image_browser_dir_var.get().strip()
+        if not os.path.isdir(current_dir):
+            current_dir = IMG_DEFAULT_DIR if os.path.isdir(IMG_DEFAULT_DIR) else self._app_root()
+        folder = filedialog.askdirectory(
+            title="Select root folder for Step 2 batch segmentation",
+            initialdir=current_dir,
+        )
+        if not folder:
+            return
+
+        self._open_step2_batch_segmentation_panel(folder)
+
+    def _open_step2_batch_segmentation_panel(self, root_dir):
+        self._close_step2_batch_segmentation_panel(restore_previous=False)
+
+        pending_open = getattr(self, "_image_browser_open_after", None)
+        if pending_open:
+            try:
+                self.after_cancel(pending_open)
+            except tk.TclError:
+                pass
+            self._image_browser_open_after = None
+
+        if getattr(self, "_active_batch_result_tab", None):
+            self._sync_active_batch_result_state()
+        try:
+            self.single_image_canvas.pack_forget()
+        except tk.TclError:
+            pass
+        notebook = getattr(self, "batch_results_notebook", None)
+        if notebook is not None:
+            notebook.pack_forget()
+        info_frame = getattr(self, "image_info_frame", None)
+        if info_frame is not None:
+            try:
+                info_frame.pack_forget()
+            except tk.TclError:
+                pass
+
+        self.batch_segmentation_panel = Step2BatchSegmentationSelectionPanel(self, self.canvas_area, root_dir)
+        self.batch_segmentation_panel.pack(fill="both", expand=True)
+        self.status_var.set(f"Scanning batch segmentation root: {os.path.abspath(root_dir)}")
+        self._update_batch_ai_button_state()
+
+    def _close_step2_batch_segmentation_panel(self, restore_previous=True):
+        panel = getattr(self, "batch_segmentation_panel", None)
+        self.batch_segmentation_panel = None
+        if panel is not None:
+            try:
+                panel.destroy()
+            except tk.TclError:
+                pass
+
+        if restore_previous:
+            info_frame = getattr(self, "image_info_frame", None)
+            if info_frame is not None and info_frame.winfo_manager() != "pack":
+                try:
+                    info_frame.pack(fill="x", padx=2, pady=2, before=self.canvas_area)
+                except tk.TclError:
+                    pass
+            notebook = getattr(self, "batch_results_notebook", None)
+            if getattr(self, "_active_batch_result_tab", None) and notebook is not None:
+                self._show_batch_results_canvas()
+            else:
+                self._show_single_image_canvas()
+            self.status_var.set("Batch segmentation selection closed.")
+        self._update_batch_ai_button_state()
+
+    def _scan_step2_batch_segmentation_folders(self, root_dir):
+        """Return folder rows showing ready and already-segmented Light/Dark inputs."""
+        root_dir = os.path.abspath(root_dir)
+        rows = []
+        scanned = 0
+        skipped = 0
+        targets = (
+            ("Light", "light.img", "light_marked.img"),
+            ("Dark", "dark.img", "dark_marked.img"),
+        )
+
+        for folder, dirnames, filenames in os.walk(root_dir):
+            dirnames.sort(key=str.lower)
+            scanned += 1
+            lower_files = {name.lower(): name for name in filenames}
+            pending = []
+            completed = []
+            image_paths = []
+
+            for label, source_name, marked_name in targets:
+                source_file = lower_files.get(source_name)
+                if source_file is None:
+                    continue
+                if marked_name in lower_files:
+                    completed.append(label)
+                    continue
+                pending.append(label)
+                image_paths.append(self._preferred_analyze_pair_path(os.path.join(folder, source_file)))
+
+            if not pending and not completed:
+                skipped += 1
+                continue
+
+            locked = not pending
+            if locked:
+                status = f"Already segmented: {', '.join(completed)}"
+            elif completed:
+                status = f"Ready: {', '.join(pending)} pending; {', '.join(completed)} done"
+            else:
+                status = f"Ready: {', '.join(pending)}"
+
+            rows.append(
+                {
+                    "folder": folder,
+                    "include": not locked,
+                    "locked": locked,
+                    "status": status,
+                    "image_paths": image_paths,
+                    "pending": pending,
+                    "completed": completed,
+                }
+            )
+
+        rows.sort(key=lambda row: os.path.relpath(row["folder"], root_dir).lower())
+        return rows, scanned, skipped
+
+    def _start_step2_batch_segmentation_from_rows(self, rows, root_dir):
+        image_paths = []
+        seen = set()
+        for row in rows:
+            for path in row.get("image_paths") or []:
+                key = self._image_pair_key(path)
+                if key in seen:
+                    continue
+                seen.add(key)
+                image_paths.append(path)
+
+        if not image_paths:
+            messagebox.showwarning("Batch Step 2", "No unsegmented Light.img or Dark.img files were selected.")
+            return
+
+        self._close_step2_batch_segmentation_panel(restore_previous=True)
+        self._set_image_browser_directory(root_dir, preserve_selection=False)
+        self.status_var.set(f"Found {len(image_paths)} target image(s) for AI batch segmentation.")
+
+        self._show_single_image_canvas()
+        manual_fovea_by_path = self._collect_folder_fovea_lines(image_paths)
+        if manual_fovea_by_path is None:
+            self.status_var.set("AI batch segmentation cancelled before running.")
+            return
+
+        image_paths = [path for path in image_paths if path in manual_fovea_by_path]
+        if not image_paths:
+            self.status_var.set("AI batch segmentation cancelled: all images were skipped.")
+            return
+
+        self._run_aidas_batch_segmentation(
+            image_paths=image_paths,
+            manual_fovea_by_path=manual_fovea_by_path,
+        )
 
     def _run_folder_segmentation(self):
         """Select a folder, recursively find images, and run AI_ForAIDAS batch segmentation."""
@@ -2340,7 +2995,7 @@ class Step2Frame(SidebarStepFrame):
             widget.configure(state=state)
 
     def _set_segmentation_frame_enabled(self, enabled):
-        """Enable/disable segmentation controls, keeping folder/batch AI buttons available."""
+        """Enable/disable segmentation controls, keeping the batch AI button available."""
         state = "normal" if enabled else "disabled"
         # Recursively disable/enable all children in the segmentation frame
         def set_state(widget, s):
@@ -3369,7 +4024,7 @@ class Step2Frame(SidebarStepFrame):
             return False
 
     def _missing_torch_message(self):
-        env_name = self.aidas_env_var.get().strip() or "oct-segmenter-env"
+        env_name = self.aidas_env_var.get().strip() or "aidas-env"
         return (
             "AI_ForAIDAS requires PyTorch in the Python environment used to run the .pth model.\n\n"
             "Install it in the configured AI_ForAIDAS Conda environment:\n"
@@ -3786,7 +4441,9 @@ class Step2Frame(SidebarStepFrame):
         return not self._segmenter_running and self._is_aidas_ai_backend()
 
     def _batch_ai_button_enabled(self):
-        return self._aidas_batch_model_ready() and len(self._selected_directory_image_paths()) >= 2
+        if getattr(self, "batch_segmentation_panel", None) is not None:
+            return False
+        return not self._segmenter_running and self._is_aidas_ai_backend()
 
     def _update_batch_ai_button_state(self):
         if hasattr(self, "folder_segment_button"):

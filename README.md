@@ -19,7 +19,8 @@ This document lists what you need before running AIDaS as a Python application.
 - This project is currently developed and tested on Linux
 
 ### 2. Python
-- Python 3.11 is recommended so the main app and OCT segmenter use the same environment
+- Python 3.11 is recommended for the main AIDaS app and the newer AI_ForAIDAS PyTorch model
+- Optional: the old Keras-based OCT Segmenter uses a separate Python 3.10 environment because it requires TensorFlow 2.9
 - `pip` available for package installation
 
 ### 3. System Packages
@@ -37,20 +38,35 @@ sudo apt install -y python3-tk
 ```
 
 ## 4. Python Dependencies
-Install all AIDaS and OCT segmenter dependencies from the root `requirements.txt`:
+Install the main AIDaS app and newer AI_ForAIDAS PyTorch dependencies from the root `requirements.txt`:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-This single file includes the main app dependencies, OCT segmenter model
-dependencies, and local OCT segmenter wheels.
+This file intentionally does not install the old TensorFlow OCT Segmenter wheels.
+Those wheels use older package pins that conflict with the Python 3.11 app environment.
 
 Alternatively, create the conda environment from `environment.yml`:
 
 ```bash
 conda env create -f environment.yml
-conda activate oct-segmenter-env
+conda activate aidas-env
+```
+
+Optional: create the legacy environment only if you need the old
+`OCT Segmenter (old, Keras-based)` backend:
+
+```bash
+conda env create -f environment-oct-segmenter-legacy.yml
+conda activate oct-segmenter-legacy-env
+```
+
+The AIDaS Step 2 AI settings default to:
+
+```text
+AI_ForAIDAS (new): aidas-env
+OCT Segmenter (old): oct-segmenter-legacy-env
 ```
 
 ## 5. Input Data Requirements
@@ -82,7 +98,7 @@ input and output files.
 
 ### Installation
 
-Install from the root dependency file before launching the segmenter:
+Install the newer AI_ForAIDAS PyTorch segmenter from the root dependency file before launching it:
 
 ```bash
 pip install -r requirements.txt
@@ -92,7 +108,7 @@ Or use the root conda environment:
 
 ```bash
 conda env create -f environment.yml
-conda activate oct-segmenter-env
+conda activate aidas-env
 ```
 
 Then launch the segmenter:
@@ -103,6 +119,27 @@ python app.py
 ```
 
 You can also double-click `OCT Segmenter.bat` if using the packaged launcher.
+
+### Optional Legacy Keras OCT Segmenter
+
+AIDaS can also call the bundled old `oct-segmenter` command-line backend, which
+uses `human_OCT.h5`. Install it in its own Python 3.10 conda environment:
+
+```bash
+conda env create -f environment-oct-segmenter-legacy.yml
+conda activate oct-segmenter-legacy-env
+```
+
+That environment installs the local wheels in `OCT Segmenter/` plus
+`tensorflow==2.9.0`. Do not install those wheels into `aidas-env`; they conflict
+with the newer Python 3.11/PyTorch stack.
+
+In Step 2, open **AI Settings** and select the backend you want:
+
+```text
+AI_ForAIDAS (New, PyTorch-based) -> aidas-env
+OCT Segmenter (old, Keras-based) -> oct-segmenter-legacy-env
+```
 
 ### File Overview
 

@@ -1,6 +1,6 @@
-conda create -n oct-segmenter-env python=3.10 
+conda create -n oct-segmenter-legacy-env python=3.10 
 
-conda activate oct-segmenter-env
+conda activate oct-segmenter-legacy-env
 
 
 pip install oct_segmenter-0.8.4-py3-none-any.whl

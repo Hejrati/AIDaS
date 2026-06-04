@@ -6,17 +6,24 @@ Automated segmentation of 6 retinal layer boundaries in OCT images, with optiona
 
 ## Installation (first time on a new computer)
 
-1. Download and install **Python 3.11** from [python.org/downloads/release/python-3119](https://python.org/downloads/release/python-3119/)
-   - On the first installer screen, tick **"Add Python to PATH"** before clicking Install Now
+1. Create the main AIDaS environment from the repository root:
 
-2. Open **Command Prompt** and run:
    ```
-   python -m pip install numpy Pillow scipy
-   python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+   conda env create -f environment.yml
+   conda activate aidas-env
    ```
-   (~500 MB total, the PyTorch download takes a few minutes)
 
-3. Double-click **OCT Segmenter.bat** to launch the app.
+   Or, with an existing Python 3.11 environment:
+
+   ```
+   python -m pip install -r requirements.txt
+   ```
+
+2. Double-click **OCT Segmenter.bat** to launch the app.
+
+The old Keras-based OCT Segmenter is separate. It uses
+`environment-oct-segmenter-legacy.yml` from the repository root and is not
+required for this PyTorch AI_ForAIDAS app.
 
 ---
 
@@ -24,7 +31,8 @@ Automated segmentation of 6 retinal layer boundaries in OCT images, with optiona
 
 Launch the GUI:
 ```
-cd "C:\Users\james\Desktop\Claude_Projects\OCTSegmenterHuman"
+conda activate aidas-env
+cd "OCT Segmenter\AI_ForAIDAS"
 python app.py
 ```
 Or double-click **OCT Segmenter.bat**.
