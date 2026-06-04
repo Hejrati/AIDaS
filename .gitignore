@@ -11,3 +11,4 @@ segmenter_output/
 aidas\__pycache__/*
 aidas\steps\__pycache__/*
 run_aidas.spec
+Examples/
