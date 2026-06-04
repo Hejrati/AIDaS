@@ -34,12 +34,13 @@ import subprocess
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, font as tkfont, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
+from aidas.utils.batch_ui import BatchTable
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.ui_utils import SidebarStepFrame, apply_app_icon_to
 
@@ -362,30 +363,11 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     COLUMN_MAX_WIDTHS = {
         "images": 92,
     }
-    HEADER_HEIGHT = 34
-    ROW_HEIGHT = 34
-    GRID_COLOR = "#d1d5db"
-    HEADER_BG = "#f3f4f6"
-    ROW_BG = "#ffffff"
-    ALT_ROW_BG = "#f9fafb"
-    TEXT_COLOR = "#111827"
-    MUTED_COLOR = "#6b7280"
-
     def __init__(self, step_frame, parent, root_dir):
         super().__init__(parent)
         self.step_frame = step_frame
         self.root_dir = os.path.abspath(root_dir)
         self.rows = []
-        self.header_cells = {}
-        self.empty_message_cell = None
-        self.table_filler_cells = []
-        self._table_resize_after_id = None
-        self._table_font = tkfont.nametofont("TkDefaultFont")
-        self._header_font = self._table_font.copy()
-        self._header_font.configure(weight="bold")
-        self.select_all_ready_var = tk.BooleanVar(value=False)
-        self.column_widths = {key: width for key, _title, width, _anchor in self.TABLE_COLUMNS}
-        self.table_width = sum(self.column_widths.values()) + len(self.TABLE_COLUMNS)
 
         self._build_ui()
         self._start_scan()
@@ -405,31 +387,16 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
 
-        self.table_outer = ttk.Frame(wrapper)
-        self.table_outer.pack(fill="both", expand=True)
-        self.table_canvas = tk.Canvas(
-            self.table_outer,
-            bg=self.ROW_BG,
-            highlightthickness=1,
-            highlightbackground=self.GRID_COLOR,
+        self.table = BatchTable(
+            wrapper,
+            columns=self.TABLE_COLUMNS,
+            min_widths=self.COLUMN_MIN_WIDTHS,
+            max_widths=self.COLUMN_MAX_WIDTHS,
+            select_column="select",
+            stretch_column="folder",
+            empty_message="No folders with Light.img or Dark.img were found.",
         )
-        self.table_yscroll = ttk.Scrollbar(self.table_outer, orient="vertical", command=self.table_canvas.yview)
-        self.table_xscroll = ttk.Scrollbar(self.table_outer, orient="horizontal", command=self._table_xview)
-
-        self.table_inner = tk.Frame(self.table_canvas, bg=self.GRID_COLOR)
-        self.table_window = self.table_canvas.create_window((0, 0), window=self.table_inner, anchor="nw")
-
-        self.table_canvas.configure(yscrollcommand=self.table_yscroll.set, xscrollcommand=self.table_xscroll.set)
-
-        self.table_canvas.grid(row=0, column=0, sticky="nsew")
-        self.table_yscroll.grid(row=0, column=1, sticky="ns")
-        self.table_outer.rowconfigure(0, weight=1)
-        self.table_outer.columnconfigure(0, weight=1)
-
-        self._build_table_header()
-        self.table_inner.bind("<Configure>", lambda _event: self._refresh_scrollregion())
-        self.table_canvas.bind("<Configure>", self._on_table_canvas_configure, add="+")
-        self.table_canvas.bind("<MouseWheel>", self._on_table_mousewheel, add="+")
+        self.table.pack(fill="both", expand=True)
 
         top = ttk.Frame(wrapper)
         top.pack(fill="x", pady=(0, 8))
@@ -442,225 +409,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
 
         run_box = ttk.Frame(wrapper)
         run_box.pack(fill="x", pady=(10, 0))
-        ttk.Button(run_box, text="Start Segmentation", command=self._run_selected).pack(side="left")
-        ttk.Button(run_box, text="Exit", command=self._cancel).pack(side="right")
-        self.after_idle(self._fit_table_to_window)
-
-    def _build_table_header(self):
-        for col, (key, title, _width, anchor) in enumerate(self.TABLE_COLUMNS):
-            cell = self._make_table_cell(
-                self.table_inner,
-                row=0,
-                col=col,
-                width=self._column_width(key),
-                height=self.HEADER_HEIGHT,
-                bg=self.HEADER_BG,
-            )
-            self.header_cells[key] = cell
-            if key == "select":
-                self.select_all_ready_check = ttk.Checkbutton(
-                    cell,
-                    variable=self.select_all_ready_var,
-                    command=self._toggle_all_ready,
-                )
-                self.select_all_ready_check.pack(anchor="center", expand=True)
-                self.select_all_ready_check.state(["disabled"])
-                continue
-
-            label = tk.Label(
-                cell,
-                text=title,
-                anchor=anchor,
-                bg=self.HEADER_BG,
-                fg=self.TEXT_COLOR,
-                font=self._header_font,
-                padx=8,
-            )
-            label.pack(fill="both", expand=True)
-
-    def _make_table_cell(self, parent, row, col, width, height, bg):
-        cell = tk.Frame(parent, bg=bg, width=width, height=height)
-        cell.grid(row=row, column=col, sticky="nsew", padx=(0, 1), pady=(0, 1))
-        cell.grid_propagate(False)
-        return cell
-
-    def _column_width(self, key):
-        return int(self.column_widths.get(key, self.COLUMN_MIN_WIDTHS.get(key, 80)))
-
-    def _text_width(self, text, *, header=False, padding=18):
-        font = self._header_font if header else self._table_font
-        return int(font.measure(str(text or ""))) + int(padding)
-
-    def _fit_content_column_width(self, key, title, values):
-        measured = [self._text_width(title, header=True)]
-        measured.extend(self._text_width(value) for value in values)
-        width = max([self.COLUMN_MIN_WIDTHS.get(key, 80), *measured])
-        max_width = self.COLUMN_MAX_WIDTHS.get(key)
-        if max_width is not None:
-            width = min(width, max_width)
-        return int(width)
-
-    def _on_table_canvas_configure(self, _event=None):
-        if self._table_resize_after_id is not None:
-            try:
-                self.after_cancel(self._table_resize_after_id)
-            except tk.TclError:
-                pass
-        self._table_resize_after_id = self.after_idle(self._fit_table_to_window)
-
-    def _fit_table_to_window(self):
-        self._table_resize_after_id = None
-        try:
-            available = max(1, int(self.table_canvas.winfo_width()) - 2)
-            visible_height = max(1, int(self.table_canvas.winfo_height()) - 2)
-        except tk.TclError:
-            return
-
-        gap_width = len(self.TABLE_COLUMNS)
-        select_width = self.COLUMN_MIN_WIDTHS["select"]
-        images_width = self._fit_content_column_width(
-            "images",
-            "Images",
-            [len(row.get("image_paths") or []) for row in self.rows],
-        )
-        status_width = self._fit_content_column_width(
-            "status",
-            "Status",
-            [row.get("status", "") for row in self.rows],
-        )
-
-        fixed_width = select_width + status_width + images_width + gap_width
-        min_table_width = fixed_width + self.COLUMN_MIN_WIDTHS["folder"]
-        target_width = max(min_table_width, available)
-        folder_width = max(self.COLUMN_MIN_WIDTHS["folder"], target_width - fixed_width)
-
-        self.column_widths = {
-            "select": select_width,
-            "folder": folder_width,
-            "status": status_width,
-            "images": images_width,
-        }
-        self.table_width = sum(self.column_widths.values()) + gap_width
-        self._set_horizontal_scrollbar_visible(self.table_width > available + 1)
-        self._apply_table_size(visible_height)
-
-    def _set_vertical_scrollbar_visible(self, visible):
-        try:
-            managed = bool(self.table_yscroll.winfo_manager())
-            changed = False
-            if visible and not managed:
-                self.table_yscroll.grid(row=0, column=1, sticky="ns")
-                changed = True
-            elif not visible and managed:
-                self.table_yscroll.grid_remove()
-                self.table_canvas.yview_moveto(0)
-                changed = True
-            if changed and self._table_resize_after_id is None:
-                self._table_resize_after_id = self.after_idle(self._fit_table_to_window)
-        except tk.TclError:
-            pass
-
-    def _set_horizontal_scrollbar_visible(self, visible):
-        try:
-            managed = bool(self.table_xscroll.winfo_manager())
-            if visible and not managed:
-                self.table_xscroll.grid(row=1, column=0, sticky="ew")
-            elif not visible and managed:
-                self.table_xscroll.grid_remove()
-        except tk.TclError:
-            pass
-
-    def _apply_table_size(self, visible_height=None):
-        try:
-            if visible_height is None:
-                visible_height = max(1, int(self.table_canvas.winfo_height()) - 2)
-        except tk.TclError:
-            return
-
-        for key, cell in self.header_cells.items():
-            try:
-                cell.configure(width=self._column_width(key))
-            except tk.TclError:
-                pass
-        for row in self.rows:
-            for key, cell in (row.get("cells") or {}).items():
-                try:
-                    cell.configure(width=self._column_width(key))
-                except tk.TclError:
-                    pass
-        if self.empty_message_cell is not None:
-            try:
-                self.empty_message_cell.configure(width=self.table_width)
-            except tk.TclError:
-                pass
-        content_overflows = self._update_table_filler(visible_height)
-        self._set_vertical_scrollbar_visible(content_overflows)
-        try:
-            table_height = max(visible_height, self._table_content_height())
-            self.table_canvas.itemconfigure(
-                self.table_window,
-                width=self.table_width,
-                height=table_height,
-            )
-        except tk.TclError:
-            return
-        self._refresh_scrollregion()
-
-    def _table_content_height(self):
-        try:
-            self.table_inner.update_idletasks()
-            return int(self.table_inner.grid_bbox()[3])
-        except tk.TclError:
-            return 0
-
-    def _visible_body_row_count(self):
-        if self.rows:
-            return len(self.rows)
-        return 1 if self.empty_message_cell is not None else 0
-
-    def _update_table_filler(self, viewport_height):
-        for cell in self.table_filler_cells:
-            try:
-                cell.destroy()
-            except tk.TclError:
-                pass
-        self.table_filler_cells = []
-
-        content_rows = self._visible_body_row_count()
-        used_height = self._table_content_height()
-        filler_height = max(0, int(viewport_height) - used_height - 1)
-        content_overflows = used_height > int(viewport_height) + 1
-        if filler_height <= 0:
-            return content_overflows
-
-        filler_row = content_rows + 1
-        for col, (key, _title, _width, _anchor) in enumerate(self.TABLE_COLUMNS):
-            cell = self._make_table_cell(
-                self.table_inner,
-                row=filler_row,
-                col=col,
-                width=self._column_width(key),
-                height=filler_height,
-                bg=self.ROW_BG,
-            )
-            self.table_filler_cells.append(cell)
-        return content_overflows
-
-    def _refresh_scrollregion(self):
-        try:
-            self.table_canvas.configure(scrollregion=self.table_canvas.bbox("all"))
-        except tk.TclError:
-            pass
-
-    def _table_xview(self, *args):
-        self.table_canvas.xview(*args)
-
-    def _on_table_mousewheel(self, event):
-        if event.state & 0x0001:
-            self._table_xview("scroll", -1 * int(event.delta / 120), "units")
-        else:
-            self.table_canvas.yview_scroll(-1 * int(event.delta / 120), "units")
-        return "break"
+        ttk.Button(run_box, text="Start", command=self._run_selected).pack(side="left")
+        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="right")
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -680,11 +430,20 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         messagebox.showerror("Batch Step 2", f"Could not scan folders.\n{exc}", parent=self)
 
     def _scan_done(self, rows, scanned, skipped):
-        self._clear_table_body()
         self.rows = rows
-        self.empty_message_cell = None
-        for idx, row in enumerate(rows):
-            self._add_row(idx, row)
+        for row in rows:
+            try:
+                folder_text = os.path.relpath(row["folder"], self.root_dir)
+                if folder_text == ".":
+                    folder_text = self.root_dir
+            except ValueError:
+                folder_text = row["folder"]
+            row["values"] = {
+                "folder": folder_text,
+                "status": row.get("status", ""),
+                "images": str(len(row.get("image_paths") or [])),
+            }
+        self.table.set_rows(rows)
 
         ready = sum(1 for row in rows if not row["locked"])
         already_segmented = sum(1 for row in rows if row["locked"])
@@ -693,132 +452,10 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             f"Scanned {scanned} folder(s). Found {ready} ready folder(s) with {ready_images} image(s) to segment, "
             f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img or Dark.img."
         )
-        if not rows:
-            self._add_empty_message()
-        self._refresh_select_all_ready_checkbox()
-        self._fit_table_to_window()
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
 
-    def _clear_table_body(self):
-        for child in self.table_inner.winfo_children():
-            try:
-                row = int(child.grid_info().get("row", 0))
-            except (TypeError, ValueError):
-                row = 0
-            if row > 0:
-                child.destroy()
-        self.table_filler_cells = []
-
-    def _add_empty_message(self):
-        cell = self._make_table_cell(
-            self.table_inner,
-            row=1,
-            col=0,
-            width=self.table_width,
-            height=self.ROW_HEIGHT,
-            bg=self.ROW_BG,
-        )
-        cell.grid(columnspan=len(self.TABLE_COLUMNS))
-        self.empty_message_cell = cell
-        tk.Label(
-            cell,
-            text="No folders with Light.img or Dark.img were found.",
-            anchor="w",
-            bg=self.ROW_BG,
-            fg=self.MUTED_COLOR,
-            padx=10,
-        ).pack(fill="both", expand=True)
-
-    def _add_row(self, idx, row):
-        row["var"] = tk.BooleanVar(value=bool(row.get("include")))
-        row["widgets"] = {}
-        row["cells"] = {}
-        bg = self.ROW_BG if idx % 2 == 0 else self.ALT_ROW_BG
-
-        try:
-            folder_text = os.path.relpath(row["folder"], self.root_dir)
-            if folder_text == ".":
-                folder_text = self.root_dir
-        except ValueError:
-            folder_text = row["folder"]
-
-        values = {
-            "folder": folder_text,
-            "status": row.get("status", ""),
-            "images": str(len(row.get("image_paths") or [])),
-        }
-
-        for col, (key, _title, width, anchor) in enumerate(self.TABLE_COLUMNS):
-            cell = self._make_table_cell(
-                self.table_inner,
-                row=idx + 1,
-                col=col,
-                width=self._column_width(key),
-                height=self.ROW_HEIGHT,
-                bg=bg,
-            )
-            row["cells"][key] = cell
-            if key == "select":
-                checkbutton = ttk.Checkbutton(
-                    cell,
-                    variable=row["var"],
-                    command=lambda item=row: self._on_row_checkbutton_toggled(item),
-                )
-                checkbutton.pack(anchor="center", expand=True)
-                if row.get("locked"):
-                    checkbutton.state(["disabled"])
-                row["widgets"]["checkbutton"] = checkbutton
-                continue
-
-            label = tk.Label(
-                cell,
-                text=values.get(key, ""),
-                anchor=anchor,
-                bg=bg,
-                fg=self.MUTED_COLOR if row.get("locked") else self.TEXT_COLOR,
-                padx=8,
-            )
-            label.pack(fill="both", expand=True)
-            row["widgets"][key] = label
-
-    def _refresh_row(self, row):
-        if "var" in row:
-            row["var"].set(bool(row.get("include")))
-        widgets = row.get("widgets") or {}
-        checkbutton = widgets.get("checkbutton")
-        if checkbutton is not None:
-            checkbutton.state(["disabled"] if row.get("locked") else ["!disabled"])
-
-    def _on_row_checkbutton_toggled(self, row):
-        if row.get("locked"):
-            row["include"] = False
-            if "var" in row:
-                row["var"].set(False)
-            return
-        row["include"] = bool(row.get("var").get()) if row.get("var") is not None else False
-        self._refresh_select_all_ready_checkbox()
-
-    def _toggle_all_ready(self):
-        self._set_all_ready_selection(bool(self.select_all_ready_var.get()))
-
-    def _set_all_ready_selection(self, include):
-        for row in self.rows:
-            if not row["locked"]:
-                row["include"] = bool(include)
-                self._refresh_row(row)
-        self._refresh_select_all_ready_checkbox()
-
-    def _refresh_select_all_ready_checkbox(self):
-        ready_rows = [row for row in self.rows if not row["locked"]]
-        if not ready_rows:
-            self.select_all_ready_var.set(False)
-            self.select_all_ready_check.state(["disabled"])
-            return
-        self.select_all_ready_check.state(["!disabled"])
-        self.select_all_ready_var.set(all(bool(row.get("include")) for row in ready_rows))
-
     def _run_selected(self):
-        rows = [row for row in self.rows if row["include"] and not row["locked"]]
+        rows = self.table.selected_rows()
         if not rows:
             messagebox.showwarning("Batch Step 2", "Select at least one ready folder.", parent=self)
             return

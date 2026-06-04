@@ -38,6 +38,7 @@ except Exception:
     pyreadr = None
 
 from aidas.utils.io_utils import read_analyze, write_analyze
+from aidas.utils.batch_ui import BatchTable
 from aidas.utils.step3_image_utils import (
     make_comparison_preview_image as _make_comparison_preview_image,
     make_find_vertex_preview_image as _make_find_vertex_preview_image,
@@ -2280,12 +2281,27 @@ class RSetupWizard(ttk.Frame):
 class RBatchSelectionPanel(ttk.Frame):
     """Embedded panel for selecting subfolders to run through the Step 3 R script."""
 
+    TABLE_COLUMNS = (
+        ("select", "", 42, "center"),
+        ("folder", "Folder", 560, "w"),
+        ("status", "Status", 380, "w"),
+        ("inputs", "Inputs", 92, "center"),
+    )
+    COLUMN_MIN_WIDTHS = {
+        "select": 42,
+        "folder": 320,
+        "status": 96,
+        "inputs": 64,
+    }
+    COLUMN_MAX_WIDTHS = {
+        "inputs": 92,
+    }
+
     def __init__(self, step_frame, parent, root_dir):
         super().__init__(parent)
         self.step_frame = step_frame
         self.root_dir = Path(root_dir)
         self.rows = []
-        self.row_widgets = []
 
         self._build_ui()
         self._start_scan()
@@ -2294,55 +2310,41 @@ class RBatchSelectionPanel(ttk.Frame):
         wrapper = ttk.Frame(self, padding=12)
         wrapper.pack(fill="both", expand=True)
 
-        ttk.Label(wrapper, text="Batch Step 3 R Processing", style="WizardTitle.TLabel").pack(anchor="w")
+        ttk.Label(wrapper, text="Batch Step 3 R Processing", font=("", 12, "bold")).pack(anchor="w")
         ttk.Label(
             wrapper,
             text=(
                 "AIDaS will search the selected folder and subfolders for complete Step 3 inputs. "
                 "Folders containing existing RData are shown as skipped and will not be processed."
             ),
-            style="WizardSubtitle.TLabel",
             wraplength=760,
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
 
+        self.table = BatchTable(
+            wrapper,
+            columns=self.TABLE_COLUMNS,
+            min_widths=self.COLUMN_MIN_WIDTHS,
+            max_widths=self.COLUMN_MAX_WIDTHS,
+            select_column="select",
+            stretch_column="folder",
+            empty_message="No folders with complete Step 3 inputs were found.",
+        )
+        self.table.pack(fill="both", expand=True)
+
         top = ttk.Frame(wrapper)
         top.pack(fill="x", pady=(0, 8))
         self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
-        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
-
-        list_frame = ttk.Frame(wrapper)
-        list_frame.pack(fill="both", expand=True)
-        header = ttk.Frame(list_frame)
-        header.pack(fill="x", padx=(0, 14), pady=(0, 2))
-        ttk.Label(header, text="Select", width=8, anchor="center").pack(side="left")
-        ttk.Label(header, text="Folder").pack(side="left", fill="x", expand=True)
-        ttk.Label(header, text="Status", width=24).pack(side="right")
-
-        self.list_canvas = tk.Canvas(list_frame, highlightthickness=0, borderwidth=0)
-        yscroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.list_canvas.yview)
-        self.list_canvas.configure(yscrollcommand=yscroll.set)
-        self.row_container = ttk.Frame(self.list_canvas)
-        self.row_window = self.list_canvas.create_window((0, 0), window=self.row_container, anchor="nw")
-        self.row_container.bind(
-            "<Configure>",
-            lambda _event: self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all")),
+        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(
+            side="left",
+            fill="x",
+            expand=True,
         )
-        self.list_canvas.bind(
-            "<Configure>",
-            lambda event: self.list_canvas.itemconfigure(self.row_window, width=event.width),
-        )
-        self.list_canvas.pack(side="left", fill="both", expand=True)
-        yscroll.pack(side="right", fill="y")
-
-        controls = ttk.Frame(wrapper)
-        controls.pack(fill="x", pady=(10, 0))
-        ttk.Button(controls, text="Select All Ready", command=self._select_all_ready).pack(side="left", padx=(0, 4))
-        ttk.Button(controls, text="Deselect All", command=self._deselect_all).pack(side="left")
 
         run_box = ttk.Frame(wrapper)
         run_box.pack(fill="x", pady=(10, 0))
-        ttk.Label(run_box, text="Parallel folders").pack(side="left")
+        ttk.Button(run_box, text="Start", command=self._run_selected).pack(side="left")
+        ttk.Label(run_box, text="Batch Size:").pack(side="left", padx=(12, 0))
         max_workers = max(1, min(8, (os.cpu_count() or 2) - 1))
         self.workers_var = tk.IntVar(value=min(4, max_workers))
         self.workers_spin = ttk.Spinbox(
@@ -2352,9 +2354,14 @@ class RBatchSelectionPanel(ttk.Frame):
             textvariable=self.workers_var,
             width=5,
         )
-        self.workers_spin.pack(side="left", padx=(6, 12))
-        ttk.Button(run_box, text="Run Selected Folders", command=self._run_selected).pack(side="left")
-        ttk.Button(run_box, text="Back to Preview", command=lambda: self.step_frame._render()).pack(side="right")
+        self.workers_spin.pack(side="left", padx=(6, 0))
+        ttk.Label(
+            run_box,
+            text=f"(1–{max_workers} based on {os.cpu_count() or 2} CPU core{'s' if (os.cpu_count() or 2) != 1 else ''})",
+            foreground="#666666",
+            font=("", 8),
+        ).pack(side="left", padx=(6, 12))
+        ttk.Button(run_box, text="Cancel", command=lambda: self.step_frame._render()).pack(side="right")
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -2375,12 +2382,23 @@ class RBatchSelectionPanel(ttk.Frame):
                     continue
                 has_rdata = self.step_frame._folder_has_r_data(folder)
                 status = "Skipped: RData exists" if has_rdata else "Ready"
+                try:
+                    folder_text = str(folder.relative_to(self.root_dir))
+                    if folder_text == ".":
+                        folder_text = str(self.root_dir)
+                except ValueError:
+                    folder_text = str(folder)
                 rows.append(
                     {
                         "folder": folder,
                         "include": not has_rdata,
                         "locked": has_rdata,
                         "status": status,
+                        "values": {
+                            "folder": folder_text,
+                            "status": status,
+                            "inputs": "4",
+                        },
                     }
                 )
         except Exception as exc:
@@ -2395,11 +2413,7 @@ class RBatchSelectionPanel(ttk.Frame):
 
     def _scan_done(self, rows, scanned, missing):
         self.rows = rows
-        self.row_widgets.clear()
-        for child in self.row_container.winfo_children():
-            child.destroy()
-        for idx, row in enumerate(rows):
-            self._add_row_widget(idx, row)
+        self.table.set_rows(rows)
         ready = sum(1 for row in rows if not row["locked"])
         skipped = sum(1 for row in rows if row["locked"])
         self.summary_var.set(
@@ -2411,55 +2425,8 @@ class RBatchSelectionPanel(ttk.Frame):
         self.workers_var.set(min(4, max_workers))
         self.step_frame.status_var.set("Batch scan complete. Select folders to process.")
 
-    def _add_row_widget(self, idx, row):
-        var = tk.BooleanVar(value=bool(row["include"]))
-        row["var"] = var
-        frame = ttk.Frame(self.row_container)
-        frame.pack(fill="x", pady=1)
-
-        check = ttk.Checkbutton(
-            frame,
-            variable=var,
-            command=lambda item=row: self._sync_row_selection(item),
-        )
-        check.pack(side="left", padx=(16, 18))
-        if row["locked"]:
-            check.configure(state="disabled")
-
-        try:
-            folder_text = str(row["folder"].relative_to(self.root_dir))
-            if folder_text == ".":
-                folder_text = str(self.root_dir)
-        except ValueError:
-            folder_text = str(row["folder"])
-
-        ttk.Label(frame, text=folder_text, wraplength=520, justify="left").pack(side="left", fill="x", expand=True)
-        ttk.Label(frame, text=row["status"], width=24).pack(side="right", padx=(8, 0))
-        self.row_widgets.append((frame, check))
-
-    def _sync_row_selection(self, row):
-        if row["locked"]:
-            row["include"] = False
-            row["var"].set(False)
-            return
-        row["include"] = bool(row["var"].get())
-
-    def _select_all_ready(self):
-        for row in self.rows:
-            if not row["locked"]:
-                row["include"] = True
-                if "var" in row:
-                    row["var"].set(True)
-
-    def _deselect_all(self):
-        for row in self.rows:
-            if not row["locked"]:
-                row["include"] = False
-                if "var" in row:
-                    row["var"].set(False)
-
     def _run_selected(self):
-        folders = [row["folder"] for row in self.rows if row["include"] and not row["locked"]]
+        folders = [row["folder"] for row in self.table.selected_rows()]
         if not folders:
             messagebox.showwarning("Batch Step 3", "Select at least one ready folder.", parent=self)
             return
@@ -2473,6 +2440,20 @@ class RBatchSelectionPanel(ttk.Frame):
 class RBatchRunPanel(ttk.Frame):
     """Embedded progress panel for concurrent folder-level R script runs."""
 
+    TABLE_COLUMNS = (
+        ("folder", "Folder", 560, "w"),
+        ("status", "Status", 380, "w"),
+        ("progress", "Progress", 92, "center"),
+    )
+    COLUMN_MIN_WIDTHS = {
+        "folder": 320,
+        "status": 160,
+        "progress": 76,
+    }
+    COLUMN_MAX_WIDTHS = {
+        "progress": 92,
+    }
+
     def __init__(self, step_frame, parent, folders, workers):
         super().__init__(parent)
         self.step_frame = step_frame
@@ -2484,37 +2465,44 @@ class RBatchRunPanel(ttk.Frame):
     def _build_ui(self):
         wrapper = ttk.Frame(self, padding=12)
         wrapper.pack(fill="both", expand=True)
-        ttk.Label(wrapper, text="Running Batch Step 3", style="WizardTitle.TLabel").pack(anchor="w")
+        ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            wrapper,
+            text="AIDaS is running the selected Step 3 R script folders. Progress and logs update as each folder finishes.",
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 10))
+
+        rows = []
+        for folder in self.folders:
+            row = {
+                "folder": folder,
+                "values": {
+                    "folder": str(folder),
+                    "status": "Queued",
+                    "progress": "0%",
+                },
+            }
+            rows.append(row)
+            self.row_by_folder[str(folder)] = row
+
+        self.table = BatchTable(
+            wrapper,
+            columns=self.TABLE_COLUMNS,
+            min_widths=self.COLUMN_MIN_WIDTHS,
+            max_widths=self.COLUMN_MAX_WIDTHS,
+            stretch_column="folder",
+            empty_message="No folders are queued.",
+        )
+        self.table.pack(fill="both", expand=True)
+        self.table.set_rows(rows)
+
         self.summary_var = tk.StringVar(
             value=f"Running {len(self.folders)} folder(s) with up to {self.workers} parallel R process(es)."
         )
-        ttk.Label(wrapper, textvariable=self.summary_var, style="WizardSubtitle.TLabel", wraplength=760).pack(
+        ttk.Label(wrapper, textvariable=self.summary_var, wraplength=760, justify="left").pack(
             anchor="w", pady=(4, 10)
         )
-
-        table_frame = ttk.Frame(wrapper)
-        table_frame.pack(fill="both", expand=True)
-        self.tree = ttk.Treeview(
-            table_frame,
-            columns=("folder", "status", "progress"),
-            show="headings",
-            selectmode="browse",
-        )
-        self.tree.heading("folder", text="Folder")
-        self.tree.heading("status", text="Status")
-        self.tree.heading("progress", text="Progress")
-        self.tree.column("folder", width=470, stretch=True)
-        self.tree.column("status", width=230, stretch=False)
-        self.tree.column("progress", width=90, stretch=False, anchor="center")
-        yscroll = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=yscroll.set)
-        self.tree.pack(side="left", fill="both", expand=True)
-        yscroll.pack(side="right", fill="y")
-
-        for idx, folder in enumerate(self.folders):
-            iid = str(idx)
-            self.row_by_folder[str(folder)] = iid
-            self.tree.insert("", "end", iid=iid, values=(str(folder), "Queued", "0%"))
 
         log_frame = ttk.LabelFrame(wrapper, text="Batch log")
         log_frame.pack(fill="both", expand=False, pady=(10, 0))
@@ -2525,15 +2513,15 @@ class RBatchRunPanel(ttk.Frame):
         log_scroll.pack(side="right", fill="y")
 
     def update_folder(self, folder, status=None, progress=None):
-        iid = self.row_by_folder.get(str(folder))
-        if iid is None:
+        row = self.row_by_folder.get(str(folder))
+        if row is None:
             return
-        current = list(self.tree.item(iid, "values"))
+        values = dict(row.get("values") or {})
         if status is not None:
-            current[1] = status
+            values["status"] = status
         if progress is not None:
-            current[2] = f"{int(max(0, min(100, float(progress))))}%"
-        self.tree.item(iid, values=current)
+            values["progress"] = f"{int(max(0, min(100, float(progress))))}%"
+        self.table.update_row(row, values=values)
 
     def set_summary(self, text):
         self.summary_var.set(text)
