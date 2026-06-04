@@ -405,15 +405,6 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
 
-        top = ttk.Frame(wrapper)
-        top.pack(fill="x", pady=(0, 8))
-        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
-        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(
-            side="left",
-            fill="x",
-            expand=True,
-        )
-
         self.table_outer = ttk.Frame(wrapper)
         self.table_outer.pack(fill="both", expand=True)
         self.table_canvas = tk.Canvas(
@@ -440,9 +431,18 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.table_canvas.bind("<Configure>", self._on_table_canvas_configure, add="+")
         self.table_canvas.bind("<MouseWheel>", self._on_table_mousewheel, add="+")
 
+        top = ttk.Frame(wrapper)
+        top.pack(fill="x", pady=(0, 8))
+        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(
+            side="left",
+            fill="x",
+            expand=True,
+        )
+
         run_box = ttk.Frame(wrapper)
         run_box.pack(fill="x", pady=(10, 0))
-        ttk.Button(run_box, text="Run Selected Folders", command=self._run_selected).pack(side="left")
+        ttk.Button(run_box, text="Start Segmentation", command=self._run_selected).pack(side="left")
         ttk.Button(run_box, text="Exit", command=self._cancel).pack(side="right")
         self.after_idle(self._fit_table_to_window)
 

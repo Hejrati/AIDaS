@@ -27,6 +27,8 @@ except Exception:
 class ImageCanvas(ttk.Frame):
     """Zoomable image canvas with rectangle ROI, line tracing, and vertical marker."""
 
+    RESIZE_REDRAW_DEBOUNCE_MS = 100
+
     # ------------------------------------------------------------------ init
     def __init__(
         self,
@@ -47,11 +49,14 @@ class ImageCanvas(ttk.Frame):
 
         # Image state
         self._data = None          # numpy (H, W) original
+        self._display_data = None  # uint8 display-normalized cache
         self._photo = None         # current PhotoImage
         self._img_id = None        # canvas item id
         self._img_offset_x = 0.0   # displayed image left on canvas coordinates
         self._img_offset_y = 0.0   # displayed image top on canvas coordinates
         self._base_size = None     # (data_id, zoom, canvas_w, canvas_h)
+        self._draw_region = None
+        self._resize_redraw_after_id = None
 
         # Zoom
         self._zoom = 1.0
@@ -85,6 +90,8 @@ class ImageCanvas(ttk.Frame):
         self._drag_anchor = None   # (canvas_x, canvas_y)
         self._drag_roi0 = None    # ROI at start of drag
         self._is_panning = False
+        self._last_cursor = None
+        self._last_mouse_sample = None
 
         self._build_widgets()
         self._bind_events()
@@ -120,6 +127,7 @@ class ImageCanvas(ttk.Frame):
         """Set an image (H, W) numpy array (any dtype)."""
         if data is None:
             self._data = None
+            self._display_data = None
         else:
             arr = np.asarray(data)
             if arr.ndim != 2:
@@ -128,6 +136,7 @@ class ImageCanvas(ttk.Frame):
             if arr.dtype.byteorder not in ("=", "|"):
                 arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
             self._data = np.ascontiguousarray(arr)
+            self._display_data = np.ascontiguousarray(self._to_display(self._data))
         self._active_line.clear()
         self._line_overlays.clear()
         self._line_preview = None
@@ -286,21 +295,19 @@ class ImageCanvas(ttk.Frame):
         return d.astype(np.uint8)
 
     def _redraw(self):
+        self._cancel_resize_redraw()
         self.canvas.delete("all")
         self._roi_items.clear()
         self._img_id = None
         if self._data is None:
             return
-        disp = self._to_display(self._data)
-        ih, iw = disp.shape[:2]
-        zw, zh = max(1, int(iw * self._zoom)), max(1, int(ih * self._zoom))
-        self.update_idletasks()
-        cw = max(self.canvas.winfo_width(), 1)
-        ch = max(self.canvas.winfo_height(), 1)
-        draw_w = max(zw, cw)
-        draw_h = max(zh, ch)
-        self._img_offset_x = (draw_w - zw) / 2.0
-        self._img_offset_y = (draw_h - zh) / 2.0
+        disp = self._display_data
+        if disp is None:
+            disp = np.ascontiguousarray(self._to_display(self._data))
+            self._display_data = disp
+        zw, zh, draw_w, draw_h, offset_x, offset_y = self._display_geometry(disp)
+        self._img_offset_x = offset_x
+        self._img_offset_y = offset_y
         pil = Image.fromarray(disp, "L").resize((zw, zh), RESAMPLE_NEAREST)
         self._photo = ImageTk.PhotoImage(pil)
         self._img_id = self.canvas.create_image(
@@ -310,8 +317,45 @@ class ImageCanvas(ttk.Frame):
             image=self._photo,
         )
         self.canvas.configure(scrollregion=(0, 0, draw_w, draw_h))
+        self._draw_region = (0, 0, draw_w, draw_h)
         self._base_size = (id(self._data), self._zoom, self.canvas.winfo_width(), self.canvas.winfo_height())
         self._redraw_overlays()
+
+    def _display_geometry(self, disp=None):
+        if disp is None:
+            disp = self._display_data
+        if disp is None:
+            disp = self._to_display(self._data)
+        ih, iw = disp.shape[:2]
+        zw = max(1, int(iw * self._zoom))
+        zh = max(1, int(ih * self._zoom))
+        cw = max(self.canvas.winfo_width(), 1)
+        ch = max(self.canvas.winfo_height(), 1)
+        draw_w = max(zw, cw)
+        draw_h = max(zh, ch)
+        offset_x = (draw_w - zw) / 2.0
+        offset_y = (draw_h - zh) / 2.0
+        return zw, zh, draw_w, draw_h, offset_x, offset_y
+
+    def _refresh_viewport_geometry(self):
+        if self._data is None or self._img_id is None:
+            self._redraw()
+            return
+        _zw, _zh, draw_w, draw_h, offset_x, offset_y = self._display_geometry()
+        draw_region = (0, 0, draw_w, draw_h)
+        changed = (
+            self._draw_region != draw_region
+            or self._img_offset_x != offset_x
+            or self._img_offset_y != offset_y
+        )
+        self._img_offset_x = offset_x
+        self._img_offset_y = offset_y
+        self.canvas.coords(self._img_id, offset_x, offset_y)
+        self.canvas.configure(scrollregion=draw_region)
+        self._draw_region = draw_region
+        self._base_size = (id(self._data), self._zoom, self.canvas.winfo_width(), self.canvas.winfo_height())
+        if changed:
+            self._redraw_overlays()
 
     def _redraw_overlays(self):
         if self._data is None or self._img_id is None:
@@ -604,10 +648,48 @@ class ImageCanvas(ttk.Frame):
         self._zoom = max(0.02, min(30.0, self._zoom * factor))
         self._redraw()
 
-    def _on_canvas_resize(self, _event):
+    def _on_canvas_resize(self, event):
         # Keep image centered whenever the viewport size changes.
-        if self._data is not None:
-            self._redraw()
+        if self._data is None:
+            return
+        width = max(1, int(getattr(event, "width", self.canvas.winfo_width())))
+        height = max(1, int(getattr(event, "height", self.canvas.winfo_height())))
+        if not self._canvas_size_changed(width, height):
+            self._cancel_resize_redraw()
+            return
+        self._schedule_resize_redraw()
+
+    def _canvas_size_changed(self, width=None, height=None):
+        if self._base_size is None:
+            return True
+        if width is None:
+            width = max(1, int(self.canvas.winfo_width()))
+        if height is None:
+            height = max(1, int(self.canvas.winfo_height()))
+        _data_id, _zoom, last_width, last_height = self._base_size
+        return int(last_width) != int(width) or int(last_height) != int(height)
+
+    def _schedule_resize_redraw(self):
+        self._cancel_resize_redraw()
+        self._resize_redraw_after_id = self.after(
+            self.RESIZE_REDRAW_DEBOUNCE_MS,
+            self._run_resize_redraw,
+        )
+
+    def _cancel_resize_redraw(self):
+        if self._resize_redraw_after_id is None:
+            return
+        try:
+            self.after_cancel(self._resize_redraw_after_id)
+        except tk.TclError:
+            pass
+        self._resize_redraw_after_id = None
+
+    def _run_resize_redraw(self):
+        self._resize_redraw_after_id = None
+        if self._data is None or not self._canvas_size_changed():
+            return
+        self._refresh_viewport_geometry()
 
     def _on_press(self, event):
         if self._vertical_line_on:
@@ -709,7 +791,7 @@ class ImageCanvas(ttk.Frame):
             return
         self._is_panning = True
         self.canvas.scan_mark(event.x, event.y)
-        self.canvas.configure(cursor="fleur")
+        self._set_canvas_cursor("fleur")
 
     def _on_pan_motion(self, event):
         if not self._is_panning:
@@ -718,6 +800,12 @@ class ImageCanvas(ttk.Frame):
 
     def _on_pan_end(self, _event):
         self._is_panning = False
+
+    def _set_canvas_cursor(self, cursor):
+        if self._last_cursor == cursor:
+            return
+        self.canvas.configure(cursor=cursor)
+        self._last_cursor = cursor
 
     def _on_hover(self, event):
         if self._data is None:
@@ -736,21 +824,23 @@ class ImageCanvas(ttk.Frame):
         ih, iw = self._data.shape[:2]
         if 0 <= int(ix) < iw and 0 <= int(iy) < ih:
             val = self._data[int(iy), int(ix)]
-            if self._cb_mouse:
+            sample = (int(ix), int(iy), val)
+            if self._cb_mouse and sample != self._last_mouse_sample:
+                self._last_mouse_sample = sample
                 self._cb_mouse(int(ix), int(iy), val)
         # Cursor shape
         if self._is_panning:
-            self.canvas.configure(cursor="fleur")
+            self._set_canvas_cursor("fleur")
             return
         if self._vertical_line_on:
-            self.canvas.configure(cursor="sb_h_double_arrow")
+            self._set_canvas_cursor("sb_h_double_arrow")
             return
         if self._line_on:
-            self.canvas.configure(cursor="crosshair")
+            self._set_canvas_cursor("crosshair")
             return
         if self._roi_on:
             h = self._hit(cx, cy)
             cursors = {"tl": "top_left_corner", "tr": "top_right_corner",
                        "bl": "bottom_left_corner", "br": "bottom_right_corner",
                        "move": "fleur"}
-            self.canvas.configure(cursor=cursors.get(h, "crosshair"))
+            self._set_canvas_cursor(cursors.get(h, "crosshair"))
