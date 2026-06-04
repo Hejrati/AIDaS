@@ -28,10 +28,9 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 import os
+import sys
 
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
+from PIL import Image, ImageOps, ImageTk
 
 try:
     import pyreadr
@@ -39,6 +38,13 @@ except Exception:
     pyreadr = None
 
 from aidas.utils.io_utils import read_analyze, write_analyze
+from aidas.utils.step3_image_utils import (
+    make_comparison_preview_image as _make_comparison_preview_image,
+    make_find_vertex_preview_image as _make_find_vertex_preview_image,
+    make_main_results_summary_image as _make_main_results_summary_image,
+    placeholder_image as _placeholder_image,
+    save_profile_plot as _save_profile_plot,
+)
 from aidas.utils.ui_utils import SidebarStepFrame
 from main import (
     build_fovea_normalized_strip as _main_build_fovea_normalized_strip,
@@ -493,45 +499,6 @@ def _nanmean_axis0(arr):
     valid = counts > 0
     out[valid] = sums[valid] / counts[valid]
     return out
-
-
-def _save_profile_plot(profile_xy: np.ndarray, output_path: str, title: str, verticals=(), spline_xy: np.ndarray | None = None) -> None:
-    """Save a simple profile plot matching `main.py`'s `save_profile_plot`.
-
-    Args:
-        profile_xy: Nx2 array of (x, mean-intensity)
-        output_path: target PNG path
-        title: plot title
-        verticals: tuple of x positions to draw vertical lines
-        spline_xy: optional Nx2 array to plot spline markers
-    """
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    profile_xy = np.asarray(profile_xy)
-    if profile_xy.size == 0 or profile_xy.shape[0] == 0:
-        return
-
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-    ax.plot(profile_xy[:, 0], profile_xy[:, 1], color="black", linewidth=1.0)
-    if spline_xy is not None:
-        ax.plot(
-            spline_xy[:, 0],
-            spline_xy[:, 1],
-            linestyle="None",
-            marker="o",
-            markersize=6.0,
-            markerfacecolor="none",
-            markeredgecolor="black",
-        )
-    for x in verticals:
-        ax.axvline(float(x), color="red" if x == verticals[-1] and len(verticals) > 3 else "black", linewidth=1.0)
-    ax.set_title(title)
-    ax.set_xlabel("column")
-    ax.set_ylabel("mean intensity")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
 
 
 def _save_flat_checkpoint(results, output_dir):
@@ -2580,6 +2547,7 @@ class RBatchRunPanel(ttk.Frame):
 
 class Step3Frame(SidebarStepFrame):
     """Step 3 tab UI that runs this module's flattening pipeline inside the app."""
+    TUTORIAL_IMAGE_NAME = "step3_tutorial.png"
     PIXEL_WIDTH_UM = 3.89
     MIN_NEGATIVE_UM = 200.0
     MIN_POSITIVE_UM = 3000.0
@@ -2663,6 +2631,7 @@ class Step3Frame(SidebarStepFrame):
         self.results = None
         self.figure = None
         self.canvas = None
+        self._preview_photo = None
         self.r_setup_panel = None
         self.r_batch_panel = None
         self.r_batch_run_panel = None
@@ -3720,13 +3689,15 @@ class Step3Frame(SidebarStepFrame):
     def _clear_plot_holder(self):
         if self.canvas is not None:
             try:
-                self.canvas.get_tk_widget().destroy()
+                widget = self.canvas.get_tk_widget() if hasattr(self.canvas, "get_tk_widget") else self.canvas
+                widget.destroy()
             except Exception:
                 pass
             self.canvas = None
         for child in self.plot_holder.winfo_children():
             child.destroy()
         self.figure = None
+        self._preview_photo = None
         self.r_setup_panel = None
         self.r_batch_panel = None
         self.r_batch_run_panel = None
@@ -4265,118 +4236,120 @@ class Step3Frame(SidebarStepFrame):
                 f"Step 3 core processing completed, but final output generation failed.\n{more_error}",
             )
 
-    def _render(self):
-        if Figure is None or FigureCanvasTkAgg is None:
-            self.status_var.set("Matplotlib is unavailable in this environment; preview rendering is disabled.")
-            return
+    @staticmethod
+    def _resource_path(relative_path):
+        base_dir = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+        return base_dir / relative_path
 
-        view = self.view_var.get()
-        self._clear_plot_holder()
+    def _tutorial_asset_path(self):
+        return self._resource_path(Path("assets") / self.TUTORIAL_IMAGE_NAME)
 
-        if view != "Tutorial" and self.results is None:
-            self.figure = None
-            self.status_var.set("Step 3 inputs loaded. Run Step 3 to view results.")
-            return
+    def _display_preview_image(self, image, background="#ffffff"):
+        label = tk.Label(self.plot_holder, bg=background, borderwidth=0, highlightthickness=0)
+        label.pack(fill="both", expand=True)
+        source = image.convert("RGB")
 
-        if view == "Tutorial":
-            fig = Figure(figsize=(11, 7), dpi=100)
-            self._draw_step3_tutorial(fig)
-            self.info_var.set(self._tutorial_info_text())
-            self.status_var.set("Step 3 tutorial: fovea spacing and source-depth minimums.")
-            fig.tight_layout()
-            self.figure = fig
-            self.canvas = FigureCanvasTkAgg(fig, master=self.plot_holder)
-            self.canvas.draw()
-            self.canvas.get_tk_widget().pack(fill="both", expand=True)
-            return
+        def redraw(_event=None):
+            try:
+                if not label.winfo_exists():
+                    return
+                width = max(1, int(label.winfo_width()))
+                height = max(1, int(label.winfo_height()))
+            except tk.TclError:
+                return
+            if width <= 1 or height <= 1:
+                return
+            fitted = ImageOps.contain(source, (width, height), Image.Resampling.LANCZOS)
+            canvas = Image.new("RGB", (width, height), background)
+            canvas.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
+            self._preview_photo = ImageTk.PhotoImage(canvas)
+            try:
+                label.configure(image=self._preview_photo)
+            except tk.TclError:
+                return
 
-        slice_idx = int(self.slice_var.get())
-        max_slice = self.results['flattened_dark'].shape[0] - 1
-        slice_idx = max(0, min(slice_idx, max_slice))
+        label.bind("<Configure>", redraw, add="+")
+        self.canvas = label
+        self.after(0, redraw)
 
-        fig = Figure(figsize=(11, 7), dpi=100)
-
-        if view == "DARK_MARKED_find_vertex":
-            # Row layout: profile on top, image on bottom
-            ax1 = fig.add_subplot(211)
-            ax2 = fig.add_subplot(212)
-            gm = self.results['final_grand_mean']
-
-            # Top: intensity profile across columns
-            profile = np.nanmean(gm, axis=0)
-            xs = np.arange(1, profile.size + 1, dtype=np.float64)
-            ax1.plot(xs, profile, color="black", linewidth=1.0)
-            ax1.axvline(self.results['vertex'], color="r", linestyle="--", alpha=0.7)
-            ax1.set_title("Intensity Profile")
-            ax1.set_xlabel("column")
-            ax1.set_ylabel("mean intensity")
-            ax1.grid(True, alpha=0.3)
-
-            # Bottom: grand mean image displayed horizontally (columns left->right)
-            ax2.imshow(gm.T, cmap="gray", aspect="auto")
-            # Draw horizontal line across the image at the detected vertex (row corresponding to column)
-            ax2.axhline(self.results['vertex'], color="r", linestyle="--", alpha=0.7)
-            ax2.set_title("Final Grand Mean")
-            ax2.axis("off")
-        elif view == "DARK_MARKED_vertex":
-            vertex_plot_path = Path(self.output_sdb_dir or self.current_sdb_dir) / "DARK_MARKED_vertex.png"
-            ax = fig.add_subplot(111)
-            if vertex_plot_path.is_file():
-                ax.imshow(plt.imread(vertex_plot_path))
-                ax.set_title("DARK_MARKED_vertex")
-                ax.axis("off")
-            else:
-                ax.text(
-                    0.5,
-                    0.5,
-                    "DARK_MARKED_vertex.png not found",
-                    ha="center",
-                    va="center",
-                    transform=ax.transAxes,
-                )
-                ax.axis("off")
-                self.status_var.set(f"DARK_MARKED_vertex.png not found in {vertex_plot_path.parent}.")
+    def _render_tutorial(self):
+        tutorial_path = self._tutorial_asset_path()
+        if tutorial_path.is_file():
+            with Image.open(tutorial_path) as img:
+                image = img.copy()
         else:
-            ax1 = fig.add_subplot(211)
-            ax2 = fig.add_subplot(212)
-            # Original volumes are (y, x, slice); rotate 90° counter-clockwise for preview
-            ax1.imshow(np.rot90(self.processor.light[:, :, slice_idx], k=1), cmap="gray", aspect="auto")
-            ax1.set_title("Original LIGHT")
-            ax1.axis("off")
-            ax2.imshow(self.results['flattened_light'][slice_idx].T, cmap="gray", aspect="auto")
-            ax2.set_title("Flattened LIGHT")
-            ax2.axis("off")
+            image = _placeholder_image(
+                f"Missing Step 3 tutorial asset:\n{tutorial_path}",
+                size=(1800, 1100),
+                title="Step 3 Tutorial",
+            )
+            self.status_var.set(f"Step 3 tutorial image not found: {tutorial_path}")
+        self.info_var.set(self._tutorial_info_text())
+        if tutorial_path.is_file():
+            self.status_var.set("Step 3 tutorial: using static asset image.")
+        self._display_preview_image(image)
 
-        fig.tight_layout()
-        self.figure = fig
-        self.canvas = FigureCanvasTkAgg(fig, master=self.plot_holder)
-        self.canvas.draw()
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        self.info_var.set(
+    def _result_info_text(self):
+        return (
             f"flattened_dark: {self.results['flattened_dark'].shape}\n"
             f"flattened_light: {self.results['flattened_light'].shape}\n"
             f"final_grand_mean: {self.results['final_grand_mean'].shape}\n"
             f"vertex: {self.results['vertex']}"
         )
 
-    @staticmethod
-    def _dimension_arrow(ax, start, end, y, label, color="black", text_offset=0.04):
-        ax.annotate(
-            "",
-            xy=(end, y),
-            xytext=(start, y),
-            arrowprops={"arrowstyle": "<->", "color": color, "linewidth": 1.4},
-        )
-        ax.text(
-            (start + end) / 2.0,
-            y + text_offset,
-            label,
-            ha="center",
-            va="bottom",
-            fontsize=9,
-            color=color,
-        )
+    def _render(self):
+        view = self.view_var.get()
+        self._clear_plot_holder()
+
+        if view == "Tutorial":
+            self._render_tutorial()
+            return
+
+        if self.results is None:
+            self.status_var.set("Step 3 inputs loaded. Run Step 3 to view results.")
+            return
+
+        try:
+            slice_idx = int(self.slice_var.get())
+        except Exception:
+            slice_idx = 0
+        max_slice = self.results["flattened_dark"].shape[0] - 1
+        slice_idx = max(0, min(slice_idx, max_slice))
+
+        if view == "DARK_MARKED_find_vertex":
+            image = _make_find_vertex_preview_image(self.results)
+            self.status_var.set("Showing DARK_MARKED_find_vertex preview.")
+        elif view == "DARK_MARKED_vertex":
+            vertex_plot_path = Path(self.output_sdb_dir or self.current_sdb_dir) / "DARK_MARKED_vertex.png"
+            if vertex_plot_path.is_file():
+                with Image.open(vertex_plot_path) as img:
+                    image = img.copy()
+                self.status_var.set("Showing DARK_MARKED_vertex.png.")
+            else:
+                image = _placeholder_image(
+                    f"DARK_MARKED_vertex.png not found in:\n{vertex_plot_path.parent}",
+                    size=(1600, 1000),
+                    title="DARK_MARKED_vertex",
+                )
+                self.status_var.set(f"DARK_MARKED_vertex.png not found in {vertex_plot_path.parent}.")
+        else:
+            if self.processor is None or getattr(self.processor, "light", None) is None:
+                image = _placeholder_image(
+                    "The original LIGHT volume is not loaded.\nRun Step 3 from an input folder to view the comparison.",
+                    size=(1600, 1000),
+                    title="Comparison",
+                )
+                self.status_var.set("Comparison preview needs the original LIGHT volume.")
+            else:
+                image = _make_comparison_preview_image(
+                    self.processor.light,
+                    self.results["flattened_light"],
+                    slice_idx,
+                )
+                self.status_var.set(f"Showing Step 3 comparison for slice {slice_idx}.")
+        self._display_preview_image(image)
+
+        self.info_var.set(self._result_info_text())
 
     def _tutorial_info_text(self):
         left_px = int(np.ceil(self.MIN_NEGATIVE_UM / self.PIXEL_WIDTH_UM))
@@ -4396,170 +4369,6 @@ class Step3Frame(SidebarStepFrame):
             f"({safe_centered_side_px} px per side)\n"
             f"Height around RPE: >= {inward_px} px from top and >= {outward_px} px from bottom\n"
             f"Centered RPE height: >= {inward_px * 2} px"
-        )
-
-    def _draw_step3_tutorial(self, fig):
-        left_px = int(np.ceil(self.MIN_NEGATIVE_UM / self.PIXEL_WIDTH_UM))
-        right_px = int(np.ceil(self.MIN_POSITIVE_UM / self.PIXEL_WIDTH_UM))
-        source_width_px = int(np.ceil((self.MIN_NEGATIVE_UM + self.MIN_POSITIVE_UM) / self.PIXEL_WIDTH_UM))
-        centered_width_px = right_px * 2
-        safe_centered_side_px = right_px + self.CENTERED_FOVEA_GUARD_PX
-        safe_centered_width_px = safe_centered_side_px * 2
-        outward_px = int(np.ceil(self.MIN_DEPTH_OUTWARD_UM / self.PIXEL_WIDTH_UM))
-        inward_px = int(np.ceil(self.MIN_DEPTH_INWARD_UM / self.PIXEL_WIDTH_UM))
-        depth_px = int(np.ceil((self.MIN_DEPTH_OUTWARD_UM + self.MIN_DEPTH_INWARD_UM) / self.PIXEL_WIDTH_UM))
-        centered_height_px = inward_px * 2
-
-        ax1 = fig.add_subplot(311)
-        ax2 = fig.add_subplot(312)
-        ax3 = fig.add_subplot(313)
-
-        for ax in (ax1, ax2, ax3):
-            ax.set_xlim(0.0, 1.0)
-            ax.set_ylim(0.0, 1.0)
-            ax.axis("off")
-
-        x0, x1 = 0.06, 0.95
-        fovea_x = x0 + ((x1 - x0) * self.MIN_NEGATIVE_UM / (self.MIN_NEGATIVE_UM + self.MIN_POSITIVE_UM))
-        y = 0.44
-        ax1.set_title("Minimum RPE marker coverage for Step 3", loc="left", fontsize=12, fontweight="bold")
-        ax1.fill_between([x0, fovea_x], 0.34, 0.55, color="#f3b562", alpha=0.28)
-        ax1.fill_between([fovea_x, x1], 0.34, 0.55, color="#7cb7e8", alpha=0.24)
-        ax1.plot([x0, x1], [y, y], color="#a31d1d", linewidth=3.0)
-        ax1.plot([fovea_x, fovea_x], [0.22, 0.73], color="#1f5c99", linewidth=2.0)
-        ax1.scatter([fovea_x], [y], s=70, color="#1f5c99", zorder=3)
-        self._dimension_arrow(
-            ax1,
-            x0,
-            fovea_x,
-            0.72,
-            f"-200 um side >= {left_px} px",
-            color="#99621f",
-            text_offset=0.02,
-        )
-        self._dimension_arrow(
-            ax1,
-            fovea_x,
-            x1,
-            0.72,
-            f"+3000 um side >= {right_px} px",
-            color="#1f5c99",
-            text_offset=0.02,
-        )
-        ax1.text(fovea_x, 0.14, "fovea marker 243", ha="center", va="center", fontsize=9, color="#1f5c99")
-        ax1.text(x1, 0.25, "RPE marker 255", ha="right", va="center", fontsize=9, color="#a31d1d")
-        ax1.text(
-            0.5,
-            0.02,
-            f"Smallest useful marked-RPE length is about {source_width_px} input px "
-            f"({self.MIN_NEGATIVE_UM + self.MIN_POSITIVE_UM:g} um).",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-
-        x0, x1, fovea_x, y = 0.12, 0.88, 0.50, 0.48
-        minimum_left_x = fovea_x - ((fovea_x - x0) * right_px / safe_centered_side_px)
-        minimum_right_x = fovea_x + ((x1 - fovea_x) * right_px / safe_centered_side_px)
-        ax2.set_title("If the fovea is centered in the image", loc="left", fontsize=12, fontweight="bold")
-        ax2.fill_between([x0, minimum_left_x], 0.35, 0.59, color="#f3b562", alpha=0.5)
-        ax2.fill_between([minimum_left_x, minimum_right_x], 0.35, 0.59, color="#d9d9d9", alpha=0.55)
-        ax2.fill_between([minimum_right_x, x1], 0.35, 0.59, color="#f3b562", alpha=0.5)
-        ax2.plot([minimum_left_x, minimum_left_x], [0.33, 0.61], color="#99621f", linewidth=1.0, linestyle="--")
-        ax2.plot([minimum_right_x, minimum_right_x], [0.33, 0.61], color="#99621f", linewidth=1.0, linestyle="--")
-        ax2.plot([x0, x1], [y, y], color="#a31d1d", linewidth=3.0)
-        ax2.plot([fovea_x, fovea_x], [0.27, 0.61], color="#1f5c99", linewidth=2.0)
-        ax2.scatter([fovea_x], [y], s=70, color="#1f5c99", zorder=3)
-        self._dimension_arrow(
-            ax2,
-            x0,
-            x1,
-            0.84,
-            f"recommended full image width = {safe_centered_width_px} px",
-            color="#333333",
-            text_offset=0.015,
-        )
-        self._dimension_arrow(ax2, x0, minimum_left_x, 0.66, "100 px", color="#99621f", text_offset=0.015)
-        self._dimension_arrow(
-            ax2,
-            minimum_left_x,
-            minimum_right_x,
-            0.66,
-            f"actual minimum = {centered_width_px} px",
-            color="#444444",
-            text_offset=0.015,
-        )
-        self._dimension_arrow(ax2, minimum_right_x, x1, 0.66, "100 px", color="#99621f", text_offset=0.015)
-        ax2.text(
-            0.5,
-            0.22,
-            "gold = guard area, gray = actual minimum width",
-            ha="center",
-            va="center",
-            fontsize=9,
-            color="#444444",
-        )
-        ax2.text(fovea_x, 0.17, "centered fovea", ha="center", va="center", fontsize=9, color="#1f5c99")
-        ax2.text(
-            0.5,
-            0.03,
-            f"Minimum centered width is {centered_width_px} input px; recommended with 100 px guard "
-            f"on each side is {safe_centered_width_px} input px.",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-
-        ax3.set_title("Minimum source-image height/depth around the RPE", loc="left", fontsize=12, fontweight="bold")
-        img_left, img_right = 0.22, 0.50
-        top, bottom = 0.82, 0.15
-        rpe_y = bottom + (
-            (top - bottom)
-            * self.MIN_DEPTH_OUTWARD_UM
-            / (self.MIN_DEPTH_OUTWARD_UM + self.MIN_DEPTH_INWARD_UM)
-        )
-        ax3.fill_between([img_left, img_right], bottom, top, color="#d9d9d9", alpha=0.45)
-        ax3.plot([img_left, img_right, img_right, img_left, img_left], [bottom, bottom, top, top, bottom], color="#666666")
-        ax3.plot([img_left, img_right], [rpe_y, rpe_y], color="#a31d1d", linewidth=3.0)
-        ax3.annotate(
-            "",
-            xy=(0.61, top),
-            xytext=(0.61, rpe_y),
-            arrowprops={"arrowstyle": "<->", "color": "#1f5c99", "linewidth": 1.4},
-        )
-        ax3.annotate(
-            "",
-            xy=(0.61, rpe_y),
-            xytext=(0.61, bottom),
-            arrowprops={"arrowstyle": "<->", "color": "#99621f", "linewidth": 1.4},
-        )
-        ax3.text(
-            0.64,
-            (top + rpe_y) / 2.0,
-            f"450 um from top\n>= {inward_px} px",
-            ha="left",
-            va="center",
-            fontsize=9,
-            color="#1f5c99",
-        )
-        ax3.text(
-            0.64,
-            (rpe_y + bottom) / 2.0,
-            f"50 um from bottom\n>= {outward_px} px",
-            ha="left",
-            va="center",
-            fontsize=9,
-            color="#99621f",
-        )
-        ax3.text(img_left, rpe_y + 0.03, "RPE", ha="left", va="bottom", fontsize=9, color="#a31d1d")
-        ax3.text(
-            0.5,
-            0.02,
-            f"Absolute depth need: about {depth_px} input px. If the RPE is centered vertically, use "
-            f"at least {centered_height_px} input px.",
-            ha="center",
-            va="bottom",
-            fontsize=9,
         )
 
     def _generate_more_outputs(self, output_dir, results=None, progress_cb=None):
@@ -4678,19 +4487,7 @@ def main():
     print(f"  Final grand mean shape: {results['final_grand_mean'].shape}")
     print(f"  Vertex: {results['vertex']}")
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
-    axes[0, 0].imshow(results['first_grand_mean'], cmap='gray', aspect='auto')
-    axes[0, 0].set_title('First Grand Mean')
-    axes[0, 1].imshow(results['second_grand_mean'], cmap='gray', aspect='auto')
-    axes[0, 1].set_title('Second Grand Mean')
-    axes[1, 0].imshow(results['final_grand_mean'], cmap='gray', aspect='auto')
-    axes[1, 0].axhline(results['vertex'], color='r', linestyle='--', alpha=0.6)
-    axes[1, 0].set_title('Final Grand Mean')
-    axes[1, 1].plot(results['grand_profile'][:, 0], results['grand_profile'][:, 1])
-    axes[1, 1].axvline(results['vertex'], color='r', linestyle='--', alpha=0.6)
-    axes[1, 1].set_title('Final Grand Profile')
-    plt.tight_layout()
-    plt.savefig('oct_flattening_results.png', dpi=150, bbox_inches='tight')
+    _make_main_results_summary_image(results).save("oct_flattening_results.png")
     print("✓ Plots saved to 'oct_flattening_results.png'")
     return results
 
