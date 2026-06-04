@@ -2354,13 +2354,7 @@ class RBatchSelectionPanel(ttk.Frame):
             textvariable=self.workers_var,
             width=5,
         )
-        self.workers_spin.pack(side="left", padx=(6, 0))
-        ttk.Label(
-            run_box,
-            text=f"(1–{max_workers} based on {os.cpu_count() or 2} CPU core{'s' if (os.cpu_count() or 2) != 1 else ''})",
-            foreground="#666666",
-            font=("", 8),
-        ).pack(side="left", padx=(6, 12))
+        self.workers_spin.pack(side="left", padx=(6, 12))
         ttk.Button(run_box, text="Cancel", command=lambda: self.step_frame._render()).pack(side="right")
 
     def _start_scan(self):
@@ -3431,17 +3425,17 @@ class Step3Frame(SidebarStepFrame):
         for label, _names, display_name, required_bits in self.REQUIRED_INPUTS:
             path = input_paths.get(label)
             if path is None:
-                lines.append(f"✗ {display_name}")
+                lines.append(f"❌ {display_name}")
             elif label in read_errors:
-                lines.append(f"✗ {display_name} (cannot read)")
+                lines.append(f"❌ {display_name} (cannot read)")
             else:
                 info = input_info.get(label)
                 if info is not None and info["bits"] == required_bits:
-                    lines.append(f"✓ {display_name} ({required_bits}-bit)")
+                    lines.append(f"✅ {display_name} ({required_bits}-bit)")
                 elif info is not None:
-                    lines.append(f"✗ {display_name} ({info['bits']}-bit, needs {required_bits}-bit)")
+                    lines.append(f"❌ {display_name} ({info['bits']}-bit, needs {required_bits}-bit)")
                 else:
-                    lines.append(f"✗ {display_name} (cannot read)")
+                    lines.append(f"❌ {display_name} (cannot read)")
         return "\n".join(lines)
 
     def _reset_to_tutorial_state(self):

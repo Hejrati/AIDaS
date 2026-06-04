@@ -718,7 +718,7 @@ class Step4Frame(SidebarStepFrame):
     def _refresh_roi_list(self) -> None:
         self.roi_listbox.delete(0, tk.END)
         for roi in self.rois:
-            mark = "done" if roi.suffix in self.completed else "open"
+            mark = "✅" if roi.suffix in self.completed else "❌"
             self.roi_listbox.insert(tk.END, f"{roi.suffix:>5}   {mark}")
 
     def _render_empty_canvas(self) -> None:
