@@ -21,10 +21,6 @@ Automated segmentation of 6 retinal layer boundaries in OCT images, with optiona
 
 2. Double-click **OCT Segmenter.bat** to launch the app.
 
-The old Keras-based OCT Segmenter is separate. It uses
-`environment-oct-segmenter-legacy.yml` from the repository root and is not
-required for this PyTorch AI_ForAIDAS app.
-
 ---
 
 ## Quick Start

@@ -1,9 +1,4 @@
 # Main AIDaS / AI_ForAIDAS requirements.
-#
-# This file intentionally does not install the legacy OCT Segmenter wheels.
-# Those wheels require Python 3.10 and TensorFlow 2.9; install them with
-# `requirements-oct-segmenter-legacy.txt` or
-# `environment-oct-segmenter-legacy.yml`.
 numpy>=2.4
 scipy>=1.17
 Pillow>=12

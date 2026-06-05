@@ -2,15 +2,14 @@
 
 This module implements the Step 2 GUI panel for annotating retinal boundary
 lines over OCT images. It supports manual ImageJ-style polyline drawing,
-AI segmentation import for automated predictions, and saving boundary
-coordinates.
+AI_ForAIDAS batch segmentation import, and saving boundary coordinates.
 
 Core Functionality:
   • Manual Annotation: Click-to-place polyline drawing for 6 preset retinal
     boundaries (RPE, ELM, ONL-OPL, INL-IPL, GCL-RNFL, RNFL-Vitreous) with
     vertex undo and visual feedback.
-  • AI Segmentation: Run neural network predictions via oct-segmenter tool,
-    with optional auto-preprocessing (center-crop to model input size).
+  • AI Segmentation: Run AI_ForAIDAS batch predictions and import boundary
+    traces for review.
     Predictions are automatically imported as boundary traces.
   • Boundary Workflow: Tracks annotation progress with separate incomplete/
     completed boundary lists; auto-advances to next boundary after finish.
@@ -26,7 +25,6 @@ Core Functionality:
 
 import csv
 import datetime
-import json
 import os
 import shutil
 import subprocess
@@ -81,18 +79,10 @@ MARKED_BOUNDARY_WIDTHS = {
 }
 LIGHT_MARKED_BASENAME = "Light_MARKED"
 DARK_MARKED_BASENAME = "Dark_MARKED"
-LIGHT_PREPROCESSED_BASENAME = "Light"
-DARK_PREPROCESSED_BASENAME = "Dark"
-AI_BACKEND_OCT_SEGMENTER = "oct_segmenter"
-AI_BACKEND_AIDAS = "ai_for_aidas"
-AI_BACKEND_LABELS = {
-    AI_BACKEND_OCT_SEGMENTER: "OCT Segmenter (old, Keras-based)",
-    AI_BACKEND_AIDAS: "AI_ForAIDAS (New, PyTorch-based)",
-}
-AI_BACKEND_BY_LABEL = {label: key for key, label in AI_BACKEND_LABELS.items()}
+LIGHT_SOURCE_BASENAME = "Light"
+DARK_SOURCE_BASENAME = "Dark"
 AI_DEVICE_OPTIONS = ("auto", "cpu", "cuda")
 IMG_DEFAULT_DIR = os.path.expanduser("~/Desktop")
-SUPPORTED_IMAGE_EXTENSIONS = (".img",)
 SUPPORTED_IMAGE_FILETYPES = [
     ("Analyze image", "*.img"),
     ("All files", "*.*"),
@@ -481,7 +471,6 @@ class Step2Frame(SidebarStepFrame):
     Key data structures:
       - boundary_traces: {name -> {points, pixels, color}} for saved boundaries
       - boundary_completion_vars: {name -> BooleanVar} for progress tracking
-      - _preprocessing_info: metadata for AI preprocessing crop params
       - image_data: current numpy array being annotated
     """
 
@@ -494,9 +483,6 @@ class Step2Frame(SidebarStepFrame):
             source_step: Reference to Step 1 panel for linked image loading (optional).
         """
         super().__init__(parent)
-        self._step1_after_id = None
-        self._step1_watcher_active = False
-
         self.preferences = preferences
         self.source_step = source_step
         self.on_output_folder_changed = on_output_folder_changed
@@ -505,13 +491,6 @@ class Step2Frame(SidebarStepFrame):
         self.current_file = None  # Path to currently loaded image
         self.image_data = None  # Current numpy array displayed on canvas
         self._source_was_8bit = False  # True when an opened 8-bit source was promoted for saving
-        
-        # ─ Preprocessing pipeline state ─
-        self._last_auto_preprocessed_image = None  # Preprocessed image cached for AI segmentation
-        self._original_image_for_ai = None  # Backup of original image before preprocessing
-        self._original_file_for_ai = None  # Backup file path before preprocessing
-        self._preprocessing_done = False  # Flag: True if preprocessing applied to current image
-        self._preprocessing_info = None  # Dict: crop metadata to inverse-transform AI predictions
         
         # ─ Boundary tracing state ─
         self.active_boundary = None  # Name of boundary currently being traced
@@ -540,13 +519,9 @@ class Step2Frame(SidebarStepFrame):
         
         # Initialize completion tracking for all 6 preset boundaries
         self.boundary_completion_vars = {name: tk.BooleanVar(value=False) for name in BOUNDARY_NAMES}
-        self.source_label_var = tk.StringVar(value="No source selected")
 
         app_root = self._app_root()
-        segmenter_root = os.path.join(app_root, "OCT Segmenter")
-        self.segmenter_default_config = os.path.join(segmenter_root, "config.json")
-        self.segmenter_default_model = os.path.join(segmenter_root, "Model", "human_OCT.h5")
-        self.ai_for_aidas_root = os.path.join(segmenter_root, "AI_ForAIDAS")
+        self.ai_for_aidas_root = os.path.join(app_root, "OCT Segmenter", "AI_ForAIDAS")
         self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.pth")
         self.ai_for_aidas_default_vline_model = os.path.join(self.ai_for_aidas_root, "vline_model.pth")
 
@@ -589,19 +564,11 @@ class Step2Frame(SidebarStepFrame):
         self.image_canvas.pack(fill="both", expand=True)
 
         self.status_var = tk.StringVar(
-            value="Ready — load a Step 1 result or any OCT image, then trace boundaries with left-clicks."
+            value="Ready - process an image in Step 1, then trace boundaries or run batch segmentation."
         )
         self.add_status_bar(self.status_var, parent=right)
 
         self._build_controls()
-
-    def destroy(self):
-        """Clean up when the panel is destroyed."""
-        self._step1_watcher_active = False
-        if getattr(self, "_step1_after_id", None) is not None:
-            self.after_cancel(self._step1_after_id)
-            self._step1_after_id = None
-        super().destroy()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  AI Settings Dialog
@@ -609,15 +576,12 @@ class Step2Frame(SidebarStepFrame):
     def _open_ai_settings_dialog(self):
         """Open a separate dialog for AI segmentation configuration.
 
-        This dialog allows users to:
-          - Choose the AI backend used by the single-image AI segmentation button
-          - Set config/model settings for oct-segmenter
-          - Select bundled PyTorch model files for AI_ForAIDAS
-          - Specify output directory for segmentation results
+        This dialog allows users to select AI_ForAIDAS model files, choose the
+        execution device, and specify the output directory for batch results.
         """
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title("AI Segmentation Settings")
-        dialog.geometry("620x420")
+        dialog.geometry("620x320")
         dialog.resizable(True, True)
 
         # Apply shared helper to propagate the app icon to this dialog
@@ -626,27 +590,7 @@ class Step2Frame(SidebarStepFrame):
         main = ttk.Frame(dialog, padding=10)
         main.pack(fill="both", expand=True)
 
-        legacy = ttk.LabelFrame(main, text="OCT Segmenter (old)", padding=6)
-        legacy.pack(fill="x", pady=(0, 8))
-
-        # ttk.Label(legacy, text="Conda Environment:").pack(anchor="w", pady=(0, 2))
-        # env_frame = ttk.Frame(legacy)
-        # env_frame.pack(fill="x", pady=(0, 6))
-        # ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
-
-        ttk.Label(legacy, text="Config (.json):").pack(anchor="w", pady=(2, 2))
-        cfg_frame = ttk.Frame(legacy)
-        cfg_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(cfg_frame, textvariable=self.segmenter_config_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(cfg_frame, text="Browse", width=10, command=self._browse_segmenter_config).pack(side="right", padx=(4, 0))
-
-        ttk.Label(legacy, text="Model (.h5):").pack(anchor="w", pady=(2, 2))
-        model_frame = ttk.Frame(legacy)
-        model_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(model_frame, textvariable=self.segmenter_model_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(model_frame, text="Browse", width=10, command=self._browse_segmenter_model).pack(side="right", padx=(4, 0))
-
-        aidas = ttk.LabelFrame(main, text="AI_ForAIDAS (new)", padding=6)
+        aidas = ttk.LabelFrame(main, text="AI_ForAIDAS", padding=6)
         aidas.pack(fill="x", pady=(0, 8))
 
         ttk.Label(aidas, text="Boundary Model (.pth):").pack(anchor="w", pady=(0, 2))
@@ -696,95 +640,10 @@ class Step2Frame(SidebarStepFrame):
     def _build_controls(self):
         """Construct and lay out all left-side control widgets.
 
-        The left panel is organized into titled LabelFrames arranged vertically:
-          1. Image Source: Load image or fetch from Step 1
-          2. Segmentation: Workflow (incomplete/completed lists), AI buttons,
-             clear traces button, and progress indicator
-          3. Foveal Center Line: Vertical line placement and adjustment
-          4. Export buttons: CSV export and MARKED image generation
-          5. Help text: Usage instructions
-
-        All controls are placed in a scrollable canvas to keep the UI compact
-        and accessible even on smaller screens.
+        The left panel contains segmentation review controls, foveal center
+        placement, and save/export actions.
         """
-        load_section = self.add_sidebar_section("Image Source", padding=3, pady=5)
-        load = load_section.body
-
-        self.step1_button = ttk.Button(load, text="Load from Step 1", command=self._load_from_step1)
-        self.step1_button.pack(fill="x")
-        if self.source_step is None:
-            self.step1_button.state(["disabled"])
-        else:
-            # Start a watcher to enable the button only when Step 1 has a processed (cropped) image
-            self._step1_watcher_active = True
-            self.after(100, self._update_step1_button_state)
-
-        # browser = ttk.LabelFrame(load, text="IMG Files", padding=3)
-        # browser.pack(fill="x", pady=(6, 0))
-
-        ttk.Label(load, text="Input dir:").pack(anchor="w")
-        dir_frame = ttk.Frame(load)
-        dir_frame.pack(fill="x")
-        self.image_browser_dir_var = tk.StringVar(value=IMG_DEFAULT_DIR)
-        self.image_browser_dir_entry = ttk.Entry(dir_frame, textvariable=self.image_browser_dir_var)
-        self.image_browser_dir_entry.pack(side="left", fill="x", expand=True)
-        self.image_browser_dir_entry.bind("<Return>", lambda _e: self._refresh_directory_image_list())
-        self.image_browser_reset_btn = ttk.Button(
-            dir_frame,
-            text="⌂",
-            width=2,
-            command=self._reset_image_browser_dir_to_default,
-        )
-        self.image_browser_reset_btn.pack(side="right", padx=(2, 0))
-        self.image_browser_refresh_btn = ttk.Button(
-            dir_frame,
-            text="↻",
-            width=3,
-            command=self._refresh_directory_image_list,
-        )
-        self.image_browser_refresh_btn.pack(side="right", padx=(2, 0))
-        self.image_browser_folder_btn = ttk.Button(
-            dir_frame,
-            text="…",
-            width=3,
-            command=self._choose_image_browser_directory,
-        )
-        self.image_browser_folder_btn.pack(side="right")
-
-
-        browser_list_frame = ttk.Frame(load)
-        browser_list_frame.pack(fill="both", expand=True, pady=(2, 0))
-        self.directory_image_listbox = tk.Listbox(
-            browser_list_frame,
-            height=8,
-            selectmode="extended",
-            exportselection=False,
-        )
-        image_scroll = ttk.Scrollbar(browser_list_frame, orient="vertical", command=self.directory_image_listbox.yview)
-        self.directory_image_listbox.configure(yscrollcommand=image_scroll.set)
-        self.directory_image_listbox.pack(side="left", fill="both", expand=True)
-        image_scroll.pack(side="right", fill="y")
-        self.directory_image_listbox.bind("<<ListboxSelect>>", self._on_directory_image_selected)
-        self.directory_image_listbox.bind("<Double-Button-1>", self._open_selected_directory_image)
-
-        nav_frame = ttk.Frame(load)
-        nav_frame.pack(fill="x", pady=(4, 0))
-        ttk.Button(nav_frame, text="◀ Prev",
-                   command=self._prev_directory_image).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(nav_frame, text="Next ▶",
-                   command=self._next_directory_image).pack(side="right", expand=True, fill="x", padx=(2, 0))
-
-        self.image_browser_status_var = tk.StringVar(value="Open a directory to show images")
-        ttk.Label(load, textvariable=self.image_browser_status_var, wraplength=240, justify="left").pack(
-            fill="x",
-            pady=(4, 0),
-        )
-
-        self.segmenter_config_var = tk.StringVar(value=self.segmenter_default_config)
-        self.segmenter_model_var = tk.StringVar(value=self.segmenter_default_model)
         self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
-        self.segmenter_env_var = tk.StringVar(value="oct-segmenter-legacy-env")
-        self.ai_backend_var = tk.StringVar(value=AI_BACKEND_LABELS[AI_BACKEND_AIDAS])
         self.aidas_model_var = tk.StringVar(value=self.ai_for_aidas_default_model)
         self.aidas_vline_model_var = tk.StringVar(value=self.ai_for_aidas_default_vline_model)
         self.aidas_predict_fovea_var = tk.BooleanVar(value=True)
@@ -842,38 +701,10 @@ class Step2Frame(SidebarStepFrame):
         self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary)
         self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
 
-        ai_select = ttk.Frame(workflow)
-        ai_select.pack(fill="x", pady=(6, 0))
-        ttk.Label(ai_select, text="AI Version:").pack(side="left")
-        self.ai_backend_combo = ttk.Combobox(
-            ai_select,
-            textvariable=self.ai_backend_var,
-            values=[AI_BACKEND_LABELS[AI_BACKEND_OCT_SEGMENTER], AI_BACKEND_LABELS[AI_BACKEND_AIDAS]],
-            state="readonly",
-            width=20,
-        )
-        self.ai_backend_combo.pack(side="left", fill="x", expand=True, padx=(6, 0))
-        self.ai_backend_combo.bind("<<ComboboxSelected>>", self._on_ai_backend_changed)
-
         ai_buttons = ttk.Frame(workflow)
         ai_buttons.pack(fill="x", pady=(6, 0))
-        self.preprocess_button = ttk.Button(
-            ai_buttons,
-            text="Preprocess Image",
-            command=self._preprocess_image_for_ai,
-        )
-        self.preprocess_button.pack(side="left", fill="x", expand=True, padx=(0, 2))
         self.ai_settings_btn = ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog)
-        self.ai_settings_btn.pack(side="left", fill="x", expand=True, padx=(2, 0))
-
-        ai_run_buttons = ttk.Frame(workflow)
-        ai_run_buttons.pack(fill="x", pady=(4, 0))
-        self.segment_button = ttk.Button(
-            ai_run_buttons,
-            text="AI Single Image Seg",
-            command=self._run_neural_segmentation,
-        )
-        self.segment_button.pack(fill="x")
+        self.ai_settings_btn.pack(fill="x")
 
         ai_folder_buttons = ttk.Frame(workflow)
         ai_folder_buttons.pack(fill="x", pady=(4, 0))
@@ -987,18 +818,11 @@ class Step2Frame(SidebarStepFrame):
 
         self._refresh_boundary_lists(auto_select=False)
         self._set_segmentation_frame_enabled(False)
-        self._directory_image_paths_cache = []
-        self._image_browser_dir = ""
         self._update_batch_ai_button_state()
-        self._set_image_browser_directory(IMG_DEFAULT_DIR, preserve_selection=False)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Image loading
     # ═══════════════════════════════════════════════════════════════════════
-    @staticmethod
-    def _is_supported_image_path(path):
-        return os.path.splitext(path)[1].lower() in SUPPORTED_IMAGE_EXTENSIONS
-
     @staticmethod
     def _image_pair_key(path):
         ext = os.path.splitext(path)[1].lower()
@@ -1017,262 +841,28 @@ class Step2Frame(SidebarStepFrame):
                 return hdr_path
         return path
 
-    def _directory_image_paths(self, folder):
-        """Return .img images in a folder."""
-        if not folder or not os.path.isdir(folder):
-            return []
-
-        selected_by_key = {}
-        for name in sorted(os.listdir(folder), key=str.lower):
-            path = os.path.join(folder, name)
-            if not os.path.isfile(path) or not self._is_supported_image_path(path):
-                continue
-            path = self._preferred_analyze_pair_path(path)
-            key = self._image_pair_key(path)
-            current = selected_by_key.get(key)
-            if current is None or os.path.splitext(path)[1].lower() == ".img":
-                selected_by_key[key] = path
-
-        return sorted(selected_by_key.values(), key=lambda item: os.path.basename(item).lower())
-
-    def _recursive_directory_image_paths(self, folder):
-        """Return supported images in a folder tree."""
-        if not folder or not os.path.isdir(folder):
-            return []
-
-        selected_by_key = {}
-        for dirpath, dirnames, filenames in os.walk(folder):
-            dirnames.sort(key=str.lower)
-            for name in sorted(filenames, key=str.lower):
-                path = os.path.join(dirpath, name)
-                if not os.path.isfile(path) or not self._is_supported_image_path(path):
-                    continue
-                path = self._preferred_analyze_pair_path(path)
-                key = self._image_pair_key(path)
-                current = selected_by_key.get(key)
-                if current is None or os.path.splitext(path)[1].lower() == ".img":
-                    selected_by_key[key] = path
-
-        root = os.path.abspath(folder)
-        return sorted(
-            selected_by_key.values(),
-            key=lambda item: os.path.relpath(os.path.abspath(item), root).lower(),
-        )
-
-    def _set_image_browser_directory(self, folder, select_path=None, preserve_selection=True):
-        folder = os.path.abspath(folder) if folder else ""
-        self._image_browser_dir = folder
-        if hasattr(self, "image_browser_dir_var"):
-            self.image_browser_dir_var.set(folder)
-        self._refresh_directory_image_list(select_path=select_path, preserve_selection=preserve_selection)
-
-    def _refresh_directory_image_list(self, select_path=None, preserve_selection=True):
-        listbox = getattr(self, "directory_image_listbox", None)
-        if listbox is None:
-            return
-
-        folder = self.image_browser_dir_var.get().strip() if hasattr(self, "image_browser_dir_var") else ""
-        if not folder:
-            self._image_browser_dir = ""
-            self._directory_image_paths_cache = []
-            listbox.delete(0, "end")
-            self.image_browser_status_var.set("Open a directory to list .img images")
-            if self.image_data is None:
-                self._set_segmentation_frame_enabled(False)
-            self._update_batch_ai_button_state()
-            return
-        folder = os.path.abspath(folder)
-        self._image_browser_dir = folder
-        if self.image_browser_dir_var.get() != folder:
-            self.image_browser_dir_var.set(folder)
-        if not os.path.isdir(folder):
-            self._directory_image_paths_cache = []
-            listbox.delete(0, "end")
-            self.image_browser_status_var.set("Folder not found")
-            if self.image_data is None:
-                self._set_segmentation_frame_enabled(False)
-            self._update_batch_ai_button_state()
-            return
-
-        selected_keys = set()
-        if preserve_selection:
-            for index in listbox.curselection():
-                try:
-                    selected_keys.add(self._image_pair_key(self._directory_image_paths_cache[int(index)]))
-                except (AttributeError, IndexError, ValueError):
-                    pass
-        if select_path:
-            selected_keys.add(self._image_pair_key(select_path))
-
-        paths = self._directory_image_paths(folder)
-        filter_text = self.image_browser_filter_var.get().strip().lower() if hasattr(self, "image_browser_filter_var") else ""
-        if filter_text:
-            paths = [
-                path for path in paths
-                if filter_text in os.path.basename(path).lower()
-            ]
-        self._directory_image_paths_cache = paths
-
-        self._updating_image_browser = True
-        try:
-            listbox.delete(0, "end")
-            for path in paths:
-                listbox.insert("end", os.path.basename(path))
-            for index, path in enumerate(paths):
-                if self._image_pair_key(path) in selected_keys:
-                    listbox.selection_set(index)
-                    listbox.see(index)
-        finally:
-            self._updating_image_browser = False
-
-        count = len(paths)
-        suffix = " matching filter" if filter_text else ""
-        self.image_browser_status_var.set(f"{count} image(s){suffix}")
-        if paths:
-            self._set_segmentation_frame_enabled(True)
-            self._update_ai_button_states()
-        elif self.image_data is None:
-            self._set_segmentation_frame_enabled(False)
-        self._update_batch_ai_button_state()
-
-    def _choose_image_browser_directory(self):
-        typed_dir = self.image_browser_dir_var.get().strip() if hasattr(self, "image_browser_dir_var") else ""
-        initialdir = typed_dir if os.path.isdir(typed_dir) else (getattr(self, "_image_browser_dir", "") or self._app_root())
-        file_path = filedialog.askopenfilename(
-            title="Select IMG file (directory will be used)",
-            initialdir=initialdir,
-            filetypes=SUPPORTED_IMAGE_FILETYPES,
-        )
-        if file_path:
-            self._set_image_browser_directory(os.path.dirname(file_path), select_path=file_path, preserve_selection=False)
-
-    def _reset_image_browser_dir_to_default(self):
-        self._set_image_browser_directory(IMG_DEFAULT_DIR, preserve_selection=False)
-        self.status_var.set(f"IMG directory reset to default: {IMG_DEFAULT_DIR}")
-
-    def _selected_directory_image_paths(self):
-        listbox = getattr(self, "directory_image_listbox", None)
-        paths = getattr(self, "_directory_image_paths_cache", [])
-        if listbox is None:
-            return []
-        selected = []
-        for index in listbox.curselection():
-            try:
-                selected.append(paths[int(index)])
-            except (IndexError, ValueError):
-                pass
-        return selected
-
-    def _on_directory_image_selected(self, _event=None):
-        if getattr(self, "_updating_image_browser", False) or self._segmenter_running:
-            return
-        paths = self._selected_directory_image_paths()
-        self._update_batch_ai_button_state()
-        if len(paths) != 1:
-            if paths:
-                self.status_var.set(f"{len(paths)} IMG files selected.")
-            elif getattr(self, "_directory_image_paths_cache", []):
-                self.status_var.set("Select an IMG file to load, or use Run Batch Segmentation for folder processing.")
-            return
-
-        path = paths[0]
-        self.status_var.set(f"Selected IMG: {os.path.basename(path)}")
-        pending = getattr(self, "_image_browser_open_after", None)
-        if pending:
-            self.after_cancel(pending)
-        self._image_browser_open_after = self.after(
-            120,
-            lambda p=path: self._open_directory_image_path_if_still_single(p),
-        )
-
-    def _open_directory_image_path_if_still_single(self, path):
-        self._image_browser_open_after = None
-        paths = self._selected_directory_image_paths()
-        if len(paths) == 1 and self._image_pair_key(paths[0]) == self._image_pair_key(path):
-            self._open_directory_image_path(path)
-
-    def _open_selected_directory_image(self, _event=None):
-        paths = self._selected_directory_image_paths()
-        if not paths:
-            messagebox.showinfo("No image selected", "Select an image from the current directory list first.")
-            return
-        self._open_directory_image_path(paths[0])
-
-    def _prev_directory_image(self):
-        paths = getattr(self, "_directory_image_paths_cache", [])
-        if not paths:
-            return
-        selection = self.directory_image_listbox.curselection()
-        index = max(0, selection[0] - 1) if selection else 0
-        self.directory_image_listbox.selection_clear(0, "end")
-        self.directory_image_listbox.selection_set(index)
-        self.directory_image_listbox.see(index)
-        self._open_directory_image_path(paths[index])
-
-    def _next_directory_image(self):
-        paths = getattr(self, "_directory_image_paths_cache", [])
-        if not paths:
-            return
-        selection = self.directory_image_listbox.curselection()
-        index = min(len(paths) - 1, selection[0] + 1) if selection else 0
-        self.directory_image_listbox.selection_clear(0, "end")
-        self.directory_image_listbox.selection_set(index)
-        self.directory_image_listbox.see(index)
-        self._open_directory_image_path(paths[index])
-
-    def _open_directory_image_path(self, path):
-        try:
-            image = self._load_image_from_path(path)
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("Open error", str(exc))
-            return
-
-        self._loading_from_image_browser = True
-        try:
-            self._show_image(image, path)
-        finally:
-            self._loading_from_image_browser = False
-        self.image_browser_status_var.set(f"Loaded {os.path.basename(path)}")
-
-    def _segment_selected_directory_images(self):
-        paths = self._selected_directory_image_paths()
-        if not self._is_aidas_ai_backend():
-            messagebox.showinfo(
-                "AI_ForAIDAS required",
-                "Select AI_ForAIDAS (New, PyTorch-based) before running batch segmentation.",
-            )
-            return
-        model_path = self.aidas_model_var.get().strip()
-        if not os.path.isfile(model_path):
-            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
-            return
-        if len(paths) < 2:
-            messagebox.showinfo("Select multiple images", "Select at least two .img files for batch segmentation.")
-            return
-        self._run_aidas_batch_segmentation(image_paths=paths)
+    def _default_batch_initial_dir(self):
+        if self.current_file and self.current_file != "Step 1 output":
+            folder = os.path.dirname(self.current_file)
+            if os.path.isdir(folder):
+                return folder
+        if os.path.isdir(IMG_DEFAULT_DIR):
+            return IMG_DEFAULT_DIR
+        return self._app_root()
 
     def _open_batch_segmentation_scanner(self):
         """Open an embedded folder scanner before running Step 2 batch segmentation."""
         if self._segmenter_running:
             messagebox.showinfo("Please wait", "Segmentation is already running.")
             return
-        if not self._is_aidas_ai_backend():
-            messagebox.showinfo(
-                "AI_ForAIDAS required",
-                "Select AI_ForAIDAS (New, PyTorch-based) before running batch segmentation.",
-            )
-            return
         model_path = self.aidas_model_var.get().strip()
         if not os.path.isfile(model_path):
             messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
             return
 
-        current_dir = getattr(self, "_image_browser_dir", "") or self.image_browser_dir_var.get().strip()
-        if not os.path.isdir(current_dir):
-            current_dir = IMG_DEFAULT_DIR if os.path.isdir(IMG_DEFAULT_DIR) else self._app_root()
         folder = filedialog.askdirectory(
             title="Select root folder for Step 2 batch segmentation",
-            initialdir=current_dir,
+            initialdir=self._default_batch_initial_dir(),
         )
         if not folder:
             return
@@ -1281,14 +871,6 @@ class Step2Frame(SidebarStepFrame):
 
     def _open_step2_batch_segmentation_panel(self, root_dir):
         self._close_step2_batch_segmentation_panel(restore_previous=False)
-
-        pending_open = getattr(self, "_image_browser_open_after", None)
-        if pending_open:
-            try:
-                self.after_cancel(pending_open)
-            except tk.TclError:
-                pass
-            self._image_browser_open_after = None
 
         if getattr(self, "_active_batch_result_tab", None):
             self._sync_active_batch_result_state()
@@ -1407,7 +989,6 @@ class Step2Frame(SidebarStepFrame):
             return
 
         self._close_step2_batch_segmentation_panel(restore_previous=True)
-        self._set_image_browser_directory(root_dir, preserve_selection=False)
         self.status_var.set(f"Found {len(image_paths)} target image(s) for AI batch segmentation.")
 
         self._show_single_image_canvas()
@@ -1426,91 +1007,6 @@ class Step2Frame(SidebarStepFrame):
             manual_fovea_by_path=manual_fovea_by_path,
         )
 
-    def _run_folder_segmentation(self):
-        """Select a folder, recursively find images, and run AI_ForAIDAS batch segmentation."""
-        if self._segmenter_running:
-            messagebox.showinfo("Please wait", "Segmentation is already running.")
-            return
-        if not self._is_aidas_ai_backend():
-            messagebox.showinfo(
-                "AI_ForAIDAS required",
-                "Select AI_ForAIDAS (New, PyTorch-based) before running folder segmentation.",
-            )
-            return
-        model_path = self.aidas_model_var.get().strip()
-        if not os.path.isfile(model_path):
-            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
-            return
-
-        current_dir = getattr(self, "_image_browser_dir", "") or self.image_browser_dir_var.get().strip()
-        if not os.path.isdir(current_dir):
-            current_dir = IMG_DEFAULT_DIR if os.path.isdir(IMG_DEFAULT_DIR) else self._app_root()
-        folder = filedialog.askdirectory(
-            title="Select folder for AI folder segmentation",
-            initialdir=current_dir,
-        )
-        if not folder:
-            return
-
-        image_paths = []
-        found_any = False
-        all_completed = True
-
-        for root_dir, _, files in os.walk(folder):
-            lower_files = {f.lower(): f for f in files}
-            
-            has_light = "light.img" in lower_files
-            has_dark = "dark.img" in lower_files
-            has_light_marked = "light_marked.img" in lower_files
-            has_dark_marked = "dark_marked.img" in lower_files
-
-            if not has_light and not has_dark:
-                continue
-
-            found_any = True
-
-            complete_light = has_light_marked if has_light else True
-            complete_dark = has_dark_marked if has_dark else True
-
-            if complete_light and complete_dark:
-                continue
-
-            all_completed = False
-            if has_light and not has_light_marked:
-                image_paths.append(os.path.join(root_dir, lower_files["light.img"]))
-            if has_dark and not has_dark_marked:
-                image_paths.append(os.path.join(root_dir, lower_files["dark.img"]))
-
-        if not found_any:
-            messagebox.showwarning(
-                "No images found",
-                f"No Light.img or Dark.img files were found in:\n{folder}",
-            )
-            return
-
-        if all_completed:
-            messagebox.showinfo("Completed", "They all completed.")
-            return
-
-        self._set_image_browser_directory(folder, preserve_selection=False)
-        self.status_var.set(f"Found {len(image_paths)} target image(s) in folder tree for AI segmentation.")
-        
-        manual_fovea_by_path = self._collect_folder_fovea_lines(image_paths)
-        if manual_fovea_by_path is None:
-            self.status_var.set("AI folder segmentation cancelled before running.")
-            return
-
-        # Keep only the images that were not skipped
-        image_paths = [p for p in image_paths if p in manual_fovea_by_path]
-        if not image_paths:
-            self.status_var.set("AI folder segmentation cancelled: all images were skipped.")
-            return
-
-        self._run_aidas_batch_segmentation(
-            image_paths=image_paths,
-            manual_fovea_by_path=manual_fovea_by_path,
-        )
-
     def _collect_folder_fovea_lines(self, image_paths):
         """Prompt for a fovea center line for each image before folder segmentation in the main canvas."""
         fovea_by_path = {}
@@ -1518,9 +1014,7 @@ class Step2Frame(SidebarStepFrame):
 
         next_var = tk.StringVar(value="")
         
-        # Disable batch buttons to prevent duplicate triggers
-        if hasattr(self, "folder_segment_button"):
-            self.folder_segment_button.state(["disabled"])
+        # Disable batch controls to prevent duplicate triggers.
         if hasattr(self, "batch_ai_button"):
             self.batch_ai_button.state(["disabled"])
 
@@ -1546,7 +1040,7 @@ class Step2Frame(SidebarStepFrame):
         btn_skip = ttk.Button(temp_frame, text="Skip Image", command=on_skip)
         btn_skip.pack(side="right", padx=4, pady=4)
 
-        btn_set = ttk.Button(temp_frame, text="Set Fovea & Process", command=on_set)
+        btn_set = ttk.Button(temp_frame, text="Set Fovea", command=on_set)
         btn_set.pack(side="right", padx=4, pady=4)
         
         # Save current editor state to restore later if canceled (optional, but good practice)
@@ -1614,63 +1108,11 @@ class Step2Frame(SidebarStepFrame):
                 
         finally:
             temp_frame.destroy()
-            if hasattr(self, "folder_segment_button"):
-                self.folder_segment_button.state(["!disabled"])
             self._update_batch_ai_button_state()
             self.vertical_mode_var.set(False)
             self._on_vertical_mode_toggled()
 
         return fovea_by_path
-
-    def _open_image(self):
-        """Show open-file dialog and load the selected image.
-
-        Supports multiple formats:
-          - TIFF stacks (.tif, .tiff) → extracts first slice
-          - Analyze 7.5 (.hdr/.img pairs) → reads header/data
-          - Standard images (.png, .jpg, .jpeg) → converts to grayscale
-        
-        Auto-detects format by file extension and preserves 16-bit grayscale
-        data when available. Clears all existing traces and resets UI.
-        """
-        path = filedialog.askopenfilename(
-            title="Select an OCT image",
-            filetypes=SUPPORTED_IMAGE_FILETYPES,
-        )
-        if not path:
-            return
-        try:
-            image = self._load_image_from_path(path)
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("Open error", str(exc))
-            return
-        self._show_image(image, path)
-
-    def _load_from_step1(self):
-        """Load the processed image exported by the connected Step 1 panel.
-
-        Step 1 provides a link to automatically import the cropped/scaled image
-        after preprocessing. If Step 1 has a processed_image (cropped), it is
-        preferred; otherwise the raw image is used.
-
-        Preserves the source image bit depth and resets all traces.
-        """
-        if self.source_step is None:
-            messagebox.showinfo("Unavailable", "No Step 1 panel is connected to this view.")
-            return
-
-        image = getattr(self.source_step, "processed_image", None)
-        source_path = getattr(self.source_step, "current_file", None)
-        if image is None:
-            image = getattr(self.source_step, "raw_image", None)
-        if image is None:
-            messagebox.showinfo("No image", "Step 1 has no loaded image yet.")
-            return
-
-        display_path = source_path or "Step 1 output"
-        self._input_analyze_template = None
-        img = self._image_for_annotation(image)
-        self._show_image(img, display_path)
 
     def load_external_image(self, image, source_path=None):
         """Load an externally supplied image into Step 2.
@@ -1684,28 +1126,6 @@ class Step2Frame(SidebarStepFrame):
         self._input_analyze_template = None
         img = self._image_for_annotation(image)
         self._show_image(img, display_path)
-
-    def _update_step1_button_state(self):
-        """Enable the Step 1 load button only when `source_step.processed_image` exists.
-
-        This method re-schedules itself via `after` while the frame exists.
-        """
-        if not self.winfo_exists():
-            return
-            
-        try:
-            has = self.source_step is not None and getattr(self.source_step, "processed_image", None) is not None
-        except Exception:
-            has = False
-
-        if has:
-            self.step1_button.state(["!disabled"])
-        else:
-            self.step1_button.state(["disabled"])
-
-        # continue polling as long as this frame is mapped
-        if getattr(self, "_step1_watcher_active", False) and self.winfo_exists():
-            self._step1_after_id = self.after(500, self._update_step1_button_state)
 
     def _load_image_from_path(self, path):
         """Read an image file from disk and return a 2-D numpy array.
@@ -1777,7 +1197,6 @@ class Step2Frame(SidebarStepFrame):
         Displays the image on the canvas and clears all tracing state:
           - Clears all saved and active boundary traces
           - Resets boundary completion status
-          - Clears preprocessing state and backup
           - Resets foveal center line
           - Updates info display and UI controls
           - Re-enables all controls for fresh annotation
@@ -1787,11 +1206,6 @@ class Step2Frame(SidebarStepFrame):
                 the canvas normalizes a preview for display only.
             path: Path or description string for the image source.
         """
-        self._last_auto_preprocessed_image = None
-        self._original_image_for_ai = None
-        self._original_file_for_ai = None
-        self._preprocessing_done = False
-        self._preprocessing_info = None
         self._show_single_image_canvas()
         self.current_file = path
         self.image_data = image
@@ -1808,7 +1222,6 @@ class Step2Frame(SidebarStepFrame):
         self.image_canvas.fit_to_window()
 
         filename = os.path.basename(path) if path and path != "Step 1 output" else "Step 1 output"
-        self.source_label_var.set(path)
         self.image_info_var.set(
             f"{filename} | Size: {image.shape[1]} × {image.shape[0]} px | Type: {image.dtype}"
         )
@@ -1832,8 +1245,6 @@ class Step2Frame(SidebarStepFrame):
             return
         folder = os.path.dirname(self.current_file)
         if folder:
-            if not getattr(self, "_loading_from_image_browser", False):
-                self._set_image_browser_directory(folder, select_path=self.current_file)
             if self.on_output_folder_changed is not None:
                 self.on_output_folder_changed(folder)
 
@@ -1925,11 +1336,6 @@ class Step2Frame(SidebarStepFrame):
                 state["fovea_x"] = self.fovea_x
         self._input_analyze_template = state.get("template")
         self._source_was_8bit = bool(state.get("source_was_8bit", False))
-        self._last_auto_preprocessed_image = None
-        self._original_image_for_ai = None
-        self._original_file_for_ai = None
-        self._preprocessing_done = False
-        self._preprocessing_info = None
         self.active_boundary = None
 
         self.image_canvas.enable_roi(False)
@@ -1956,7 +1362,6 @@ class Step2Frame(SidebarStepFrame):
             else "Step 1 output"
         )
         if self.image_data is not None:
-            self.source_label_var.set(self.current_file or "")
             self.image_info_var.set(
                 f"{filename} | Size: {self.image_data.shape[1]} x {self.image_data.shape[0]} px | "
                 f"Type: {self.image_data.dtype}"
@@ -2638,9 +2043,7 @@ class Step2Frame(SidebarStepFrame):
             if widget in (
                 self.finish_boundary_btn,
                 self.revert_boundary_btn,
-                getattr(self, "ai_backend_combo", None),
                 getattr(self, "ai_settings_btn", None),
-                getattr(self, "folder_segment_button", None),
                 getattr(self, "batch_ai_button", None),
             ):
                 return
@@ -2653,8 +2056,6 @@ class Step2Frame(SidebarStepFrame):
         
         if hasattr(self, "segmentation_frame"):
             set_state(self.segmentation_frame, state)
-        if hasattr(self, "ai_backend_combo"):
-            self.ai_backend_combo.configure(state="disabled" if self._segmenter_running else "readonly")
         if hasattr(self, "ai_settings_btn"):
             self.ai_settings_btn.state(["disabled"] if self._segmenter_running else ["!disabled"])
         self._update_batch_ai_button_state()
@@ -2900,13 +2301,13 @@ class Step2Frame(SidebarStepFrame):
             out_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         return os.path.join(out_dir, basename)
 
-    def _preprocessed_output_basepath(self, basename):
+    def _source_output_basepath(self, basename):
         return self._marked_output_basepath(basename)
 
-    def _preprocessed_output_basepaths(self):
+    def _source_output_basepaths(self):
         return [
-            self._preprocessed_output_basepath(LIGHT_PREPROCESSED_BASENAME),
-            self._preprocessed_output_basepath(DARK_PREPROCESSED_BASENAME),
+            self._source_output_basepath(LIGHT_SOURCE_BASENAME),
+            self._source_output_basepath(DARK_SOURCE_BASENAME),
         ]
 
     def _reference_marked_volume_spec(self):
@@ -3004,7 +2405,6 @@ class Step2Frame(SidebarStepFrame):
           - Dark_MARKED: All 6 boundaries + Fovea marked on a dark background
 
         All output volumes are automatically resized to standard format (current annotation height × 2133 width, 2 slices).
-        If preprocessing was applied, the annotation crop stays as the coordinate reference.
 
         Returns:
             Tuple (light_volume, dark_volume): Two 3-D uint8 numpy arrays in standard format.
@@ -3085,32 +2485,13 @@ class Step2Frame(SidebarStepFrame):
 
     def _source_image_for_original_save(self):
         """Return the 16-bit source image that corresponds to current annotations."""
-        if (
-            self._preprocessing_done
-            and self._original_image_for_ai is not None
-            and self._preprocessing_info
-        ):
-            source = np.asarray(self._original_image_for_ai)
-            if source.ndim != 2:
-                raise ValueError("Original Step 2 image must be 2-D.")
-
-            x0 = int(self._preprocessing_info.get("crop_offset_x", 0))
-            y0 = int(self._preprocessing_info.get("crop_offset_y", 0))
-            crop_w = int(self._preprocessing_info.get("crop_w", self.image_data.shape[1]))
-            crop_h = int(self._preprocessing_info.get("crop_h", self.image_data.shape[0]))
-            y1 = min(y0 + crop_h, source.shape[0])
-            x1 = min(x0 + crop_w, source.shape[1])
-            return np.array(source[y0:y1, x0:x1], copy=True)
-
         return self.image_data
 
     def _save_light_dark_images(self, reference_shape=None):
         """Export unmarked LIGHT and DARK Analyze volumes from the current image.
 
         These outputs use the 16-bit image that corresponds to the current
-        annotation coordinates. If AI preprocessing displays an 8-bit crop,
-        save the same crop from the original image, then resize it to the
-        saved MARKED/annotation volume shape.
+        annotation coordinates, resized to the saved MARKED volume shape.
 
         Returns:
             List of saved file basepaths (without .img/.hdr extension).
@@ -3133,7 +2514,7 @@ class Step2Frame(SidebarStepFrame):
             stack = _resize_to_standard_format(stack)
 
         saved_paths = []
-        for base_path in self._preprocessed_output_basepaths():
+        for base_path in self._source_output_basepaths():
             write_analyze(base_path, stack)
             saved_paths.append(base_path)
         return saved_paths
@@ -3144,10 +2525,6 @@ class Step2Frame(SidebarStepFrame):
         The MARKED volumes are 8-bit Analyze files with boundary pixels marked at
         specific intensity values per ImageJ macro conventions. Boundaries are
         rasterized at their specified line widths and mark values.
-
-        Preprocessing inverse-scaling is applied if needed: if the image was
-        preprocessed for AI, the boundaries are re-scaled to match the original
-        image size before marking.
 
         Args:
             require_complete: If True, only save if all 6 preset boundaries complete.
@@ -3385,7 +2762,7 @@ class Step2Frame(SidebarStepFrame):
         light_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME) + ".img"
         dark_path = self._marked_output_basepath(DARK_MARKED_BASENAME) + ".img"
         message_lines = ["Saved MARKED images:", light_path, dark_path]
-        message_lines.extend([path + ".img" for path in self._preprocessed_output_basepaths()])
+        message_lines.extend([path + ".img" for path in self._source_output_basepaths()])
         messagebox.showinfo("Saved", "\n".join(message_lines))
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -3432,37 +2809,6 @@ class Step2Frame(SidebarStepFrame):
             root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         return os.path.join(root, "segmenter_output")
 
-    def _selected_ai_backend(self):
-        label = self.ai_backend_var.get().strip()
-        return AI_BACKEND_BY_LABEL.get(label, AI_BACKEND_OCT_SEGMENTER)
-
-    def _is_aidas_ai_backend(self):
-        return self._selected_ai_backend() == AI_BACKEND_AIDAS
-
-    def _on_ai_backend_changed(self, _event=None):
-        if hasattr(self, "ai_backend_combo"):
-            self.ai_backend_combo.set(AI_BACKEND_LABELS[self._selected_ai_backend()])
-        self._update_ai_button_states()
-        if self.image_data is not None:
-            label = AI_BACKEND_LABELS[self._selected_ai_backend()]
-            self.status_var.set(f"AI version set to {label}.")
-
-    def _browse_segmenter_config(self):
-        path = filedialog.askopenfilename(
-            title="Select segmenter config",
-            filetypes=[("JSON", "*.json"), ("All files", "*.*")],
-        )
-        if path:
-            self.segmenter_config_var.set(path)
-
-    def _browse_segmenter_model(self):
-        path = filedialog.askopenfilename(
-            title="Select segmenter model",
-            filetypes=[("Keras model", "*.h5"), ("All files", "*.*")],
-        )
-        if path:
-            self.segmenter_model_var.set(path)
-
     def _browse_aidas_model(self):
         kwargs = {}
         if os.path.isdir(self.ai_for_aidas_root):
@@ -3492,30 +2838,6 @@ class Step2Frame(SidebarStepFrame):
         path = filedialog.askdirectory(title="Select segmentation output folder")
         if path:
             self.segmenter_output_var.set(path)
-
-    def _segmenter_command(self):
-        env_name = self.segmenter_env_var.get().strip()
-        conda_bin = shutil.which("conda") or os.environ.get("CONDA_EXE")
-
-        # If user specified a conda env and conda is available, prefer `conda run -n <env> oct-segmenter`
-        if env_name and conda_bin:
-            return [conda_bin, "run", "-n", env_name, "--no-capture-output", "oct-segmenter"]
-
-        # Prefer an `oct-segmenter` executable on PATH if present.
-        oct_exec = shutil.which("oct-segmenter")
-        if oct_exec:
-            return [oct_exec]
-
-        # When running as a frozen/bundled executable (pyinstaller, etc.),
-        # `sys.executable` points to the app exe. Calling
-        # `sys.executable -m oct_segmenter` will re-launch the app executable
-        # (causing a new window) rather than a separate Python environment
-        # that has the `oct_segmenter` package installed. Avoid that.
-        if getattr(sys, "frozen", False):
-            return None
-
-        # Fallback: run as module when not frozen (developer machine with Python).
-        return [sys.executable, "-m", "oct_segmenter"]
 
     def _segmenter_subprocess_env(self):
         """Return an environment suitable for launching Windows CLI tools."""
@@ -3821,97 +3143,6 @@ class Step2Frame(SidebarStepFrame):
             arr = np.rint(arr.astype(np.float64) * (65535.0 / 255.0)).astype(np.uint16)
         return np.ascontiguousarray(arr), source_was_8bit
 
-    def _segmenter_model_size(self):
-        """Extract target input size (height, width) from model_config.json.
-
-        Reads model_config.json located next to the selected .h5 model file
-        to determine the expected input dimensions for the neural network.
-
-        Returns:
-            Tuple (target_h, target_w, config_path) if found and valid.
-            None if model path not set, config file missing, or JSON invalid.
-        """
-        model_path = self.segmenter_model_var.get().strip()
-        if not model_path:
-            return None
-        cfg_path = os.path.join(os.path.dirname(model_path), "model_config.json")
-        if not os.path.isfile(cfg_path):
-            return None
-
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as fh:
-                cfg = json.load(fh)
-            target_h = int(cfg.get("image_height"))
-            target_w = int(cfg.get("image_width"))
-            if target_h <= 0 or target_w <= 0:
-                return None
-            return target_h, target_w, cfg_path
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return None
-
-    @staticmethod
-    def _center_crop_to_size(image, target_w, target_h):
-        """Crop image to the exact target size without resizing.
-
-        Width is center-cropped. Extra height is removed from the top only so
-        the returned crop keeps the bottom target_h rows.
-        """
-        src_h, src_w = image.shape[:2]
-        if src_w < target_w or src_h < target_h:
-            raise ValueError(
-                f"Image is {src_w}x{src_h}, smaller than AI input {target_w}x{target_h}; "
-                "cannot center-crop without upsampling."
-            )
-        x0 = (src_w - target_w) // 2
-        y0 = src_h - target_h
-        cropped = np.array(image[y0:y0 + target_h, x0:x0 + target_w], copy=True)
-        return cropped, x0, y0
-
-    def _prepare_segmenter_input_image(self, auto_preprocess=False):
-        image_u8 = self._image_uint8(self.image_data)
-        source_h, source_w = image_u8.shape[:2]
-        process_note = f"Using source size: {source_w}x{source_h}"
-        self._preprocessing_info = None
-
-        if not auto_preprocess:
-            return image_u8, process_note
-
-        model_size = self._segmenter_model_size()
-        if model_size is None:
-            raise RuntimeError(
-                "Auto preprocess could not find model size. Expected model_config.json next to the selected .h5 model."
-            )
-
-        target_h, target_w, cfg_path = model_size
-        cropped, crop_offset_x, crop_offset_y = self._center_crop_to_size(image_u8, target_w, target_h)
-        crop_h, crop_w = cropped.shape[:2]
-
-        # Store preprocessing info for later inverse transformation of AI predictions
-        self._preprocessing_info = {
-            "source_h": source_h,
-            "source_w": source_w,
-            "crop_h": crop_h,
-            "crop_w": crop_w,
-            "crop_offset_x": crop_offset_x,
-            "crop_offset_y": crop_offset_y,
-            "target_h": target_h,
-            "target_w": target_w,
-        }
-        
-        process_note = (
-            f"Auto preprocess: center-cropped {source_w}x{source_h} -> {crop_w}x{crop_h} "
-            f"without resizing using {cfg_path}"
-        )
-        return cropped, process_note
-
-    def _segmenter_input_tiff(self, auto_preprocess=False):
-        image_for_segmenter, process_note = self._prepare_segmenter_input_image(auto_preprocess=auto_preprocess)
-        temp_dir = tempfile.mkdtemp(prefix="aidas_segmenter_")
-        temp_path = os.path.join(temp_dir, "step2_input.tiff")
-        Image.fromarray(image_for_segmenter).save(temp_path)
-        return temp_path, temp_dir, process_note, image_for_segmenter
-
-
     def _write_segmenter_log_file(self, output_dir, content):
         log_dir = os.path.join(output_dir, "logs")
         os.makedirs(log_dir, exist_ok=True)
@@ -3973,75 +3204,12 @@ class Step2Frame(SidebarStepFrame):
             order.append(name)
         return traces, order
 
-    def _import_boundary_rows(self, data, source_label="predicted boundaries"):
-        """Import six boundary rows into the Step 2 trace state."""
-        traces, order = self._boundary_traces_from_rows(data, self.image_data.shape, source_label=source_label)
-
-        self.boundary_traces.clear()
-        self.boundary_order.clear()
-        self.image_canvas.clear_active_line()
-        self.image_canvas.clear_line_overlays()
-
-        self.boundary_traces.update(traces)
-        self.boundary_order.extend(order)
-        for name in self.boundary_order:
-            trace = self.boundary_traces[name]
-            self.image_canvas.add_line_overlay(trace["points"], color=trace["color"], label=name)
-
-        self._refresh_trace_list()
-        if self.boundary_order:
-            self._select_trace_by_name(self.boundary_order[0])
-            self._update_saved_trace_summary(self.boundary_order[0])
-
-        # Mark imported boundaries as complete to indicate AI has processed them
-        for name in BOUNDARY_NAMES:
-            if name in self.boundary_completion_vars:
-                self.boundary_completion_vars[name].set(name in self.boundary_traces)
-        self._refresh_boundary_lists()
-        self._update_boundary_progress_bar()
-
-    def _import_segmenter_boundaries(self, csv_path):
-        """Import boundary traces from oct-segmenter CSV output."""
-        try:
-            data = np.loadtxt(csv_path, delimiter=",", dtype=float)
-        except (OSError, ValueError) as exc:
-            raise RuntimeError(f"Could not read predicted boundaries CSV: {exc}") from exc
-
-        self._import_boundary_rows(data, source_label="Predicted CSV")
-
-    def _image_matches_model_input(self):
-        """Return True when current image already matches model input size."""
-        if self.image_data is None:
-            return False
-        model_size = self._segmenter_model_size()
-        if model_size is None:
-            return False
-        target_h, target_w, _cfg_path = model_size
-        image_h, image_w = self.image_data.shape[:2]
-        return int(image_h) == int(target_h) and int(image_w) == int(target_w)
-
-    def _aidas_batch_model_ready(self):
-        if self._segmenter_running:
-            return False
-        if not self._is_aidas_ai_backend():
-            return False
-        model_path = self.aidas_model_var.get().strip()
-        return bool(model_path) and os.path.isfile(model_path)
-
-    def _folder_ai_button_enabled(self):
-        return not self._segmenter_running and self._is_aidas_ai_backend()
-
     def _batch_ai_button_enabled(self):
         if getattr(self, "batch_segmentation_panel", None) is not None:
             return False
-        return not self._segmenter_running and self._is_aidas_ai_backend()
+        return not self._segmenter_running
 
     def _update_batch_ai_button_state(self):
-        if hasattr(self, "folder_segment_button"):
-            if self._folder_ai_button_enabled():
-                self.folder_segment_button.state(["!disabled"])
-            else:
-                self.folder_segment_button.state(["disabled"])
         if not hasattr(self, "batch_ai_button"):
             return
         if self._batch_ai_button_enabled():
@@ -4050,50 +3218,7 @@ class Step2Frame(SidebarStepFrame):
             self.batch_ai_button.state(["disabled"])
 
     def _update_ai_button_states(self):
-        """Update AI button states based on preprocessing and input readiness.
-
-        Three possible states:
-          1. Preprocessing already done: Show "Remove Preprocess" (enabled) + enable AI
-          2. Image matches model size: Show "Preprocess Not Needed" (disabled) + enable AI
-          3. Need preprocessing: Show "Preprocess Image" (enabled) + disable AI
-
-        This implements the smart preprocessing workflow where unnecessary preprocessing
-        is skipped if the image already matches the model's expected input dimensions.
-        """
-        if not hasattr(self, "preprocess_button") or not hasattr(self, "segment_button"):
-            return
-
-        if self.image_data is None:
-            self.preprocess_button.configure(text="Preprocess Image", command=self._preprocess_image_for_ai)
-            self.preprocess_button.state(["disabled"])
-            self.segment_button.state(["disabled"])
-            self._update_batch_ai_button_state()
-            return
-
-        if self._is_aidas_ai_backend():
-            self.preprocess_button.configure(text="Preprocess Not Needed", command=self._preprocess_image_for_ai)
-            self.preprocess_button.state(["disabled"])
-            self.segment_button.state(["!disabled"])
-            self._update_batch_ai_button_state()
-            return
-
-        if self._preprocessing_done:
-            self.preprocess_button.configure(text="Remove Preprocess", command=self._remove_preprocess)
-            self.preprocess_button.state(["!disabled"])
-            self.segment_button.state(["!disabled"])
-            self._update_batch_ai_button_state()
-            return
-
-        if self._image_matches_model_input():
-            self.preprocess_button.configure(text="Preprocess Not Needed", command=self._preprocess_image_for_ai)
-            self.preprocess_button.state(["disabled"])
-            self.segment_button.state(["!disabled"])
-            self._update_batch_ai_button_state()
-            return
-
-        self.preprocess_button.configure(text="Preprocess Image", command=self._preprocess_image_for_ai)
-        self.preprocess_button.state(["!disabled"])
-        self.segment_button.state(["disabled"])
+        """Update AI-related button states."""
         self._update_batch_ai_button_state()
 
     def _set_segmentation_running(
@@ -4117,7 +3242,7 @@ class Step2Frame(SidebarStepFrame):
         After segmentation (running=False):
           - Re-enables controls
           - Stops progress animation
-          - Updates AI button states based on preprocessing
+          - Updates AI button states
           - Re-enables line drawing if appropriate
 
         Args:
@@ -4125,28 +3250,13 @@ class Step2Frame(SidebarStepFrame):
             status_message: Optional status text to display to user.
         """
         self._segmenter_running = bool(running)
-        button_state = ["disabled"] if running else ["!disabled"]
-        self.preprocess_button.state(button_state)
-        self.segment_button.state(button_state)
-        if hasattr(self, "ai_backend_combo"):
-            self.ai_backend_combo.configure(state="disabled" if running else "readonly")
         if hasattr(self, "ai_settings_btn"):
             self.ai_settings_btn.state(["disabled"] if running else ["!disabled"])
         if running:
-            if hasattr(self, "folder_segment_button"):
-                self.folder_segment_button.state(["disabled"])
             if hasattr(self, "batch_ai_button"):
                 self.batch_ai_button.state(["disabled"])
         else:
             self._update_batch_ai_button_state()
-        for widget_name in (
-            "image_browser_reset_btn",
-            "image_browser_folder_btn",
-            "image_browser_refresh_btn",
-        ):
-            widget = getattr(self, widget_name, None)
-            if widget is not None:
-                widget.state(["disabled"] if running else ["!disabled"])
         
         # Disable/enable boundary listboxes during segmentation
         listbox_state = "disabled" if running else "normal"
@@ -4154,8 +3264,6 @@ class Step2Frame(SidebarStepFrame):
             self.boundary_incomplete_listbox.configure(state=listbox_state)
         if hasattr(self, "boundary_completed_listbox"):
             self.boundary_completed_listbox.configure(state=listbox_state)
-        if hasattr(self, "directory_image_listbox"):
-            self.directory_image_listbox.configure(state=listbox_state)
         
         # Disable/enable entire fovea frame during segmentation
         if running:
@@ -4223,7 +3331,7 @@ class Step2Frame(SidebarStepFrame):
                 self._update_boundary_progress_bar()
             # Update button states after segmentation finishes
             self._update_ai_button_states()
-            if self.image_data is None and not getattr(self, "_directory_image_paths_cache", []):
+            if self.image_data is None:
                 self._set_segmentation_frame_enabled(False)
 
         # Update canvas state to disable/enable drawing based on segmentation status
@@ -4266,231 +3374,6 @@ class Step2Frame(SidebarStepFrame):
         else:
             # Keep it near max until segmentation finishes.
             self._progress_animation_job = self.after(500, self._animate_progress_bar)
-
-    def _run_segmenter_worker(self, cmd, output_dir):
-        try:
-            # Prevent spawning a visible console window on Windows when running
-            # console-based CLIs like `conda` or `oct-segmenter`.
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            startupinfo = None
-            if os.name == "nt":
-                try:
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    si.wShowWindow = subprocess.SW_HIDE
-                    startupinfo = si
-                except Exception:
-                    startupinfo = None
-
-            run_result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=self._segmenter_subprocess_env(),
-                creationflags=creationflags,
-                startupinfo=startupinfo,
-            )
-            stdout = (run_result.stdout or "").strip()
-            stderr = (run_result.stderr or "").strip()
-            run_log = (
-                "AIDaS Step 2 Neural Segmentation\n"
-                f"Command: {subprocess.list2cmdline(cmd)}\n"
-                f"Return code: {run_result.returncode}\n\n"
-                f"STDOUT:\n{stdout or '(empty)'}\n\n"
-                f"STDERR:\n{stderr or '(empty)'}\n"
-            )
-            log_path = self._write_segmenter_log_file(output_dir, run_log)
-            result = {
-                "returncode": run_result.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
-                "log_path": log_path,
-            }
-        except Exception as exc:  # pragma: no cover - defensive runtime error handling
-            result = {
-                "exception": str(exc),
-                "returncode": -1,
-                "stdout": "",
-                "stderr": "",
-                "log_path": None,
-            }
-
-        self.after(0, lambda: self._on_segmenter_worker_done(result))
-
-    def _on_segmenter_worker_done(self, result):
-        input_tiff = getattr(self, "_segmenter_input_tiff_path", None)
-        temp_dir = getattr(self, "_segmenter_temp_dir", None)
-        output_dir = getattr(self, "_segmenter_output_dir", None)
-
-        try:
-            log_path = result.get("log_path")
-            if result.get("exception"):
-                self._append_segmenter_log(f"Segmentation execution failed: {result['exception']}")
-                messagebox.showerror("Segmentation failed", result["exception"])
-                self.status_var.set("Neural segmentation failed.")
-                return
-
-            if log_path:
-                self._append_segmenter_log(f"Saved run log: {log_path}")
-
-            stdout = result.get("stdout", "")
-            stderr = result.get("stderr", "")
-            if stdout:
-                self._append_segmenter_log("STDOUT:\n" + stdout)
-            if stderr:
-                self._append_segmenter_log("STDERR:\n" + stderr)
-
-            if result.get("returncode", 1) != 0:
-                details = stderr or stdout or "Unknown error"
-                message = details
-                if log_path:
-                    message += f"\n\nLog saved to:\n{log_path}"
-                messagebox.showerror("Segmentation failed", message)
-                self.status_var.set("Neural segmentation failed.")
-                return
-
-            labeled_dir = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(input_tiff))[0]}_labeled")
-            boundaries_csv = os.path.join(labeled_dir, "gs_boundaries.csv")
-            if not os.path.isfile(boundaries_csv):
-                message = (
-                    "Segmentation finished but gs_boundaries.csv was not found.\n"
-                    "Check that graph_search is enabled in the config and try again."
-                )
-                if log_path:
-                    message += f"\n\nLog saved to:\n{log_path}"
-                messagebox.showerror("Segmentation output missing", message)
-                self.status_var.set("Segmentation finished, but no boundary CSV was found.")
-                return
-
-            self._import_segmenter_boundaries(boundaries_csv)
-            self.status_var.set(f"Segmentation completed and boundaries loaded from {boundaries_csv}")
-            self._append_segmenter_log(f"Loaded predicted boundaries from: {boundaries_csv}")
-            msg = f"Loaded predicted boundaries from:\n{boundaries_csv}"
-            if log_path:
-                msg += f"\n\nLog saved to:\n{log_path}"
-            messagebox.showinfo("Segmentation complete", msg)
-        finally:
-            if temp_dir and os.path.isdir(temp_dir):
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            self._set_segmentation_running(False)
-            # Ensure listboxes are updated after controls are re-enabled
-            try:
-                incomplete_names = self._incomplete_boundary_names()
-                completed_names = self._completed_boundary_names()
-                self._populate_boundary_listbox(self.boundary_incomplete_listbox, incomplete_names, None)
-                self._populate_boundary_listbox(self.boundary_completed_listbox, completed_names, None)
-                # Select first completed boundary if any
-                if completed_names:
-                    self.boundary_completed_listbox.selection_clear(0, "end")
-                    self.boundary_completed_listbox.selection_set(0)
-                    self.boundary_completed_listbox.see(0)
-                    # Explicitly set active boundary to first completed
-                    self._set_active_boundary_target(completed_names[0])
-                else:
-                    # Otherwise select first incomplete
-                    if incomplete_names:
-                        self.boundary_incomplete_listbox.selection_clear(0, "end")
-                        self.boundary_incomplete_listbox.selection_set(0)
-                        self.boundary_incomplete_listbox.see(0)
-            except Exception:
-                pass
-
-    def _preprocess_image_for_ai(self):
-        """Preprocess image for AI segmentation with exact center crop.
-
-        Preprocessing pipeline:
-          1. Backup original image and file path for later restore
-          2. Convert current image to 8-bit if needed
-          3. Center-crop to exact model input dimensions (no downsampling or resizing)
-          4. Display preprocessed image on canvas
-          5. Store preprocessing metadata
-          6. Update button states to show "Remove Preprocess" and enable AI
-
-        Original image is preserved and can be restored with _remove_preprocess().
-        Preprocessing info is saved for later use (e.g., rescaling AI predictions).
-
-        The model size comes from model_config.json next to the .h5 model file.
-        """
-        if self.image_data is None:
-            messagebox.showwarning("No image", "Load an image before preprocessing.")
-            return
-
-        model_size = self._segmenter_model_size()
-        if model_size is None:
-            messagebox.showerror(
-                "Missing model config",
-                "Could not find model size. Expected model_config.json next to the selected .h5 model."
-            )
-            return
-
-        target_h, target_w, cfg_path = model_size
-        try:
-            original_image = np.array(self.image_data, copy=True)
-            original_path = self.current_file
-            image_u8 = self._image_uint8(self.image_data)
-            cropped, crop_offset_x, crop_offset_y = self._center_crop_to_size(image_u8, target_w, target_h)
-            
-            # Calculate crop offsets for inverse transformation
-            source_h, source_w = image_u8.shape[:2]
-            crop_h, crop_w = cropped.shape[:2]
-            
-            # Display the preprocessed image (note: _show_image clears preprocessing state)
-            display_path = self.current_file or "Step 2 input (preprocessed)"
-            self._show_image(cropped, display_path)
-            
-            # Restore preprocessing info and state after _show_image clears them
-            self._preprocessing_info = {
-                "source_h": source_h,
-                "source_w": source_w,
-                "crop_h": crop_h,
-                "crop_w": crop_w,
-                "crop_offset_x": crop_offset_x,
-                "crop_offset_y": crop_offset_y,
-                "target_h": target_h,
-                "target_w": target_w,
-            }
-            self._last_auto_preprocessed_image = np.array(cropped, copy=True)
-            self._original_image_for_ai = original_image
-            self._original_file_for_ai = original_path
-            self._preprocessing_done = True
-            
-            self._update_ai_button_states()
-            self.status_var.set(
-                f"Image preprocessed: cropped {source_w}x{source_h} → {crop_w}x{crop_h}, "
-                "no resizing/downsampling. Ready for AI segmentation."
-            )
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("Preprocess failed", str(exc))
-
-    def _remove_preprocess(self):
-        """Remove preprocessing and restore original image shape and data.
-
-        Restores the image to its original state before preprocessing was applied.
-        This is a lossless operation—all original pixels are preserved exactly.
-
-        Updates:
-          - Displays the original image on canvas
-          - Clears preprocessing metadata
-          - Updates AI button states to show "Preprocess Image" (enabled)
-          - Resets preprocessing_done flag
-        """
-        if self._original_image_for_ai is None:
-            return
-
-        restored_image = np.array(self._original_image_for_ai, copy=True)
-        restored_path = self._original_file_for_ai or self.current_file or "Original image"
-
-        self._show_image(restored_image, restored_path)
-        
-        self._update_ai_button_states()
-        self.status_var.set("Preprocessing removed. Original image restored.")
-
-    def _run_neural_segmentation(self, auto_preprocess=False):
-        """Launch the selected AI backend."""
-        if self._is_aidas_ai_backend():
-            self._run_aidas_neural_segmentation()
-            return
-        self._run_oct_segmenter_segmentation(auto_preprocess=auto_preprocess)
 
     def _run_aidas_batch_segmentation(self, image_paths=None, manual_fovea_by_path=None):
         """Run AI_ForAIDAS predictions for multiple images and preview them in tabs."""
@@ -5041,168 +3924,6 @@ class Step2Frame(SidebarStepFrame):
             self.status_var.set(f"Saved {out_base}.img")
         return True
 
-    def _run_oct_segmenter_segmentation(self, auto_preprocess=False):
-        """Launch neural network segmentation in background thread.
-
-        Validates inputs, prepares a TIFF file for the segmenter tool, and
-        runs the oct-segmenter command via subprocess. The segmentation happens
-        in a daemon thread to keep the UI responsive. Results are automatically
-        imported when complete.
-
-        Steps:
-          1. Check segmentation is not already running and image is loaded
-          2. Validate config (.json) and model (.h5) file paths exist
-          3. Determine which image to segment (preprocessed, already-sized, or error)
-          4. Create temp TIFF in temp directory for segmenter input
-          5. Build command-line arguments for oct-segmenter predict
-          6. Lock UI (disable buttons, show progress animation)
-          7. Start daemon thread with _run_segmenter_worker
-          8. Worker reports back via _on_segmenter_worker_done callback
-
-        Args:
-            auto_preprocess: Not currently used; left for future auto-preprocess feature.
-        """
-        if self._segmenter_running:
-            messagebox.showinfo("Please wait", "Segmentation is already running.")
-            return
-        if self.image_data is None:
-            messagebox.showwarning("No image", "Load an image before running neural segmentation.")
-            return
-
-        config_path = self.segmenter_config_var.get().strip()
-        model_path = self.segmenter_model_var.get().strip()
-        output_dir = self.segmenter_output_var.get().strip() or self._default_segmenter_output_dir()
-
-        if not os.path.isfile(config_path):
-            messagebox.showerror("Missing config", f"Config file not found:\n{config_path}")
-            return
-        if not os.path.isfile(model_path):
-            messagebox.showerror("Missing model", f"Model file not found:\n{model_path}")
-            return
-
-        os.makedirs(output_dir, exist_ok=True)
-        self.segmenter_output_var.set(output_dir)
-
-        try:
-            # Use preprocessed image when available.
-            if self._preprocessing_done and self._last_auto_preprocessed_image is not None:
-                processed_image = self._last_auto_preprocessed_image
-                process_note = "Using preprocessed image."
-            elif self._image_matches_model_input():
-                processed_image = self._image_uint8(self.image_data)
-                process_note = "Input already matches model size; preprocessing skipped."
-            else:
-                messagebox.showinfo(
-                    "Preprocess required",
-                    "Preprocess Image first, or load an image that already matches the model input size.",
-                )
-                return
-            
-            # Create temp TIFF for segmenter input
-            temp_dir = tempfile.mkdtemp(prefix="aidas_segmenter_")
-            temp_path = os.path.join(temp_dir, "step2_input.tiff")
-            Image.fromarray(processed_image).save(temp_path)
-            input_tiff = temp_path
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("Preprocess failed", str(exc))
-            return
-
-        base_cmd = self._segmenter_command()
-        if not base_cmd:
-            # Could not determine an external oct-segmenter command to run.
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            messagebox.showerror(
-                "Segmenter unavailable",
-                (
-                    "Could not find an 'oct-segmenter' executable or a usable conda installation on this machine.\n\n"
-                    "When running AIDaS as a bundled executable, the embedded Python cannot run\n"
-                    "the 'oct_segmenter' module via '-m' without a separate Python interpreter.\n\n"
-                    "Please install 'oct-segmenter' on the target machine (pip/conda), ensure 'oct-segmenter'\n"
-                    "is on PATH, or set a valid conda environment in AI Settings."
-                ),
-            )
-            self._set_segmentation_running(False)
-            return
-
-        cmd = base_cmd + [
-            "predict",
-            "-c",
-            config_path,
-            "-m",
-            model_path,
-            "-i",
-            input_tiff,
-            "-o",
-            output_dir,
-        ]
-        cmd_display = subprocess.list2cmdline(cmd)
-        self._append_segmenter_log(process_note)
-        self._append_segmenter_log(f"Running command: {cmd_display}")
-
-        self._segmenter_input_tiff_path = input_tiff
-        self._segmenter_temp_dir = temp_dir
-        self._segmenter_output_dir = output_dir
-
-        self._set_segmentation_running(True, status_message="Running neural segmentation...")
-        worker = threading.Thread(target=self._run_segmenter_worker, args=(cmd, output_dir), daemon=True)
-        worker.start()
-
-    def _run_aidas_neural_segmentation(self):
-        """Run the AI_ForAIDAS PyTorch backend in a background thread."""
-        if self._segmenter_running:
-            messagebox.showinfo("Please wait", "Segmentation is already running.")
-            return
-        if self.image_data is None:
-            messagebox.showwarning("No image", "Load an image before running neural segmentation.")
-            return
-
-        model_path = self.aidas_model_var.get().strip()
-        if not os.path.isfile(model_path):
-            messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
-            return
-
-        predict_fovea = bool(self.aidas_predict_fovea_var.get())
-        vline_path = self.aidas_vline_model_var.get().strip()
-        if predict_fovea and vline_path and not os.path.isfile(vline_path):
-            self._append_segmenter_log(f"AI_ForAIDAS vline model not found; fovea prediction skipped: {vline_path}")
-            vline_path = None
-        if not predict_fovea:
-            vline_path = None
-
-        output_dir = self.segmenter_output_var.get().strip() or self._default_segmenter_output_dir()
-        os.makedirs(output_dir, exist_ok=True)
-        self.segmenter_output_var.set(output_dir)
-
-        model_input_uses_stored_y = self._aidas_should_use_stored_analyze_y()
-        image_for_ai = np.array(self.image_data, copy=True)
-        if model_input_uses_stored_y:
-            image_for_ai = np.ascontiguousarray(np.flipud(image_for_ai))
-        device_name = self.aidas_device_var.get().strip() or AI_DEVICE_OPTIONS[0]
-        height, width = self.image_data.shape[:2]
-        self._append_segmenter_log(
-            f"Running AI_ForAIDAS on {width}x{height}; model={model_path}; device={device_name}"
-        )
-        if model_input_uses_stored_y:
-            self._append_segmenter_log(
-                "AI_ForAIDAS Analyze compatibility: using stored .img vertical orientation to match app.py."
-            )
-
-        self._set_segmentation_running(True, status_message="Running AI_ForAIDAS segmentation...")
-        worker = threading.Thread(
-            target=self._run_aidas_segmenter_worker,
-            args=(
-                image_for_ai,
-                model_path,
-                vline_path,
-                predict_fovea,
-                device_name,
-                output_dir,
-                model_input_uses_stored_y,
-            ),
-            daemon=True,
-        )
-        worker.start()
-
     def _aidas_should_use_stored_analyze_y(self):
         """Return True when AI_ForAIDAS should mimic app.py's Analyze input orientation."""
         if self.image_data is None:
@@ -5228,118 +3949,6 @@ class Step2Frame(SidebarStepFrame):
         # order so the imported traces remain top-to-bottom on the displayed image.
         converted = (height - 1) - boundaries[::-1]
         return np.clip(converted, 0, height - 1).astype(np.float32, copy=False)
-
-    def _run_aidas_segmenter_worker(
-        self,
-        image,
-        model_path,
-        vline_path,
-        predict_fovea,
-        device_name,
-        output_dir,
-        model_input_uses_stored_y=False,
-    ):
-        try:
-            try:
-                prediction = self._run_aidas_prediction_worker_process(
-                    image,
-                    model_path=model_path,
-                    vline_path=vline_path,
-                    predict_fovea=predict_fovea and bool(vline_path),
-                    device_name=device_name,
-                )
-                log_content = (
-                    "AIDaS Step 2 AI_ForAIDAS Segmentation\n"
-                    f"Boundary model: {model_path}\n"
-                    f"VLine model: {vline_path or '(not used)'}\n"
-                    f"Device: {prediction['device']}\n"
-                    f"Image shape: {image.shape[1]}x{image.shape[0]}\n"
-                    f"Boundary rows: {prediction['boundaries'].shape}\n"
-                    f"Fovea x: {prediction['fovea_x'] if prediction['fovea_x'] is not None else '(not predicted)'}\n"
-                    f"Worker command: {prediction['command']}\n"
-                )
-                if prediction.get("stdout"):
-                    log_content += f"\nWorker STDOUT:\n{prediction['stdout']}\n"
-                if prediction.get("stderr"):
-                    log_content += f"\nWorker STDERR:\n{prediction['stderr']}\n"
-                log_path = self._write_segmenter_log_file(output_dir, log_content)
-                result = {
-                    "boundaries": self._aidas_boundaries_from_model_to_display(
-                        prediction["boundaries"],
-                        image.shape[0],
-                        model_input_uses_stored_y,
-                    ),
-                    "fovea_x": prediction["fovea_x"],
-                    "device": prediction["device"],
-                    "log_path": log_path,
-                }
-            except Exception as inner_exc:
-                if self._is_missing_torch_error(inner_exc):
-                    raise RuntimeError(self._missing_torch_message(inner_exc)) from inner_exc
-                raise
-        except Exception as exc:  # pragma: no cover - defensive runtime error handling
-            result = {
-                "exception": str(exc),
-                "boundaries": None,
-                "fovea_x": None,
-                "device": None,
-                "log_path": None,
-            }
-
-        self.after(0, lambda: self._on_aidas_segmenter_worker_done(result))
-
-    def _on_aidas_segmenter_worker_done(self, result):
-        predicted_fovea_x = None
-        try:
-            if result.get("exception"):
-                self._append_segmenter_log(f"AI_ForAIDAS segmentation failed: {result['exception']}")
-                messagebox.showerror("Segmentation failed", result["exception"])
-                self.status_var.set("AI_ForAIDAS segmentation failed.")
-                return
-
-            log_path = result.get("log_path")
-            if log_path:
-                self._append_segmenter_log(f"Saved run log: {log_path}")
-
-            self._import_boundary_rows(result["boundaries"], source_label="AI_ForAIDAS prediction")
-
-            predicted_fovea_x = result.get("fovea_x")
-            if predicted_fovea_x is not None:
-                self._set_fovea_from_prediction(predicted_fovea_x)
-
-            device = result.get("device") or "unknown"
-            self.status_var.set(f"AI_ForAIDAS segmentation completed on {device}.")
-            self._append_segmenter_log("Loaded AI_ForAIDAS predicted boundaries into Step 2.")
-            msg = "Loaded AI_ForAIDAS predicted boundaries."
-            if predicted_fovea_x is not None:
-                msg += f"\nPredicted foveal center: x={int(predicted_fovea_x)}"
-            if log_path:
-                msg += f"\n\nLog saved to:\n{log_path}"
-            messagebox.showinfo("Segmentation complete", msg)
-        finally:
-            self._set_segmentation_running(False)
-            try:
-                incomplete_names = self._incomplete_boundary_names()
-                completed_names = self._completed_boundary_names()
-                self._populate_boundary_listbox(self.boundary_incomplete_listbox, incomplete_names, None)
-                self._populate_boundary_listbox(self.boundary_completed_listbox, completed_names, None)
-                if predicted_fovea_x is not None and FOVEA_BOUNDARY_NAME in self.boundary_traces:
-                    self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
-                    self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
-                elif completed_names:
-                    self.boundary_completed_listbox.selection_clear(0, "end")
-                    self.boundary_completed_listbox.selection_set(0)
-                    self.boundary_completed_listbox.see(0)
-                    self._set_active_boundary_target(completed_names[0])
-                elif incomplete_names:
-                    self.boundary_incomplete_listbox.selection_clear(0, "end")
-                    self.boundary_incomplete_listbox.selection_set(0)
-                    self.boundary_incomplete_listbox.see(0)
-            except Exception:
-                pass
-            if not result.get("exception"):
-                device = result.get("device") or "unknown"
-                self.status_var.set(f"AI_ForAIDAS segmentation completed on {device}.")
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Export boundary rows as CSV

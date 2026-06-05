@@ -9,10 +9,8 @@ dependencies:
 
 # Notes:
 # - This file uses conda only to create the Python environment.
-# - All main AIDaS app and newer AI_ForAIDAS packages are installed with pip
+# - All main AIDaS app and AI_ForAIDAS packages are installed with pip
 #   from requirements.txt to avoid mixing conda and pip runtime libraries.
-# - The legacy OCT Segmenter wheels require Python 3.10 and TensorFlow 2.9;
-#   install them with `environment-oct-segmenter-legacy.yml` instead.
 # - To create the environment locally:
 #
 # conda env create -f environment.yml

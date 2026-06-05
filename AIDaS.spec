@@ -10,9 +10,6 @@ project_root = Path(SPECPATH)
 
 datas = [
     (str(project_root / "assets"), "assets"),
-    (str(project_root / "OCT Segmenter" / "config.json"), "OCT Segmenter"),
-    (str(project_root / "OCT Segmenter" / "Model" / "human_OCT.h5"), "OCT Segmenter/Model"),
-    (str(project_root / "OCT Segmenter" / "Model" / "model_config.json"), "OCT Segmenter/Model"),
     (
         str(project_root / "OCT Segmenter" / "AI_ForAIDAS" / "model_img.pth"),
         "OCT Segmenter/AI_ForAIDAS",
