@@ -29,14 +29,6 @@ hiddenimports = [
     "torch.nn",
     "torch.nn.functional",
 ]
-excludes = [
-    "PySide6",
-    "shiboken6",
-    "PyQt5",
-    "PyQt6",
-    "qtpy",
-    "torchvision",
-]
 
 
 def collect_package(package_name, required=True):
@@ -82,7 +74,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=excludes,
+    excludes=[],
     noarchive=False,
     optimize=0,
 )
