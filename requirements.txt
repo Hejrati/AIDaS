@@ -4,9 +4,10 @@
 # Those wheels require Python 3.10 and TensorFlow 2.9; install them with
 # `requirements-oct-segmenter-legacy.txt` or
 # `environment-oct-segmenter-legacy.yml`.
-numpy==2.2.6
-scipy==1.15.2
-Pillow>=10.0
-pyreadr
-xarray
-torch
+numpy>=2.4
+scipy>=1.17
+Pillow>=12
+matplotlib>=3.10
+pyreadr>=0.5
+xarray>=2026.4
+torch>=2.12

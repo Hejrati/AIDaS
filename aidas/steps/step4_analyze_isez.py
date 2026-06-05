@@ -16,12 +16,9 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image
 
-# Step 4 is temporarily disabled because Matplotlib can initialize an OpenMP
-# runtime that conflicts with PyTorch segmentation.
-STEP4_DISABLED = True
-# from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-# from matplotlib.figure import Figure
-# from matplotlib.patches import Rectangle
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.ui_utils import SidebarStepFrame
@@ -466,27 +463,6 @@ class Step4Frame(SidebarStepFrame):
         self.preferences = preferences
         self.source_step = source_step
 
-        if STEP4_DISABLED:
-            self.status_var = tk.StringVar(value="Step 4 is disabled.")
-            self.build_standard_layout(
-                sidebar_width=self.SIDEBAR_WIDTH,
-                sidebar_pack={"padx": (2, 6), "pady": 6},
-                content_pack={"padx": 6, "pady": 6},
-                status_var=self.status_var,
-            )
-            ttk.Label(
-                self.content,
-                text=(
-                    "Step 4 Analyze ISez is temporarily disabled.\n\n"
-                    "This prevents Matplotlib/OpenMP from conflicting with "
-                    "PyTorch AI segmentation."
-                ),
-                justify="center",
-                wraplength=520,
-                padding=24,
-            ).pack(expand=True)
-            return
-
         self.rois = default_isez_rois()
         self.volume = None
         self.image = None
@@ -527,8 +503,23 @@ class Step4Frame(SidebarStepFrame):
 
         source_section = self.add_sidebar_section("Input", padding=3, pady=(0, 5))
         source = source_section.body
-        ttk.Button(source, text="Open OCT Image...", command=self._open_image).pack(fill="x", pady=2)
-        ttk.Button(source, text="Load Step 3 _flat_LIGHT", command=self._load_step3_flat_light).pack(fill="x", pady=2)
+        # Temporarily disable the file-open and Step 3 load buttons to prevent
+        # loading files while the feature is disabled for maintenance/testing.
+        self.open_button = ttk.Button(
+            source,
+            text="Open OCT Image...",
+            command=self._open_image,
+            state="disabled",
+        )
+        self.open_button.pack(fill="x", pady=2)
+
+        self.load_step3_button = ttk.Button(
+            source,
+            text="Load Step 3 _flat_LIGHT",
+            command=self._load_step3_flat_light,
+            state="disabled",
+        )
+        self.load_step3_button.pack(fill="x", pady=2)
 
         ttk.Label(source, text="Step 3 folder").pack(anchor="w", pady=(6, 0))
         folder_row = ttk.Frame(source)

@@ -47,7 +47,9 @@ pip install -r requirements.txt
 This file intentionally does not install the old TensorFlow OCT Segmenter wheels.
 Those wheels use older package pins that conflict with the Python 3.11 app environment.
 
-Alternatively, create the conda environment from `environment.yml`:
+Alternatively, create the conda environment from `environment.yml`. This uses
+conda only for Python itself; app packages are installed by pip from
+`requirements.txt`:
 
 ```bash
 conda env create -f environment.yml
@@ -104,7 +106,8 @@ Install the newer AI_ForAIDAS PyTorch segmenter from the root dependency file be
 pip install -r requirements.txt
 ```
 
-Or use the root conda environment:
+Or create the root environment. It still installs the app packages with pip
+from `requirements.txt`:
 
 ```bash
 conda env create -f environment.yml

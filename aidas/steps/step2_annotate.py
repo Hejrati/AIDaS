@@ -1579,15 +1579,18 @@ class Step2Frame(SidebarStepFrame):
                     vline_path = self.aidas_vline_model_var.get().strip()
                     if os.path.isfile(vline_path):
                         try:
-                            from aidas.ai_for_aidas_inference import AIForAIDASPredictor
                             device_name = self.aidas_device_var.get().strip() or "cpu"
-                            import torch
-                            device = torch.device(device_name if torch.cuda.is_available() else "cpu")
-                            pred = AIForAIDASPredictor(None, vline_path, device)
-                            fovea_x, _ = pred.predict_fovea([image_data])
+                            prediction = self._run_aidas_prediction_worker_process(
+                                image_data,
+                                model_path=self.aidas_model_var.get().strip(),
+                                vline_path=vline_path,
+                                predict_fovea=True,
+                                device_name=device_name,
+                            )
+                            fovea_x = prediction.get("fovea_x")
                             if fovea_x is not None:
-                                self.fovea_x_entry_var.set(str(int(fovea_x[0])))
-                                self.image_canvas.vertical_line_x = int(fovea_x[0])
+                                self.fovea_x_entry_var.set(str(int(fovea_x)))
+                                self.image_canvas.vertical_line_x = int(fovea_x)
                                 self.image_canvas._draw_vertical_line()
                         except Exception as e:
                             print("Auto-predict fovea failed:", e)
@@ -3577,6 +3580,110 @@ class Step2Frame(SidebarStepFrame):
 
         return env
 
+    def _aidas_worker_command(self):
+        """Return the isolated AI_ForAIDAS worker command."""
+        if getattr(sys, "frozen", False):
+            return [sys.executable, "--aidas-ai-worker"]
+        return [sys.executable, "-m", "aidas.ai_for_aidas_cli"]
+
+    def _aidas_worker_env(self):
+        """Return an environment for AI_ForAIDAS worker subprocesses."""
+        env = self._segmenter_subprocess_env()
+        if not getattr(sys, "frozen", False):
+            root = self._app_root()
+            path_key = next((key for key in env if key.lower() == "pythonpath"), "PYTHONPATH")
+            existing = env.get(path_key, "")
+            parts = [part for part in existing.split(os.pathsep) if part]
+            root_norm = os.path.normcase(os.path.abspath(root))
+            if root_norm not in {os.path.normcase(os.path.abspath(part)) for part in parts}:
+                env[path_key] = os.pathsep.join([root] + parts)
+        return env
+
+    @staticmethod
+    def _hidden_subprocess_kwargs():
+        """Hide worker console windows on Windows."""
+        kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+        if os.name == "nt":
+            try:
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                si.wShowWindow = subprocess.SW_HIDE
+                kwargs["startupinfo"] = si
+            except Exception:
+                pass
+        return kwargs
+
+    def _run_aidas_prediction_worker_process(
+        self,
+        image,
+        *,
+        model_path,
+        vline_path,
+        predict_fovea,
+        device_name,
+    ):
+        """Run PyTorch AI_ForAIDAS in a clean subprocess and return arrays."""
+        temp_dir = tempfile.mkdtemp(prefix="aidas_ai_for_aidas_")
+        image_npy = os.path.join(temp_dir, "image.npy")
+        output_npz = os.path.join(temp_dir, "prediction.npz")
+        try:
+            np.save(image_npy, np.ascontiguousarray(image))
+            cmd = self._aidas_worker_command() + [
+                "--image-npy",
+                image_npy,
+                "--model",
+                model_path,
+                "--device",
+                device_name,
+                "--output-npz",
+                output_npz,
+            ]
+            if predict_fovea and vline_path:
+                cmd.extend(["--vline-model", vline_path])
+            else:
+                cmd.append("--no-vline")
+
+            run_result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=self._aidas_worker_env(),
+                **self._hidden_subprocess_kwargs(),
+            )
+            stdout = (run_result.stdout or "").strip()
+            stderr = (run_result.stderr or "").strip()
+            if run_result.returncode != 0:
+                details = stderr or stdout or "(worker produced no output)"
+                raise RuntimeError(
+                    "AI_ForAIDAS worker process failed.\n\n"
+                    f"Command: {subprocess.list2cmdline(cmd)}\n"
+                    f"Return code: {run_result.returncode}\n\n"
+                    f"{details}"
+                )
+            if not os.path.isfile(output_npz):
+                raise RuntimeError(
+                    "AI_ForAIDAS worker finished without writing prediction output.\n\n"
+                    f"Command: {subprocess.list2cmdline(cmd)}\n"
+                    f"STDOUT:\n{stdout or '(empty)'}\n\n"
+                    f"STDERR:\n{stderr or '(empty)'}"
+                )
+
+            with np.load(output_npz) as data:
+                fovea_arr = np.asarray(data["fovea_x"])
+                fovea_x = int(fovea_arr[0]) if fovea_arr.size else -1
+                device_arr = np.asarray(data["device"])
+                device = str(device_arr[0]) if device_arr.size else "unknown"
+                return {
+                    "boundaries": np.asarray(data["boundaries"], dtype=np.float32),
+                    "fovea_x": None if fovea_x < 0 else fovea_x,
+                    "device": device,
+                    "stdout": stdout,
+                    "stderr": stderr,
+                    "command": subprocess.list2cmdline(cmd),
+                }
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
     def _app_root(self):
         bundled_root = getattr(sys, "_MEIPASS", None)
         if bundled_root:
@@ -4487,30 +4594,6 @@ class Step2Frame(SidebarStepFrame):
             self.after(0, lambda: self._append_segmenter_log(f"Batch {index}/{total}: {path}"))
 
         try:
-            try:
-                from aidas.ai_for_aidas_inference import AIForAIDASPredictor
-
-                predictor = AIForAIDASPredictor(
-                    boundary_model_path=model_path,
-                    vline_model_path=vline_path,
-                    predict_fovea=predict_fovea and bool(vline_path),
-                    device_name=device_name,
-                )
-                device = str(predictor.device)
-
-                def run_prediction_with_result(image_for_ai):
-                    prediction = predictor.predict(image_for_ai)
-                    return {
-                        "boundaries": prediction.boundaries,
-                        "fovea_x": prediction.fovea_x,
-                        "device": prediction.device,
-                    }
-
-            except Exception as inner_exc:
-                if self._is_missing_torch_error(inner_exc):
-                    raise RuntimeError(self._missing_torch_message(inner_exc)) from inner_exc
-                raise
-
             for index, path in enumerate(image_paths, start=1):
                 report_status(index, path)
                 try:
@@ -4520,7 +4603,13 @@ class Step2Frame(SidebarStepFrame):
                     if model_input_uses_stored_y:
                         image_for_ai = np.ascontiguousarray(np.flipud(image_for_ai))
 
-                    prediction = run_prediction_with_result(image_for_ai)
+                    prediction = self._run_aidas_prediction_worker_process(
+                        image_for_ai,
+                        model_path=model_path,
+                        vline_path=vline_path,
+                        predict_fovea=predict_fovea and bool(vline_path),
+                        device_name=device_name,
+                    )
                     if prediction.get("device"):
                         device = prediction["device"]
                     fovea_x = prediction.get("fovea_x")
@@ -4548,6 +4637,7 @@ class Step2Frame(SidebarStepFrame):
                     })
                     log_lines.append(f"OK: {path}")
                     log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
+                    log_lines.append(f"  Worker: {prediction.get('command', '(unknown command)')}")
                     if fovea_x is not None:
                         source = "manual" if manual_fovea else "predicted"
                         log_lines.append(f"  Fovea x ({source}): {int(fovea_x)}")
@@ -5151,33 +5241,36 @@ class Step2Frame(SidebarStepFrame):
     ):
         try:
             try:
-                from aidas.ai_for_aidas_inference import predict_boundaries_and_fovea
-
-                prediction = predict_boundaries_and_fovea(
+                prediction = self._run_aidas_prediction_worker_process(
                     image,
-                    boundary_model_path=model_path,
-                    vline_model_path=vline_path,
+                    model_path=model_path,
+                    vline_path=vline_path,
                     predict_fovea=predict_fovea and bool(vline_path),
                     device_name=device_name,
                 )
                 log_content = (
                     "AIDaS Step 2 AI_ForAIDAS Segmentation\n"
-                    f"Boundary model: {prediction.boundary_model_path}\n"
-                    f"VLine model: {prediction.vline_model_path or '(not used)'}\n"
-                    f"Device: {prediction.device}\n"
+                    f"Boundary model: {model_path}\n"
+                    f"VLine model: {vline_path or '(not used)'}\n"
+                    f"Device: {prediction['device']}\n"
                     f"Image shape: {image.shape[1]}x{image.shape[0]}\n"
-                    f"Boundary rows: {prediction.boundaries.shape}\n"
-                    f"Fovea x: {prediction.fovea_x if prediction.fovea_x is not None else '(not predicted)'}\n"
+                    f"Boundary rows: {prediction['boundaries'].shape}\n"
+                    f"Fovea x: {prediction['fovea_x'] if prediction['fovea_x'] is not None else '(not predicted)'}\n"
+                    f"Worker command: {prediction['command']}\n"
                 )
+                if prediction.get("stdout"):
+                    log_content += f"\nWorker STDOUT:\n{prediction['stdout']}\n"
+                if prediction.get("stderr"):
+                    log_content += f"\nWorker STDERR:\n{prediction['stderr']}\n"
                 log_path = self._write_segmenter_log_file(output_dir, log_content)
                 result = {
                     "boundaries": self._aidas_boundaries_from_model_to_display(
-                        prediction.boundaries,
+                        prediction["boundaries"],
                         image.shape[0],
                         model_input_uses_stored_y,
                     ),
-                    "fovea_x": prediction.fovea_x,
-                    "device": prediction.device,
+                    "fovea_x": prediction["fovea_x"],
+                    "device": prediction["device"],
                     "log_path": log_path,
                 }
             except Exception as inner_exc:

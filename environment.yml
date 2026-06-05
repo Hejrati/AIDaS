@@ -1,27 +1,18 @@
 name: aidas-env
 channels:
-  - conda-forge
   - defaults
 dependencies:
   - python=3.11
-  - numpy=2.2.6
-  - scipy=1.15.2
-  - pillow>=10.0
-  - xarray
-  - packaging=26.1
-  - typeguard=4.5.1
-  - typing_extensions=4.15.0
-  - unicodedata2=17.0.1
   - pip
   - pip:
-    - pyreadr
-    - torch
+    - -r requirements.txt
 
 # Notes:
-# - This file is for the main AIDaS app and the newer AI_ForAIDAS PyTorch model.
+# - This file uses conda only to create the Python environment.
+# - All main AIDaS app and newer AI_ForAIDAS packages are installed with pip
+#   from requirements.txt to avoid mixing conda and pip runtime libraries.
 # - The legacy OCT Segmenter wheels require Python 3.10 and TensorFlow 2.9;
 #   install them with `environment-oct-segmenter-legacy.yml` instead.
-# - If you prefer everything via pip, run `pip install -r requirements.txt`.
 # - To create the environment locally:
 #
 # conda env create -f environment.yml

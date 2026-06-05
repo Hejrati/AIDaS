@@ -24,6 +24,7 @@ datas = [
 ]
 binaries = []
 hiddenimports = [
+    "aidas.ai_for_aidas_cli",
     "aidas.ai_for_aidas_inference",
     "torch",
     "torch.nn",
@@ -50,6 +51,7 @@ for package_name in (
     "numpy",
     "scipy",
     "PIL",
+    "matplotlib",
 ):
     collect_package(package_name)
 

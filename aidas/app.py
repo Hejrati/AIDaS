@@ -16,7 +16,6 @@ from aidas import __version__
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2Frame
 from aidas.steps.step3_flatten import Step3Frame
-# from aidas.steps.step4_analyze_isez import Step4Frame
 
 from aidas.config import Config
 
@@ -101,13 +100,10 @@ class AIDaSApp(tk.Tk):
         # Step 3
         self.step3 = Step3Frame(self.notebook, preferences=self.preferences)
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
-        self.step4 = None
-        # self.step4 = Step4Frame(
-        #     self.notebook,
-        #     preferences=self.preferences,
-        #     source_step=self.step3,
-        # )
-        # self.notebook.add(self.step4, text="  Step 4 - Analyze ISez  ")
+        # Step 4 imports Matplotlib, so load it only when the Step 4 tab opens.
+        self.step4 = ttk.Frame(self.notebook)
+        self._step4_frame = None
+        self.notebook.add(self.step4, text="  Step 4 - Analyze ISez  ")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
 
@@ -118,8 +114,24 @@ class AIDaSApp(tk.Tk):
 
     def _on_notebook_tab_changed(self, _event=None):
         selected = self.notebook.nametowidget(self.notebook.select())
+        if selected is self.step4:
+            self._ensure_step4_loaded()
+            selected = self._step4_frame or selected
         if hasattr(selected, "on_show"):
             selected.on_show()
+
+    def _ensure_step4_loaded(self):
+        if self._step4_frame is not None:
+            return
+
+        from aidas.steps.step4_analyze_isez import Step4Frame
+
+        self._step4_frame = Step4Frame(
+            self.step4,
+            preferences=self.preferences,
+            source_step=self.step3,
+        )
+        self._step4_frame.pack(fill="both", expand=True)
 
     @staticmethod
     def _resource_path(relative_path):
