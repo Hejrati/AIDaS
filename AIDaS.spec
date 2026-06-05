@@ -23,7 +23,20 @@ datas = [
     ),
 ]
 binaries = []
-hiddenimports = []
+hiddenimports = [
+    "aidas.ai_for_aidas_inference",
+    "torch",
+    "torch.nn",
+    "torch.nn.functional",
+]
+excludes = [
+    "PySide6",
+    "shiboken6",
+    "PyQt5",
+    "PyQt6",
+    "qtpy",
+    "torchvision",
+]
 
 
 def collect_package(package_name, required=True):
@@ -44,7 +57,6 @@ for package_name in (
     "torch",
     "numpy",
     "scipy",
-    "matplotlib",
     "PIL",
 ):
     collect_package(package_name)
@@ -53,8 +65,6 @@ for package_name in (
 for package_name in (
     "pyreadr",
     "xarray",
-    "PySide6",
-    "shiboken6",
     "imgviz",
     "prettytable",
     "art",
@@ -72,7 +82,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=excludes,
     noarchive=False,
     optimize=0,
 )

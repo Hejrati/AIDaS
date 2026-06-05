@@ -16,9 +16,12 @@ from tkinter import filedialog, messagebox, ttk
 import numpy as np
 from PIL import Image
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
+# Step 4 is temporarily disabled because Matplotlib can initialize an OpenMP
+# runtime that conflicts with PyTorch segmentation.
+STEP4_DISABLED = True
+# from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+# from matplotlib.figure import Figure
+# from matplotlib.patches import Rectangle
 
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.ui_utils import SidebarStepFrame
@@ -462,6 +465,27 @@ class Step4Frame(SidebarStepFrame):
         super().__init__(parent)
         self.preferences = preferences
         self.source_step = source_step
+
+        if STEP4_DISABLED:
+            self.status_var = tk.StringVar(value="Step 4 is disabled.")
+            self.build_standard_layout(
+                sidebar_width=self.SIDEBAR_WIDTH,
+                sidebar_pack={"padx": (2, 6), "pady": 6},
+                content_pack={"padx": 6, "pady": 6},
+                status_var=self.status_var,
+            )
+            ttk.Label(
+                self.content,
+                text=(
+                    "Step 4 Analyze ISez is temporarily disabled.\n\n"
+                    "This prevents Matplotlib/OpenMP from conflicting with "
+                    "PyTorch AI segmentation."
+                ),
+                justify="center",
+                wraplength=520,
+                padding=24,
+            ).pack(expand=True)
+            return
 
         self.rois = default_isez_rois()
         self.volume = None

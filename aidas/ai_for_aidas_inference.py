@@ -1,7 +1,8 @@
 """Inference adapter for the PyTorch AI_ForAIDAS OCT models.
 
 The Step 2 UI imports this module only when the AI_ForAIDAS backend is used, so
-PyTorch remains an optional runtime dependency for the rest of AIDaS.
+PyTorch can be bundled for release builds without making the rest of AIDaS
+depend on the model code at import time.
 """
 
 from __future__ import annotations
@@ -85,10 +86,12 @@ def _import_torch():
         import torch
         import torch.nn as nn
         import torch.nn.functional as F
-    except ImportError as exc:  # pragma: no cover - depends on local install
+    except (ImportError, OSError) as exc:  # pragma: no cover - depends on local install
         raise RuntimeError(
-            "AI_ForAIDAS requires PyTorch. Install torch in the AIDaS Python "
-            "environment before using this AI version."
+            "AI_ForAIDAS requires PyTorch, but PyTorch could not load its Windows DLLs.\n\n"
+            f"Original error: {exc}\n\n"
+            "If you are running the packaged app, rebuild from AIDaS.spec so PyInstaller bundles torch. "
+            "If you are running from source, start AIDaS from an activated aidas-env environment."
         ) from exc
     return torch, nn, F
 

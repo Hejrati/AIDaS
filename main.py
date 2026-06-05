@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import BSpline, LSQUnivariateSpline, UnivariateSpline
 
@@ -34,6 +33,12 @@ DEBUG_STEP = "startup"
 
 class StopTranslationBoundary(Exception):
     """Raised when we intentionally stop at the current translation boundary."""
+
+
+def _plotting_disabled(output_path: Path) -> None:
+    """Keep Step 3 processing free of Matplotlib/OpenMP runtime conflicts."""
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def dbg(step: str, *parts: object) -> None:
@@ -128,24 +133,7 @@ def load_input_volumes(input_dir: Path) -> dict[str, np.ndarray]:
 
 def save_r_image_matlines_plot(dark_slice: np.ndarray, rpe_info_2: np.ndarray, output_path: Path) -> None:
     """Save the Python equivalent of R's image(...); matlines(...)."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-    ax.imshow(
-        np.asarray(dark_slice, dtype=np.float64).T,
-        cmap="gray",
-        origin="lower",
-        aspect="auto",
-        extent=(1, dark_slice.shape[0], 1, dark_slice.shape[1]),
-    )
-    ax.plot(rpe_info_2[:, 0], rpe_info_2[:, 1], color="red", linewidth=1.0)
-    ax.set_title("DARK[,,1] with RPE.info.2")
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    _plotting_disabled(output_path)
 
 
 def save_overlay_series_plot(
@@ -172,27 +160,7 @@ def save_shift_position_plot(
     title: str,
 ) -> None:
     """Save the Python equivalent of plot(...); matlines(..., col='red')."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(10, 5), dpi=150)
-    ax.plot(x_values, y_values, color="black", linewidth=1.0)
-    ax.plot(
-        spline_xy[:, 0],
-        spline_xy[:, 1],
-        linestyle="None",
-        marker="o",
-        markersize=6.0,
-        markerfacecolor="red",
-        markeredgecolor="red",
-    )
-    ax.set_ylim(430, 470)
-    ax.set_title(title)
-    ax.set_xlabel("dist.on.spline.microns")
-    ax.set_ylabel("shift target")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    _plotting_disabled(output_path)
 
 
 def save_profile_plot(
@@ -203,29 +171,7 @@ def save_profile_plot(
     spline_xy: np.ndarray | None = None,
 ) -> None:
     """Save simple line plots used by the later R verification steps."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-    ax.plot(profile_xy[:, 0], profile_xy[:, 1], color="black", linewidth=1.0)
-    if spline_xy is not None:
-        ax.plot(
-            spline_xy[:, 0],
-            spline_xy[:, 1],
-            linestyle="None",
-            marker="o",
-            markersize=6.0,
-            markerfacecolor="none",
-            markeredgecolor="black",
-        )
-    for x in verticals:
-        ax.axvline(float(x), color="red" if x == verticals[-1] and len(verticals) > 3 else "black", linewidth=1.0)
-    ax.set_title(title)
-    ax.set_xlabel("column")
-    ax.set_ylabel("mean intensity")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    _plotting_disabled(output_path)
 
 
 def save_border_positions_overview_plot(
@@ -235,20 +181,7 @@ def save_border_positions_overview_plot(
     ylim: tuple[float, float],
 ) -> None:
     """Save the translated border overview plot from the R script."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-    for values, color, linewidth in series_specs:
-        x_values = np.arange(1.0, values.shape[0] + 1.0, 1.0)
-        ax.plot(x_values, values, color=color, linewidth=linewidth)
-    ax.set_ylim(*ylim)
-    ax.set_title(title)
-    ax.set_xlabel("row")
-    ax.set_ylabel("border position")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    _plotting_disabled(output_path)
 
 
 def save_border_refinement_plot(
@@ -258,25 +191,7 @@ def save_border_refinement_plot(
     title: str,
 ) -> None:
     """Save the translated plot(...) + matlines(...) refinement plot."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=150)
-    split = relative_positions.shape[0]
-    x_values = np.arange(1.0, split + 1.0, 1.0)
-    ylim_source = relative_positions[:, : min(4, relative_positions.shape[1])]
-    ax.plot(x_values, relative_positions[:, min(3, relative_positions.shape[1] - 1)], color="black", linewidth=1.0)
-    for col in range(relative_positions.shape[1] - 1, -1, -1):
-        ax.plot(x_values, relative_positions[:, col], color="black", linewidth=1.0)
-    for col in range(spline_results.shape[1]):
-        ax.plot(x_values, spline_results[:, col], color="red", linewidth=1.0)
-    ax.set_ylim(float(np.nanmin(ylim_source)), float(np.nanmax(ylim_source)))
-    ax.set_title(title)
-    ax.set_xlabel("index")
-    ax.set_ylabel("relative position")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    _plotting_disabled(output_path)
 
 
 def save_series_with_spline_line_plot(
@@ -287,18 +202,7 @@ def save_series_with_spline_line_plot(
     title: str,
 ) -> None:
     """Save simple source-vs-spline line plots from the later R sections."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    fig, ax = plt.subplots(figsize=(8, 5), dpi=150)
-    ax.plot(x_values, y_values, color="black", linewidth=1.0)
-    ax.plot(spline_xy[:, 0], spline_xy[:, 1], color="red", linewidth=1.0)
-    ax.set_title(title)
-    ax.set_xlabel("x")
-    ax.set_ylabel("y")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    _plotting_disabled(output_path)
 
 
 def get_recon_value(unwrapped_recon: np.ndarray, upper_x: int, upper_y: int, point: np.ndarray) -> float:
@@ -928,30 +832,7 @@ def save_tissue_border_plot(
     title: str,
 ) -> None:
     """Translate the R tissue-border image/matlines plot."""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    x_axis = np.arange(-100.0, 2751.0, 1.0)
-    y_axis = np.arange(-30.0, 431.0, 1.0)
-    image = np.asarray(flattened_rrc[: x_axis.size, ::-1, 0], dtype=np.float64).T
-
-    fig, ax = plt.subplots(figsize=(12, 4), dpi=150)
-    ax.imshow(
-        image,
-        cmap="gray",
-        origin="lower",
-        aspect="auto",
-        extent=(x_axis[0], x_axis[-1], y_axis[0], y_axis[-1]),
-    )
-    for positions, color in position_arrays:
-        y_values = 431.0 - np.asarray(positions[: x_axis.size, 0], dtype=np.float64)
-        ax.plot(x_axis, y_values, color=color, linewidth=1.0)
-    ax.set_title(title)
-    ax.set_xlabel("Distance from Fovea (microns)")
-    ax.set_ylabel("Distance from RPE (microns)")
-    fig.tight_layout()
-    fig.savefig(output_path, bbox_inches="tight")
-    plt.close(fig)
+    _plotting_disabled(output_path)
 
 
 def build_thickness_export(

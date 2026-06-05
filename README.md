@@ -313,18 +313,26 @@ OCT Segmenter/AI_ForAIDAS/
 
 ## Building the Windows Executable
 
-To create a standalone Windows executable, use PyInstaller:
+To create a standalone Windows build, install the app requirements in the build
+environment, then use the spec file:
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --windowed --name AIDaS run_aidas.py
+python -m PyInstaller AIDaS.spec --clean
 ```
 
-The executable will be created in the `dist/` folder as `AIDaS.exe`.
+The build is created in `dist/AIDaS/`. The spec bundles the app assets,
+AI_ForAIDAS `.pth` model files, and the PyTorch runtime collected from the
+build environment. Users running the generated app should not need a separate
+conda environment for the AI_ForAIDAS model.
+
+Do not use the minimal `--onefile --name AIDaS run_aidas.py` command for release
+builds; it does not include the model/data files defined in `AIDaS.spec`.
 
 ### Build with Spec File (Recommended)
 
-If you have `AIDaS.spec`, build from it so app name, icon, and bundled files stay consistent:
+Build from `AIDaS.spec` so app name, icon, bundled assets, AI model files, and
+hidden PyTorch imports stay consistent:
 
 ```bash
 python -m PyInstaller AIDaS.spec --clean
@@ -335,7 +343,7 @@ python -m PyInstaller AIDaS.spec --clean
 If `AIDaS.exe` has the new icon but the desktop shortcut still shows the old icon, Windows is using cached icon data.
 
 1. Delete the old desktop shortcut (do not delete the EXE)
-2. Run `dist/AIDaS.exe` once directly
+2. Run `dist/AIDaS/AIDaS.exe` once directly
 3. Create a new desktop shortcut from the new EXE
 4. If still unchanged, clear icon cache and restart Explorer:
 
@@ -360,6 +368,6 @@ PyInstaller is usually installed, but its script path is not on your `PATH`.
 Use the module form instead:
 
 ```bash
-python -m PyInstaller --onefile --windowed --name AIDaS run_aidas.py
+python -m PyInstaller AIDaS.spec --clean
 ```
 

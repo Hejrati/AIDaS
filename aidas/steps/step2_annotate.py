@@ -28,9 +28,9 @@ import csv
 import datetime
 import json
 import os
-import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import tkinter as tk
@@ -542,7 +542,7 @@ class Step2Frame(SidebarStepFrame):
         self.boundary_completion_vars = {name: tk.BooleanVar(value=False) for name in BOUNDARY_NAMES}
         self.source_label_var = tk.StringVar(value="No source selected")
 
-        app_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        app_root = self._app_root()
         segmenter_root = os.path.join(app_root, "OCT Segmenter")
         self.segmenter_default_config = os.path.join(segmenter_root, "config.json")
         self.segmenter_default_model = os.path.join(segmenter_root, "Model", "human_OCT.h5")
@@ -611,13 +611,13 @@ class Step2Frame(SidebarStepFrame):
 
         This dialog allows users to:
           - Choose the AI backend used by the single-image AI segmentation button
-          - Set conda/config/model settings for oct-segmenter
-          - Select PyTorch model files for AI_ForAIDAS
+          - Set config/model settings for oct-segmenter
+          - Select bundled PyTorch model files for AI_ForAIDAS
           - Specify output directory for segmentation results
         """
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title("AI Segmentation Settings")
-        dialog.geometry("620x620")
+        dialog.geometry("620x420")
         dialog.resizable(True, True)
 
         # Apply shared helper to propagate the app icon to this dialog
@@ -629,10 +629,10 @@ class Step2Frame(SidebarStepFrame):
         legacy = ttk.LabelFrame(main, text="OCT Segmenter (old)", padding=6)
         legacy.pack(fill="x", pady=(0, 8))
 
-        ttk.Label(legacy, text="Conda Environment:").pack(anchor="w", pady=(0, 2))
-        env_frame = ttk.Frame(legacy)
-        env_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
+        # ttk.Label(legacy, text="Conda Environment:").pack(anchor="w", pady=(0, 2))
+        # env_frame = ttk.Frame(legacy)
+        # env_frame.pack(fill="x", pady=(0, 6))
+        # ttk.Entry(env_frame, textvariable=self.segmenter_env_var).pack(fill="x")
 
         ttk.Label(legacy, text="Config (.json):").pack(anchor="w", pady=(2, 2))
         cfg_frame = ttk.Frame(legacy)
@@ -648,8 +648,6 @@ class Step2Frame(SidebarStepFrame):
 
         aidas = ttk.LabelFrame(main, text="AI_ForAIDAS (new)", padding=6)
         aidas.pack(fill="x", pady=(0, 8))
-        ttk.Label(aidas, text="Conda Environment:").pack(anchor="w", pady=(6, 2))
-        ttk.Entry(aidas, textvariable=self.aidas_env_var).pack(fill="x", pady=(0, 6))
 
         ttk.Label(aidas, text="Boundary Model (.pth):").pack(anchor="w", pady=(0, 2))
         aidas_model_frame = ttk.Frame(aidas)
@@ -791,8 +789,6 @@ class Step2Frame(SidebarStepFrame):
         self.aidas_vline_model_var = tk.StringVar(value=self.ai_for_aidas_default_vline_model)
         self.aidas_predict_fovea_var = tk.BooleanVar(value=True)
         self.aidas_device_var = tk.StringVar(value=AI_DEVICE_OPTIONS[0])
-        self.aidas_env_var = tk.StringVar(value="aidas-env")
-        self.aidas_python_var = tk.StringVar(value="")
 
         self.segmentation_section = self.add_sidebar_section("Segmentation", padding=3, pady=2)
         self.segmentation_frame = self.segmentation_section.body
@@ -3495,8 +3491,6 @@ class Step2Frame(SidebarStepFrame):
             self.segmenter_output_var.set(path)
 
     def _segmenter_command(self):
-        import sys
-        
         env_name = self.segmenter_env_var.get().strip()
         conda_bin = shutil.which("conda") or os.environ.get("CONDA_EXE")
 
@@ -3584,190 +3578,43 @@ class Step2Frame(SidebarStepFrame):
         return env
 
     def _app_root(self):
+        bundled_root = getattr(sys, "_MEIPASS", None)
+        if bundled_root:
+            return os.path.abspath(bundled_root)
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-    def _aidas_external_python_command(self):
-        """Return a Python command for running AI_ForAIDAS outside this process."""
-        python_cmd = self.aidas_python_var.get().strip()
-        if python_cmd:
-            if os.path.isfile(python_cmd):
-                return [python_cmd]
-            return shlex.split(python_cmd, posix=(os.name != "nt"))
-
-        path_python = self._find_torch_python_on_path()
-        if path_python:
-            return [path_python]
-
-        env_name = self.aidas_env_var.get().strip()
-        conda_bin = shutil.which("conda") or os.environ.get("CONDA_EXE")
-        if env_name and conda_bin:
-            return [conda_bin, "run", "-n", env_name, "--no-capture-output", "python"]
-
-        return None
-
-    def _candidate_path_pythons(self):
-        candidates = []
-        seen = set()
-
-        if os.name == "nt":
-            try:
-                result = subprocess.run(
-                    ["where.exe", "python"],
-                    capture_output=True,
-                    text=True,
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    startupinfo=None,
-                )
-                for line in (result.stdout or "").splitlines():
-                    path = line.strip()
-                    if path and os.path.isfile(path):
-                        norm = os.path.normcase(os.path.abspath(path))
-                        if norm not in seen:
-                            candidates.append(path)
-                            seen.add(norm)
-            except Exception:
-                pass
-
-        which_python = shutil.which("python")
-        if which_python and os.path.isfile(which_python):
-            norm = os.path.normcase(os.path.abspath(which_python))
-            if norm not in seen:
-                candidates.append(which_python)
-                seen.add(norm)
-
-        return candidates
-
-    def _find_torch_python_on_path(self):
-        """Return the first PATH python.exe that can import torch."""
-        for python_path in self._candidate_path_pythons():
-            if "windowsapps" in os.path.normcase(python_path):
-                continue
-            if self._python_command_has_torch([python_path]):
-                return python_path
-        return None
-
-    def _python_command_has_torch(self, python_cmd):
-        try:
-            result = subprocess.run(
-                python_cmd + ["-c", "import torch"],
-                capture_output=True,
-                text=True,
-                cwd=self._app_root(),
-                env=self._segmenter_subprocess_env(),
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    def _missing_torch_message(self, exc=None):
+        original = f"\n\nOriginal error:\n{exc}" if exc else ""
+        if getattr(sys, "frozen", False):
+            return (
+                "AI_ForAIDAS requires PyTorch to be bundled with the AIDaS app.\n\n"
+                "Build the Windows executable from AIDaS.spec in a Python environment that has torch installed, "
+                "so PyInstaller can collect the PyTorch runtime and include it in dist/AIDaS.\n\n"
+                "End users should not need a separate conda environment for the AI_ForAIDAS model."
+                f"{original}"
             )
-            return result.returncode == 0
-        except Exception:
-            return False
 
-    def _missing_torch_message(self):
-        env_name = self.aidas_env_var.get().strip() or "aidas-env"
         return (
-            "AI_ForAIDAS requires PyTorch in the Python environment used to run the .pth model.\n\n"
-            "Install it in the configured AI_ForAIDAS Conda environment:\n"
-            f"  conda activate {env_name}\n"
-            "  python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu\n\n"
-            "Or set AI Settings > AI_ForAIDAS > Python Executable to a python.exe that already has torch installed."
+            "AI_ForAIDAS requires PyTorch in the Python environment running AIDaS.\n\n"
+            f"Current Python:\n{sys.executable}\n\n"
+            "Run from an activated environment, for example:\n"
+            "  conda activate aidas-env\n"
+            "  python run_aidas.py\n\n"
+            "If torch is missing or damaged in that environment, reinstall it there."
+            f"{original}"
         )
 
     @staticmethod
     def _is_missing_torch_error(exc):
         text = str(exc).lower()
-        return "requires pytorch" in text or "no module named 'torch'" in text or "no module named torch" in text
-
-    def _run_aidas_external_prediction(
-        self,
-        image,
-        model_path,
-        vline_path,
-        predict_fovea,
-        device_name,
-        output_dir,
-        fallback_reason=None,
-    ):
-        base_cmd = self._aidas_external_python_command()
-        if not base_cmd:
-            raise RuntimeError(self._missing_torch_message())
-
-        temp_dir = tempfile.mkdtemp(prefix="aidas_ai_for_aidas_")
-        try:
-            image_path = os.path.join(temp_dir, "step2_image.npy")
-            result_path = os.path.join(temp_dir, "prediction.npz")
-            np.save(image_path, image)
-
-            cmd = base_cmd + [
-                "-m",
-                "aidas.ai_for_aidas_cli",
-                "--image-npy",
-                image_path,
-                "--model",
-                model_path,
-                "--output-npz",
-                result_path,
-                "--device",
-                device_name,
-            ]
-            if predict_fovea and vline_path:
-                cmd.extend(["--vline-model", vline_path])
-            else:
-                cmd.append("--no-vline")
-
-            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            startupinfo = None
-            if os.name == "nt":
-                try:
-                    si = subprocess.STARTUPINFO()
-                    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    si.wShowWindow = subprocess.SW_HIDE
-                    startupinfo = si
-                except Exception:
-                    startupinfo = None
-
-            run_result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                cwd=self._app_root(),
-                env=self._segmenter_subprocess_env(),
-                creationflags=creationflags,
-                startupinfo=startupinfo,
-            )
-            stdout = (run_result.stdout or "").strip()
-            stderr = (run_result.stderr or "").strip()
-            log_content = (
-                "AIDaS Step 2 AI_ForAIDAS External Segmentation\n"
-                f"Fallback reason: {fallback_reason or '(configured external run)'}\n"
-                f"Command: {subprocess.list2cmdline(cmd)}\n"
-                f"Return code: {run_result.returncode}\n\n"
-                f"STDOUT:\n{stdout or '(empty)'}\n\n"
-                f"STDERR:\n{stderr or '(empty)'}\n"
-            )
-            log_path = self._write_segmenter_log_file(output_dir, log_content)
-
-            if run_result.returncode != 0:
-                details = stderr or stdout or "External Python returned a non-zero exit code."
-                if "no module named torch" in details.lower():
-                    details += "\n\n" + self._missing_torch_message()
-                raise RuntimeError(f"{details}\n\nLog saved to:\n{log_path}")
-
-            if not os.path.isfile(result_path):
-                raise RuntimeError(f"External AI_ForAIDAS finished but did not write predictions.\n\nLog saved to:\n{log_path}")
-
-            with np.load(result_path, allow_pickle=False) as npz:
-                boundaries = np.array(npz["boundaries"], copy=True)
-                fovea_values = np.array(npz["fovea_x"], copy=False)
-                fovea_x = int(fovea_values[0]) if fovea_values.size and int(fovea_values[0]) >= 0 else None
-                device_values = np.array(npz["device"], copy=False)
-                device = str(device_values[0]) if device_values.size else "external"
-
-            return {
-                "boundaries": boundaries,
-                "fovea_x": fovea_x,
-                "device": device,
-                "log_path": log_path,
-            }
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        return (
+            "requires pytorch" in text
+            or "could not load its windows dlls" in text
+            or "no module named 'torch'" in text
+            or "no module named torch" in text
+            or "winerror 127" in text
+            or "shm.dll" in text
+        )
 
     def _image_uint8(self, image):
         """Convert image to 8-bit (0-255) range with auto-scaling.
@@ -4660,21 +4507,9 @@ class Step2Frame(SidebarStepFrame):
                     }
 
             except Exception as inner_exc:
-                if not self._is_missing_torch_error(inner_exc):
-                    raise
-                fallback_reason_text = str(inner_exc)
-                log_lines.append(f"Internal PyTorch unavailable; using external Python fallback: {fallback_reason_text}")
-
-                def run_prediction_with_result(image_for_ai):
-                    return self._run_aidas_external_prediction(
-                        image_for_ai,
-                        model_path,
-                        vline_path,
-                        predict_fovea,
-                        device_name,
-                        output_dir,
-                        fallback_reason=fallback_reason_text,
-                    )
+                if self._is_missing_torch_error(inner_exc):
+                    raise RuntimeError(self._missing_torch_message(inner_exc)) from inner_exc
+                raise
 
             for index, path in enumerate(image_paths, start=1):
                 report_status(index, path)
@@ -5346,22 +5181,9 @@ class Step2Frame(SidebarStepFrame):
                     "log_path": log_path,
                 }
             except Exception as inner_exc:
-                if not self._is_missing_torch_error(inner_exc):
-                    raise
-                result = self._run_aidas_external_prediction(
-                    image,
-                    model_path,
-                    vline_path,
-                    predict_fovea,
-                    device_name,
-                    output_dir,
-                    fallback_reason=str(inner_exc),
-                )
-                result["boundaries"] = self._aidas_boundaries_from_model_to_display(
-                    result["boundaries"],
-                    image.shape[0],
-                    model_input_uses_stored_y,
-                )
+                if self._is_missing_torch_error(inner_exc):
+                    raise RuntimeError(self._missing_torch_message(inner_exc)) from inner_exc
+                raise
         except Exception as exc:  # pragma: no cover - defensive runtime error handling
             result = {
                 "exception": str(exc),
