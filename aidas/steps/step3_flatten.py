@@ -30,6 +30,7 @@ from aidas.utils.step3_image_utils import (
     make_find_vertex_preview_image as _make_find_vertex_preview_image,
     placeholder_image as _placeholder_image,
 )
+from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_utils import SidebarStepFrame
 
 
@@ -438,9 +439,7 @@ class RSetupWizard(ttk.Frame):
         return Path.home() / "AIDaS_R_packages"
 
     def _package_log_path(self):
-        output_dir = Path(self.step_frame.output_sdb_dir or self.step_frame.current_sdb_dir or os.getcwd())
-        output_dir.mkdir(parents=True, exist_ok=True)
-        return output_dir / "step3_r_package_setup.log"
+        return app_log_dir() / "step3_r_package_setup.log"
 
     def _log(self, message):
         text = f"{datetime.now().strftime('%H:%M:%S')}  {message}"
@@ -1026,10 +1025,16 @@ class RBatchRunPanel(ttk.Frame):
         self.summary_var.set(text)
 
     def log(self, text):
+        line = f"{datetime.now().strftime('%H:%M:%S')}  {text}"
         self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"{datetime.now().strftime('%H:%M:%S')}  {text}\n")
+        self.log_text.insert("end", line + "\n")
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
+        try:
+            with (app_log_dir() / "step3_batch_activity.log").open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except OSError:
+            pass
 
 
 class Step3Frame(SidebarStepFrame):
@@ -1915,12 +1920,11 @@ class Step3Frame(SidebarStepFrame):
             self._load_r_results_from_folder(successful_folders[0], show_errors=False)
 
     def _write_r_run_log(self, output_dir, returncode, stdout, stderr, cmd):
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        log_path = output_dir / "step3_rscript.log"
+        log_path = app_log_dir() / f"step3_rscript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
         log_path.write_text(
             "Command:\n"
             + " ".join(str(part) for part in cmd)
+            + f"\n\nOutput directory:\n{output_dir}"
             + f"\n\nReturn code: {returncode}\n\nSTDOUT:\n{stdout or ''}\n\nSTDERR:\n{stderr or ''}\n",
             encoding="utf-8",
         )

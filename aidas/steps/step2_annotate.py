@@ -40,6 +40,7 @@ from PIL import Image, ImageDraw, ImageTk
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.batch_ui import BatchTable
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
+from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_utils import SidebarStepFrame, apply_app_icon_to
 
 
@@ -81,7 +82,6 @@ LIGHT_MARKED_BASENAME = "Light_MARKED"
 DARK_MARKED_BASENAME = "Dark_MARKED"
 LIGHT_SOURCE_BASENAME = "Light"
 DARK_SOURCE_BASENAME = "Dark"
-AI_DEVICE_OPTIONS = ("auto", "cpu", "cuda")
 IMG_DEFAULT_DIR = os.path.expanduser("~/Desktop")
 SUPPORTED_IMAGE_FILETYPES = [
     ("Analyze image", "*.img"),
@@ -570,58 +570,8 @@ class Step2Frame(SidebarStepFrame):
         self._build_controls()
 
     # ═══════════════════════════════════════════════════════════════════════
-    #  AI Settings Dialog
+    #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
-    def _open_ai_settings_dialog(self):
-        """Open a separate dialog for AI segmentation configuration.
-
-        This dialog allows users to select AI_ForAIDAS model files, choose the
-        execution device, and specify the output directory for batch results.
-        """
-        dialog = tk.Toplevel(self.winfo_toplevel())
-        dialog.title("AI Segmentation Settings")
-        dialog.geometry("620x260")
-        dialog.resizable(True, True)
-
-        # Apply shared helper to propagate the app icon to this dialog
-        apply_app_icon_to(dialog)
-
-        main = ttk.Frame(dialog, padding=10)
-        main.pack(fill="both", expand=True)
-
-        aidas = ttk.LabelFrame(main, text="AI_ForAIDAS", padding=6)
-        aidas.pack(fill="x", pady=(0, 8))
-
-        ttk.Label(aidas, text="Boundary Model (.pth):").pack(anchor="w", pady=(0, 2))
-        aidas_model_frame = ttk.Frame(aidas)
-        aidas_model_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(aidas_model_frame, textvariable=self.aidas_model_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(aidas_model_frame, text="Browse", width=10, command=self._browse_aidas_model).pack(side="right", padx=(4, 0))
-
-        aidas_options = ttk.Frame(aidas)
-        aidas_options.pack(fill="x", pady=(0, 2))
-        ttk.Label(aidas_options, text="Device:").pack(side="left", padx=(8, 4))
-        ttk.Combobox(
-            aidas_options,
-            textvariable=self.aidas_device_var,
-            values=AI_DEVICE_OPTIONS,
-            state="readonly",
-            width=7,
-        ).pack(side="right")
-
-
-        ttk.Label(main, text="Output Folder:", font=(" ", 9, "bold")).pack(anchor="w", pady=(0, 2))
-        out_frame = ttk.Frame(main)
-        out_frame.pack(fill="x", pady=(0, 12))
-        ttk.Entry(out_frame, textvariable=self.segmenter_output_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(out_frame, text="Browse", width=10, command=self._browse_segmenter_output_dir).pack(side="right", padx=(4, 0))
-
-        buttons = ttk.Frame(main)
-        buttons.pack(fill="x", expand=True, side="bottom")
-        ttk.Button(buttons, text="OK", command=dialog.destroy).pack(side="right", padx=(2, 0))
-        dialog.focus_set()
-        dialog.grab_set()
-
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
@@ -631,9 +581,7 @@ class Step2Frame(SidebarStepFrame):
         The left panel contains segmentation review controls, foveal center
         placement, and save/export actions.
         """
-        self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
-        self.aidas_model_var = tk.StringVar(value=self.ai_for_aidas_default_model)
-        self.aidas_device_var = tk.StringVar(value=AI_DEVICE_OPTIONS[0])
+        self.aidas_model_path = self.ai_for_aidas_default_model
 
         self.segmentation_section = self.add_sidebar_section("Segmentation", padding=3, pady=2)
         self.segmentation_frame = self.segmentation_section.body
@@ -687,21 +635,14 @@ class Step2Frame(SidebarStepFrame):
         self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary)
         self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
 
-        ai_buttons = ttk.Frame(workflow)
-        ai_buttons.pack(fill="x", pady=(6, 0))
-        self.ai_settings_btn = ttk.Button(ai_buttons, text="AI Settings", command=self._open_ai_settings_dialog)
-        self.ai_settings_btn.pack(fill="x")
-
         ai_folder_buttons = ttk.Frame(workflow)
-        ai_folder_buttons.pack(fill="x", pady=(4, 0))
+        ai_folder_buttons.pack(fill="x", pady=(6, 0))
         self.batch_ai_button = ttk.Button(
             ai_folder_buttons,
             text="Run Batch Segmentation",
             command=self._open_batch_segmentation_scanner,
         )
         self.batch_ai_button.pack(fill="x")
-
-        self.aidas_model_var.trace_add("write", lambda *_: self._update_batch_ai_button_state())
 
         self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
         self.clear_all_traces_btn.pack(fill="x", pady=(6, 4))
@@ -841,7 +782,7 @@ class Step2Frame(SidebarStepFrame):
         if self._segmenter_running:
             messagebox.showinfo("Please wait", "Segmentation is already running.")
             return
-        model_path = self.aidas_model_var.get().strip()
+        model_path = self.aidas_model_path
         if not os.path.isfile(model_path):
             messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
             return
@@ -2010,7 +1951,6 @@ class Step2Frame(SidebarStepFrame):
             if widget in (
                 self.finish_boundary_btn,
                 self.revert_boundary_btn,
-                getattr(self, "ai_settings_btn", None),
                 getattr(self, "batch_ai_button", None),
             ):
                 return
@@ -2023,8 +1963,6 @@ class Step2Frame(SidebarStepFrame):
         
         if hasattr(self, "segmentation_frame"):
             set_state(self.segmentation_frame, state)
-        if hasattr(self, "ai_settings_btn"):
-            self.ai_settings_btn.state(["disabled"] if self._segmenter_running else ["!disabled"])
         self._update_batch_ai_button_state()
 
     def _clear_fovea_lock(self):
@@ -2769,30 +2707,6 @@ class Step2Frame(SidebarStepFrame):
             }
         return scaled
 
-    def _default_segmenter_output_dir(self):
-        if self.current_file and self.current_file != "Step 1 output":
-            root = os.path.dirname(self.current_file)
-        else:
-            root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-        return os.path.join(root, "segmenter_output")
-
-    def _browse_aidas_model(self):
-        kwargs = {}
-        if os.path.isdir(self.ai_for_aidas_root):
-            kwargs["initialdir"] = self.ai_for_aidas_root
-        path = filedialog.askopenfilename(
-            title="Select AI_ForAIDAS boundary model",
-            filetypes=[("PyTorch model", "*.pth"), ("All files", "*.*")],
-            **kwargs,
-        )
-        if path:
-            self.aidas_model_var.set(path)
-
-    def _browse_segmenter_output_dir(self):
-        path = filedialog.askdirectory(title="Select segmentation output folder")
-        if path:
-            self.segmenter_output_var.set(path)
-
     def _segmenter_subprocess_env(self):
         """Return an environment suitable for launching Windows CLI tools."""
         env = os.environ.copy()
@@ -3091,14 +3005,13 @@ class Step2Frame(SidebarStepFrame):
             arr = np.rint(arr.astype(np.float64) * (65535.0 / 255.0)).astype(np.uint16)
         return np.ascontiguousarray(arr), source_was_8bit
 
-    def _write_segmenter_log_file(self, output_dir, content):
-        log_dir = os.path.join(output_dir, "logs")
-        os.makedirs(log_dir, exist_ok=True)
+    def _write_segmenter_log_file(self, content):
+        log_dir = app_log_dir()
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_path = os.path.join(log_dir, f"segmentation_{ts}.log")
-        with open(log_path, "w", encoding="utf-8") as fh:
+        log_path = log_dir / f"step2_segmentation_{ts}.log"
+        with log_path.open("w", encoding="utf-8") as fh:
             fh.write(content)
-        return log_path
+        return str(log_path)
 
     def _append_segmenter_log(self, text):
         """Append a short entry to the in-memory and (if present) UI segmenter log."""
@@ -3107,6 +3020,11 @@ class Step2Frame(SidebarStepFrame):
         ts = datetime.datetime.now().isoformat(sep=" ", timespec="seconds")
         entry = f"{ts} - {text}"
         self._segmenter_log_lines.append(entry)
+        try:
+            with (app_log_dir() / "step2_activity.log").open("a", encoding="utf-8") as fh:
+                fh.write(entry + "\n")
+        except OSError:
+            pass
         # If there's a text widget for logs, append there; otherwise print to stdout.
         try:
             widget = getattr(self, "segmenter_log_text", None)
@@ -3198,8 +3116,6 @@ class Step2Frame(SidebarStepFrame):
             status_message: Optional status text to display to user.
         """
         self._segmenter_running = bool(running)
-        if hasattr(self, "ai_settings_btn"):
-            self.ai_settings_btn.state(["disabled"] if running else ["!disabled"])
         if running:
             if hasattr(self, "batch_ai_button"):
                 self.batch_ai_button.state(["disabled"])
@@ -3329,7 +3245,7 @@ class Step2Frame(SidebarStepFrame):
             messagebox.showinfo("Please wait", "Segmentation is already running.")
             return
 
-        model_path = self.aidas_model_var.get().strip()
+        model_path = self.aidas_model_path
         if not os.path.isfile(model_path):
             messagebox.showerror("Missing model", f"AI_ForAIDAS boundary model not found:\n{model_path}")
             return
@@ -3361,11 +3277,7 @@ class Step2Frame(SidebarStepFrame):
                 for path, x in manual_fovea_by_path.items()
             }
 
-        output_dir = self.segmenter_output_var.get().strip() or self._default_segmenter_output_dir()
-        os.makedirs(output_dir, exist_ok=True)
-        self.segmenter_output_var.set(output_dir)
-
-        device_name = self.aidas_device_var.get().strip() or AI_DEVICE_OPTIONS[0]
+        device_name = "auto"
         self._append_segmenter_log(
             f"Starting AI_ForAIDAS batch for {len(image_paths)} image(s); model={model_path}; device={device_name}"
         )
@@ -3378,7 +3290,7 @@ class Step2Frame(SidebarStepFrame):
 
         worker = threading.Thread(
             target=self._run_aidas_batch_segmenter_worker,
-            args=(image_paths, model_path, device_name, output_dir, manual_fovea_by_key),
+            args=(image_paths, model_path, device_name, manual_fovea_by_key),
             daemon=True,
         )
         worker.start()
@@ -3388,7 +3300,6 @@ class Step2Frame(SidebarStepFrame):
         image_paths,
         model_path,
         device_name,
-        output_dir,
         manual_fovea_by_key=None,
     ):
         results = []
@@ -3474,7 +3385,7 @@ class Step2Frame(SidebarStepFrame):
             log_lines.append(f"Device: {device}")
 
         try:
-            log_path = self._write_segmenter_log_file(output_dir, "\n".join(log_lines) + "\n")
+            log_path = self._write_segmenter_log_file("\n".join(log_lines) + "\n")
         except Exception:
             log_path = None
 
