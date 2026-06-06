@@ -24,7 +24,6 @@ class PredictionResult:
     fovea_x: Optional[int]
     device: str
     boundary_model_path: str
-    vline_model_path: Optional[str]
 
 
 class AIForAIDASPredictor:
@@ -34,8 +33,6 @@ class AIForAIDASPredictor:
         self,
         *,
         boundary_model_path: str,
-        vline_model_path: Optional[str] = None,
-        predict_fovea: bool = True,
         device_name: str = "auto",
     ):
         torch, nn, F = _import_torch()
@@ -44,15 +41,9 @@ class AIForAIDASPredictor:
         self.boundary_model_path = boundary_model_path
         self.boundary_model = _load_boundary_model(boundary_model_path, self.device, torch, nn, F)
 
-        self.vline_model_path = None
-        self.vline_model = None
-        if predict_fovea and vline_model_path:
-            self.vline_model_path = vline_model_path
-            self.vline_model = _load_vline_model(vline_model_path, self.device, torch, nn)
-
     def predict(self, image: np.ndarray) -> PredictionResult:
         image_norm = _normalize_for_model(image)
-        height, width = image_norm.shape
+        height, _width = image_norm.shape
 
         x = self._torch.from_numpy(image_norm[np.newaxis, np.newaxis]).to(self.device)
         with self._torch.inference_mode():
@@ -66,18 +57,11 @@ class AIForAIDASPredictor:
         boundaries = np.sort(pred_y[:NUM_BOUNDARIES], axis=0).astype(np.float32, copy=False)
         boundaries = np.clip(boundaries, 0, height - 1)
 
-        fovea_x = None
-        if self.vline_model is not None:
-            with self._torch.inference_mode():
-                x_norm = float(self.vline_model(x).item())
-            fovea_x = int(np.clip(round(x_norm * width), 0, width - 1))
-
         return PredictionResult(
             boundaries=boundaries,
-            fovea_x=fovea_x,
+            fovea_x=None,
             device=str(self.device),
             boundary_model_path=self.boundary_model_path,
-            vline_model_path=self.vline_model_path,
         )
 
 
@@ -175,42 +159,6 @@ def _build_unet_class(torch, nn, F):
     return UNet
 
 
-def _build_vline_class(nn):
-    class VLineNet(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.encoder = nn.Sequential(
-                nn.Conv2d(1, 16, 5, stride=2, padding=2, bias=False),
-                nn.BatchNorm2d(16),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(16, 32, 3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(32),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(32, 64, 3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(64),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(64, 128, 3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(128),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(128, 128, 3, stride=2, padding=1, bias=False),
-                nn.BatchNorm2d(128),
-                nn.ReLU(inplace=True),
-            )
-            self.head = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Linear(128, 64),
-                nn.ReLU(inplace=True),
-                nn.Linear(64, 1),
-                nn.Sigmoid(),
-            )
-
-        def forward(self, x):
-            return self.head(self.encoder(x))
-
-    return VLineNet
-
-
 def _state_dict_from_checkpoint(ckpt):
     if isinstance(ckpt, dict) and "model_state" in ckpt:
         return ckpt["model_state"]
@@ -256,18 +204,6 @@ def _load_boundary_model(model_path: str, device, torch, nn, F):
     return model
 
 
-def _load_vline_model(model_path: str, device, torch, nn):
-    if not os.path.isfile(model_path):
-        raise FileNotFoundError(f"AI_ForAIDAS vline model not found: {model_path}")
-
-    ckpt = torch.load(model_path, map_location=device)
-    VLineNet = _build_vline_class(nn)
-    model = VLineNet()
-    model.load_state_dict(_strip_module_prefix(_state_dict_from_checkpoint(ckpt)))
-    model.to(device).eval()
-    return model
-
-
 def _soft_argmax_y(logits, torch):
     height = logits.shape[2]
     y_idx = torch.arange(height, dtype=torch.float32, device=logits.device)
@@ -279,15 +215,11 @@ def predict_boundaries_and_fovea(
     image: np.ndarray,
     *,
     boundary_model_path: str,
-    vline_model_path: Optional[str] = None,
-    predict_fovea: bool = True,
     device_name: str = "auto",
 ) -> PredictionResult:
     """Run AI_ForAIDAS inference on a 2-D OCT image."""
     predictor = AIForAIDASPredictor(
         boundary_model_path=boundary_model_path,
-        vline_model_path=vline_model_path,
-        predict_fovea=predict_fovea,
         device_name=device_name,
     )
     return predictor.predict(image)

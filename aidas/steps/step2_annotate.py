@@ -523,7 +523,6 @@ class Step2Frame(SidebarStepFrame):
         app_root = self._app_root()
         self.ai_for_aidas_root = os.path.join(app_root, "OCT Segmenter", "AI_ForAIDAS")
         self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.pth")
-        self.ai_for_aidas_default_vline_model = os.path.join(self.ai_for_aidas_root, "vline_model.pth")
 
         self.build_standard_layout()
         right = self.content
@@ -581,7 +580,7 @@ class Step2Frame(SidebarStepFrame):
         """
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title("AI Segmentation Settings")
-        dialog.geometry("620x320")
+        dialog.geometry("620x260")
         dialog.resizable(True, True)
 
         # Apply shared helper to propagate the app icon to this dialog
@@ -599,19 +598,8 @@ class Step2Frame(SidebarStepFrame):
         ttk.Entry(aidas_model_frame, textvariable=self.aidas_model_var).pack(side="left", fill="x", expand=True)
         ttk.Button(aidas_model_frame, text="Browse", width=10, command=self._browse_aidas_model).pack(side="right", padx=(4, 0))
 
-        ttk.Label(aidas, text="Fovea/VLine Model (.pth):").pack(anchor="w", pady=(2, 2))
-        aidas_vline_frame = ttk.Frame(aidas)
-        aidas_vline_frame.pack(fill="x", pady=(0, 6))
-        ttk.Entry(aidas_vline_frame, textvariable=self.aidas_vline_model_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(aidas_vline_frame, text="Browse", width=10, command=self._browse_aidas_vline_model).pack(side="right", padx=(4, 0))
-
         aidas_options = ttk.Frame(aidas)
         aidas_options.pack(fill="x", pady=(0, 2))
-        ttk.Checkbutton(
-            aidas_options,
-            text="Predict foveal center when vline model exists",
-            variable=self.aidas_predict_fovea_var,
-        ).pack(side="left", fill="x", expand=True)
         ttk.Label(aidas_options, text="Device:").pack(side="left", padx=(8, 4))
         ttk.Combobox(
             aidas_options,
@@ -645,8 +633,6 @@ class Step2Frame(SidebarStepFrame):
         """
         self.segmenter_output_var = tk.StringVar(value=self._default_segmenter_output_dir())
         self.aidas_model_var = tk.StringVar(value=self.ai_for_aidas_default_model)
-        self.aidas_vline_model_var = tk.StringVar(value=self.ai_for_aidas_default_vline_model)
-        self.aidas_predict_fovea_var = tk.BooleanVar(value=True)
         self.aidas_device_var = tk.StringVar(value=AI_DEVICE_OPTIONS[0])
 
         self.segmentation_section = self.add_sidebar_section("Segmentation", padding=3, pady=2)
@@ -1067,27 +1053,7 @@ class Step2Frame(SidebarStepFrame):
                 self._show_image(image_data, path)
                 self.vertical_mode_var.set(True)
                 self._on_vertical_mode_toggled()
-                
-                # Predict fovea centrally if enabled
-                if self.aidas_predict_fovea_var.get():
-                    vline_path = self.aidas_vline_model_var.get().strip()
-                    if os.path.isfile(vline_path):
-                        try:
-                            device_name = self.aidas_device_var.get().strip() or "cpu"
-                            prediction = self._run_aidas_prediction_worker_process(
-                                image_data,
-                                model_path=self.aidas_model_var.get().strip(),
-                                vline_path=vline_path,
-                                predict_fovea=True,
-                                device_name=device_name,
-                            )
-                            fovea_x = prediction.get("fovea_x")
-                            if fovea_x is not None:
-                                self.fovea_x_entry_var.set(str(int(fovea_x)))
-                                self.image_canvas.vertical_line_x = int(fovea_x)
-                                self.image_canvas._draw_vertical_line()
-                        except Exception as e:
-                            print("Auto-predict fovea failed:", e)
+                self.update_idletasks()
 
                 self.wait_variable(next_var)
                 
@@ -1216,10 +1182,6 @@ class Step2Frame(SidebarStepFrame):
 
         self.image_canvas.set_image(image)
         self.image_canvas.enable_roi(False)
-        self.image_canvas.clear_active_line()
-        self.image_canvas.clear_line_overlays()
-        self.image_canvas.clear_vertical_line()
-        self.image_canvas.fit_to_window()
 
         filename = os.path.basename(path) if path and path != "Step 1 output" else "Step 1 output"
         self.image_info_var.set(
@@ -1743,11 +1705,16 @@ class Step2Frame(SidebarStepFrame):
         Called after any modification to boundary_traces or boundary_order.
         Maintains order and colors when re-rendering the canvas display.
         """
-        self.image_canvas.clear_line_overlays()
+        overlays = []
         for name in self.boundary_order:
             trace = self.boundary_traces.get(name)
             if trace:
-                self.image_canvas.add_line_overlay(trace["points"], color=trace["color"], label=name)
+                overlays.append({
+                    "points": trace["points"],
+                    "color": trace.get("color") or self._boundary_color(name),
+                    "label": name,
+                })
+        self.image_canvas.set_line_overlays(overlays)
 
     def _reset_boundary_completion(self):
         """Reset all boundaries to incomplete status and update UI.
@@ -2821,19 +2788,6 @@ class Step2Frame(SidebarStepFrame):
         if path:
             self.aidas_model_var.set(path)
 
-    def _browse_aidas_vline_model(self):
-        kwargs = {}
-        if os.path.isdir(self.ai_for_aidas_root):
-            kwargs["initialdir"] = self.ai_for_aidas_root
-        path = filedialog.askopenfilename(
-            title="Select AI_ForAIDAS fovea/vline model",
-            filetypes=[("PyTorch model", "*.pth"), ("All files", "*.*")],
-            **kwargs,
-        )
-        if path:
-            self.aidas_vline_model_var.set(path)
-
-
     def _browse_segmenter_output_dir(self):
         path = filedialog.askdirectory(title="Select segmentation output folder")
         if path:
@@ -2940,8 +2894,6 @@ class Step2Frame(SidebarStepFrame):
         image,
         *,
         model_path,
-        vline_path,
-        predict_fovea,
         device_name,
     ):
         """Run PyTorch AI_ForAIDAS in a clean subprocess and return arrays."""
@@ -2960,10 +2912,6 @@ class Step2Frame(SidebarStepFrame):
                 "--output-npz",
                 output_npz,
             ]
-            if predict_fovea and vline_path:
-                cmd.extend(["--vline-model", vline_path])
-            else:
-                cmd.append("--no-vline")
 
             run_result = subprocess.run(
                 cmd,
@@ -3412,16 +3360,6 @@ class Step2Frame(SidebarStepFrame):
                 self._image_pair_key(path): (None if x is None else int(x))
                 for path, x in manual_fovea_by_path.items()
             }
-            predict_fovea = False
-            vline_path = None
-        else:
-            predict_fovea = bool(self.aidas_predict_fovea_var.get())
-            vline_path = self.aidas_vline_model_var.get().strip()
-            if predict_fovea and vline_path and not os.path.isfile(vline_path):
-                self._append_segmenter_log(f"AI_ForAIDAS vline model not found; batch fovea prediction skipped: {vline_path}")
-                vline_path = None
-            if not predict_fovea:
-                vline_path = None
 
         output_dir = self.segmenter_output_var.get().strip() or self._default_segmenter_output_dir()
         os.makedirs(output_dir, exist_ok=True)
@@ -3440,7 +3378,7 @@ class Step2Frame(SidebarStepFrame):
 
         worker = threading.Thread(
             target=self._run_aidas_batch_segmenter_worker,
-            args=(image_paths, model_path, vline_path, predict_fovea, device_name, output_dir, manual_fovea_by_key),
+            args=(image_paths, model_path, device_name, output_dir, manual_fovea_by_key),
             daemon=True,
         )
         worker.start()
@@ -3449,8 +3387,6 @@ class Step2Frame(SidebarStepFrame):
         self,
         image_paths,
         model_path,
-        vline_path,
-        predict_fovea,
         device_name,
         output_dir,
         manual_fovea_by_key=None,
@@ -3460,7 +3396,6 @@ class Step2Frame(SidebarStepFrame):
         log_lines = [
             "AIDaS Step 2 AI_ForAIDAS Batch Segmentation",
             f"Boundary model: {model_path}",
-            f"VLine model: {vline_path or '(not used)'}",
             f"Manual fovea lines: {'yes' if manual_fovea_by_key is not None else 'no'}",
             f"Requested device: {device_name}",
             f"Images: {len(image_paths)}",
@@ -3489,16 +3424,13 @@ class Step2Frame(SidebarStepFrame):
                     prediction = self._run_aidas_prediction_worker_process(
                         image_for_ai,
                         model_path=model_path,
-                        vline_path=vline_path,
-                        predict_fovea=predict_fovea and bool(vline_path),
                         device_name=device_name,
                     )
                     if prediction.get("device"):
                         device = prediction["device"]
-                    fovea_x = prediction.get("fovea_x")
-                    manual_fovea = False
+                    fovea_x = None
+                    manual_fovea = manual_fovea_by_key is not None
                     if manual_fovea_by_key is not None:
-                        manual_fovea = True
                         fovea_x = manual_fovea_by_key.get(self._image_pair_key(path))
                     if fovea_x is not None:
                         fovea_x = int(np.clip(int(fovea_x), 0, max(0, image.shape[1] - 1)))
@@ -3522,8 +3454,7 @@ class Step2Frame(SidebarStepFrame):
                     log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
                     log_lines.append(f"  Worker: {prediction.get('command', '(unknown command)')}")
                     if fovea_x is not None:
-                        source = "manual" if manual_fovea else "predicted"
-                        log_lines.append(f"  Fovea x ({source}): {int(fovea_x)}")
+                        log_lines.append(f"  Fovea x (manual): {int(fovea_x)}")
                     elif manual_fovea:
                         log_lines.append("  Fovea x: skipped by user")
                 except Exception as exc:
@@ -3676,17 +3607,27 @@ class Step2Frame(SidebarStepFrame):
                     )
                 traces = self._copy_trace_dict(traces)
                 order = [name for name in BOUNDARY_NAMES if name in traces]
+                overlays = []
                 for name in BOUNDARY_NAMES:
                     trace = traces.get(name)
                     if trace:
-                        canvas.add_line_overlay(trace["points"], color=trace.get("color"), label=name)
+                        overlays.append({
+                            "points": trace["points"],
+                            "color": trace.get("color"),
+                            "label": name,
+                        })
                 fovea_x = item.get("fovea_x")
                 if fovea_x is not None:
                     fovea_trace = self._vertical_line_trace(int(fovea_x), data.shape[0])
                     traces[FOVEA_BOUNDARY_NAME] = fovea_trace
                     if FOVEA_BOUNDARY_NAME not in order:
                         order.append(FOVEA_BOUNDARY_NAME)
-                    canvas.add_line_overlay(fovea_trace["points"], color=fovea_trace.get("color"), label=FOVEA_BOUNDARY_NAME)
+                    overlays.append({
+                        "points": fovea_trace["points"],
+                        "color": fovea_trace.get("color"),
+                        "label": FOVEA_BOUNDARY_NAME,
+                    })
+                canvas.set_line_overlays(overlays)
                 self._batch_result_states[str(frame)] = {
                     "input": input_path,
                     "image": data,

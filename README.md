@@ -110,7 +110,6 @@ You can also double-click `OCT Segmenter.bat` if using the packaged launcher.
 |------|---------|
 | `app.py` | One-click GUI: segment, batch segment, gather data, retrain |
 | `train.py` | Train the 6-boundary U-Net model |
-| `train_vline.py` | Train the foveal vertical-line predictor |
 | `segment_img_via_tiff.py` | Core inference pipeline for `.img` files |
 | `segment.py` | Inference for TIFF files |
 | `segment_analyze.py` | Alternative direct `.img` inference without TIFF round-trip |
@@ -135,7 +134,7 @@ You can also double-click `OCT Segmenter.bat` if using the packaged launcher.
 - Safe to run multiple times; new files are appended and existing files are not overwritten
 
 **Retrain Models**
-- Retrains the boundary model (`model_img.pth`, 60 epochs), then the vertical-line model (`vline_model.pth`, 200 epochs)
+- Retrains the boundary model (`model_img.pth`, 60 epochs)
 - Run after gathering more training data
 - Progress appears in the log area
 
@@ -181,22 +180,6 @@ python train.py --epochs 60 --save-path model_img.pth
 
 Key arguments: `--epochs`, `--lr`, `--save-path`, `--data-dir`
 
-### Vertical Line Model
-
-`train_vline.py` trains a lightweight CNN regression model.
-
-- Input: `(1, H, W)` grayscale OCT slice
-- Output: single scalar in `[0, 1]`, the foveal x-coordinate as a fraction of image width
-- Architecture: 5 strided convolution layers, AdaptiveAvgPool, fully connected layer, Sigmoid
-- Loss: MSE on normalised x-coordinate
-- Only one slice is used per `.img` file because slices are identical
-- Optimizer: Adam, lr=1e-3, ReduceLROnPlateau
-- Best checkpoint saved based on validation MAE in pixels
-
-```bash
-python train_vline.py --epochs 200 --save-path vline_model.pth
-```
-
 ### Inference Pipeline
 
 `segment_img_via_tiff.py` processes each slice of an Analyze `.img` file:
@@ -213,7 +196,7 @@ python train_vline.py --epochs 200 --save-path vline_model.pth
 python segment_img_via_tiff.py test/Light.img --model model_img.pth
 ```
 
-Key arguments: `--model`, `--vline-model`, `--no-csv`
+Key arguments: `--model`, `--no-csv`
 
 Output files are saved next to the input:
 
@@ -240,7 +223,6 @@ python gather_training_data.py
 | `model.pth` | Original model trained on TIFF images |
 | `model_img.pth` | Current boundary model trained on `.img` data |
 | `model_img_baseline.pth` | Saved baseline before further modifications |
-| `vline_model.pth` | Vertical line, foveal centre predictor |
 
 ### Segmenter Folder Structure
 
@@ -248,14 +230,12 @@ python gather_training_data.py
 OCT Segmenter/AI_ForAIDAS/
   app.py                    GUI application
   train.py                  Boundary model training
-  train_vline.py            Vertical line model training
   segment_img_via_tiff.py   Main inference script
   segment.py                TIFF inference
   segment_analyze.py        Direct .img inference
   gather_training_data.py   Data collection utility
   model_img.pth             Trained boundary model
   model_img_baseline.pth    Baseline boundary model
-  vline_model.pth           Trained vline model
   model.pth                 Original TIFF-trained model
   test/
     gathered_data/          Training pairs

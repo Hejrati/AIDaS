@@ -165,6 +165,27 @@ class ImageCanvas(ttk.Frame):
         self._line_overlays.clear()
         self._redraw_overlays()
 
+    def set_line_overlays(self, overlays):
+        self._line_overlays.clear()
+        for overlay in overlays:
+            if isinstance(overlay, dict):
+                points = overlay.get("points", [])
+                color = overlay.get("color") or self._line_color
+                label = overlay.get("label")
+            else:
+                points = overlay
+                color = self._line_color
+                label = None
+            cleaned = self._clean_line_points(points)
+            if not cleaned:
+                continue
+            self._line_overlays.append({
+                "points": cleaned,
+                "color": color,
+                "label": label,
+            })
+        self._redraw_overlays()
+
     def clear_active_line(self):
         self._active_line.clear()
         self._line_preview = None
@@ -187,6 +208,14 @@ class ImageCanvas(ttk.Frame):
 
     def get_vertical_line_x(self):
         return self._vertical_line_x
+
+    @property
+    def vertical_line_x(self):
+        return self.get_vertical_line_x()
+
+    @vertical_line_x.setter
+    def vertical_line_x(self, x):
+        self.set_vertical_line_x(x)
 
     def clear_vertical_line(self):
         self._vertical_line_x = None

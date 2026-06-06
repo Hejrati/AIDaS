@@ -15,19 +15,14 @@ def main():
     parser = argparse.ArgumentParser(description="Run AI_ForAIDAS inference on a NumPy image.")
     parser.add_argument("--image-npy", required=True, help="Input 2-D image saved with numpy.save")
     parser.add_argument("--model", required=True, help="AI_ForAIDAS boundary model .pth")
-    parser.add_argument("--vline-model", default="", help="Optional fovea/vline model .pth")
-    parser.add_argument("--no-vline", action="store_true", help="Skip foveal center prediction")
     parser.add_argument("--device", default="auto", choices=("auto", "cpu", "cuda"))
     parser.add_argument("--output-npz", required=True, help="Output .npz path for predicted arrays")
     args = parser.parse_args()
 
     image = np.load(args.image_npy)
-    vline_path = args.vline_model if args.vline_model and not args.no_vline else None
     prediction = predict_boundaries_and_fovea(
         image,
         boundary_model_path=args.model,
-        vline_model_path=vline_path,
-        predict_fovea=bool(vline_path),
         device_name=args.device,
     )
 

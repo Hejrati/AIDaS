@@ -14,10 +14,6 @@ datas = [
         str(project_root / "OCT Segmenter" / "AI_ForAIDAS" / "model_img.pth"),
         "OCT Segmenter/AI_ForAIDAS",
     ),
-    (
-        str(project_root / "OCT Segmenter" / "AI_ForAIDAS" / "vline_model.pth"),
-        "OCT Segmenter/AI_ForAIDAS",
-    ),
 ]
 binaries = []
 hiddenimports = [
