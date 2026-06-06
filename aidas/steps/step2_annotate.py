@@ -13,8 +13,8 @@ Core Functionality:
     Predictions are automatically imported as boundary traces.
   • Boundary Workflow: Tracks annotation progress with separate incomplete/
     completed boundary lists; auto-advances to next boundary after finish.
-  • Foveal Center Line: Dedicated vertical line mode for placing/adjusting
-    the foveal center X-coordinate with nudge buttons and keyboard entry.
+  • Foveal Center Line: Always-visible draggable vertical marker for the
+    foveal center X-coordinate with nudge buttons and keyboard entry.
   • Export: CSV export of all boundary row coordinates (one row per boundary).
   • MARKED Images: Generate Light_MARKED and Dark_MARKED Analyze volumes
     (8-bit) with boundary pixels marked at specific intensity values per
@@ -222,119 +222,6 @@ def _resize_volume_to_shape(volume_3d, target_shape):
     return np.stack(resized_slices[:target_slices], axis=0)
 
 
-class _FoveaLinePicker(tk.Toplevel):
-    """Modal image viewer for choosing one foveal center x-coordinate."""
-
-    DISPLAY_W = 1100
-    DISPLAY_H = 320
-
-    def __init__(self, parent, image, *, title=None, initial_x=None):
-        super().__init__(parent)
-        self.title(title or "Mark Foveal Center")
-        self.resizable(False, False)
-        self.transient(parent)
-        apply_app_icon_to(self)
-
-        arr = np.asarray(image)
-        if arr.ndim != 2:
-            raise ValueError("Fovea picker expects a 2-D grayscale image.")
-        height, width = arr.shape
-        self._orig_w = int(width)
-        self._orig_h = int(height)
-        self.result = None
-        self.cancelled = False
-
-        scale = min(self.DISPLAY_W / max(1, width), self.DISPLAY_H / max(1, height))
-        self._scale = max(scale, 1e-6)
-        self._display_w = max(1, int(round(width * self._scale)))
-        self._display_h = max(1, int(round(height * self._scale)))
-
-        display = arr.astype(np.float32, copy=False)
-        lo = float(np.nanmin(display))
-        hi = float(np.nanmax(display))
-        if hi <= lo:
-            u8 = np.zeros(display.shape, dtype=np.uint8)
-        else:
-            u8 = ((display - lo) / (hi - lo + 1e-8) * 255).clip(0, 255).astype(np.uint8)
-        try:
-            resample_bilinear = Image.Resampling.BILINEAR
-        except AttributeError:
-            resample_bilinear = Image.BILINEAR
-        pil = Image.fromarray(u8, mode="L").resize((self._display_w, self._display_h), resample_bilinear)
-        self._tk_img = ImageTk.PhotoImage(pil)
-
-        self._canvas = tk.Canvas(
-            self,
-            width=self._display_w,
-            height=self._display_h,
-            cursor="sb_h_double_arrow",
-            highlightthickness=0,
-        )
-        self._canvas.pack(fill="both", expand=True)
-        self._canvas.create_image(0, 0, anchor="nw", image=self._tk_img)
-
-        start_x = self._orig_w // 2 if initial_x is None else int(initial_x)
-        self._line_x = int(np.clip(round(start_x * self._scale), 0, max(0, self._display_w - 1)))
-        self._canvas.create_line(
-            self._line_x,
-            0,
-            self._line_x,
-            self._display_h,
-            fill="#ffd500",
-            width=2,
-            tags="vline",
-        )
-
-        self._label_var = tk.StringVar()
-        ttk.Label(self, textvariable=self._label_var, font=("Consolas", 10)).pack(pady=4)
-
-        buttons = ttk.Frame(self)
-        buttons.pack(pady=(0, 8))
-        ttk.Button(buttons, text="Confirm", command=self._confirm).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Skip", command=self._skip).pack(side="left", padx=6)
-        ttk.Button(buttons, text="Cancel Folder", command=self._cancel).pack(side="left", padx=6)
-
-        self._canvas.bind("<ButtonPress-1>", self._on_press)
-        self._canvas.bind("<B1-Motion>", self._on_drag)
-        self._canvas.bind("<ButtonRelease-1>", self._on_drag)
-        self._canvas.bind("<Left>", lambda _event: self._move_line(self._line_x - 1))
-        self._canvas.bind("<Right>", lambda _event: self._move_line(self._line_x + 1))
-        self._canvas.bind("<Shift-Left>", lambda _event: self._move_line(self._line_x - 10))
-        self._canvas.bind("<Shift-Right>", lambda _event: self._move_line(self._line_x + 10))
-        self.bind("<Return>", lambda _event: self._confirm())
-        self.bind("<Escape>", lambda _event: self._skip())
-        self.protocol("WM_DELETE_WINDOW", self._skip)
-
-        self._move_line(self._line_x)
-        self.grab_set()
-        self._canvas.focus_set()
-
-    def _move_line(self, x):
-        x = int(np.clip(int(x), 0, max(0, self._display_w - 1)))
-        self._line_x = x
-        self._canvas.coords("vline", x, 0, x, self._display_h)
-        orig_col = int(np.clip(round(x / self._scale), 0, max(0, self._orig_w - 1)))
-        self._label_var.set(f"Fovea center column: {orig_col}")
-
-    def _on_press(self, event):
-        self._move_line(event.x)
-
-    def _on_drag(self, event):
-        self._move_line(event.x)
-
-    def _confirm(self):
-        self.result = int(np.clip(round(self._line_x / self._scale), 0, max(0, self._orig_w - 1)))
-        self.destroy()
-
-    def _skip(self):
-        self.result = None
-        self.destroy()
-
-    def _cancel(self):
-        self.cancelled = True
-        self.destroy()
-
-
 class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     """Embedded panel for selecting folders to run through Step 2 AI segmentation."""
 
@@ -399,8 +286,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
 
         run_box = ttk.Frame(wrapper)
         run_box.pack(fill="x", pady=(10, 0))
-        ttk.Button(run_box, text="Start", command=self._run_selected).pack(side="left")
-        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="right")
+        ttk.Button(run_box, text="Next >", command=self._run_selected).pack(side="right")
+        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="left")
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -557,7 +444,7 @@ class Step2Frame(SidebarStepFrame):
             on_vertical_line_change=self._on_vertical_line_changed,
         )
         self.single_image_canvas = self.image_canvas
-        self.image_canvas.enable_line(True)
+        self.image_canvas.enable_line(False)
         self.image_canvas.enable_roi(False)
         self.image_canvas.enable_vertical_line(False)
         self.image_canvas.pack(fill="both", expand=True)
@@ -569,9 +456,6 @@ class Step2Frame(SidebarStepFrame):
 
         self._build_controls()
 
-    # ═══════════════════════════════════════════════════════════════════════
-    #  UI construction
-    # ═══════════════════════════════════════════════════════════════════════
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
@@ -587,8 +471,14 @@ class Step2Frame(SidebarStepFrame):
         self.segmentation_frame = self.segmentation_section.body
         segmentation = self.segmentation_frame
 
-        self.active_trace_var = tk.StringVar(value="No active boundary")
-        ttk.Label(segmentation, textvariable=self.active_trace_var, wraplength=240, justify="left").pack(fill="x", pady=(0, 4))
+        ai_folder_buttons = ttk.Frame(segmentation)
+        ai_folder_buttons.pack(fill="x", pady=(6, 0))
+        self.batch_ai_button = ttk.Button(
+            ai_folder_buttons,
+            text="Run Batch Segmentation",
+            command=self._open_batch_segmentation_scanner,
+        )
+        self.batch_ai_button.pack(fill="x")
 
         workflow = ttk.LabelFrame(segmentation, text="Boundary Progress", padding=3)
         workflow.pack(fill="x", pady=(4, 0))
@@ -630,26 +520,23 @@ class Step2Frame(SidebarStepFrame):
 
         workflow_buttons = ttk.Frame(workflow)
         workflow_buttons.pack(fill="x", pady=(6, 0))
-        self.finish_boundary_btn = ttk.Button(workflow_buttons, text="Finish", command=self._finish_boundary)
+        self.button_finish_icon = tk.PhotoImage(file="assets\\el--ok.png")
+        self.finish_boundary_btn = ttk.Button(workflow_buttons, text="Done", command=self._finish_boundary, image=self.button_finish_icon, compound="left")
         self.finish_boundary_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
-        self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary)
+        self.clear_all_traces_btn_icon = tk.PhotoImage(file="assets\\solar--eraser-bold-duotone.png")
+        self.clear_all_traces_btn = ttk.Button(workflow_buttons, text="Clear", command=self._clear_all_traces, 
+                                               image=self.clear_all_traces_btn_icon, compound="left")
+        self.button_revert_icon = tk.PhotoImage(file="assets\\grommet-icons--revert.png")
+        self.clear_all_traces_btn.pack(side="left", fill="x", padx=(2, 2))
+        self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary, image=self.button_revert_icon, compound="left")
         self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
-
-        ai_folder_buttons = ttk.Frame(workflow)
-        ai_folder_buttons.pack(fill="x", pady=(6, 0))
-        self.batch_ai_button = ttk.Button(
-            ai_folder_buttons,
-            text="Run Batch Segmentation",
-            command=self._open_batch_segmentation_scanner,
-        )
-        self.batch_ai_button.pack(fill="x")
-
-        self.clear_all_traces_btn = ttk.Button(workflow, text="Clear All Traces", command=self._clear_all_traces)
-        self.clear_all_traces_btn.pack(fill="x", pady=(6, 4))
 
         self.segmenter_progress_var = tk.StringVar(value="Idle")
         self.segmenter_progress = ttk.Progressbar(workflow, mode="determinate", maximum=6, value=0)
         self.segmenter_progress.pack(fill="x", pady=(6, 4))
+
+        self.active_trace_var = tk.StringVar(value="No active boundary")
+        ttk.Label(workflow, textvariable=self.active_trace_var, wraplength=240, justify="left").pack(fill="x", pady=(0, 4))
 
         self.boundary_workflow_status_var = tk.StringVar(value="Select a boundary to make it active.")
         ttk.Label(workflow, textvariable=self.boundary_workflow_status_var, wraplength=240, justify="left").pack(
@@ -660,15 +547,6 @@ class Step2Frame(SidebarStepFrame):
         fovea = ttk.LabelFrame(segmentation, text="Foveal Center Line", padding=3)
         fovea.pack(fill="x", pady=(4, 2))
         self.fovea_frame = fovea  # Store reference for later state management
-
-        self.vertical_mode_var = tk.BooleanVar(value=False)
-        self.vertical_mode_check = ttk.Checkbutton(
-            fovea,
-            text="Vertical line mode (click/drag on image)",
-            variable=self.vertical_mode_var,
-            command=self._on_vertical_mode_toggled,
-        )
-        self.vertical_mode_check.pack(anchor="w")
 
         # Keep this state var even when the label is hidden; callbacks rely on it.
         self.fovea_line_var = tk.StringVar(value="Fovea line: not set")
@@ -686,7 +564,6 @@ class Step2Frame(SidebarStepFrame):
         self.fovea_plus_btn.pack(side="left", padx=(0, 4))
         self._bind_fovea_nudge_button(self.fovea_minus_btn, -1)
         self._bind_fovea_nudge_button(self.fovea_plus_btn, 1)
-        self.fovea_x_entry.bind("<Return>", lambda _e: self._apply_vertical_line_x())
 
         # Reset icon matches Step 1 numeric reset affordance.
         self.fovea_reset_btn = ttk.Button(coord_row, text="↺", width=2, command=self._center_vertical_line)
@@ -694,21 +571,11 @@ class Step2Frame(SidebarStepFrame):
 
         fovea_action_row = ttk.Frame(fovea)
         fovea_action_row.pack(fill="x", pady=(2, 0))
-        self.fovea_set_btn = ttk.Button(fovea_action_row, text="Set", command=self._apply_vertical_line_x)
-        self.fovea_set_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
-        self.fovea_clear_btn = ttk.Button(fovea_action_row, text="Clear", command=self._clear_fovea_lock)
-        self.fovea_clear_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
 
         self._set_fovea_controls_enabled(False)
 
-        self.trace_detail_var = tk.StringVar(value="No saved boundary")
-        ttk.Label(segmentation, textvariable=self.trace_detail_var, wraplength=240, justify="left").pack(
-            fill="x",
-            pady=(4, 0),
-        )
-
         saved_buttons = ttk.Frame(segmentation)
-        saved_buttons.pack(fill="x", pady=(6, 0))
+        saved_buttons.pack( pady=(6, 0))
         self.saved_buttons_frame = saved_buttons  # Store reference for later state management
         # ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv).pack(
         #     side="left",
@@ -716,17 +583,13 @@ class Step2Frame(SidebarStepFrame):
         #     fill="x",
         #     padx=(0, 2),
         # )
-        ttk.Button(saved_buttons, text="Save this image", command=self._save_current_marked_image_button).pack(
+        self.button_save_icon = tk.PhotoImage(file="assets\\glyphs-poly--save.png")
+        self.saved_button = ttk.Button(saved_buttons, text="Save", command=self._save_current_marked_image_button, 
+                   image=self.button_save_icon, compound="right")
+        self.saved_button.pack(
             side="left",
-            expand=True,
-            fill="x",
-            padx=2,
-        )
-        ttk.Button(saved_buttons, text="Save all", command=self._save_marked_images_button).pack(
-            side="right",
-            expand=True,
-            fill="x",
-            padx=(2, 0),
+            anchor="center",
+            padx=4,
         )
 
         # help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
@@ -738,7 +601,7 @@ class Step2Frame(SidebarStepFrame):
         #         "2. Pick a boundary name.\n"
         #         "3. Left-click points along the boundary.\n"
         #         "4. Press Finish Boundary to save all pixels on the line.\n"
-        #         "5. Enable Vertical line mode to place/drag the foveal center line."
+        #         "5. Drag the vertical foveal center line to adjust it."
         #     ),
         #     justify="left",
         # ).pack(anchor="w")
@@ -961,13 +824,13 @@ class Step2Frame(SidebarStepFrame):
         def on_cancel():
             next_var.set("cancel")
             
-        btn_cancel = ttk.Button(temp_frame, text="Cancel AI Batch", command=on_cancel)
+        btn_cancel = ttk.Button(temp_frame, text="Exit", command=on_cancel)
         btn_cancel.pack(side="right", padx=4, pady=4)
         
-        btn_skip = ttk.Button(temp_frame, text="Skip Image", command=on_skip)
+        btn_skip = ttk.Button(temp_frame, text="Skip >", command=on_skip)
         btn_skip.pack(side="right", padx=4, pady=4)
 
-        btn_set = ttk.Button(temp_frame, text="Set Fovea", command=on_set)
+        btn_set = ttk.Button(temp_frame, text="Confirm", command=on_set)
         btn_set.pack(side="right", padx=4, pady=4)
         
         # Save current editor state to restore later if canceled (optional, but good practice)
@@ -988,22 +851,21 @@ class Step2Frame(SidebarStepFrame):
                         "Fovea picker skipped",
                         f"Could not open this image for fovea selection:\n{path}\n\n{exc}",
                     )
-                    fovea_by_path[path] = None
+                    self._clear_image_display("Image skipped. No image is loaded.")
                     continue
 
                 self._show_image(image_data, path)
-                self.vertical_mode_var.set(True)
-                self._on_vertical_mode_toggled()
                 self.update_idletasks()
 
                 self.wait_variable(next_var)
                 
                 action = next_var.get()
                 if action == "cancel":
-                    self._load_editor_state(saved_state, self.image_canvas)
+                    self._clear_image_display("All Images skipped. No image is loaded.")
                     return None
                 elif action == "skip":
                     # Do not add it to fovea_by_path, which explicitly drops it from the batch list
+                    self._clear_image_display("Image skipped. No image is loaded.")
                     continue
                 else:  # "set"
                     # Read whatever they left in the entry
@@ -1015,9 +877,9 @@ class Step2Frame(SidebarStepFrame):
                 
         finally:
             temp_frame.destroy()
+            self._update_boundary_action_buttons()
             self._update_batch_ai_button_state()
-            self.vertical_mode_var.set(False)
-            self._on_vertical_mode_toggled()
+
 
         return fovea_by_path
 
@@ -1128,10 +990,7 @@ class Step2Frame(SidebarStepFrame):
         self.image_info_var.set(
             f"{filename} | Size: {image.shape[1]} × {image.shape[0]} px | Type: {image.dtype}"
         )
-        self.trace_detail_var.set("No saved boundary")
         self.active_trace_var.set("No active boundary")
-        self.fovea_line_var.set("Fovea line: not set")
-        self.fovea_x_entry_var.set("")
         self._reset_boundary_completion()
         self._set_drawing_locked(False)
         self._refresh_trace_list()
@@ -1139,9 +998,43 @@ class Step2Frame(SidebarStepFrame):
         self._set_segmentation_frame_enabled(True)
         self._update_ai_button_states()
         self.status_var.set(
-            "Image loaded. Left-click to place points only after selecting an incomplete boundary."
+            "Image loaded. Drag the foveal center line or select an incomplete boundary to trace."
         )
         self._notify_output_folder_changed()
+
+    def _clear_image_display(self, status_message=None):
+        """Clear the editor canvas and reset image-specific annotation state."""
+        self._show_single_image_canvas()
+        self.current_file = None
+        self.image_data = None
+        self.active_boundary = None
+        self.boundary_traces = {}
+        self.boundary_order = []
+        self.fovea_x = None
+        self._input_analyze_template = None
+        self._source_was_8bit = False
+
+        self.image_canvas.set_image(None)
+        self.image_canvas.enable_roi(False)
+        self.image_canvas.enable_line(False)
+        self.image_canvas.enable_vertical_line(False)
+
+        self.image_info_var.set("No image loaded")
+        self.active_trace_var.set("No active boundary")
+        self.fovea_line_var.set("Fovea line: not set")
+        self._updating_fovea_entry = True
+        try:
+            self.fovea_x_entry_var.set("")
+        finally:
+            self._updating_fovea_entry = False
+
+        self._reset_boundary_completion()
+        self._refresh_trace_list()
+        self._set_fovea_controls_enabled(False)
+        self._sync_boundary_canvas_state()
+        self._update_ai_button_states()
+        if status_message:
+            self.status_var.set(status_message)
 
     def _notify_output_folder_changed(self):
         if not self.current_file or self.current_file == "Step 1 output":
@@ -1173,11 +1066,15 @@ class Step2Frame(SidebarStepFrame):
             "color": BOUNDARY_COLORS.get(FOVEA_BOUNDARY_NAME, "#ffd500"),
         }
 
-    def _set_fovea_from_prediction(self, x):
+    def _ensure_fovea_line(self, x=None):
         if self.image_data is None:
-            return
+            self.image_canvas.clear_vertical_line()
+            self._set_fovea_controls_enabled(False)
+            return None
         width = int(self.image_data.shape[1])
         height = int(self.image_data.shape[0])
+        if x is None:
+            x = self.fovea_x if self.fovea_x is not None else width // 2
         fovea_x = int(np.clip(int(x), 0, max(0, width - 1)))
 
         self.fovea_x = fovea_x
@@ -1185,26 +1082,26 @@ class Step2Frame(SidebarStepFrame):
         if FOVEA_BOUNDARY_NAME not in self.boundary_order:
             self.boundary_order.append(FOVEA_BOUNDARY_NAME)
 
-        self.vertical_mode_var.set(True)
         self._updating_fovea_entry = True
         try:
             self.fovea_x_entry_var.set(str(fovea_x))
         finally:
             self._updating_fovea_entry = False
         self.fovea_line_var.set(f"Fovea line: x={fovea_x}")
-        self.image_canvas.enable_vertical_line(False)
+        self.image_canvas.set_vertical_line_x(fovea_x)
         self._set_fovea_controls_enabled(True)
+        return fovea_x
+
+    def _set_fovea_from_prediction(self, x):
+        if self._ensure_fovea_line(x) is None:
+            return
         self._rebuild_saved_overlays()
         self._refresh_trace_list()
         self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
-        self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
         self._sync_boundary_canvas_state()
 
     def _has_saved_fovea_trace(self):
         return FOVEA_BOUNDARY_NAME in self.boundary_traces
-
-    def _fovea_live_edit_mode(self):
-        return bool(self.vertical_mode_var.get() and not self._has_saved_fovea_trace())
 
     def _capture_current_editor_state(self):
         return {
@@ -1246,18 +1143,8 @@ class Step2Frame(SidebarStepFrame):
         self._rebuild_saved_overlays()
         self._set_completion_from_traces()
 
-        if self.fovea_x is not None:
-            self._set_fovea_from_prediction(self.fovea_x)
-        else:
-            self.vertical_mode_var.set(False)
-            self.image_canvas.clear_vertical_line()
-            self._set_fovea_controls_enabled(False)
-            self._updating_fovea_entry = True
-            try:
-                self.fovea_x_entry_var.set("")
-            finally:
-                self._updating_fovea_entry = False
-            self.fovea_line_var.set("Fovea line: not set")
+        self._ensure_fovea_line(self.fovea_x)
+        state["fovea_x"] = self.fovea_x
 
         filename = (
             os.path.basename(self.current_file)
@@ -1270,7 +1157,6 @@ class Step2Frame(SidebarStepFrame):
                 f"Type: {self.image_data.dtype}"
             )
 
-        self.trace_detail_var.set("No saved boundary")
         self.active_trace_var.set("No active boundary")
         self._refresh_trace_list()
         selected_trace = None
@@ -1280,7 +1166,6 @@ class Step2Frame(SidebarStepFrame):
             selected_trace = self.boundary_order[0]
         if selected_trace is not None:
             self._select_trace_by_name(selected_trace)
-            self._update_saved_trace_summary(selected_trace)
         self._refresh_boundary_lists(auto_select=False)
         self._set_drawing_locked(False)
         self._set_segmentation_frame_enabled(True)
@@ -1344,7 +1229,7 @@ class Step2Frame(SidebarStepFrame):
 
         Switches to the given boundary name and prepares for point-by-point drawing.
         If a trace already exists for this boundary, prompts user to overwrite.
-        Automatically disables vertical line mode and clears any active unfinished trace.
+        Keeps the foveal center marker visible and clears any active unfinished trace.
 
         Args:
             name: Boundary name from BOUNDARY_NAMES.
@@ -1361,10 +1246,6 @@ class Step2Frame(SidebarStepFrame):
 
         if name not in BOUNDARY_NAMES:
             return
-
-        if self._fovea_live_edit_mode():
-            self.vertical_mode_var.set(False)
-            self._on_vertical_mode_toggled()
 
         if self.image_canvas.get_active_line() and not auto_advance:
             if not messagebox.askyesno(
@@ -1397,10 +1278,6 @@ class Step2Frame(SidebarStepFrame):
     def _set_active_boundary_target(self, name):
         if name not in BOUNDARY_NAMES or self.image_data is None:
             return
-
-        if self._fovea_live_edit_mode():
-            self.vertical_mode_var.set(False)
-            self._on_vertical_mode_toggled()
 
         self.active_boundary = name
         self.image_canvas.clear_active_line()
@@ -1438,6 +1315,14 @@ class Step2Frame(SidebarStepFrame):
             self.finish_boundary_btn.configure(state="normal" if is_incomplete else "disabled")
         if getattr(self, "revert_boundary_btn", None) is not None:
             self.revert_boundary_btn.configure(state="normal" if is_completed else "disabled")
+        if getattr(self, "clear_all_traces_btn", None) is not None:
+            self.clear_all_traces_btn.configure(state="normal" if active_name in BOUNDARY_NAMES else "disabled")
+
+        if getattr(self, "saved_button", None) is not None:
+            if self._all_required_boundaries_complete():
+                self.saved_button.state(["!disabled"]) # Enable if all 6 boundaries exist
+            else:
+                self.saved_button.state(["disabled"])  # Disable otherwise
 
     def _boundary_color(self, name):
         if name in BOUNDARY_COLORS:
@@ -1452,11 +1337,10 @@ class Step2Frame(SidebarStepFrame):
         Line drawing is DISABLED if:
           - AI segmentation is actively running (prevents accidental edits)
           - No boundary is selected or selected boundary is complete
-          - Vertical line mode is active
 
         Completed boundaries must be reverted to incomplete to edit.
 
-        Vertical line mode is DISABLED during AI segmentation to prevent conflicts.
+        The foveal center line remains visible whenever an image is loaded.
 
         This method is called after each state change (AI finish, boundary selection,
         vertical line toggle) to maintain consistent canvas interactivity.
@@ -1465,13 +1349,16 @@ class Step2Frame(SidebarStepFrame):
         # Only allow drawing on incomplete boundaries
         is_incomplete = active_name in self._incomplete_boundary_names()
         drawing_enabled = (
-            active_name is not None
+            self.image_data is not None
+            and active_name is not None
             and is_incomplete
-            and not self._fovea_live_edit_mode()
+            and not self._drawing_locked
             and not self._segmenter_running
         )
+        if self.image_data is not None and self.image_canvas.get_vertical_line_x() is None:
+            self._ensure_fovea_line()
         self.image_canvas.enable_line(drawing_enabled)
-        self.image_canvas.enable_vertical_line(self._fovea_live_edit_mode() and not self._segmenter_running)
+        self.image_canvas.enable_vertical_line(self.image_data is not None)
 
     def _start_boundary(self):
         """Begin drawing the currently selected boundary from the incomplete list.
@@ -1545,7 +1432,6 @@ class Step2Frame(SidebarStepFrame):
         next_name = self._mark_boundary_complete(name)
         self._refresh_trace_list()
         self._select_trace_by_name(name)
-        self._update_saved_trace_summary(name)
         self.active_trace_var.set("No active boundary")
         self._update_boundary_action_buttons()
         if next_name is not None:
@@ -1589,7 +1475,6 @@ class Step2Frame(SidebarStepFrame):
         self._refresh_boundary_lists(select_incomplete_name=name)
         self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
-        self.trace_detail_var.set("No saved boundary")
         self.active_trace_var.set(f"Active: {name} | no vertices placed yet")
         self.status_var.set(f"Reverted '{name}' back to incomplete.")
 
@@ -1608,6 +1493,10 @@ class Step2Frame(SidebarStepFrame):
             messagebox.showinfo("Nothing selected", "Select a saved boundary first.")
             return
         name = self.boundary_order[selection[0]]
+        if name == FOVEA_BOUNDARY_NAME:
+            self._center_vertical_line()
+            self.status_var.set("Foveal center line reset to image center.")
+            return
         self.boundary_traces.pop(name, None)
         self.boundary_order.remove(name)
         if name in self.boundary_completion_vars:
@@ -1615,7 +1504,6 @@ class Step2Frame(SidebarStepFrame):
         self._refresh_boundary_lists(select_incomplete_name=name)
         self._rebuild_saved_overlays()
         self._refresh_trace_list()
-        self.trace_detail_var.set("No saved boundary")
         self.status_var.set(f"Deleted boundary '{name}'.")
 
     def _clear_all_traces(self):
@@ -1624,30 +1512,38 @@ class Step2Frame(SidebarStepFrame):
         Asks for confirmation before clearing to prevent accidental data loss.
         Resets boundary completion status and clears canvas overlays.
         """
-        if not self.boundary_traces and not self.image_canvas.get_active_line():
+        has_boundary_traces = any(name != FOVEA_BOUNDARY_NAME for name in self.boundary_traces)
+        if not has_boundary_traces and not self.image_canvas.get_active_line():
             return
-        if not messagebox.askyesno("Clear all traces?", "Remove every saved and active boundary trace?"):
+        if not messagebox.askyesno(
+            "Clear all traces?",
+            "Remove every saved and active boundary trace? The foveal center line will be kept.",
+        ):
             return
+        fovea_x = self.fovea_x
         self.boundary_traces.clear()
         self.boundary_order.clear()
         self._reset_boundary_completion()
+        self._ensure_fovea_line(fovea_x)
         self.active_boundary = None
         self.image_canvas.clear_line_overlays()
         self.image_canvas.clear_active_line()
         self._refresh_boundary_lists()
         self._refresh_trace_list()
-        self.trace_detail_var.set("No saved boundary")
         self.active_trace_var.set("No active boundary")
-        self.status_var.set("All boundary traces cleared.")
+        self.status_var.set("All boundary traces cleared. Foveal center line kept.")
 
     def _rebuild_saved_overlays(self):
         """Redraw all saved boundary overlays on the canvas from boundary_traces.
 
         Called after any modification to boundary_traces or boundary_order.
         Maintains order and colors when re-rendering the canvas display.
+        The fovea line is drawn only by the interactive vertical marker.
         """
         overlays = []
         for name in self.boundary_order:
+            if name == FOVEA_BOUNDARY_NAME:
+                continue
             trace = self.boundary_traces.get(name)
             if trace:
                 overlays.append({
@@ -1725,61 +1621,6 @@ class Step2Frame(SidebarStepFrame):
                 return name
         return None
 
-    def _on_vertical_mode_toggled(self):
-        """Toggle foveal center line mode on/off.
-
-        When enabled:
-          - Shows the saved fovea trace as complete when it already exists
-          - Otherwise switches to vertical-line drawing mode on the canvas
-          - Enables foveal center nudge controls (left/right buttons, X entry)
-
-        When disabled:
-          - Disables foveal center editing
-          - Keeps an existing saved fovea trace visible
-          - Re-enables polyline drawing for boundaries
-          - Disables foveal center controls
-
-        Prevents mode toggle during AI segmentation (_drawing_locked).
-        """
-        if self._drawing_locked:
-            self.vertical_mode_var.set(False)
-            return
-        enabled = self.vertical_mode_var.get()
-        has_saved_fovea = self._has_saved_fovea_trace()
-        live_fovea = bool(enabled and not has_saved_fovea)
-        self._set_fovea_controls_enabled(enabled)
-        self.image_canvas.enable_vertical_line(live_fovea)
-        self.image_canvas.enable_line(not live_fovea)
-        if enabled:
-            if self.image_data is not None:
-                if has_saved_fovea:
-                    if self.fovea_x is None:
-                        points = self.boundary_traces.get(FOVEA_BOUNDARY_NAME, {}).get("points", [])
-                        if points:
-                            self.fovea_x = int(points[0][0])
-                    self._rebuild_saved_overlays()
-                    self.status_var.set("Foveal center is complete in the segmentation map.")
-                elif self.fovea_x is not None:
-                    self.image_canvas.set_vertical_line_x(int(self.fovea_x))
-                    self.status_var.set(f"Vertical line mode enabled. Foveal center line set to x={int(self.fovea_x)}.")
-                else:
-                    self._center_vertical_line()
-                    self.status_var.set("Vertical line mode enabled. Foveal center line set to image center.")
-            else:
-                self.status_var.set("Vertical line mode enabled. Load an image to place the foveal center line.")
-        else:
-            if not has_saved_fovea:
-                self.image_canvas.clear_vertical_line()
-            self._rebuild_saved_overlays()
-            self._refresh_trace_list()
-            if has_saved_fovea:
-                self._select_trace_by_name(FOVEA_BOUNDARY_NAME)
-                self._update_saved_trace_summary(FOVEA_BOUNDARY_NAME)
-                self.status_var.set("Boundary tracing mode enabled. Saved foveal center line is preserved.")
-            else:
-                self.trace_detail_var.set("No saved boundary")
-                self.status_var.set("Boundary tracing mode enabled. Left-click to place boundary points.")
-
     def _populate_boundary_listbox(self, listbox, names, selected_name):
         """Populate a boundary listbox with names, marking the selected one."""
         listbox.delete(0, "end")
@@ -1837,7 +1678,7 @@ class Step2Frame(SidebarStepFrame):
 
         fovea_status = " | Fovea center: done" if self._has_saved_fovea_trace() else ""
         self.boundary_workflow_status_var.set(
-            f"Incomplete: {len(incomplete_names)} | Completed: {len(completed_names)}/{len(BOUNDARY_NAMES)}"
+            f"Completed: {len(completed_names)}/{len(BOUNDARY_NAMES)}"
             f"{fovea_status}"
         )
         self._update_boundary_action_buttons()
@@ -1874,61 +1715,16 @@ class Step2Frame(SidebarStepFrame):
             return
         width = int(self.image_data.shape[1])
         center_x = width // 2
-        if self._has_saved_fovea_trace():
-            self._set_fovea_from_prediction(center_x)
-        else:
-            self.image_canvas.set_vertical_line_x(center_x)
-
-    def _clear_vertical_line(self):
-        self.image_canvas.clear_vertical_line()
-        self.status_var.set("Foveal center line cleared.")
-
-    def _apply_vertical_line_x(self):
-        if self.image_data is None:
-            messagebox.showinfo("No image", "Load an image first.")
-            return
-        raw_value = self.fovea_x_entry_var.get().strip()
-        if not raw_value:
-            messagebox.showinfo("Missing coordinate", "Enter Center X first.")
-            return
-        try:
-            x = int(raw_value)
-        except ValueError:
-            messagebox.showerror("Invalid coordinate", "Center X must be an integer.")
-            return
-        width = int(self.image_data.shape[1])
-        height = int(self.image_data.shape[0])
-        if x < 0 or x >= width:
-            messagebox.showerror("Out of range", f"Center X must be between 0 and {width - 1}.")
-            return
-
-        # Save the foveal center line into the segmentation map so there is one
-        # fovea marker source for the editor and MARKED output.
-        if height >= 2:
-            self._set_fovea_from_prediction(x)
-
-        next_name = self._next_incomplete_boundary()
-        if next_name is not None:
-            self._set_active_boundary_target(next_name)
-
-        self.status_var.set(f"Foveal center line set to x={x} and saved in the segmentation map.")
+        self._set_fovea_from_prediction(center_x)
 
     def _set_drawing_locked(self, locked):
         self._drawing_locked = bool(locked)
         self._stop_fovea_repeat()
 
-        self.vertical_mode_check.configure(state="disabled" if self._drawing_locked else "normal")
-        self._set_fovea_controls_enabled(self.vertical_mode_var.get())
-
+        self._set_fovea_controls_enabled(self.image_data is not None and not self._drawing_locked)
         if self._drawing_locked:
-            self.vertical_mode_var.set(False)
-            self.image_canvas.enable_vertical_line(False)
-            # Keep boundary tracing active while fovea controls are locked.
-            self.image_canvas.enable_line(True)
-        else:
-            live_fovea = self._fovea_live_edit_mode()
-            self.image_canvas.enable_vertical_line(live_fovea)
-            self.image_canvas.enable_line(not live_fovea)
+            self.image_canvas.enable_line(False)
+        self._sync_boundary_canvas_state()
 
     def _set_fovea_controls_enabled(self, enabled):
         """Enable/disable fovea-specific controls based on mode and lock state."""
@@ -1937,9 +1733,7 @@ class Step2Frame(SidebarStepFrame):
             self.fovea_minus_btn,
             self.fovea_x_entry,
             self.fovea_plus_btn,
-            self.fovea_set_btn,
             self.fovea_reset_btn,
-            self.fovea_clear_btn,
         ):
             widget.configure(state=state)
 
@@ -1952,6 +1746,7 @@ class Step2Frame(SidebarStepFrame):
                 self.finish_boundary_btn,
                 self.revert_boundary_btn,
                 getattr(self, "batch_ai_button", None),
+                getattr(self, "save_btn", None),
             ):
                 return
             try:
@@ -1965,23 +1760,6 @@ class Step2Frame(SidebarStepFrame):
             set_state(self.segmentation_frame, state)
         self._update_batch_ai_button_state()
 
-    def _clear_fovea_lock(self):
-        """Remove saved fovea lock line, unlock controls, then show default center line."""
-        self.boundary_traces.pop(FOVEA_BOUNDARY_NAME, None)
-        if FOVEA_BOUNDARY_NAME in self.boundary_order:
-            self.boundary_order.remove(FOVEA_BOUNDARY_NAME)
-
-        self._set_drawing_locked(False)
-        self.image_canvas.clear_vertical_line()
-        self._rebuild_saved_overlays()
-        self._refresh_trace_list()
-        self.trace_detail_var.set("No saved boundary")
-
-        if self.image_data is not None:
-            self._center_vertical_line()
-            self.status_var.set("Fovea lock cleared. Default center line restored.")
-        else:
-            self.status_var.set("Fovea lock cleared.")
 
     def _on_fovea_x_entry_changed(self, *_):
         """Apply Center X edits immediately when they are valid integers in range."""
@@ -2000,10 +1778,8 @@ class Step2Frame(SidebarStepFrame):
             self._updating_fovea_entry = True
             self.fovea_x_entry_var.set(str(x))
             self._updating_fovea_entry = False
-        if self._has_saved_fovea_trace():
-            self._set_fovea_from_prediction(x)
-            return
-        self.image_canvas.set_vertical_line_x(x)
+        self._ensure_fovea_line(x)
+        self._refresh_trace_list()
 
     def _nudge_fovea_x(self, delta):
         if self.image_data is None:
@@ -2021,10 +1797,8 @@ class Step2Frame(SidebarStepFrame):
         self._updating_fovea_entry = True
         self.fovea_x_entry_var.set(str(next_x))
         self._updating_fovea_entry = False
-        if self._has_saved_fovea_trace():
-            self._set_fovea_from_prediction(next_x)
-            return
-        self.image_canvas.set_vertical_line_x(next_x)
+        self._ensure_fovea_line(next_x)
+        self._refresh_trace_list()
 
     def _bind_fovea_nudge_button(self, button, delta):
         button.bind("<ButtonPress-1>", lambda _event, d=delta: self._start_fovea_repeat(d))
@@ -2084,6 +1858,11 @@ class Step2Frame(SidebarStepFrame):
                 fovea_x_entry_var.set("")
             self._updating_fovea_entry = False
             return
+        if self.image_data is not None and FOVEA_BOUNDARY_NAME in self.boundary_traces:
+            self.boundary_traces[FOVEA_BOUNDARY_NAME] = self._vertical_line_trace(
+                int(x),
+                int(self.image_data.shape[0]),
+            )
         if fovea_line_var is not None:
             fovea_line_var.set(f"Fovea line: x={x}")
         self._updating_fovea_entry = True
@@ -2156,7 +1935,6 @@ class Step2Frame(SidebarStepFrame):
         if not selection:
             return
         name = self.boundary_order[selection[0]]
-        self._update_saved_trace_summary(name)
 
     def _update_active_trace_summary(self):
         if self.active_boundary is None:
@@ -2171,25 +1949,6 @@ class Step2Frame(SidebarStepFrame):
             f"Active: {self.active_boundary} | {len(points)} vertices | {len(pixels)} pixel(s) on line"
         )
 
-    def _update_saved_trace_summary(self, name):
-        trace = self.boundary_traces.get(name)
-        if not trace:
-            self.trace_detail_var.set("No saved boundary")
-            return
-        if name == FOVEA_BOUNDARY_NAME:
-            x_value = self.fovea_x
-            if x_value is None:
-                points = trace.get("points", [])
-                if points:
-                    x_value = int(points[0][0])
-            suffix = f" at x={int(x_value)}" if x_value is not None else ""
-            self.trace_detail_var.set(
-                f"{name}: done{suffix}; populated from the segmentation map."
-            )
-            return
-        self.trace_detail_var.set(
-            f"{name}: {len(trace['points'])} vertices, {len(trace['pixels'])} pixels saved."
-        )
 
     def _all_required_boundaries_complete(self):
         """Check if all 6 preset boundaries have been traced and completed.
@@ -3101,7 +2860,7 @@ class Step2Frame(SidebarStepFrame):
         During segmentation (running=True):
           - Disables all AI buttons
           - Disables boundary listboxes to prevent selection changes
-          - Disables vertical line mode and fovea controls
+          - Disables fovea controls while keeping the marker visible
           - Starts animated progress bar showing activity
           - Disables line drawing
 
@@ -3151,10 +2910,6 @@ class Step2Frame(SidebarStepFrame):
                     for child in widget.winfo_children():
                         disable_widget(child)
                 disable_widget(self.saved_buttons_frame)
-            # If vertical mode is currently on, turn it off during segmentation
-            if self._fovea_live_edit_mode():
-                self.vertical_mode_var.set(False)
-                self._on_vertical_mode_toggled()
         else:
             if hasattr(self, "fovea_frame"):
                 # Recursively enable all controls in the fovea frame
@@ -3167,8 +2922,8 @@ class Step2Frame(SidebarStepFrame):
                             pass
                         enable_widget(child)
                 enable_widget(self.fovea_frame)
-                # Then properly update fovea controls state based on vertical mode
-                self._set_fovea_controls_enabled(self.vertical_mode_var.get())
+                # Then properly update fovea controls state based on image availability.
+                self._set_fovea_controls_enabled(self.image_data is not None)
             # Also re-enable save/export buttons
             if hasattr(self, "saved_buttons_frame"):
                 def enable_widget(widget):
@@ -3451,8 +3206,8 @@ class Step2Frame(SidebarStepFrame):
 
             if failed:
                 messagebox.showwarning("Batch segmentation complete with errors", "\n".join(message_lines))
-            else:
-                messagebox.showinfo("Batch segmentation complete", "\n".join(message_lines))
+            # else:
+            #     messagebox.showinfo("Batch segmentation complete", "\n".join(message_lines))
         finally:
             if not running_cleared:
                 self._set_segmentation_running(False)

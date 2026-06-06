@@ -145,21 +145,24 @@ class ImageCanvas(ttk.Frame):
         if data is not None:
             self._auto_zoom()
         self._redraw()
+        self._refresh_cursor_for_mode()
 
     def get_image(self):
         return self._data
 
     # ROI
     def enable_roi(self, enabled=True):
-        self._roi_on = enabled
+        self._roi_on = bool(enabled)
         if not enabled:
             self._clear_roi()
+        self._refresh_cursor_for_mode()
 
     # Line tracing
     def enable_line(self, enabled=True):
-        self._line_on = enabled
-        if not enabled:
+        self._line_on = bool(enabled)
+        if not self._line_on:
             self.clear_active_line()
+        self._refresh_cursor_for_mode()
 
     def clear_line_overlays(self):
         self._line_overlays.clear()
@@ -197,6 +200,7 @@ class ImageCanvas(ttk.Frame):
         self._vertical_line_on = bool(enabled)
         self._drag_vertical_line = False
         self._update_vertical_line_overlay()
+        self._refresh_cursor_for_mode()
 
     def set_vertical_line_x(self, x):
         if x is None:
@@ -221,6 +225,7 @@ class ImageCanvas(ttk.Frame):
         self._vertical_line_x = None
         self._drag_vertical_line = False
         self._update_vertical_line_overlay()
+        self._refresh_cursor_for_mode()
         self._emit_vertical_line_change()
 
     def undo_active_line_vertex(self):
@@ -668,6 +673,12 @@ class ImageCanvas(ttk.Frame):
             return "move"
         return None
 
+    def _hit_vertical_line(self, cx):
+        if self._data is None or self._vertical_line_x is None or not self._vertical_line_on:
+            return False
+        line_x, _line_y = self._i2c(self._vertical_line_x, 0)
+        return abs(cx - line_x) <= max(8, self._scaled_line_width(4) * 2)
+
     # ---------------------------------------------------------- mouse events
     def _on_wheel(self, event):
         if event.num == 4 or getattr(event, "delta", 0) > 0:
@@ -726,12 +737,13 @@ class ImageCanvas(ttk.Frame):
                 return
             cx = self.canvas.canvasx(event.x)
             cy = self.canvas.canvasy(event.y)
-            ix, _iy = self._c2i(cx, cy)
-            self._vertical_line_x = self._clamp_image_point(ix, 0)[0]
-            self._drag_vertical_line = True
-            self._update_vertical_line_overlay()
-            self._emit_vertical_line_change()
-            return
+            if self._hit_vertical_line(cx):
+                ix, _iy = self._c2i(cx, cy)
+                self._vertical_line_x = self._clamp_image_point(ix, 0)[0]
+                self._drag_vertical_line = True
+                self._update_vertical_line_overlay()
+                self._emit_vertical_line_change()
+                return
 
         if self._line_on:
             if self._data is None:
@@ -814,6 +826,7 @@ class ImageCanvas(ttk.Frame):
         self._drag = None
         self._drag_anchor = None
         self._drag_roi0 = None
+        self._refresh_cursor_for_mode()
 
     def _on_pan_start(self, event):
         if self._data is None:
@@ -829,6 +842,7 @@ class ImageCanvas(ttk.Frame):
 
     def _on_pan_end(self, _event):
         self._is_panning = False
+        self._refresh_cursor_for_mode()
 
     def _set_canvas_cursor(self, cursor):
         if self._last_cursor == cursor:
@@ -836,8 +850,24 @@ class ImageCanvas(ttk.Frame):
         self.canvas.configure(cursor=cursor)
         self._last_cursor = cursor
 
+    def _refresh_cursor_for_mode(self):
+        if self._data is None:
+            self._set_canvas_cursor("")
+            return
+        if self._is_panning:
+            self._set_canvas_cursor("fleur")
+        elif self._drag_vertical_line:
+            self._set_canvas_cursor("sb_h_double_arrow")
+        elif self._line_on:
+            self._set_canvas_cursor("crosshair")
+        elif self._roi_on:
+            self._set_canvas_cursor("crosshair")
+        else:
+            self._set_canvas_cursor("")
+
     def _on_hover(self, event):
         if self._data is None:
+            self._set_canvas_cursor("")
             return
         if self._drag_vertical_line:
             return
@@ -861,7 +891,7 @@ class ImageCanvas(ttk.Frame):
         if self._is_panning:
             self._set_canvas_cursor("fleur")
             return
-        if self._vertical_line_on:
+        if self._hit_vertical_line(cx):
             self._set_canvas_cursor("sb_h_double_arrow")
             return
         if self._line_on:
@@ -873,3 +903,5 @@ class ImageCanvas(ttk.Frame):
                        "bl": "bottom_left_corner", "br": "bottom_right_corner",
                        "move": "fleur"}
             self._set_canvas_cursor(cursors.get(h, "crosshair"))
+            return
+        self._set_canvas_cursor("")
