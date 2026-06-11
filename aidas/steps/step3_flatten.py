@@ -26,8 +26,6 @@ except Exception:
 from aidas.utils.io_utils import read_analyze
 from aidas.utils.batch_ui import BatchTable
 from aidas.utils.step3_image_utils import (
-    make_comparison_preview_image as _make_comparison_preview_image,
-    make_find_vertex_preview_image as _make_find_vertex_preview_image,
     placeholder_image as _placeholder_image,
 )
 from aidas.utils.log_paths import app_log_dir
@@ -144,16 +142,17 @@ class RSetupWizard(ttk.Frame):
         self.log_text.pack(side="left", fill="both", expand=True)
         log_scroll.pack(side="right", fill="y")
 
+        self.progress = ttk.Progressbar(right, mode="determinate", maximum=100)
+        self.progress.pack(fill="x", pady=(6, 0))
+
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(10, 0))
-        self.progress = ttk.Progressbar(footer, mode="determinate", maximum=100)
-        self.progress.pack(side="left", fill="x", expand=True, padx=(0, 10))
         self.back_button = ttk.Button(footer, text="Back", command=self._back)
-        self.back_button.pack(side="left", padx=(0, 4))
+        self.back_button.pack(side="right", padx=(4, 0))
         self.next_button = ttk.Button(footer, text="Next", command=self._next)
-        self.next_button.pack(side="left", padx=(0, 4))
+        self.next_button.pack(side="right", padx=(4, 0))
         self.cancel_button = ttk.Button(footer, text="Cancel", command=self._cancel)
-        self.cancel_button.pack(side="left")
+        self.cancel_button.pack(side="right")
 
         self._log("R setup wizard opened.")
 
@@ -1099,12 +1098,10 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_run_panel = None
         self.r_setup_button = None
         self.r_batch_button = None
-        self.slice_combo = None
         self._busy = False
         self.r_package_library_path = None if self.preferences is None else self.preferences.get("r_package_library_path")
 
-        self.slice_var = tk.StringVar(value="0")
-        self.view_var = tk.StringVar(value="Tutorial")
+        self.view_var = tk.StringVar(value="DARK_MARKED_find_vertex")
         self.status_var = tk.StringVar(value="Ready - use batch Step 3 R processing.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
@@ -1128,6 +1125,21 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_button = ttk.Button(process, text="Batch Run R Script...", command=self._open_r_batch_scanner)
         self.r_batch_button.pack(fill="x", pady=2)
 
+        ttk.Button(process, text="Load R Results...", command=self._browse_r_results_folder).pack(fill="x", pady=2)
+
+        ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(6, 4))
+
+        ttk.Label(process, text="View").pack(anchor="w", pady=(6, 2))
+        view_combo = ttk.Combobox(
+            process,
+            textvariable=self.view_var,
+            values=["DARK_MARKED_find_vertex", "_tissueBorders__DARK"],
+            state="readonly",
+        )
+        view_combo.pack(fill="x", pady=2)
+        view_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
+
+        ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(8, 4))
         self.progress = ttk.Progressbar(process, mode="determinate", maximum=100)
         self.progress.pack(fill="x", pady=2)
         progress_text_frame = ttk.Frame(process, height=44)
@@ -1140,36 +1152,6 @@ class Step3Frame(SidebarStepFrame):
             foreground="gray",
             justify="left",
         ).pack(fill="both", expand=True)
-
-        view_results_section = self.add_sidebar_section("View Results", pady=(0, 5))
-        view_results = view_results_section.body
-
-        ttk.Button(view_results, text="Load R Results...", command=self._browse_r_results_folder).pack(fill="x", pady=2)
-
-        ttk.Label(view_results, text="View").pack(anchor="w", pady=(6, 2))
-        view_combo = ttk.Combobox(
-            view_results,
-            textvariable=self.view_var,
-            values=["Tutorial", "Comparison", "DARK_MARKED_find_vertex", "DARK_MARKED_vertex"],
-            state="readonly",
-        )
-        view_combo.pack(fill="x", pady=2)
-        view_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
-
-        ttk.Label(view_results, text="Slice").pack(anchor="w", pady=(8, 2))
-        self.slice_combo = ttk.Combobox(view_results, textvariable=self.slice_var, values=["0", "1"], state="readonly")
-        self.slice_combo.pack(fill="x", pady=2)
-        self.slice_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
-
-        stats_section = self.add_sidebar_section("Stats", pady=(0, 5))
-        stats = stats_section.body
-
-        ttk.Label(
-            stats,
-            textvariable=self.info_var,
-            wraplength=self.SIDEBAR_TEXT_WRAP,
-            justify="left",
-        ).pack(fill="x")
 
         self.plot_holder = ttk.Frame(self.content)
         self.plot_holder.pack(fill="both", expand=True)
@@ -1521,15 +1503,6 @@ class Step3Frame(SidebarStepFrame):
                 errors.append(f"{loader.__name__}: {exc}")
         raise RuntimeError("Could not load R outputs using any supported method:\n" + "\n".join(errors))
 
-    def _update_slice_options_from_results(self):
-        if self.slice_combo is None or self.results is None:
-            return
-        count = int(self.results["flattened_light"].shape[0])
-        values = [str(idx) for idx in range(max(1, count))]
-        self.slice_combo.configure(values=values)
-        if self.slice_var.get() not in values:
-            self.slice_var.set(values[0])
-
     def _load_original_light_for_preview(self, folder):
         input_paths = self._find_input_paths(folder)
         light_path = input_paths.get("LIGHT")
@@ -1555,10 +1528,9 @@ class Step3Frame(SidebarStepFrame):
         self.output_sdb_dir = str(folder)
         self.results = results
         self._load_original_light_for_preview(folder)
-        self._update_slice_options_from_results()
         self.progress.configure(value=100)
         self.progress_text_var.set("Loaded R results")
-        self.view_var.set("Comparison" if self.original_light_volume is not None else "DARK_MARKED_find_vertex")
+        self.view_var.set("DARK_MARKED_find_vertex")
         self.info_var.set(
             f"flattened_dark: {results['flattened_dark'].shape}\n"
             f"flattened_light: {results['flattened_light'].shape}\n"
@@ -1571,6 +1543,13 @@ class Step3Frame(SidebarStepFrame):
         self.status_var.set(f"Loaded Step 3 R results from {folder}.")
         self._render()
         return True
+
+    def _load_result_png(self, filename):
+        png_path = Path(self.output_sdb_dir or self.current_sdb_dir) / filename
+        if not png_path.is_file():
+            raise FileNotFoundError(f"{filename} not found in {png_path.parent}")
+        with Image.open(png_path) as img:
+            return img.copy()
 
     def _browse_r_results_folder(self):
         folder = filedialog.askdirectory(
@@ -1683,10 +1662,7 @@ class Step3Frame(SidebarStepFrame):
     def _reset_to_tutorial_state(self):
         self.results = None
         self.original_light_volume = None
-        self.view_var.set("Tutorial")
-        if self.slice_combo is not None:
-            self.slice_combo.configure(values=["0", "1"])
-        self.slice_var.set("0")
+        self.view_var.set("DARK_MARKED_find_vertex")
         self.progress.configure(value=0)
         self.progress_text_var.set("Idle")
         self._render()
@@ -1978,7 +1954,7 @@ class Step3Frame(SidebarStepFrame):
                 title="Step 3 Tutorial",
             )
             self.status_var.set(f"Step 3 tutorial image not found: {tutorial_path}")
-        self.info_var.set(self._tutorial_info_text())
+        self.info_var.set("")
         if tutorial_path.is_file():
             self.status_var.set("Step 3 tutorial: using static asset image.")
         self._display_preview_image(image)
@@ -1997,67 +1973,39 @@ class Step3Frame(SidebarStepFrame):
         view = self.view_var.get()
         self._clear_plot_holder()
 
-        if view == "Tutorial":
+        if self.results is None:
             self._render_tutorial()
             return
 
-        if self.results is None:
+        if view == "DARK_MARKED_find_vertex":
+            try:
+                image = self._load_result_png("DARK_MARKED_find_vertex.png")
+                self.status_var.set("Showing DARK_MARKED_find_vertex.png.")
+            except Exception as exc:
+                image = _placeholder_image(
+                    f"Could not load DARK_MARKED_find_vertex.png:\n{exc}",
+                    size=(1600, 1000),
+                    title="DARK_MARKED_find_vertex.png",
+                )
+                self.status_var.set("Could not load DARK_MARKED_find_vertex.png.")
+        elif view == "_tissueBorders__DARK":
+            try:
+                image = self._load_result_png("_tissueBorders__DARK.png")
+                self.status_var.set("Showing _tissueBorders__DARK.png.")
+            except Exception as exc:
+                image = _placeholder_image(
+                    f"Could not load _tissueBorders__DARK.png:\n{exc}",
+                    size=(1600, 1000),
+                    title="_tissueBorders__DARK.png",
+                )
+                self.status_var.set("Could not load _tissueBorders__DARK.png.")
+        else:
             image = _placeholder_image(
-                "Load Step 3 R results to view flattened outputs.",
+                f"Unknown Step 3 view:\n{view}",
                 size=(1600, 1000),
                 title="Step 3 Results",
             )
-            self.status_var.set("No Step 3 R results are loaded.")
-            self._display_preview_image(image)
-            return
-
-        try:
-            slice_idx = int(self.slice_var.get())
-        except Exception:
-            slice_idx = 0
-        max_slice = self.results["flattened_light"].shape[0] - 1
-        slice_idx = max(0, min(slice_idx, max_slice))
-
-        if view == "DARK_MARKED_find_vertex":
-            image = _make_find_vertex_preview_image(self.results)
-            self.status_var.set("Showing DARK_MARKED_find_vertex preview.")
-        elif view == "DARK_MARKED_vertex":
-            vertex_plot_path = Path(self.output_sdb_dir or self.current_sdb_dir) / "DARK_MARKED_vertex.png"
-            if vertex_plot_path.is_file():
-                with Image.open(vertex_plot_path) as img:
-                    image = img.copy()
-                self.status_var.set("Showing DARK_MARKED_vertex.png.")
-            else:
-                image = _placeholder_image(
-                    f"DARK_MARKED_vertex.png not found in:\n{vertex_plot_path.parent}",
-                    size=(1600, 1000),
-                    title="DARK_MARKED_vertex",
-                )
-                self.status_var.set(f"DARK_MARKED_vertex.png not found in {vertex_plot_path.parent}.")
-        else:
-            if self.original_light_volume is None:
-                image = _placeholder_image(
-                    "Original LIGHT volume is not available for comparison.\n"
-                    "Use DARK_MARKED_find_vertex or load results from the Step 3 input/output folder.",
-                    size=(1600, 1000),
-                    title="Comparison",
-                )
-                self.status_var.set("Comparison preview needs the original LIGHT volume.")
-            else:
-                try:
-                    image = _make_comparison_preview_image(
-                        self.original_light_volume,
-                        self.results["flattened_light"],
-                        slice_idx,
-                    )
-                    self.status_var.set(f"Showing Step 3 comparison for slice {slice_idx}.")
-                except Exception as exc:
-                    image = _placeholder_image(
-                        f"Could not build comparison preview:\n{exc}",
-                        size=(1600, 1000),
-                        title="Comparison",
-                    )
-                    self.status_var.set("Could not build Step 3 comparison preview.")
+            self.status_var.set("Unknown Step 3 results view.")
 
         self._display_preview_image(image)
         self.info_var.set(self._result_info_text())

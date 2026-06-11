@@ -48,6 +48,7 @@ class BatchTable(ttk.Frame):
         self.empty_message_cell = None
         self.table_filler_cells = []
         self._table_resize_after_id = None
+        self._bulk_updating = False
         self._table_font = tkfont.nametofont("TkDefaultFont")
         self._header_font = self._table_font.copy()
         self._header_font.configure(weight="bold")
@@ -78,7 +79,7 @@ class BatchTable(ttk.Frame):
         self.columnconfigure(0, weight=1)
 
         self._build_table_header()
-        self.table_inner.bind("<Configure>", lambda _event: self._refresh_scrollregion())
+        self.table_inner.bind("<Configure>", self._on_table_inner_configure)
         self.table_canvas.bind("<Configure>", self._on_table_canvas_configure, add="+")
         self.table_canvas.bind("<MouseWheel>", self._on_table_mousewheel, add="+")
 
@@ -142,6 +143,8 @@ class BatchTable(ttk.Frame):
         return int(width)
 
     def _on_table_canvas_configure(self, _event=None):
+        if self._bulk_updating:
+            return
         if self._table_resize_after_id is not None:
             try:
                 self.after_cancel(self._table_resize_after_id)
@@ -286,10 +289,15 @@ class BatchTable(ttk.Frame):
         return content_overflows
 
     def _refresh_scrollregion(self):
+        if self._bulk_updating:
+            return
         try:
             self.table_canvas.configure(scrollregion=self.table_canvas.bbox("all"))
         except tk.TclError:
             pass
+
+    def _on_table_inner_configure(self, _event=None):
+        self._refresh_scrollregion()
 
     def _table_xview(self, *args):
         self.table_canvas.xview(*args)
@@ -304,13 +312,26 @@ class BatchTable(ttk.Frame):
     def set_rows(self, rows, *, empty_message=None):
         self.rows = list(rows or [])
         self.empty_message = self.empty_message if empty_message is None else empty_message
-        self._clear_table_body()
-        self.empty_message_cell = None
-        for idx, row in enumerate(self.rows):
-            self._add_row(idx, row)
-        if not self.rows:
-            self._add_empty_message()
-        self._refresh_select_all_ready_checkbox()
+        self._bulk_updating = True
+        try:
+            try:
+                self.table_canvas.itemconfigure(self.table_window, state="hidden")
+            except tk.TclError:
+                pass
+            self._clear_table_body()
+            self.empty_message_cell = None
+            for idx, row in enumerate(self.rows):
+                self._add_row(idx, row)
+            if not self.rows:
+                self._add_empty_message()
+            self._refresh_select_all_ready_checkbox()
+        finally:
+            self._bulk_updating = False
+            try:
+                self.table_canvas.itemconfigure(self.table_window, state="normal")
+            except tk.TclError:
+                pass
+        self._refresh_scrollregion()
         self.after_idle(self.fit_to_window)
 
     def _clear_table_body(self):

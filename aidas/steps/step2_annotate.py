@@ -32,13 +32,12 @@ import sys
 import tempfile
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
-from aidas.utils.batch_ui import BatchTable
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_utils import NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to
@@ -222,29 +221,232 @@ def _resize_volume_to_shape(volume_3d, target_shape):
     return np.stack(resized_slices[:target_slices], axis=0)
 
 
+class Step2BatchSegmentationTable(ttk.Frame):
+    """Fast folder table for Step 2 batch segmentation selection."""
+
+    COLUMNS = ("folder", "status", "images")
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.rows = []
+        self._row_by_iid = {}
+        self._checkbox_images = self._make_checkbox_images()
+        self._tree_font = tkfont.nametofont("TkDefaultFont")
+        self._heading_font = self._tree_font.copy()
+        self._heading_font.configure(weight="bold")
+
+        self._tree_style = "Step2Batch.Treeview"
+        self._style = ttk.Style(self)
+        try:
+            self._style.configure(self._tree_style, indent=0)
+        except tk.TclError:
+            pass
+
+        self.tree = ttk.Treeview(
+            self,
+            columns=self.COLUMNS,
+            show=("tree", "headings"),
+            selectmode="none",
+            style=self._tree_style,
+        )
+        self.yscroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.xscroll = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=self.yscroll.set, xscrollcommand=self.xscroll.set)
+
+        self.tree.heading(
+            "#0",
+            text="",
+            image=self._checkbox_images["unchecked"],
+            anchor="center",
+            command=self._toggle_all_ready,
+        )
+        self.tree.heading("folder", text="Folder")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("images", text="Images")
+
+        self.tree.column("#0", width=40, minwidth=40, stretch=False, anchor="center")
+        self.tree.column("folder", width=520, minwidth=220, stretch=False, anchor="w")
+        self.tree.column("status", width=360, minwidth=120, stretch=False, anchor="w")
+        self.tree.column("images", width=72, minwidth=60, stretch=False, anchor="center")
+
+        self.tree.tag_configure("locked", foreground="#6b7280")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.yscroll.grid(row=0, column=1, sticky="ns")
+        self.xscroll.grid(row=1, column=0, sticky="ew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.tree.bind("<Button-1>", self._on_click, add="+")
+        self.tree.bind("<Configure>", self._on_tree_configure, add="+")
+
+    def _make_checkbox_images(self):
+        images = {
+            "checked": tk.PhotoImage(width=16, height=16),
+            "unchecked": tk.PhotoImage(width=16, height=16),
+            "locked": tk.PhotoImage(width=16, height=16),
+        }
+        for image in images.values():
+            image.put("#ffffff", to=(0, 0, 16, 16))
+            image.put("#6b7280", to=(2, 2, 14, 3))
+            image.put("#6b7280", to=(2, 13, 14, 14))
+            image.put("#6b7280", to=(2, 2, 3, 14))
+            image.put("#6b7280", to=(13, 2, 14, 14))
+
+        checked = images["checked"]
+        for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
+            checked.put("#111827", to=(x, y, x + 1, y + 1))
+            checked.put("#111827", to=(x, y + 1, x + 1, y + 2))
+
+        locked = images["locked"]
+        locked.put("#e5e7eb", to=(3, 3, 13, 13))
+        locked.put("#9ca3af", to=(5, 7, 11, 9))
+        return images
+
+    def set_rows(self, rows):
+        self.rows = list(rows or [])
+        self._row_by_iid = {}
+        self.tree.delete(*self.tree.get_children(""))
+
+        if not self.rows:
+            self.tree.insert(
+                "",
+                "end",
+                text="",
+                values=("No folders with Light.img or Dark.img were found.", "", ""),
+                tags=("locked",),
+            )
+            self._refresh_header_checkbox()
+            return
+
+        for index, row in enumerate(self.rows):
+            iid = str(index)
+            self._row_by_iid[iid] = row
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                text="",
+                image=self._image_for_row(row),
+                values=self._values_for_row(row),
+                tags=("locked",) if row.get("locked") else (),
+            )
+        self._fit_columns_to_content()
+        self._refresh_header_checkbox()
+
+    def _image_for_row(self, row):
+        if row.get("locked"):
+            return self._checkbox_images["locked"]
+        if row.get("include"):
+            return self._checkbox_images["checked"]
+        return self._checkbox_images["unchecked"]
+
+    def _values_for_row(self, row):
+        values = row.get("values") or {}
+        return (
+            values.get("folder", ""),
+            values.get("status", ""),
+            values.get("images", ""),
+        )
+
+    def _measure_text(self, text, *, heading=False, padding=18):
+        font = self._heading_font if heading else self._tree_font
+        return int(font.measure(str(text or ""))) + int(padding)
+
+    def _fit_columns_to_content(self):
+        widths = {
+            "folder": self._measure_text("Folder", heading=True),
+            "status": self._measure_text("Status", heading=True),
+            "images": self._measure_text("Images", heading=True),
+        }
+        for row in self.rows:
+            folder, status, images = self._values_for_row(row)
+            widths["folder"] = max(widths["folder"], self._measure_text(folder))
+            widths["status"] = max(widths["status"], self._measure_text(status))
+            widths["images"] = max(widths["images"], self._measure_text(images))
+
+        self.tree.column("folder", width=max(220, widths["folder"]))
+        self.tree.column("status", width=max(120, widths["status"]))
+        self.tree.column("images", width=max(60, widths["images"]))
+        self._expand_folder_to_view()
+
+    def _on_tree_configure(self, _event=None):
+        self._expand_folder_to_view()
+
+    def _expand_folder_to_view(self):
+        if not self.rows:
+            return
+        try:
+            view_width = max(1, int(self.tree.winfo_width()))
+            checkbox_width = int(self.tree.column("#0", "width"))
+            folder_width = int(self.tree.column("folder", "width"))
+            status_width = int(self.tree.column("status", "width"))
+            images_width = int(self.tree.column("images", "width"))
+        except tk.TclError:
+            return
+
+        non_folder_width = checkbox_width + status_width + images_width
+        desired_folder_width = max(220, view_width - non_folder_width - 2)
+        if desired_folder_width > folder_width:
+            try:
+                self.tree.column("folder", width=desired_folder_width)
+            except tk.TclError:
+                pass
+
+    def _refresh_row(self, iid, row):
+        try:
+            self.tree.item(iid, image=self._image_for_row(row), values=self._values_for_row(row))
+        except tk.TclError:
+            pass
+
+    def _refresh_header_checkbox(self):
+        ready_rows = [row for row in self.rows if not row.get("locked")]
+        image = self._checkbox_images["unchecked"]
+        if ready_rows and all(bool(row.get("include")) for row in ready_rows):
+            image = self._checkbox_images["checked"]
+        try:
+            self.tree.heading("#0", image=image)
+        except tk.TclError:
+            pass
+
+    def _on_click(self, event):
+        if self.tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
+            return None
+        if self.tree.identify_column(event.x) != "#0":
+            return None
+        iid = self.tree.identify_row(event.y)
+        row = self._row_by_iid.get(iid)
+        if not row or row.get("locked"):
+            return "break"
+        row["include"] = not bool(row.get("include"))
+        self._refresh_row(iid, row)
+        self._refresh_header_checkbox()
+        return "break"
+
+    def _toggle_all_ready(self):
+        ready_rows = [row for row in self.rows if not row.get("locked")]
+        if not ready_rows:
+            return
+        include = not all(bool(row.get("include")) for row in ready_rows)
+        for iid, row in self._row_by_iid.items():
+            if row.get("locked"):
+                continue
+            row["include"] = include
+            self._refresh_row(iid, row)
+        self._refresh_header_checkbox()
+
+    def selected_rows(self):
+        return [row for row in self.rows if row.get("include") and not row.get("locked")]
+
+
 class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     """Embedded panel for selecting folders to run through Step 2 AI segmentation."""
 
-    TABLE_COLUMNS = (
-        ("select", "", 42, "center"),
-        ("folder", "Folder", 560, "w"),
-        ("status", "Status", 380, "w"),
-        ("images", "Images", 92, "center"),
-    )
-    COLUMN_MIN_WIDTHS = {
-        "select": 42,
-        "folder": 320,
-        "status": 96,
-        "images": 64,
-    }
-    COLUMN_MAX_WIDTHS = {
-        "images": 92,
-    }
     def __init__(self, step_frame, parent, root_dir):
         super().__init__(parent)
         self.step_frame = step_frame
         self.root_dir = os.path.abspath(root_dir)
         self.rows = []
+        self.table = None
 
         self._build_ui()
         self._start_scan()
@@ -257,23 +459,12 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         ttk.Label(
             wrapper,
             text=(
-                "AIDaS will search the selected folder and subfolders for Light.img and Dark.img."
+                "AIDaS will search the selected folder and subfolders for Light.img and Dark.img. "
                 "Folders with existing MARKED segmentation are shown as already segmented and skipped."
             ),
             wraplength=760,
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
-
-        self.table = BatchTable(
-            wrapper,
-            columns=self.TABLE_COLUMNS,
-            min_widths=self.COLUMN_MIN_WIDTHS,
-            max_widths=self.COLUMN_MAX_WIDTHS,
-            select_column="select",
-            stretch_column="folder",
-            empty_message="No folders with Light.img or Dark.img were found.",
-        )
-        self.table.pack(fill="both", expand=True)
 
         top = ttk.Frame(wrapper)
         top.pack(fill="x", pady=(0, 8))
@@ -284,9 +475,21 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             expand=True,
         )
 
+        self.table_host = ttk.Frame(wrapper)
+        self.table_host.pack(fill="both", expand=True)
+        self.scan_label = ttk.Label(
+            self.table_host,
+            text="Scanning folders...",
+            anchor="center",
+            justify="center",
+        )
+        self.scan_label.pack(fill="both", expand=True)
+
         run_box = ttk.Frame(wrapper)
         run_box.pack(fill="x", pady=(10, 0))
-        ttk.Button(run_box, text="Next >", command=self._run_selected).pack(side="right")
+        self.next_button = ttk.Button(run_box, text="Next >", command=self._run_selected)
+        self.next_button.pack(side="right")
+        self.next_button.state(["disabled"])
         ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="left")
 
     def _start_scan(self):
@@ -302,11 +505,31 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.after(0, lambda: self._scan_done(rows, scanned, skipped))
 
     def _scan_failed(self, exc):
+        if not self.winfo_exists():
+            return
         self.summary_var.set(f"Scan failed: {exc}")
         self.step_frame.status_var.set("Batch segmentation scan failed.")
+        try:
+            self.next_button.state(["disabled"])
+        except tk.TclError:
+            pass
         messagebox.showerror("Batch Step 2", f"Could not scan folders.\n{exc}", parent=self)
 
+    def _show_results_table(self, rows):
+        for child in self.table_host.winfo_children():
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+
+        table = Step2BatchSegmentationTable(self.table_host)
+        table.set_rows(rows)
+        table.pack(fill="both", expand=True)
+        self.table = table
+
     def _scan_done(self, rows, scanned, skipped):
+        if not self.winfo_exists():
+            return
         self.rows = rows
         for row in rows:
             try:
@@ -320,7 +543,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
                 "status": row.get("status", ""),
                 "images": str(len(row.get("image_paths") or [])),
             }
-        self.table.set_rows(rows)
+        self._show_results_table(rows)
 
         ready = sum(1 for row in rows if not row["locked"])
         already_segmented = sum(1 for row in rows if row["locked"])
@@ -330,8 +553,17 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img or Dark.img."
         )
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
+        try:
+            if ready:
+                self.next_button.state(["!disabled"])
+            else:
+                self.next_button.state(["disabled"])
+        except tk.TclError:
+            pass
 
     def _run_selected(self):
+        if self.table is None:
+            return
         rows = self.table.selected_rows()
         if not rows:
             messagebox.showwarning("Batch Step 2", "Select at least one ready folder.", parent=self)
@@ -1307,17 +1539,23 @@ class Step2Frame(SidebarStepFrame):
         completed = self._completed_boundary_names()
         return self._get_listbox_selection(getattr(self, "boundary_completed_listbox", None), completed)
 
+    def _has_clearable_boundary_markers(self):
+        has_saved_boundary = any(name != FOVEA_BOUNDARY_NAME for name in self.boundary_traces)
+        has_active_boundary = bool(self.image_canvas.get_active_line())
+        return has_saved_boundary or has_active_boundary
+
     def _update_boundary_action_buttons(self):
         active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
         is_completed = active_name in self._completed_boundary_names()
         is_incomplete = active_name in self._incomplete_boundary_names()
+        has_clearable_markers = self._has_clearable_boundary_markers()
 
         if getattr(self, "finish_boundary_btn", None) is not None:
             self.finish_boundary_btn.configure(state="normal" if is_incomplete else "disabled")
         if getattr(self, "revert_boundary_btn", None) is not None:
             self.revert_boundary_btn.configure(state="normal" if is_completed else "disabled")
         if getattr(self, "clear_all_traces_btn", None) is not None:
-            self.clear_all_traces_btn.configure(state="normal" if active_name in BOUNDARY_NAMES else "disabled")
+            self.clear_all_traces_btn.configure(state="normal" if has_clearable_markers else "disabled")
 
         if getattr(self, "saved_button", None) is not None:
             if self._all_required_boundaries_complete():
@@ -1389,6 +1627,7 @@ class Step2Frame(SidebarStepFrame):
         """
         self.image_canvas.clear_active_line()
         self._update_active_trace_summary()
+        self._update_boundary_action_buttons()
         self.status_var.set("Current unfinished trace cleared.")
 
     def _finish_boundary(self):
@@ -1532,6 +1771,7 @@ class Step2Frame(SidebarStepFrame):
         self._refresh_boundary_lists()
         self._refresh_trace_list()
         self.active_trace_var.set("No active boundary")
+        self._update_boundary_action_buttons()
         self.status_var.set("All boundary traces cleared. Foveal center line kept.")
 
     def _rebuild_saved_overlays(self):
@@ -1877,6 +2117,7 @@ class Step2Frame(SidebarStepFrame):
             return
         if not points:
             self._update_active_trace_summary()
+            self._update_boundary_action_buttons()
             return
 
         pixels = _polyline_pixels(points)
@@ -1884,6 +2125,7 @@ class Step2Frame(SidebarStepFrame):
         self.active_trace_var.set(
             f"Active: {name} | {len(points)} vertices | {len(pixels)} pixel(s) on line"
         )
+        self._update_boundary_action_buttons()
 
     def _on_mouse_moved(self, ix, iy, val):
         if self.image_data is None:

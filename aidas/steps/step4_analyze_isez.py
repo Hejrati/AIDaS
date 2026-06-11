@@ -18,7 +18,6 @@ from PIL import Image
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
 
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.ui_utils import SidebarStepFrame, directory_row
@@ -473,7 +472,6 @@ class Step4Frame(SidebarStepFrame):
         self.profile_clicks: list[float] = []
         self.figure = None
         self.canvas = None
-        self.ax_image = None
         self.ax_profile = None
         self.ax_isez = None
         self._input_dir_user_selected = False
@@ -742,7 +740,6 @@ class Step4Frame(SidebarStepFrame):
         roi = self.rois[self.current_roi_idx]
         try:
             profile = intensity_profile(self.image, roi)
-            bounds = roi_bounds_for_image(roi, self.image.shape)
         except Exception as exc:
             self.status_var.set(str(exc))
             return
@@ -751,44 +748,17 @@ class Step4Frame(SidebarStepFrame):
             self.canvas.get_tk_widget().destroy()
 
         self.figure = Figure(figsize=(11, 7), dpi=100)
-        grid = self.figure.add_gridspec(2, 2, height_ratios=[1.15, 1.0])
-        self.ax_image = self.figure.add_subplot(grid[0, :])
+        grid = self.figure.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
+        self.ax_isez = self.figure.add_subplot(grid[0, 0])
         self.ax_profile = self.figure.add_subplot(grid[1, 0])
-        self.ax_isez = self.figure.add_subplot(grid[1, 1])
-
-        display = to_uint8_display(self.image)
-        left, right, low, high = bounds
-        x_pad = max(30, (right - left) * 2)
-        y_pad = 40
-        x0 = max(0, left - x_pad)
-        x1 = min(display.shape[1], right + x_pad)
-        y0 = max(0, low - y_pad)
-        y1 = min(display.shape[0], high + y_pad)
-        crop = display[y0:y1, x0:x1]
-
-        self.ax_image.imshow(crop, cmap="gray", aspect="auto", extent=(x0 + 1, x1, y1, y0 + 1))
-        rect = Rectangle(
-            (left + 1, low + 1),
-            max(1, right - left),
-            max(1, high - low),
-            fill=False,
-            edgecolor="yellow",
-            linewidth=1.5,
-            linestyle="--",
-        )
-        self.ax_image.add_patch(rect)
-        self.ax_image.set_title(f"ROI {roi.suffix}: x={roi.left}:{roi.right}, y={roi.low}:{roi.high}")
-        self.ax_image.set_xlabel("image x")
-        self.ax_image.set_ylabel("image y")
 
         xs = np.arange(1, profile.size + 1, dtype=np.float64)
         ymin = float(np.nanmin(profile))
         self.ax_profile.plot(xs, profile, color="black", linewidth=1.2)
         self.ax_profile.set_xlim(0, 140)
-        self.ax_profile.set_ylim(ymin, ymin + 80)
-        self.ax_profile.set_title("Click start, then end")
+        self.ax_profile.set_ylim(ymin, ymin + 20)
+        self.ax_profile.set_title(f"ROI {roi.suffix}: click start, then end")
         self.ax_profile.set_xlabel("profile row")
-        self.ax_profile.set_ylabel("mean intensity / 3")
         for idx, click in enumerate(self.profile_clicks[:2]):
             color = "#1f77b4" if idx == 0 else "#d62728"
             self.ax_profile.axvline(click, color=color, linewidth=1.2)
