@@ -15,7 +15,13 @@ import numpy as np
 
 from aidas.image_canvas import ImageCanvas
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
-from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame
+from aidas.utils.ui_utils import (
+    HoverToolTip,
+    NativeNumericSpinbox,
+    SidebarStepFrame,
+    directory_row,
+    icon_button,
+)
 
 SDB_PREF_KEY = "sdb_dir"
 SDB_DEFAULT_DIR = os.path.abspath(os.path.expanduser("~/Desktop"))
@@ -74,18 +80,19 @@ class Step1Frame(SidebarStepFrame):
         right = self.content
 
         # Right — image canvas + status
-        # Image info header at top
-        info_frame = ttk.Frame(right, relief="solid", borderwidth=1)
-        info_frame.pack(fill="x", padx=2, pady=2)
+        # UX Improvement: Removed the hard "solid" border. Added generous padding to let it breathe.
+        info_frame = ttk.Frame(right)
+        info_frame.pack(fill="x", padx=12, pady=(12, 6))
         self.image_info_var = tk.StringVar(value="No image loaded")
-        info_label = ttk.Label(info_frame, textvariable=self.image_info_var,
-                              font=("", 10, "bold"), padding=8, anchor="w")
+        
+        # UX Improvement: Muted the font weight slightly, relying on size and space for hierarchy
+        info_label = ttk.Label(info_frame, textvariable=self.image_info_var, font=("", 11), padding=0, anchor="w")
         info_label.pack(fill="x")
 
         self.image_canvas = ImageCanvas(right,
                                         on_roi_change=self._on_roi_changed,
                                         on_mouse_move=self._on_mouse_moved)
-        self.image_canvas.pack(fill="both", expand=True)
+        self.image_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
 
         self.status_var = tk.StringVar(
             value="Ready — open an SDB raw OCT file to begin (left-drag ROI, right-drag pan)"
@@ -102,59 +109,31 @@ class Step1Frame(SidebarStepFrame):
         """Create and lay out the full left-side control panel."""
         numeric_vcmd = (self.register(self._validate_digits_only), "%P")
 
-
         # ── SDB Image Parameters ──
-        self.sdb_params_section = self.add_sidebar_section(
-            "SDB Image Parameters",
-            padding=1,
-            pady=5,
-        )
+        # UX Improvement: Increased padding for better section separation
+        self.sdb_params_section = self.add_sidebar_section("SDB Image Parameters", pady=(10, 5))
         self.sdb_params_frame = self.sdb_params_section.body
+        self.sdb_params_frame.grid_columnconfigure(2, weight=1)
 
         self.width_var = tk.StringVar(value=str(DEFAULT_RAW_WIDTH))
         self.height_var = tk.StringVar(value=str(DEFAULT_RAW_HEIGHT))
         self.offset_var = tk.StringVar(value=str(DEFAULT_RAW_OFFSET))
 
-        self.width_entry, self.width_minus_btn, self.width_plus_btn, self.width_reset_btn = self._param_button_row(
+        # Update these assignments in _build_controls
+        self.width_stepper, self.width_reset_btn = self._param_stepper_row(
             self.sdb_params_frame, 0, "Width (px):", self.width_var, DEFAULT_RAW_WIDTH,
             step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
         )
-        self.height_entry, self.height_minus_btn, self.height_plus_btn, self.height_reset_btn = self._param_button_row(
+        
+        self.height_stepper, self.height_reset_btn = self._param_stepper_row(
             self.sdb_params_frame, 1, "Height (px):", self.height_var, DEFAULT_RAW_HEIGHT,
             step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
         )
-        self.offset_entry, self.offset_minus_btn, self.offset_plus_btn, self.offset_reset_btn = self._param_button_row(
+        
+        self.offset_stepper, self.offset_reset_btn = self._param_stepper_row(
             self.sdb_params_frame, 2, "Offset (bytes):", self.offset_var, DEFAULT_RAW_OFFSET,
             step=2, minimum=0, maximum=10_000_000, validatecommand=numeric_vcmd
         )
-
-        width_entry_hint = (
-            "Width value: if smaller than source width, image is cropped; "
-            "if larger, image is padded with zeros."
-        )
-        width_minus_hint = "− Width: decrease by 1 px. May crop image if width becomes smaller than source."
-        width_plus_hint = "+ Width: increase by 1 px. Adds zero-padding if width becomes larger than source."
-        width_reset_hint = f"↺ Width: reset to default width ({DEFAULT_RAW_WIDTH} px)."
-        self._width_tooltips = [
-            HoverToolTip(self.width_entry, width_entry_hint),
-            HoverToolTip(self.width_minus_btn, width_minus_hint),
-            HoverToolTip(self.width_plus_btn, width_plus_hint),
-            HoverToolTip(self.width_reset_btn, width_reset_hint),
-        ]
-
-        height_entry_hint = (
-            "Height value: changes the number of image rows used for import; "
-            "too small truncates rows, too large adds zero-filled rows."
-        )
-        height_minus_hint = "− Height: decrease by 1 px. May truncate bottom rows if below source height."
-        height_plus_hint = "+ Height: increase by 1 px. May add zero-filled rows if above source height."
-        height_reset_hint = f"↺ Height: reset to default height ({DEFAULT_RAW_HEIGHT} px)."
-        self._height_tooltips = [
-            HoverToolTip(self.height_entry, height_entry_hint),
-            HoverToolTip(self.height_minus_btn, height_minus_hint),
-            HoverToolTip(self.height_plus_btn, height_plus_hint),
-            HoverToolTip(self.height_reset_btn, height_reset_hint),
-        ]
 
         self.width_var.trace_add("write", lambda *_: self._on_width_changed())
         self.height_var.trace_add("write", lambda *_: self._on_import_param_changed())
@@ -167,43 +146,42 @@ class Step1Frame(SidebarStepFrame):
             text="Little-endian",
             variable=self.endian_var,
         )
-        self.endian_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", pady=1)
+        self.endian_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self._endian_tooltip = HoverToolTip(self.endian_checkbox, "Can affect visualization for some offsets")
 
         # ── SDB Files ──
-        sdb_section = self.add_sidebar_section("SDB Files", padding=3, pady=2)
+        sdb_section = self.add_sidebar_section("SDB Files", pady=(5, 5))
         sdb = sdb_section.body
-
-        ttk.Label(sdb, text="Input dir:").pack(anchor="w")
-        dir_frame = ttk.Frame(sdb)
-        dir_frame.pack(fill="x")
+        ttk.Label(sdb, text="Input dir:").pack(anchor="w", pady=(0, 2))
         self.sdb_dir_var = tk.StringVar(value=self._initial_sdb_dir())
-        ttk.Entry(dir_frame, textvariable=self.sdb_dir_var
-                  ).pack(side="left", fill="x", expand=True)
-        ttk.Button(
-            dir_frame,
-            text="⌂",
-            width=2,
-            command=self._reset_sdb_dir_to_default,
-        ).pack(side="right", padx=(2, 0))
-        ttk.Button(dir_frame, text="↻", width=3,
-                   command=self.refresh_sdb_list).pack(side="right", padx=(2, 0))
-        ttk.Button(dir_frame, text="…", width=3,
-                   command=self._browse_sdb_dir).pack(side="right")
+        
+        dir_frame, _dir_entry, dir_buttons = directory_row(
+            sdb,
+            self,
+            self.sdb_dir_var,
+            self._browse_sdb_dir,
+            home_command=self._reset_sdb_dir_to_default,
+            refresh_command=self.refresh_sdb_list,
+            browse_tooltip="Browse SDB folder",
+            home_tooltip="Reset to Desktop",
+            refresh_tooltip="Refresh SDB files",
+        )
+        dir_frame.pack(fill="x", pady=(0, 8))
+        self.search_btn = dir_buttons["browse"]
+        self.home_btn = dir_buttons["home"]
+        self.refresh_btn = dir_buttons["refresh"]
 
         filt_frame = ttk.Frame(sdb)
-        filt_frame.pack(fill="x", pady=(2, 0))
+        filt_frame.pack(fill="x", pady=(0, 4))
         ttk.Label(filt_frame, text="Search:").pack(side="left")
         self.sdb_filter_var = tk.StringVar(value="")
         self.sdb_filter_var.trace_add("write", lambda *_: self.refresh_sdb_list())
-        ttk.Entry(filt_frame, textvariable=self.sdb_filter_var).pack(
-            side="left", fill="x", expand=True, padx=(4, 0))
+        ttk.Entry(filt_frame, textvariable=self.sdb_filter_var).pack(side="left", fill="x", expand=True, padx=(6, 0))
 
         lb_frame = ttk.Frame(sdb)
-        lb_frame.pack(fill="both", expand=True, pady=(2, 0))
-        self.sdb_listbox = tk.Listbox(lb_frame, height=8, selectmode="browse")
-        lb_scroll = ttk.Scrollbar(lb_frame, orient="vertical",
-                                  command=self.sdb_listbox.yview)
+        lb_frame.pack(fill="both", expand=True, pady=(4, 6))
+        self.sdb_listbox = tk.Listbox(lb_frame, height=8, selectmode="browse", relief="flat", highlightthickness=1)
+        lb_scroll = ttk.Scrollbar(lb_frame, orient="vertical", command=self.sdb_listbox.yview)
         self.sdb_listbox.configure(yscrollcommand=lb_scroll.set)
         self.sdb_listbox.pack(side="left", fill="both", expand=True)
         lb_scroll.pack(side="right", fill="y")
@@ -211,17 +189,15 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_listbox.bind("<<ListboxSelect>>", self._on_sdb_list_select)
 
         nav_frame = ttk.Frame(sdb)
-        nav_frame.pack(fill="x", pady=(4, 0))
-        ttk.Button(nav_frame, text="◀ Prev",
-                   command=self._prev_sdb).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(nav_frame, text="Next ▶",
-                   command=self._next_sdb).pack(side="right", expand=True, fill="x", padx=(2, 0))
+        nav_frame.pack(fill="x")
+        ttk.Button(nav_frame, text="◀ Prev", command=self._prev_sdb).pack(side="left", expand=True, fill="x", padx=(0, 4))
+        ttk.Button(nav_frame, text="Next ▶", command=self._next_sdb).pack(side="right", expand=True, fill="x", padx=(4, 0))
 
         self._sdb_files = []
         self.refresh_sdb_list()
 
         # ── ROI Selection ──
-        roi_section = self.add_sidebar_section("ROI Selection (crop and save)", padding=3, pady=2)
+        roi_section = self.add_sidebar_section("ROI Selection (crop and save)", pady=(5, 10))
         roi = roi_section.body
         for col in range(4):
             roi.grid_columnconfigure(col, weight=1)
@@ -239,101 +215,98 @@ class Step1Frame(SidebarStepFrame):
         self.target_w_var.trace_add("write", self._on_target_size_entry_changed)
         self.target_h_var.trace_add("write", self._on_target_size_entry_changed)
 
-        ttk.Label(roi, text="Output dir:").grid(
-            row=0, column=0, columnspan=4, sticky="w", pady=(0, 0)
-        )
+        ttk.Label(roi, text="Output dir:").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
         save_dir_row = ttk.Frame(roi)
-        save_dir_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(2, 6))
+        save_dir_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
         self.outdir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
-        ttk.Entry(save_dir_row, textvariable=self.outdir_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(
+        ttk.Entry(save_dir_row, textvariable=self.outdir_var).pack(side="left", fill="x", expand=True, padx=(0, 4))
+        self.out_search_btn = icon_button(
             save_dir_row,
-            text="⌂",
-            width=2,
-            command=self._reset_outdir_to_default,
-        ).pack(side="right", padx=(2, 0))
-        ttk.Button(save_dir_row, text="↻", width=3,
-                   command=self._refresh_outdir_from_source).pack(side="right", padx=(2, 0))
-        ttk.Button(save_dir_row, text="…", width=3,
-                   command=self._browse_outdir).pack(side="right")
+            self,
+            "glyphs-poly--folder.png",
+            self._browse_outdir,
+            tooltip="Browse output folder",
+        )
+        self.out_search_btn.pack(side="right")
 
+       
         self.roi_entries = []
-        for i, (lbl, var, color) in enumerate([
-            ("X (Left):", self.roi_x_var, "#DA0404"),
-            ("Y (Top):", self.roi_y_var, "#DA0404"),
-            ("Source W:", self.roi_w_var, None),
-            ("Source H:", self.roi_h_var, None),
+        # UX Improvement: Removed the bright #DA0404 red. Using default text color for a cleaner look.
+        for i, (lbl, var) in enumerate([
+            ("X (Left):", self.roi_x_var),
+            ("Y (Top):", self.roi_y_var),
+            ("Source W:", self.roi_w_var),
+            ("Source H:", self.roi_h_var),
         ]):
             r, c = divmod(i, 2)
-            if color:
-                tk.Label(roi, text=lbl, fg=color).grid(row=r + 2, column=c * 2, sticky="w", pady=1)
-            else:
-                ttk.Label(roi, text=lbl).grid(row=r + 2, column=c * 2, sticky="w", pady=1)
-            entry = ttk.Entry(
+            ttk.Label(roi, text=lbl).grid(row=r + 2, column=c * 2, sticky="w", pady=4)
+            stepper = self._numeric_stepper(
                 roi,
-                textvariable=var,
-                width=7,
-                validate="key",
+                var,
+                width=5,
+                step=1,
+                minimum=0,
+                maximum=10000,
                 validatecommand=numeric_vcmd,
             )
-            entry.grid(
-                row=r + 2, column=c * 2 + 1, sticky="e", padx=(0, 8), pady=1)
-            self.roi_entries.append(entry)
+            stepper.grid(row=r + 2, column=c * 2 + 1, sticky="e", padx=(0, 8), pady=4)
+            self.roi_entries.append(stepper)
 
-        ttk.Label(roi, text="Target W:").grid(row=4, column=0, sticky="w", pady=(4, 1))
-        self.target_w_entry = ttk.Entry(
+        ttk.Label(roi, text="Target W:").grid(row=4, column=0, sticky="w", pady=(8, 4))
+        self.target_w_entry = self._numeric_stepper(
             roi,
-            textvariable=self.target_w_var,
-            width=7,
-            validate="key",
+            self.target_w_var,
+            width=5,
+            step=CROP_SCALE_X,
+            minimum=1,
+            maximum=30000,
             validatecommand=numeric_vcmd,
         )
-        self.target_w_entry.grid(row=4, column=1, sticky="e", padx=(0, 8), pady=(4, 1))
-        ttk.Label(roi, text="Target H:").grid(row=4, column=2, sticky="w", pady=(4, 1))
-        self.target_h_entry = ttk.Entry(
+        self.target_w_entry.grid(row=4, column=1, sticky="e", padx=(0, 8), pady=(8, 4))
+        
+        ttk.Label(roi, text="Target H:").grid(row=4, column=2, sticky="w", pady=(8, 4))
+        self.target_h_entry = self._numeric_stepper(
             roi,
-            textvariable=self.target_h_var,
-            width=7,
-            validate="key",
+            self.target_h_var,
+            width=5,
+            step=1,
+            minimum=1,
+            maximum=30000,
             validatecommand=numeric_vcmd,
         )
-        self.target_h_entry.grid(row=4, column=3, sticky="e", padx=(0, 8), pady=(4, 1))
+        self.target_h_entry.grid(row=4, column=3, sticky="e", padx=(0, 8), pady=(8, 4))
         self.target_size_entries = [self.target_w_entry, self.target_h_entry]
 
         ttk.Label(
             roi,
             text=f"Scale: target width is source width x{CROP_SCALE_X}; height unchanged.",
             foreground="gray",
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(2, 2))
+            wraplength=280
+        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 8))
 
         roi_presets = ttk.Frame(roi)
-        roi_presets.grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 2))
+        roi_presets.grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 10))
         self.default_roi_btn = ttk.Button(roi_presets, text="Default Region", command=self._set_default_roi)
-        self.default_roi_btn.pack(side="left", padx=(0, 4))
+        self.default_roi_btn.pack(side="left", padx=(0, 6))
         self.entire_roi_btn = ttk.Button(roi_presets, text="Entire Image", command=self._select_all_roi)
-        self.entire_roi_btn.pack(side="left", padx=(4, 0))
-        #Todo: add AI based auto-ROI detection here
-        ttk.Button(roi_presets, text="Auto Select", command=self._set_default_roi, state="disabled").pack(side="left", padx=(4, 0))
+        self.entire_roi_btn.pack(side="left", padx=(0, 6))
+        ttk.Button(roi_presets, text="Auto Select", command=self._set_default_roi, state="disabled").pack(side="left")
 
         roi_actions = ttk.Frame(roi)
         roi_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
-        self.crop_btn = ttk.Button(roi_actions, text="▶  Crop", command=self._crop_and_scale)
-        self.crop_btn.pack(fill="x", pady=(0, 2))
-        self.undo_crop_btn = ttk.Button(
-            roi_actions,
-            text="↺ Undo Crop",
-            command=self._reset,
-            state="disabled",
-        )
-        self.undo_crop_btn.pack(fill="x", pady=(0, 2))
-        self.save_all_btn = ttk.Button(
-            roi,
-            text="Save All (TIFF, IMG, HDR)",
-            command=self._save_all_formats,
-            state="disabled",
-        )
-        self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(2, 2))
+        # UX Improvement: Applied "Accent.TButton" style if a modern theme is loaded.
+        self.crop_btn_icon = tk.PhotoImage(file="assets\\material-symbols-light--crop.png")
+        self.crop_btn = ttk.Button(roi_actions, text="Crop & Scale", command=self._crop_and_scale, image=self.crop_btn_icon, compound="left", style="Accent.TButton")
+        self.crop_btn.pack(fill="x", pady=(0, 6))
+        
+        self.undo_crop_btn_icon = tk.PhotoImage(file="assets\\grommet-icons--revert.png")
+        self.undo_crop_btn = ttk.Button(roi_actions, text="Undo", command=self._reset, state="disabled", image=self.undo_crop_btn_icon, compound="left")
+        self.undo_crop_btn.pack(fill="x", pady=(0, 10))
+        
+        self.save_all_btn_icon = tk.PhotoImage(file="assets\\glyphs-poly--save.png")
+        self.save_all_btn = ttk.Button(roi, text="Save All (TIFF, IMG, HDR)", command=self._save_all_formats, state="disabled", image=self.save_all_btn_icon, compound="left")
+        self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 2))
 
         # # ── View ──
         # view_section = self.add_sidebar_section("View", padding=3, pady=(2, 6))
@@ -347,6 +320,53 @@ class Step1Frame(SidebarStepFrame):
         # ttk.Button(zf, text="+", width=3, command=self._zoom_in).pack(side="right")
         # ttk.Button(view, text="Fit to Window",
         #            command=self._fit_zoom).pack(fill="x", pady=2)
+
+    @staticmethod
+    def _numeric_stepper(parent, var, *, width=8, step=1, minimum=0, maximum=10_000_000, validatecommand=None):
+        return NativeNumericSpinbox(
+            parent,
+            var,
+            width=width,
+            step=step,
+            minimum=minimum,
+            maximum=maximum,
+            validatecommand=validatecommand,
+        )
+
+    def _param_stepper_row(self, parent, row, label, var, default_value, *, step=1, minimum=0, maximum=10_000_000, validatecommand=None):
+        """Creates a modern, unified stepper with embedded +/- buttons and a reset icon."""
+        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=4)
+        
+        # --- The Main Wrapper Frame ---
+        row_frame = ttk.Frame(parent)
+        row_frame.grid(row=row, column=1, sticky="e", pady=4)
+
+        stepper = NativeNumericSpinbox(
+            row_frame,
+            var,
+            width=6,
+            step=step,
+            minimum=minimum,
+            maximum=maximum,
+            validatecommand=validatecommand,
+        )
+        stepper.pack(side="left", padx=0, anchor="center")
+
+        btn_icon = tk.PhotoImage(file="assets\\material-symbols-light--refresh-rounded.png")
+        reset_btn = tk.Button(
+            row_frame,
+            image=btn_icon,
+            bd=0,
+            relief="flat",
+            highlightthickness=0,
+            cursor="hand2",
+            command=lambda: self._reset_numeric_var(var, default_value),
+        )
+        reset_btn.image = btn_icon
+        reset_btn.pack(side="left", padx=(8, 0), anchor="center")
+
+        return stepper, reset_btn
+
 
     def _save_all_formats(self):
         """Save the current cropped image as TIFF, HDR, and IMG in one click."""
@@ -466,56 +486,6 @@ class Step1Frame(SidebarStepFrame):
         target_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
         if target_dir:
             self.outdir_var.set(target_dir)
-
-    # helper for param rows
-    def _param_button_row(
-        self,
-        parent,
-        row,
-        label,
-        var,
-        default_value,
-        *,
-        step=1,
-        minimum=0,
-        maximum=10_000_000,
-        validatecommand=None,
-    ):
-        """Create one label+entry row with external minus/plus buttons.
-
-        Args:
-            parent: Container where the row is placed.
-            row: Grid row index.
-            label: Label text.
-            var: Tk variable bound to the entry.
-            default_value: Value restored by the reset button.
-            minimum: Minimum allowed value.
-            maximum: Maximum allowed value.
-
-        Returns:
-            tuple: (entry, minus_button, plus_button, reset_button)
-        """
-        ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=1)
-        row_frame = ttk.Frame(parent)
-        row_frame.grid(row=row, column=1, sticky="e", pady=1)
-
-        minus_btn = ttk.Button(row_frame, text="−", width=2, command=lambda: self._step_numeric_var(var, -step, minimum, maximum))
-        minus_btn.pack(side="left")
-
-        entry_options = {"textvariable": var, "width": 10}
-        if validatecommand is not None:
-            entry_options["validate"] = "key"
-            entry_options["validatecommand"] = validatecommand
-        entry = ttk.Entry(row_frame, **entry_options)
-        entry.pack(side="left", padx=(4, 4))
-
-        plus_btn = ttk.Button(row_frame, text="+", width=2, command=lambda: self._step_numeric_var(var, step, minimum, maximum))
-        plus_btn.pack(side="left")
-
-        reset_btn = ttk.Button(row_frame, text="↺", width=2, command=lambda: self._reset_numeric_var(var, default_value))
-        reset_btn.pack(side="left", padx=(4, 0))
-
-        return entry, minus_btn, plus_btn, reset_btn
 
     @staticmethod
     def _step_numeric_var(var, delta, minimum, maximum):
@@ -1263,4 +1233,5 @@ class Step1Frame(SidebarStepFrame):
     def _update_zoom_label(self):
         """Refresh the visible zoom percentage label."""
         z = self.image_canvas.get_zoom()
-        self.zoom_lbl.configure(text=f"{z * 100:.0f} %")
+        if hasattr(self, "zoom_lbl"):
+            self.zoom_lbl.configure(text=f"{z * 100:.0f} %")

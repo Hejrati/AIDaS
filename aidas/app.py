@@ -9,7 +9,6 @@ Currently implements Step 1; remaining steps are placeholders.
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import sys
 import os
 
 from aidas import __version__
@@ -17,6 +16,7 @@ from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2Frame
 from aidas.steps.step3_flatten import Step3Frame
 from aidas.steps.step4_analyze_isez import Step4Frame
+from aidas.utils.ui_utils import build_app_menu, resource_path
 
 from aidas.config import Config
 
@@ -53,28 +53,7 @@ class AIDaSApp(tk.Tk):
             self.preferences.set("theme", available_themes[0])
 
         # ── Menu bar ──
-        menubar = tk.Menu(self)
-        file_menu = tk.Menu(menubar, tearoff=0)
-        file_menu.add_command(label="Browse SDB Directory",
-                      command=self._menu_browse_sdb)
-        file_menu.add_command(label="Exit", command=self.destroy,
-                      accelerator="Alt+F4")
-        menubar.add_cascade(label="File", menu=file_menu)
-
-        # Theme submenu under Help
-        theme_menu = tk.Menu(menubar, tearoff=0)
-        for theme in self.style.theme_names():
-            theme_menu.add_command(
-                label=theme.capitalize(),
-                command=lambda t=theme: self._set_theme(t)
-            )
-
-        help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_cascade(label="Theme", menu=theme_menu)
-        help_menu.add_command(label="About", command=self._show_about)
-
-        menubar.add_cascade(label="Help", menu=help_menu)
-        self.config(menu=menubar)
+        self._build_menu()
 
         self.bind_all("<Alt-F4>", lambda _: self.destroy())
 
@@ -115,8 +94,17 @@ class AIDaSApp(tk.Tk):
     @staticmethod
     def _resource_path(relative_path):
         """Resolve resource path for source runs and PyInstaller bundles."""
-        base_dir = getattr(sys, "_MEIPASS", os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-        return os.path.join(base_dir, relative_path)
+        return resource_path(relative_path)
+
+    def _build_menu(self):
+        self.menubar = build_app_menu(
+            self,
+            themes=self.style.theme_names(),
+            current_theme=self.style.theme_use(),
+            set_theme_command=self._set_theme,
+            browse_sdb_command=self._menu_browse_sdb,
+            about_command=self._show_about,
+        )
 
     def _set_app_icon(self):
         """Set window/taskbar icon if available; never fail startup if missing."""
@@ -168,6 +156,7 @@ class AIDaSApp(tk.Tk):
         """Change the application theme and save preference."""
         self.style.theme_use(theme_name)
         self.preferences.set("theme", theme_name)
+        self._build_menu()
         self.status.config(text=f"AIDaS v{__version__} — theme changed to '{theme_name}'")
 
     def _on_step1_processed_image(self, image, source_path):

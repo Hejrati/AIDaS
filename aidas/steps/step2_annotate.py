@@ -41,7 +41,7 @@ from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.batch_ui import BatchTable
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
-from aidas.utils.ui_utils import SidebarStepFrame, apply_app_icon_to
+from aidas.utils.ui_utils import NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to
 
 
 BOUNDARY_PRESETS = [
@@ -467,7 +467,7 @@ class Step2Frame(SidebarStepFrame):
         """
         self.aidas_model_path = self.ai_for_aidas_default_model
 
-        self.segmentation_section = self.add_sidebar_section("Segmentation", padding=3, pady=2)
+        self.segmentation_section = self.add_sidebar_section("Segmentation", pady=2)
         self.segmentation_frame = self.segmentation_section.body
         segmentation = self.segmentation_frame
 
@@ -556,14 +556,15 @@ class Step2Frame(SidebarStepFrame):
         ttk.Label(coord_row, text="Center X:").pack(side="left")
         self.fovea_x_entry_var = tk.StringVar(value="")
         self.fovea_x_entry_var.trace_add("write", self._on_fovea_x_entry_changed)
-        self.fovea_minus_btn = ttk.Button(coord_row, text="-", width=2)
-        self.fovea_minus_btn.pack(side="left", padx=(0, 2))
-        self.fovea_x_entry = ttk.Entry(coord_row, textvariable=self.fovea_x_entry_var, width=6)
-        self.fovea_x_entry.pack(side="left", padx=(6, 4))
-        self.fovea_plus_btn = ttk.Button(coord_row, text="+", width=2)
-        self.fovea_plus_btn.pack(side="left", padx=(0, 4))
-        self._bind_fovea_nudge_button(self.fovea_minus_btn, -1)
-        self._bind_fovea_nudge_button(self.fovea_plus_btn, 1)
+        self.fovea_stepper = NativeNumericSpinbox(
+            coord_row,
+            self.fovea_x_entry_var,
+            width=6,
+            step=1,
+            minimum=0,
+        )
+        self.fovea_stepper.pack(side="left", padx=(8, 4))
+        self.fovea_x_entry = self.fovea_stepper.entry
 
         # Reset icon matches Step 1 numeric reset affordance.
         self.fovea_reset_btn = ttk.Button(coord_row, text="↺", width=2, command=self._center_vertical_line)
@@ -585,7 +586,7 @@ class Step2Frame(SidebarStepFrame):
         # )
         self.button_save_icon = tk.PhotoImage(file="assets\\glyphs-poly--save.png")
         self.saved_button = ttk.Button(saved_buttons, text="Save", command=self._save_current_marked_image_button, 
-                   image=self.button_save_icon, compound="right")
+                   image=self.button_save_icon, compound="left")
         self.saved_button.pack(
             side="left",
             anchor="center",
@@ -1730,9 +1731,7 @@ class Step2Frame(SidebarStepFrame):
         """Enable/disable fovea-specific controls based on mode and lock state."""
         state = "normal" if (enabled and not self._drawing_locked) else "disabled"
         for widget in (
-            self.fovea_minus_btn,
-            self.fovea_x_entry,
-            self.fovea_plus_btn,
+            self.fovea_stepper,
             self.fovea_reset_btn,
         ):
             widget.configure(state=state)

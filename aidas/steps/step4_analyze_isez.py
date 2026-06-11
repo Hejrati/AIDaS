@@ -21,7 +21,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
 from aidas.utils.io_utils import read_analyze, read_tiff
-from aidas.utils.ui_utils import SidebarStepFrame
+from aidas.utils.ui_utils import SidebarStepFrame, directory_row
 
 
 MATLAB_ROI_LOW = 300
@@ -501,31 +501,21 @@ class Step4Frame(SidebarStepFrame):
             status_var=self.status_var,
         )
 
-        source_section = self.add_sidebar_section("Input", padding=3, pady=(0, 5))
+        source_section = self.add_sidebar_section("Input", pady=(0, 5))
         source = source_section.body
         # Temporarily disable the file-open and Step 3 load buttons to prevent
         # loading files while the feature is disabled for maintenance/testing.
-        self.open_button = ttk.Button(
-            source,
-            text="Open OCT Image...",
-            command=self._open_image,
-            state="disabled",
-        )
-        self.open_button.pack(fill="x", pady=2)
 
-        self.load_step3_button = ttk.Button(
+        ttk.Label(source, text="Input dir:").pack(anchor="w", pady=(6, 0))
+        folder_row, _input_entry, input_buttons = directory_row(
             source,
-            text="Load Step 3 _flat_LIGHT",
-            command=self._load_step3_flat_light,
-            state="disabled",
+            self,
+            self.input_dir_var,
+            self._browse_input_folder,
+            browse_tooltip="Browse Step 3 output folder",
         )
-        self.load_step3_button.pack(fill="x", pady=2)
-
-        ttk.Label(source, text="Step 3 folder").pack(anchor="w", pady=(6, 0))
-        folder_row = ttk.Frame(source)
-        folder_row.pack(fill="x")
-        ttk.Entry(folder_row, textvariable=self.input_dir_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(folder_row, text="...", width=3, command=self._browse_input_folder).pack(side="right", padx=(2, 0))
+        folder_row.pack(fill="x", pady=(0, 8))
+        self.input_search_btn = input_buttons["browse"]
 
         ttk.Label(
             source,
@@ -542,15 +532,27 @@ class Step4Frame(SidebarStepFrame):
         self.slice_combo.pack(side="right")
         self.slice_combo.bind("<<ComboboxSelected>>", lambda _event: self._set_current_slice())
 
-        output_section = self.add_sidebar_section("Output", padding=3, pady=(0, 5))
-        output = output_section.body
-        out_row = ttk.Frame(output)
-        out_row.pack(fill="x")
-        ttk.Entry(out_row, textvariable=self.output_dir_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(out_row, text="...", width=3, command=self._browse_output_folder).pack(side="right", padx=(2, 0))
-        ttk.Button(output, text="Build Stacks", command=self._build_stack_outputs).pack(fill="x", pady=(6, 2))
+        # output_section = self.add_sidebar_section("Output", padding=3, pady=(0, 5))
+        # output = output_section.body
+        # ttk.Label(source, text="Output dir:").pack(anchor="w", pady=(6, 0))
+        # out_row = ttk.Frame(source)
+        # out_row.pack(fill="x")
+        # ttk.Entry(out_row, textvariable=self.output_dir_var).pack(side="left", fill="x", expand=True)
+        # ttk.Button(out_row, text="...", width=3, command=self._browse_output_folder).pack(side="right", padx=(2, 0))
 
-        roi_section = self.add_sidebar_section("ROIs", padding=3, fill="both", expand=True, pady=(0, 5))
+        ttk.Label(source, text="Output dir:").pack(anchor="w", pady=(6, 0))
+        save_dir_row, _output_entry, output_buttons = directory_row(
+            source,
+            self,
+            self.output_dir_var,
+            self._browse_output_folder,
+            browse_tooltip="Browse output folder",
+        )
+        save_dir_row.pack(fill="x", pady=(0, 10))
+        self.out_search_btn = output_buttons["browse"]
+
+
+        roi_section = self.add_sidebar_section("ROIs", fill="both", expand=True, pady=(0, 5))
         roi_box = roi_section.body
         list_frame = ttk.Frame(roi_box)
         list_frame.pack(fill="both", expand=True)
@@ -566,26 +568,30 @@ class Step4Frame(SidebarStepFrame):
         ttk.Button(nav, text="Prev", command=lambda: self._move_roi(-1)).pack(side="left", expand=True, fill="x", padx=(0, 2))
         ttk.Button(nav, text="Next", command=lambda: self._move_roi(1)).pack(side="right", expand=True, fill="x", padx=(2, 0))
 
-        start_row = ttk.Frame(roi_box)
-        start_row.pack(fill="x", pady=1)
-        ttk.Label(start_row, text="Start").pack(side="left")
-        ttk.Entry(start_row, textvariable=self.start_var, width=8).pack(side="right")
-        end_row = ttk.Frame(roi_box)
-        end_row.pack(fill="x", pady=1)
-        ttk.Label(end_row, text="End").pack(side="left")
-        ttk.Entry(end_row, textvariable=self.end_var, width=8).pack(side="right")
-        action_row = ttk.Frame(roi_box)
-        action_row.pack(fill="x", pady=(6, 0))
-        ttk.Button(action_row, text="Apply", command=self._apply_entry_clicks).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(action_row, text="Clear", command=self._clear_clicks).pack(side="right", expand=True, fill="x", padx=(2, 0))
-        ttk.Label(
-            roi_box,
-            textvariable=self.profile_status_var,
-            wraplength=self.SIDEBAR_TEXT_WRAP,
-            foreground="gray",
-            justify="left",
-        ).pack(fill="x", pady=(6, 0))
+        # Create a SINGLE frame for the horizontal controls
+        control_row = ttk.Frame(roi_box)
+        # Packs the row at the top (default) of the available space
+        control_row.pack(fill="x", pady=5) 
 
+        # 1. Start Label & Entry
+        ttk.Label(control_row, text="Start").pack(side="left", padx=(0, 2))
+        ttk.Entry(control_row, textvariable=self.start_var, width=8).pack(side="left", padx=(0, 10))
+
+        # 2. End Label & Entry
+        ttk.Label(control_row, text="End").pack(side="left", padx=(0, 2))
+        ttk.Entry(control_row, textvariable=self.end_var, width=8).pack(side="left", padx=(0, 10))
+
+        # 3. Apply Button
+        self.apply_icon = tk.PhotoImage(file="assets\\streamline-stickies-color--validation-1-duo.png")
+        self.apply_button = ttk.Button(control_row, image=self.apply_icon, command=self._apply_entry_clicks)
+        self.apply_button.pack(side="left", expand=False) 
+
+        # 4. Build Stacks Button
+        # Change the parent from 'control_row' to 'roi_box'
+        # Use side="bottom" to anchor it to the bottom of the roi_box frame
+        self.build_stacks_icon = tk.PhotoImage(file="assets\\tabler--stack-push.png")
+        self.build_stacks_button = ttk.Button(roi_box, image=self.build_stacks_icon, text="Build Stacks", command=self._build_stack_outputs)
+        self.build_stacks_button.pack(side="bottom", fill="x", pady=(6, 2))
         # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
         # stats = stats_section.body
         # ttk.Label(stats, textvariable=self.stats_var, wraplength=self.SIDEBAR_TEXT_WRAP, justify="left").pack(fill="x")
@@ -609,19 +615,6 @@ class Step4Frame(SidebarStepFrame):
                 return str(folder)
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
-    def _open_image(self) -> None:
-        path = filedialog.askopenfilename(
-            title="Select flattened OCT image for Step 4",
-            initialdir=self.input_dir_var.get() or None,
-            filetypes=[
-                ("Supported images", "*.tif *.tiff *.hdr *.img *.png *.jpg *.jpeg"),
-                ("TIFF", "*.tif *.tiff"),
-                ("Analyze 7.5", "*.hdr *.img"),
-                ("All files", "*.*"),
-            ],
-        )
-        if path:
-            self._load_path(path)
 
     def _browse_input_folder(self) -> None:
         folder = filedialog.askdirectory(
@@ -631,7 +624,18 @@ class Step4Frame(SidebarStepFrame):
         if folder:
             self.input_dir_var.set(folder)
             self._input_dir_user_selected = True
-
+            if folder:
+                self.input_dir_var.set(folder)
+                self._input_dir_user_selected = True
+                # 1. Construct the expected full file path
+                dark_hdr_path = os.path.join(folder, "_flat_DARK.hdr")
+                # 2. Check if that specific file actually exists on the computer
+                if os.path.exists(dark_hdr_path):
+                    self._load_path(dark_hdr_path)
+                else:
+                    # Optional: You can add an else statement here to print a warning
+                    # or show a tkinter messagebox if the file wasn't found.
+                    print(f"Warning: _flat_DARK.hdr not found in {folder}")
     def _browse_output_folder(self) -> None:
         folder = filedialog.askdirectory(
             title="Select folder for Step 4 ISez outputs",
@@ -640,25 +644,6 @@ class Step4Frame(SidebarStepFrame):
         if folder:
             self.output_dir_var.set(folder)
             self._output_dir_user_selected = True
-
-    def _load_step3_flat_light(self) -> None:
-        if not self._input_dir_user_selected:
-            self.input_dir_var.set(self._default_input_folder())
-        folder = Path(self.input_dir_var.get() or self._default_input_folder())
-        candidates = [
-            folder / "_flat_LIGHT.hdr",
-            folder / "_flat_LIGHT.img",
-            folder / "_flat_LIGHT.tif",
-            folder / "_flat_LIGHT.tiff",
-        ]
-        for candidate in candidates:
-            if candidate.is_file():
-                self._load_path(candidate)
-                return
-        messagebox.showerror(
-            "Load Step 3 Output",
-            f"Could not find _flat_LIGHT in:\n{folder}\n\nExpected _flat_LIGHT.hdr/.img or _flat_LIGHT.tif.",
-        )
 
     def _load_path(self, path: str | os.PathLike) -> None:
         try:

@@ -1119,7 +1119,7 @@ class Step3Frame(SidebarStepFrame):
             content_pack={"padx": 6, "pady": 6},
             status_var=self.status_var,
         )
-        process_section = self.add_sidebar_section("Process", padding=3, pady=(0, 5))
+        process_section = self.add_sidebar_section("Process", pady=(0, 5))
         process = process_section.body
 
         self.r_setup_button = ttk.Button(process, text="Setup R and Packages...", command=self._open_r_setup_wizard)
@@ -1141,7 +1141,7 @@ class Step3Frame(SidebarStepFrame):
             justify="left",
         ).pack(fill="both", expand=True)
 
-        view_results_section = self.add_sidebar_section("View Results", padding=3, pady=(0, 5))
+        view_results_section = self.add_sidebar_section("View Results", pady=(0, 5))
         view_results = view_results_section.body
 
         ttk.Button(view_results, text="Load R Results...", command=self._browse_r_results_folder).pack(fill="x", pady=2)
@@ -1161,7 +1161,7 @@ class Step3Frame(SidebarStepFrame):
         self.slice_combo.pack(fill="x", pady=2)
         self.slice_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
 
-        stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
+        stats_section = self.add_sidebar_section("Stats", pady=(0, 5))
         stats = stats_section.body
 
         ttk.Label(
