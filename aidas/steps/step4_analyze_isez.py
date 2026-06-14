@@ -20,7 +20,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from aidas.utils.io_utils import read_analyze, read_tiff
-from aidas.utils.ui_utils import SidebarStepFrame, directory_row
+from aidas.utils.ui_utils import SidebarStepFrame, directory_row, load_ui_icon
 
 
 MATLAB_ROI_LOW = 300
@@ -345,7 +345,7 @@ def save_profile_plot(
     ax.axvline(end_click, color="#d62728", linewidth=1.0)
     ax.set_xlim(0, 140)
     ax.set_ylim(ymin, ymin + 80)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.95)
     fig.savefig(output_path)
 
 
@@ -358,7 +358,7 @@ def save_isez_plot(result_data: dict[str, np.ndarray | float | int], center: flo
     ax.plot(result_data["baseline_x"], result_data["baseline_y"], color="black", linewidth=1.0)
     ax.set_xlim(center - 40, center + 40)
     ax.set_ylim(-20, 120)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.10, right=0.98, bottom=0.12, top=0.95)
     fig.savefig(output_path)
 
 
@@ -472,6 +472,7 @@ class Step4Frame(SidebarStepFrame):
         self.profile_clicks: list[float] = []
         self.figure = None
         self.canvas = None
+        self.empty_placeholder = None
         self.ax_profile = None
         self.ax_isez = None
         self._input_dir_user_selected = False
@@ -580,14 +581,14 @@ class Step4Frame(SidebarStepFrame):
         ttk.Entry(control_row, textvariable=self.end_var, width=8).pack(side="left", padx=(0, 10))
 
         # 3. Apply Button
-        self.apply_icon = tk.PhotoImage(file="assets\\streamline-stickies-color--validation-1-duo.png")
+        self.apply_icon = load_ui_icon(self, "streamline-stickies-color--validation-1-duo.png")
         self.apply_button = ttk.Button(control_row, image=self.apply_icon, command=self._apply_entry_clicks)
         self.apply_button.pack(side="left", expand=False) 
 
         # 4. Build Stacks Button
         # Change the parent from 'control_row' to 'roi_box'
         # Use side="bottom" to anchor it to the bottom of the roi_box frame
-        self.build_stacks_icon = tk.PhotoImage(file="assets\\tabler--stack-push.png")
+        self.build_stacks_icon = load_ui_icon(self, "tabler--stack-push.png")
         self.build_stacks_button = ttk.Button(roi_box, image=self.build_stacks_icon, text="Build Stacks", command=self._build_stack_outputs)
         self.build_stacks_button.pack(side="bottom", fill="x", pady=(6, 2))
         # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
@@ -722,15 +723,17 @@ class Step4Frame(SidebarStepFrame):
     def _render_empty_canvas(self) -> None:
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
+            self.canvas = None
+        if self.empty_placeholder is not None:
+            self.empty_placeholder.destroy()
 
-        self.figure = Figure(figsize=(10, 7), dpi=100)
-        ax = self.figure.add_subplot(111)
-        ax.text(0.5, 0.5, "Load a flattened OCT image", ha="center", va="center", transform=ax.transAxes)
-        ax.axis("off")
-        self.figure.tight_layout()
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
-        self.canvas.draw()
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        self.figure = None
+        self.empty_placeholder = ttk.Label(
+            self.plot_holder,
+            text="Load a flattened OCT image",
+            anchor="center",
+        )
+        self.empty_placeholder.pack(fill="both", expand=True)
 
     def _render_current_roi(self) -> None:
         if self.image is None:
@@ -746,6 +749,10 @@ class Step4Frame(SidebarStepFrame):
 
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
+            self.canvas = None
+        if self.empty_placeholder is not None:
+            self.empty_placeholder.destroy()
+            self.empty_placeholder = None
 
         self.figure = Figure(figsize=(11, 7), dpi=100)
         grid = self.figure.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
@@ -765,7 +772,7 @@ class Step4Frame(SidebarStepFrame):
 
         self._draw_isez_preview(profile)
 
-        self.figure.tight_layout()
+        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.95, hspace=0.28)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
         self.canvas.mpl_connect("button_press_event", self._on_profile_click)
         self.canvas.draw()

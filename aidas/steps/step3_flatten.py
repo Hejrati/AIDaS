@@ -848,7 +848,7 @@ class RBatchSelectionPanel(ttk.Frame):
         run_box.pack(fill="x", pady=(10, 0))
         ttk.Button(run_box, text="Start", command=self._run_selected).pack(side="left")
         ttk.Label(run_box, text="Batch Size:").pack(side="left", padx=(12, 0))
-        max_workers = max(1, min(8, (os.cpu_count() or 2) - 1))
+        max_workers = self._max_worker_count()
         self.workers_var = tk.IntVar(value=min(4, max_workers))
         self.workers_spin = ttk.Spinbox(
             run_box,
@@ -858,7 +858,19 @@ class RBatchSelectionPanel(ttk.Frame):
             width=5,
         )
         self.workers_spin.pack(side="left", padx=(6, 12))
+        self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
+        ttk.Label(run_box, textvariable=self.worker_limit_var, foreground="#555555").pack(side="left")
         ttk.Button(run_box, text="Cancel", command=lambda: self.step_frame._render()).pack(side="right")
+
+    def _max_worker_count(self, ready_count=None):
+        cpu_limit = self.step_frame._cpu_worker_limit()
+        if ready_count is None:
+            return cpu_limit
+        return max(1, min(int(ready_count) or 1, cpu_limit))
+
+    def _worker_limit_text(self, max_workers):
+        cpu_limit = self.step_frame._cpu_worker_limit()
+        return f"Limit: {max_workers} (CPU cores: {cpu_limit})"
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -917,9 +929,10 @@ class RBatchSelectionPanel(ttk.Frame):
             f"Scanned {scanned} folders. Found {ready} ready folder(s), {skipped} skipped folder(s) with RData. "
             f"{missing} folder(s) did not contain all four required inputs."
         )
-        max_workers = max(1, min(ready or 1, (os.cpu_count() or 2) - 1, 8))
+        max_workers = self._max_worker_count(ready)
         self.workers_spin.configure(to=max_workers)
         self.workers_var.set(min(4, max_workers))
+        self.worker_limit_var.set(self._worker_limit_text(max_workers))
         self.step_frame.status_var.set("Batch scan complete. Select folders to process.")
 
     def _run_selected(self):
@@ -931,6 +944,9 @@ class RBatchSelectionPanel(ttk.Frame):
             workers = max(1, int(self.workers_var.get()))
         except (TypeError, ValueError):
             workers = 1
+        max_workers = self._max_worker_count(len(folders))
+        workers = min(workers, max_workers)
+        self.workers_var.set(workers)
         self.step_frame._start_batch_r_runs(folders, workers)
 
 
@@ -1249,6 +1265,72 @@ class Step3Frame(SidebarStepFrame):
         if name in {"r.exe", "rterm.exe", "r", "rterm"}:
             return [str(r_executable), "--vanilla", "--slave", "-e", expression]
         raise RuntimeError("R package setup needs Rscript.exe or Rterm.exe.")
+
+    @staticmethod
+    def _r_string(value):
+        return "'" + str(value).replace("\\", "/").replace("'", "\\'") + "'"
+
+    @staticmethod
+    def _cpu_worker_limit():
+        return max(1, os.cpu_count() or 1)
+
+    def _default_r_package_library(self):
+        if self.r_package_library_path:
+            return Path(self.r_package_library_path)
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if local_app_data:
+            return Path(local_app_data) / "AIDaS" / "R-packages"
+        return Path.home() / "AIDaS_R_packages"
+
+    def _r_env(self):
+        env = os.environ.copy()
+        library_path = self._default_r_package_library()
+        if library_path:
+            env["R_LIBS_USER"] = str(library_path.resolve())
+        return env
+
+    def _r_package_check_expression(self, package_name):
+        library_path = self._default_r_package_library()
+        lib = self._r_string(library_path.resolve())
+        return (
+            f".libPaths(c({lib}, .libPaths())); "
+            f"if (requireNamespace({self._r_string(package_name)}, quietly=TRUE)) "
+            "quit(status=0) else quit(status=1)"
+        )
+
+    def _r_packages_ready(self, rscript):
+        library_path = self._default_r_package_library()
+        try:
+            library_path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return False
+        for package_name in self.R_REQUIRED_PACKAGES:
+            result = subprocess.run(
+                self._build_r_eval_command(rscript, self._r_package_check_expression(package_name)),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=self._r_env(),
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if result.returncode != 0:
+                return False
+        return True
+
+    def _ensure_r_ready_with_wizard(self):
+        rscript = self._resolve_rscript_executable()
+        if rscript is None:
+            self.status_var.set("Rscript was not found. Open the R setup wizard to continue.")
+            return None
+        if self.preferences is not None:
+            self.preferences.set("rscript_path", str(rscript))
+        if self._r_packages_ready(rscript):
+            self.status_var.set("R and required Step 3 packages are ready.")
+            return rscript
+        self.status_var.set("Step 3 R packages are missing. Open the R setup wizard to install them.")
+        return None
 
     @staticmethod
     def _analyze_base_name(base_path):
@@ -1810,7 +1892,7 @@ class Step3Frame(SidebarStepFrame):
             )
             return
 
-        workers = max(1, min(int(workers), len(folders)))
+        workers = max(1, min(int(workers), len(folders), self._cpu_worker_limit()))
         self._clear_plot_holder()
         self.r_batch_run_panel = RBatchRunPanel(self, self.plot_holder, folders, workers)
         self.r_batch_run_panel.pack(fill="both", expand=True)
@@ -1834,6 +1916,92 @@ class Step3Frame(SidebarStepFrame):
         if log:
             panel.log(log)
 
+    def _run_r_script_for_config(self, rscript_path, script_path, r_config, batch_folder=None):
+        folder = Path(batch_folder or r_config["input_dir"])
+        script_args = [
+            r_config["input_dir"],
+            r_config["output_dir"],
+            r_config["reference_dark"],
+            r_config["reference_light"],
+            r_config["to_process_dark"],
+            r_config["to_process_light"],
+            r_config["image_index_light"],
+            r_config["image_index_dark"],
+            r_config["pixel_width"],
+        ]
+        cmd = self._build_r_run_command(rscript_path, script_path, script_args)
+        env = self._r_env()
+        env.update(
+            {
+                "AIDAS_STEP3_INPUT_DIR": r_config["input_dir"],
+                "AIDAS_STEP3_OUTPUT_DIR": r_config["output_dir"],
+                "AIDAS_REFERENCE_DARK": r_config["reference_dark"],
+                "AIDAS_REFERENCE_LIGHT": r_config["reference_light"],
+                "AIDAS_TO_PROCESS_DARK": r_config["to_process_dark"],
+                "AIDAS_TO_PROCESS_LIGHT": r_config["to_process_light"],
+                "AIDAS_IMAGE_INDEX_LIGHT": r_config["image_index_light"],
+                "AIDAS_IMAGE_INDEX_DARK": r_config["image_index_dark"],
+                "AIDAS_PIXEL_WIDTH": r_config["pixel_width"],
+            }
+        )
+
+        self.after(
+            0,
+            lambda f=folder: self._batch_panel_update(
+                f,
+                status="Running R script",
+                progress=1,
+                log=f"Starting R script: {f}",
+            ),
+        )
+        output_lines = []
+        try:
+            process = subprocess.Popen(
+                cmd,
+                cwd=r_config["input_dir"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=env,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            if process.stdout is not None:
+                for line in process.stdout:
+                    output_lines.append(line)
+                    progress = self._progress_from_r_line(line)
+                    if progress is not None:
+                        percent, label = progress
+                        self.after(
+                            0,
+                            lambda f=folder, p=percent, s=label: self._batch_panel_update(
+                                f,
+                                status=s,
+                                progress=p,
+                            ),
+                        )
+            returncode = process.wait()
+        except Exception as exc:
+            stdout = "".join(output_lines)
+            log_path = self._write_r_run_log(r_config["output_dir"], 1, stdout, str(exc), cmd)
+            return {"folder": folder, "returncode": 1, "stdout": stdout, "stderr": str(exc), "cmd": cmd, "log": log_path}
+
+        stdout = "".join(output_lines)
+        log_path = self._write_r_run_log(r_config["output_dir"], returncode, stdout, "", cmd)
+        if returncode == 0:
+            self.after(0, lambda f=folder, lp=log_path: self._batch_panel_update(f, log=f"Finished: {f}\nLog: {lp}"))
+        else:
+            short_output = self._short_process_text(stdout)
+            self.after(
+                0,
+                lambda f=folder, lp=log_path, out=short_output: self._batch_panel_update(
+                    f,
+                    log=f"Failed: {f}\nLog: {lp}\n{out}",
+                ),
+            )
+        return {"folder": folder, "returncode": returncode, "stdout": stdout, "stderr": "", "cmd": cmd, "log": log_path}
+
     def _batch_r_worker(self, rscript_path, script_path, folders, workers):
         results = []
         completed = 0
@@ -1850,6 +2018,7 @@ class Step3Frame(SidebarStepFrame):
                 return {"folder": folder, "returncode": 1, "stdout": "", "stderr": str(exc), "cmd": []}
             return self._run_r_script_for_config(rscript_path, script_path, r_config, batch_folder=folder)
 
+        workers = max(1, min(int(workers), len(folders), self._cpu_worker_limit()))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             future_map = {executor.submit(run_folder, folder): folder for folder in folders}
             for future in concurrent.futures.as_completed(future_map):
@@ -1896,7 +2065,7 @@ class Step3Frame(SidebarStepFrame):
             self._load_r_results_from_folder(successful_folders[0], show_errors=False)
 
     def _write_r_run_log(self, output_dir, returncode, stdout, stderr, cmd):
-        log_path = app_log_dir() / f"step3_rscript_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        log_path = app_log_dir() / f"step3_rscript_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log"
         log_path.write_text(
             "Command:\n"
             + " ".join(str(part) for part in cmd)

@@ -21,6 +21,7 @@ from aidas.utils.ui_utils import (
     SidebarStepFrame,
     directory_row,
     icon_button,
+    load_ui_icon,
 )
 
 SDB_PREF_KEY = "sdb_dir"
@@ -296,15 +297,15 @@ class Step1Frame(SidebarStepFrame):
         roi_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
         # UX Improvement: Applied "Accent.TButton" style if a modern theme is loaded.
-        self.crop_btn_icon = tk.PhotoImage(file="assets\\material-symbols-light--crop.png")
+        self.crop_btn_icon = load_ui_icon(self, "material-symbols-light--crop.png")
         self.crop_btn = ttk.Button(roi_actions, text="Crop & Scale", command=self._crop_and_scale, image=self.crop_btn_icon, compound="left", style="Accent.TButton")
         self.crop_btn.pack(fill="x", pady=(0, 6))
         
-        self.undo_crop_btn_icon = tk.PhotoImage(file="assets\\grommet-icons--revert.png")
+        self.undo_crop_btn_icon = load_ui_icon(self, "grommet-icons--revert.png")
         self.undo_crop_btn = ttk.Button(roi_actions, text="Undo", command=self._reset, state="disabled", image=self.undo_crop_btn_icon, compound="left")
         self.undo_crop_btn.pack(fill="x", pady=(0, 10))
         
-        self.save_all_btn_icon = tk.PhotoImage(file="assets\\glyphs-poly--save.png")
+        self.save_all_btn_icon = load_ui_icon(self, "glyphs-poly--save.png")
         self.save_all_btn = ttk.Button(roi, text="Save All (TIFF, IMG, HDR)", command=self._save_all_formats, state="disabled", image=self.save_all_btn_icon, compound="left")
         self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 2))
 
@@ -352,7 +353,7 @@ class Step1Frame(SidebarStepFrame):
         )
         stepper.pack(side="left", padx=0, anchor="center")
 
-        btn_icon = tk.PhotoImage(file="assets\\material-symbols-light--refresh-rounded.png")
+        btn_icon = load_ui_icon(self, "material-symbols-light--refresh-rounded.png")
         reset_btn = tk.Button(
             row_frame,
             image=btn_icon,

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -34,21 +34,36 @@ class AIForAIDASPredictor:
         *,
         boundary_model_path: str,
         device_name: str = "auto",
+        progress_callback: Optional[Callable[[str, float], None]] = None,
     ):
+        self._progress_callback = progress_callback
+        self._report_progress("importing_torch", 0.12)
         torch, nn, F = _import_torch()
         self._torch = torch
+        self._report_progress("resolving_device", 0.18)
         self.device = _resolve_device(torch, device_name)
         self.boundary_model_path = boundary_model_path
+        self._report_progress("loading_model", 0.25)
         self.boundary_model = _load_boundary_model(boundary_model_path, self.device, torch, nn, F)
+        self._report_progress("model_ready", 0.45)
+
+    def _report_progress(self, stage: str, fraction: float) -> None:
+        if self._progress_callback is None:
+            return
+        self._progress_callback(stage, fraction)
 
     def predict(self, image: np.ndarray) -> PredictionResult:
+        self._report_progress("normalizing_image", 0.52)
         image_norm = _normalize_for_model(image)
         height, _width = image_norm.shape
 
+        self._report_progress("preparing_tensor", 0.60)
         x = self._torch.from_numpy(image_norm[np.newaxis, np.newaxis]).to(self.device)
+        self._report_progress("running_model", 0.68)
         with self._torch.inference_mode():
             pred_y = _soft_argmax_y(self.boundary_model(x), self._torch)[0].detach().cpu().numpy()
 
+        self._report_progress("postprocessing", 0.88)
         if pred_y.shape[0] < NUM_BOUNDARIES:
             raise RuntimeError(
                 f"AI_ForAIDAS returned {pred_y.shape[0]} boundary rows; expected {NUM_BOUNDARIES}."
@@ -216,10 +231,15 @@ def predict_boundaries_and_fovea(
     *,
     boundary_model_path: str,
     device_name: str = "auto",
+    progress_callback: Optional[Callable[[str, float], None]] = None,
 ) -> PredictionResult:
     """Run AI_ForAIDAS inference on a 2-D OCT image."""
     predictor = AIForAIDASPredictor(
         boundary_model_path=boundary_model_path,
         device_name=device_name,
+        progress_callback=progress_callback,
     )
-    return predictor.predict(image)
+    result = predictor.predict(image)
+    if progress_callback is not None:
+        progress_callback("prediction_ready", 0.95)
+    return result

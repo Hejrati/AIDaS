@@ -25,6 +25,7 @@ Core Functionality:
 
 import csv
 import datetime
+import json
 import os
 import shutil
 import subprocess
@@ -40,7 +41,7 @@ from PIL import Image, ImageDraw, ImageTk
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
-from aidas.utils.ui_utils import NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to
+from aidas.utils.ui_utils import NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to, load_ui_icon
 
 
 BOUNDARY_PRESETS = [
@@ -621,6 +622,7 @@ class Step2Frame(SidebarStepFrame):
         
         # ─ UI state flags ─
         self._segmenter_running = False  # True while AI segmentation is executing
+        self._segmenter_progress_target = 0.0
         self._drawing_locked = False  # True if foveal center is locked (prevents other drawing)
         self._updating_fovea_entry = False  # Flag to avoid feedback loop when updating entry widget
         self._syncing_boundary_selection = False  # Flag to avoid feedback loop when selecting boundaries
@@ -752,13 +754,13 @@ class Step2Frame(SidebarStepFrame):
 
         workflow_buttons = ttk.Frame(workflow)
         workflow_buttons.pack(fill="x", pady=(6, 0))
-        self.button_finish_icon = tk.PhotoImage(file="assets\\el--ok.png")
+        self.button_finish_icon = load_ui_icon(self, "el--ok.png")
         self.finish_boundary_btn = ttk.Button(workflow_buttons, text="Done", command=self._finish_boundary, image=self.button_finish_icon, compound="left")
         self.finish_boundary_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
-        self.clear_all_traces_btn_icon = tk.PhotoImage(file="assets\\solar--eraser-bold-duotone.png")
+        self.clear_all_traces_btn_icon = load_ui_icon(self, "solar--eraser-bold-duotone.png")
         self.clear_all_traces_btn = ttk.Button(workflow_buttons, text="Clear", command=self._clear_all_traces, 
                                                image=self.clear_all_traces_btn_icon, compound="left")
-        self.button_revert_icon = tk.PhotoImage(file="assets\\grommet-icons--revert.png")
+        self.button_revert_icon = load_ui_icon(self, "grommet-icons--revert.png")
         self.clear_all_traces_btn.pack(side="left", fill="x", padx=(2, 2))
         self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary, image=self.button_revert_icon, compound="left")
         self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
@@ -816,7 +818,7 @@ class Step2Frame(SidebarStepFrame):
         #     fill="x",
         #     padx=(0, 2),
         # )
-        self.button_save_icon = tk.PhotoImage(file="assets\\glyphs-poly--save.png")
+        self.button_save_icon = load_ui_icon(self, "glyphs-poly--save.png")
         self.saved_button = ttk.Button(saved_buttons, text="Save", command=self._save_current_marked_image_button, 
                    image=self.button_save_icon, compound="left")
         self.saved_button.pack(
@@ -1264,6 +1266,8 @@ class Step2Frame(SidebarStepFrame):
         self._reset_boundary_completion()
         self._refresh_trace_list()
         self._set_fovea_controls_enabled(False)
+        self._set_segmentation_frame_enabled(False)
+        self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
         self._update_ai_button_states()
         if status_message:
@@ -2809,6 +2813,7 @@ class Step2Frame(SidebarStepFrame):
         *,
         model_path,
         device_name,
+        progress_callback=None,
     ):
         """Run PyTorch AI_ForAIDAS in a clean subprocess and return arrays."""
         temp_dir = tempfile.mkdtemp(prefix="aidas_ai_for_aidas_")
@@ -2827,21 +2832,42 @@ class Step2Frame(SidebarStepFrame):
                 output_npz,
             ]
 
-            run_result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
                 env=self._aidas_worker_env(),
                 **self._hidden_subprocess_kwargs(),
             )
-            stdout = (run_result.stdout or "").strip()
-            stderr = (run_result.stderr or "").strip()
-            if run_result.returncode != 0:
-                details = stderr or stdout or "(worker produced no output)"
+
+            stdout_lines = []
+            if process.stdout is not None:
+                for line in process.stdout:
+                    text = line.strip()
+                    if not text:
+                        continue
+                    stdout_lines.append(text)
+                    try:
+                        message = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+                    if message.get("type") == "progress" and progress_callback is not None:
+                        progress_callback(
+                            float(message.get("fraction", 0.0)),
+                            str(message.get("stage") or ""),
+                        )
+
+            return_code = process.wait()
+            stdout = "\n".join(stdout_lines).strip()
+            stderr = ""
+            if return_code != 0:
+                details = stdout or "(worker produced no output)"
                 raise RuntimeError(
                     "AI_ForAIDAS worker process failed.\n\n"
                     f"Command: {subprocess.list2cmdline(cmd)}\n"
-                    f"Return code: {run_result.returncode}\n\n"
+                    f"Return code: {return_code}\n\n"
                     f"{details}"
                 )
             if not os.path.isfile(output_npz):
@@ -3182,6 +3208,7 @@ class Step2Frame(SidebarStepFrame):
                 maximum = progress_max if progress_max is not None else len(BOUNDARY_NAMES)
                 self.segmenter_progress.configure(maximum=max(1, int(maximum)), mode="determinate")
                 self.segmenter_progress["value"] = 0
+                self._segmenter_progress_target = 0.0
                 if animate_progress:
                     self._animate_progress_bar()
         else:
@@ -3210,13 +3237,19 @@ class Step2Frame(SidebarStepFrame):
             pass
         self._progress_animation_job = None
 
-    def _set_segmenter_progress_value(self, value, maximum=None):
+    def _set_segmenter_progress_value(self, value, maximum=None, smooth=True):
         if not hasattr(self, "segmenter_progress"):
             return
         if maximum is not None:
             self.segmenter_progress.configure(maximum=max(1, int(maximum)), mode="determinate")
         max_value = float(self.segmenter_progress.cget("maximum") or 1)
-        self.segmenter_progress["value"] = max(0, min(float(value), max_value))
+        target = max(0.0, min(float(value), max_value))
+        self._segmenter_progress_target = target
+        if smooth and self._segmenter_running:
+            if getattr(self, "_progress_animation_job", None) is None:
+                self._animate_progress_bar()
+            return
+        self.segmenter_progress["value"] = target
 
     def _animate_progress_bar(self):
         """Gradually fill progress bar during segmentation to show activity."""
@@ -3226,14 +3259,13 @@ class Step2Frame(SidebarStepFrame):
         
         current = float(self.segmenter_progress["value"])
         maximum = float(self.segmenter_progress.cget("maximum") or len(BOUNDARY_NAMES))
-        # Gradually increase but slow down as it approaches the max.
-        if current < maximum:
-            increment = max(0.02, (maximum - current) * 0.08)
-            self.segmenter_progress["value"] = min(current + increment, maximum)
-            self._progress_animation_job = self.after(500, self._animate_progress_bar)
-        else:
-            # Keep it near max until segmentation finishes.
-            self._progress_animation_job = self.after(500, self._animate_progress_bar)
+        target = max(0.0, min(float(getattr(self, "_segmenter_progress_target", current)), maximum))
+
+        if current < target:
+            step = max(0.01, (target - current) * 0.18)
+            self.segmenter_progress["value"] = min(current + step, target)
+
+        self._progress_animation_job = self.after(80, self._animate_progress_bar)
 
     def _run_aidas_batch_segmentation(self, image_paths=None, manual_fovea_by_path=None):
         """Run AI_ForAIDAS predictions for multiple images and preview them in tabs."""
@@ -3281,7 +3313,7 @@ class Step2Frame(SidebarStepFrame):
             True,
             status_message=f"Running AI_ForAIDAS batch on {len(image_paths)} image(s)...",
             progress_max=len(image_paths),
-            animate_progress=False,
+            animate_progress=True,
         )
 
         worker = threading.Thread(
@@ -3318,6 +3350,13 @@ class Step2Frame(SidebarStepFrame):
             self.after(0, lambda: self.status_var.set(f"AI_ForAIDAS batch {index}/{total}: {name}"))
             self.after(0, lambda: self._append_segmenter_log(f"Batch {index}/{total}: {path}"))
 
+        def report_model_progress(index, total, path, fraction, stage):
+            progress_value = (index - 1) + max(0.0, min(float(fraction), 1.0))
+            label = str(stage or "running").replace("_", " ")
+            name = os.path.basename(path)
+            self.after(0, lambda v=progress_value, t=total: self._set_segmenter_progress_value(v, t))
+            self.after(0, lambda: self.status_var.set(f"AI_ForAIDAS batch {index}/{total}: {name} - {label}"))
+
         try:
             for index, path in enumerate(image_paths, start=1):
                 report_status(index, path)
@@ -3332,6 +3371,9 @@ class Step2Frame(SidebarStepFrame):
                         image_for_ai,
                         model_path=model_path,
                         device_name=device_name,
+                        progress_callback=lambda fraction, stage, i=index, t=len(image_paths), p=path: (
+                            report_model_progress(i, t, p, fraction, stage)
+                        ),
                     )
                     if prediction.get("device"):
                         device = prediction["device"]
@@ -3405,7 +3447,7 @@ class Step2Frame(SidebarStepFrame):
             completed = len(result.get("results") or [])
             failed = len(result.get("failures") or [])
             total = int(result.get("total") or (completed + failed) or 1)
-            self._set_segmenter_progress_value(completed + failed, total)
+            self._set_segmenter_progress_value(completed + failed, total, smooth=False)
             self._set_segmentation_running(False, restore_boundary_progress=False)
             running_cleared = True
 
@@ -3730,22 +3772,9 @@ class Step2Frame(SidebarStepFrame):
             self._batch_result_tab_canvases = {}
             self._batch_result_states = {}
             self._active_batch_result_tab = None
+            self._single_editor_state = None
             self._show_single_image_canvas()
-            if self._single_editor_state is not None:
-                self._load_editor_state(self._single_editor_state, self.single_image_canvas)
-            if self.image_data is None:
-                self.image_info_var.set("No image loaded")
-            else:
-                filename = (
-                    os.path.basename(self.current_file)
-                    if self.current_file and self.current_file != "Step 1 output"
-                    else "Step 1 output"
-                )
-                self.image_info_var.set(
-                    f"{filename} | Size: {self.image_data.shape[1]} x {self.image_data.shape[0]} px | "
-                    f"Type: {self.image_data.dtype}"
-                )
-            self.status_var.set("Batch result tabs closed.")
+            self._clear_image_display("All batch result images saved or removed. No image is loaded.")
 
     def _confirm_close_batch_result_tab(self, tab_key):
         state = self._batch_result_states.get(tab_key)

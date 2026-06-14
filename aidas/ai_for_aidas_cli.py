@@ -11,6 +11,14 @@ import numpy as np
 from aidas.ai_for_aidas_inference import predict_boundaries_and_fovea
 
 
+def _emit_progress(stage, fraction):
+    print(json.dumps({
+        "type": "progress",
+        "stage": str(stage),
+        "fraction": max(0.0, min(float(fraction), 1.0)),
+    }), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run AI_ForAIDAS inference on a NumPy image.")
     parser.add_argument("--image-npy", required=True, help="Input 2-D image saved with numpy.save")
@@ -19,28 +27,34 @@ def main():
     parser.add_argument("--output-npz", required=True, help="Output .npz path for predicted arrays")
     args = parser.parse_args()
 
+    _emit_progress("loading_image", 0.04)
     image = np.load(args.image_npy)
+    _emit_progress("image_loaded", 0.08)
     prediction = predict_boundaries_and_fovea(
         image,
         boundary_model_path=args.model,
         device_name=args.device,
+        progress_callback=_emit_progress,
     )
 
     fovea_x = -1 if prediction.fovea_x is None else int(prediction.fovea_x)
     os.makedirs(os.path.dirname(os.path.abspath(args.output_npz)), exist_ok=True)
+    _emit_progress("writing_output", 0.97)
     np.savez_compressed(
         args.output_npz,
         boundaries=prediction.boundaries,
         fovea_x=np.array([fovea_x], dtype=np.int64),
         device=np.array([prediction.device]),
     )
+    _emit_progress("done", 1.0)
 
     print(json.dumps({
+        "type": "result",
         "boundaries_shape": list(prediction.boundaries.shape),
         "device": prediction.device,
         "fovea_x": None if prediction.fovea_x is None else int(prediction.fovea_x),
         "output_npz": os.path.abspath(args.output_npz),
-    }))
+    }), flush=True)
 
 
 if __name__ == "__main__":
