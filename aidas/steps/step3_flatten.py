@@ -10,7 +10,7 @@ from datetime import datetime
 import concurrent.futures
 import numpy as np
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+from tkinter import ttk, filedialog, messagebox, font as tkfont
 import threading
 from pathlib import Path
 import os
@@ -781,30 +781,232 @@ class RSetupWizard(ttk.Frame):
         return all(self.package_status.get(name) == "installed" for name in self.step_frame.R_REQUIRED_PACKAGES)
 
 
+class RBatchSelectionTable(ttk.Frame):
+    """Fast folder table for Step 3 batch R script selection."""
+
+    COLUMNS = ("folder", "status", "inputs")
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.rows = []
+        self._row_by_iid = {}
+        self._checkbox_images = self._make_checkbox_images()
+        self._tree_font = tkfont.nametofont("TkDefaultFont")
+        self._heading_font = self._tree_font.copy()
+        self._heading_font.configure(weight="bold")
+
+        self._tree_style = "Step3Batch.Treeview"
+        self._style = ttk.Style(self)
+        try:
+            self._style.configure(self._tree_style, indent=0)
+        except tk.TclError:
+            pass
+
+        self.tree = ttk.Treeview(
+            self,
+            columns=self.COLUMNS,
+            show=("tree", "headings"),
+            selectmode="none",
+            style=self._tree_style,
+        )
+        self.yscroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.xscroll = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=self.yscroll.set, xscrollcommand=self.xscroll.set)
+
+        self.tree.heading(
+            "#0",
+            text="",
+            image=self._checkbox_images["unchecked"],
+            anchor="center",
+            command=self._toggle_all_ready,
+        )
+        self.tree.heading("folder", text="Folder")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("inputs", text="Inputs")
+
+        self.tree.column("#0", width=40, minwidth=40, stretch=False, anchor="center")
+        self.tree.column("folder", width=520, minwidth=220, stretch=False, anchor="w")
+        self.tree.column("status", width=360, minwidth=120, stretch=False, anchor="w")
+        self.tree.column("inputs", width=72, minwidth=60, stretch=False, anchor="center")
+
+        self.tree.tag_configure("locked", foreground="#6b7280")
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.yscroll.grid(row=0, column=1, sticky="ns")
+        self.xscroll.grid(row=1, column=0, sticky="ew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        self.tree.bind("<Button-1>", self._on_click, add="+")
+        self.tree.bind("<Configure>", self._on_tree_configure, add="+")
+
+    def _make_checkbox_images(self):
+        images = {
+            "checked": tk.PhotoImage(width=16, height=16),
+            "unchecked": tk.PhotoImage(width=16, height=16),
+            "locked": tk.PhotoImage(width=16, height=16),
+        }
+        for image in images.values():
+            image.put("#ffffff", to=(0, 0, 16, 16))
+            image.put("#6b7280", to=(2, 2, 14, 3))
+            image.put("#6b7280", to=(2, 13, 14, 14))
+            image.put("#6b7280", to=(2, 2, 3, 14))
+            image.put("#6b7280", to=(13, 2, 14, 14))
+
+        checked = images["checked"]
+        for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
+            checked.put("#111827", to=(x, y, x + 1, y + 1))
+            checked.put("#111827", to=(x, y + 1, x + 1, y + 2))
+
+        locked = images["locked"]
+        locked.put("#e5e7eb", to=(3, 3, 13, 13))
+        locked.put("#9ca3af", to=(5, 7, 11, 9))
+        return images
+
+    def set_rows(self, rows):
+        self.rows = list(rows or [])
+        self._row_by_iid = {}
+        self.tree.delete(*self.tree.get_children(""))
+
+        if not self.rows:
+            self.tree.insert(
+                "",
+                "end",
+                text="",
+                values=("No folders with complete Step 3 inputs were found.", "", ""),
+                tags=("locked",),
+            )
+            self._refresh_header_checkbox()
+            return
+
+        for index, row in enumerate(self.rows):
+            iid = str(index)
+            self._row_by_iid[iid] = row
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                text="",
+                image=self._image_for_row(row),
+                values=self._values_for_row(row),
+                tags=("locked",) if row.get("locked") else (),
+            )
+        self._fit_columns_to_content()
+        self._refresh_header_checkbox()
+
+    def _image_for_row(self, row):
+        if row.get("locked"):
+            return self._checkbox_images["locked"]
+        if row.get("include"):
+            return self._checkbox_images["checked"]
+        return self._checkbox_images["unchecked"]
+
+    def _values_for_row(self, row):
+        values = row.get("values") or {}
+        return (
+            values.get("folder", ""),
+            values.get("status", ""),
+            values.get("inputs", ""),
+        )
+
+    def _measure_text(self, text, *, heading=False, padding=18):
+        font = self._heading_font if heading else self._tree_font
+        return int(font.measure(str(text or ""))) + int(padding)
+
+    def _fit_columns_to_content(self):
+        widths = {
+            "folder": self._measure_text("Folder", heading=True),
+            "status": self._measure_text("Status", heading=True),
+            "inputs": self._measure_text("Inputs", heading=True),
+        }
+        for row in self.rows:
+            folder, status, inputs = self._values_for_row(row)
+            widths["folder"] = max(widths["folder"], self._measure_text(folder))
+            widths["status"] = max(widths["status"], self._measure_text(status))
+            widths["inputs"] = max(widths["inputs"], self._measure_text(inputs))
+
+        self.tree.column("folder", width=max(220, widths["folder"]))
+        self.tree.column("status", width=max(120, widths["status"]))
+        self.tree.column("inputs", width=max(60, widths["inputs"]))
+        self._expand_folder_to_view()
+
+    def _on_tree_configure(self, _event=None):
+        self._expand_folder_to_view()
+
+    def _expand_folder_to_view(self):
+        if not self.rows:
+            return
+        try:
+            view_width = max(1, int(self.tree.winfo_width()))
+            checkbox_width = int(self.tree.column("#0", "width"))
+            folder_width = int(self.tree.column("folder", "width"))
+            status_width = int(self.tree.column("status", "width"))
+            inputs_width = int(self.tree.column("inputs", "width"))
+        except tk.TclError:
+            return
+
+        non_folder_width = checkbox_width + status_width + inputs_width
+        desired_folder_width = max(220, view_width - non_folder_width - 2)
+        if desired_folder_width > folder_width:
+            try:
+                self.tree.column("folder", width=desired_folder_width)
+            except tk.TclError:
+                pass
+
+    def _refresh_row(self, iid, row):
+        try:
+            self.tree.item(iid, image=self._image_for_row(row), values=self._values_for_row(row))
+        except tk.TclError:
+            pass
+
+    def _refresh_header_checkbox(self):
+        ready_rows = [row for row in self.rows if not row.get("locked")]
+        image = self._checkbox_images["unchecked"]
+        if ready_rows and all(bool(row.get("include")) for row in ready_rows):
+            image = self._checkbox_images["checked"]
+        try:
+            self.tree.heading("#0", image=image)
+        except tk.TclError:
+            pass
+
+    def _on_click(self, event):
+        if self.tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
+            return None
+        if self.tree.identify_column(event.x) != "#0":
+            return None
+        iid = self.tree.identify_row(event.y)
+        row = self._row_by_iid.get(iid)
+        if not row or row.get("locked"):
+            return "break"
+        row["include"] = not bool(row.get("include"))
+        self._refresh_row(iid, row)
+        self._refresh_header_checkbox()
+        return "break"
+
+    def _toggle_all_ready(self):
+        ready_rows = [row for row in self.rows if not row.get("locked")]
+        if not ready_rows:
+            return
+        include = not all(bool(row.get("include")) for row in ready_rows)
+        for iid, row in self._row_by_iid.items():
+            if row.get("locked"):
+                continue
+            row["include"] = include
+            self._refresh_row(iid, row)
+        self._refresh_header_checkbox()
+
+    def selected_rows(self):
+        return [row for row in self.rows if row.get("include") and not row.get("locked")]
+
+
 class RBatchSelectionPanel(ttk.Frame):
     """Embedded panel for selecting subfolders to run through the Step 3 R script."""
-
-    TABLE_COLUMNS = (
-        ("select", "", 42, "center"),
-        ("folder", "Folder", 560, "w"),
-        ("status", "Status", 380, "w"),
-        ("inputs", "Inputs", 92, "center"),
-    )
-    COLUMN_MIN_WIDTHS = {
-        "select": 42,
-        "folder": 320,
-        "status": 96,
-        "inputs": 64,
-    }
-    COLUMN_MAX_WIDTHS = {
-        "inputs": 92,
-    }
 
     def __init__(self, step_frame, parent, root_dir):
         super().__init__(parent)
         self.step_frame = step_frame
         self.root_dir = Path(root_dir)
         self.rows = []
+        self.table = None
 
         self._build_ui()
         self._start_scan()
@@ -813,7 +1015,7 @@ class RBatchSelectionPanel(ttk.Frame):
         wrapper = ttk.Frame(self, padding=12)
         wrapper.pack(fill="both", expand=True)
 
-        ttk.Label(wrapper, text="Batch Step 3 R Processing", font=("", 12, "bold")).pack(anchor="w")
+        ttk.Label(wrapper, text="Batch R Script Processing", font=("", 12, "bold")).pack(anchor="w")
         ttk.Label(
             wrapper,
             text=(
@@ -824,17 +1026,6 @@ class RBatchSelectionPanel(ttk.Frame):
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
 
-        self.table = BatchTable(
-            wrapper,
-            columns=self.TABLE_COLUMNS,
-            min_widths=self.COLUMN_MIN_WIDTHS,
-            max_widths=self.COLUMN_MAX_WIDTHS,
-            select_column="select",
-            stretch_column="folder",
-            empty_message="No folders with complete Step 3 inputs were found.",
-        )
-        self.table.pack(fill="both", expand=True)
-
         top = ttk.Frame(wrapper)
         top.pack(fill="x", pady=(0, 8))
         self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
@@ -844,9 +1035,19 @@ class RBatchSelectionPanel(ttk.Frame):
             expand=True,
         )
 
+        self.table_host = ttk.Frame(wrapper)
+        self.table_host.pack(fill="both", expand=True)
+        self.scan_label = ttk.Label(
+            self.table_host,
+            text="Scanning folders...",
+            anchor="center",
+            justify="center",
+        )
+        self.scan_label.pack(fill="both", expand=True)
+
         run_box = ttk.Frame(wrapper)
         run_box.pack(fill="x", pady=(10, 0))
-        ttk.Button(run_box, text="Start", command=self._run_selected).pack(side="left")
+        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="left")
         ttk.Label(run_box, text="Batch Size:").pack(side="left", padx=(12, 0))
         max_workers = self._max_worker_count()
         self.workers_var = tk.IntVar(value=min(4, max_workers))
@@ -860,7 +1061,10 @@ class RBatchSelectionPanel(ttk.Frame):
         self.workers_spin.pack(side="left", padx=(6, 12))
         self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
         ttk.Label(run_box, textvariable=self.worker_limit_var, foreground="#555555").pack(side="left")
-        ttk.Button(run_box, text="Cancel", command=lambda: self.step_frame._render()).pack(side="right")
+        self.next_button = ttk.Button(run_box, text="Next >", command=self._run_selected)
+        self.next_button.pack(side="right")
+        self.next_button.state(["disabled"])
+        self.workers_spin.configure(state="disabled")
 
     def _max_worker_count(self, ready_count=None):
         cpu_limit = self.step_frame._cpu_worker_limit()
@@ -916,13 +1120,34 @@ class RBatchSelectionPanel(ttk.Frame):
         self.after(0, lambda: self._scan_done(rows, scanned, missing))
 
     def _scan_failed(self, exc):
+        if not self.winfo_exists():
+            return
         self.summary_var.set(f"Scan failed: {exc}")
         self.step_frame.status_var.set("Batch scan failed.")
+        try:
+            self.next_button.state(["disabled"])
+            self.workers_spin.configure(state="disabled")
+        except tk.TclError:
+            pass
         messagebox.showerror("Batch Step 3", f"Could not scan folders.\n{exc}", parent=self)
 
+    def _show_results_table(self, rows):
+        for child in self.table_host.winfo_children():
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+
+        table = RBatchSelectionTable(self.table_host)
+        table.set_rows(rows)
+        table.pack(fill="both", expand=True)
+        self.table = table
+
     def _scan_done(self, rows, scanned, missing):
+        if not self.winfo_exists():
+            return
         self.rows = rows
-        self.table.set_rows(rows)
+        self._show_results_table(rows)
         ready = sum(1 for row in rows if not row["locked"])
         skipped = sum(1 for row in rows if row["locked"])
         self.summary_var.set(
@@ -934,8 +1159,19 @@ class RBatchSelectionPanel(ttk.Frame):
         self.workers_var.set(min(4, max_workers))
         self.worker_limit_var.set(self._worker_limit_text(max_workers))
         self.step_frame.status_var.set("Batch scan complete. Select folders to process.")
+        try:
+            if ready:
+                self.next_button.state(["!disabled"])
+                self.workers_spin.configure(state="normal")
+            else:
+                self.next_button.state(["disabled"])
+                self.workers_spin.configure(state="disabled")
+        except tk.TclError:
+            pass
 
     def _run_selected(self):
+        if self.table is None:
+            return
         folders = [row["folder"] for row in self.table.selected_rows()]
         if not folders:
             messagebox.showwarning("Batch Step 3", "Select at least one ready folder.", parent=self)
@@ -948,6 +1184,9 @@ class RBatchSelectionPanel(ttk.Frame):
         workers = min(workers, max_workers)
         self.workers_var.set(workers)
         self.step_frame._start_batch_r_runs(folders, workers)
+
+    def _cancel(self):
+        self.step_frame._close_r_batch_panel(render_previous=True)
 
 
 class RBatchRunPanel(ttk.Frame):
@@ -1844,6 +2083,17 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_panel.pack(fill="both", expand=True)
         self.progress_text_var.set("Batch scan")
         self.status_var.set(f"Scanning batch root: {root_dir}")
+
+    def _close_r_batch_panel(self, *, render_previous):
+        panel = self.r_batch_panel
+        self.r_batch_panel = None
+        if panel is not None:
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        if render_previous:
+            self._render()
 
     def _folder_has_r_data(self, folder):
         folder = Path(folder)
