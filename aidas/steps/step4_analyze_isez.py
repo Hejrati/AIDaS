@@ -1,20 +1,48 @@
 """Step 4 - Analyze ISez.
 
-Python translation of ``Rotated_Rescaled_Human_ISez6_8bit_JS.m`` with a
-Tkinter/Matplotlib canvas that replaces MATLAB's ``ginput`` profile clicks.
+This module is intentionally a close translation of the lab's original Step 4
+workflow:
+
+1. ``Rotated_Rescaled_Human_ISez6_8bit_JS.m`` computes the ROI intensity
+   profile, adjusts the clicked IS band bounds, rotates the selected IS band
+   baseline, rescales the surrounding profile, and saves an ISez plot.
+2. ``Step 4 analyze ISez.txt`` is the ImageJ macro that opens those ISez plot
+   frames, runs ``doWand(512, 179)``, measures with
+   ``Set Measurements... fit shape invert redirect=None decimal=3``, and then
+   saves ``ROI_to_move_stck.tif``, ``MAX_Stack.tif``, and the results table.
+
+ImageJ reference source used for the measurement port:
+- Wand selection:
+  https://github.com/imagej/ImageJ/blob/master/ij/gui/Wand.java
+- Ellipse fit:
+  https://github.com/imagej/ImageJ/blob/master/ij/process/EllipseFitter.java
+- Result columns and shape descriptors:
+  https://github.com/imagej/ImageJ/blob/master/ij/plugin/filter/Analyzer.java
+- Statistics-to-ellipse handoff:
+  https://github.com/imagej/ImageJ/blob/master/ij/process/ImageStatistics.java
+
+Important limitation: the macro pauses after each ``doWand`` call with
+``waitForUser("Pause","Do Wand")``. If the user manually edits the wand ROI in
+ImageJ during that pause, the saved Results.xlsx can contain values that cannot
+be reproduced from the plot image alone because that manual ROI state is not
+stored in ``ROI_to_move_stck.tif``.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import csv
+import math
 import os
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+import zipfile
+from xml.sax.saxutils import escape
 
 import numpy as np
 from PIL import Image
+from PIL import ImageDraw
+from scipy import ndimage
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -27,6 +55,16 @@ MATLAB_ROI_LOW = 300
 MATLAB_ROI_HIGH = 450
 MATLAB_ROI_TOP_LINE = 450
 MATLAB_A_LIMIT = 1.0
+
+# These dimensions are the generated plot-frame geometry used before applying
+# the ImageJ macro measurement. They are kept fixed so the same wand seed
+# location, doWand(512, 179), lands inside the drawn ISez shape.
+IMAGEJ_ISEZ_CANVAS_SIZE = (969, 513)
+IMAGEJ_PLOT_BOX = (126.0, 38.0, 876.0, 456.0)
+
+# Column order and text match the ImageJ Results table produced by the macro's
+# "fit shape" measurement options and 3-decimal precision.
+RESULTS_HEADERS = [" ", "Major", "Minor", "Angle", "Circ.", "AR", "Round", "Solidity"]
 
 
 @dataclass(frozen=True)
@@ -59,9 +97,6 @@ class ISezResult:
     normalized_y: np.ndarray
     baseline_x: np.ndarray
     baseline_y: np.ndarray
-    roi_image_path: Path
-    profile_path: Path
-    isez_path: Path
 
 
 def default_isez_rois() -> list[ISezROI]:
@@ -171,7 +206,13 @@ def adjust_isez_bounds(
     right_click_x: float | None = None,
     a_limit: float = MATLAB_A_LIMIT,
 ) -> tuple[int, int, float]:
-    """Apply the four MATLAB while-loop adjustments to the selected bounds."""
+    """Apply the four MATLAB while-loop adjustments to the selected bounds.
+
+    Reference: ``Rotated_Rescaled_Human_ISez6_8bit_JS.m`` after the two
+    ``ginput`` calls. MATLAB indexes are 1-based, so this function keeps the
+    public ``s`` and ``e`` variables as 1-based values and only subtracts one
+    when reading from the NumPy array.
+    """
 
     values = np.asarray(profile, dtype=np.float64)
     n_points = values.size
@@ -262,7 +303,18 @@ def adjust_isez_bounds(
 
 
 def rotated_rescaled_isez(profile: np.ndarray, start: int, end: int) -> dict[str, np.ndarray | float | int]:
-    """Rotate the IS band baseline and rescale the surrounding region to 0-100."""
+    """Rotate the IS band baseline and rescale the surrounding region to 0-100.
+
+    This is the Python equivalent of the MATLAB block beginning at
+    ``IS=Int(s:e);`` and ending after:
+
+    ``Int_region = (Int_region - min_Int_region) / ... * 100``.
+
+    The matrix multiplication from MATLAB,
+    ``R * [x_points - x_rotation_point; y_points - y_rotation_point]``, is
+    expanded below into scalar/vector operations. The math is identical, but it
+    avoids a native BLAS crash seen on the Windows test environment.
+    """
 
     values = np.asarray(profile, dtype=np.float64)
     n_points = values.size
@@ -274,6 +326,11 @@ def rotated_rescaled_isez(profile: np.ndarray, start: int, end: int) -> dict[str
         raise ValueError("ISez end must be greater than start.")
 
     is_region = values[s - 1:e]
+
+    # MATLAB:
+    # x_rotation_point = (e + s)/2;
+    # y_rotation_point = (Int(s) + Int(e)) / 2;
+    # theta_radians = acos((e-s)/sqrt((e-s)^2 + (IS(end)-IS(1))^2));
     x_rotation_point = (e + s) / 2.0
     y_rotation_point = (values[s - 1] + values[e - 1]) / 2.0
     adjacent_length = float(e - s)
@@ -284,16 +341,20 @@ def rotated_rescaled_isez(profile: np.ndarray, start: int, end: int) -> dict[str
         ratio = max(-1.0, min(1.0, adjacent_length / hypotenuse_length))
         theta_radians = float(np.arccos(ratio))
 
-    cos_t = np.cos(-theta_radians)
-    sin_t = np.sin(-theta_radians)
-    rotation = np.array([[cos_t, -sin_t], [sin_t, cos_t]], dtype=np.float64)
-
     x_points = np.linspace(s, e, is_region.size)
-    shifted = np.vstack((x_points - x_rotation_point, is_region - y_rotation_point))
-    rotated = rotation @ shifted
-    new_y = rotated[1, :] + y_rotation_point
+    x_shifted = x_points - x_rotation_point
+    y_shifted = is_region - y_rotation_point
+
+    # MATLAB clockwise rotation matrix:
+    # R = [cos(-theta) -sin(-theta); sin(-theta) cos(-theta)]
+    # We only need new_y for the peak index used during rescaling.
+    cos_t = float(np.cos(-theta_radians))
+    sin_t = float(np.sin(-theta_radians))
+    new_y = (sin_t * x_shifted) + (cos_t * y_shifted) + y_rotation_point
     max_index_zero = int(np.nanargmax(new_y))
 
+    # MATLAB uses Int(s-3:e+5), then normalizes by the minimum of IS and the
+    # original IS intensity at the rotated maximum index.
     region_start = max(1, s - 3)
     region_end = min(n_points, e + 5)
     x_region = np.arange(region_start, region_end + 1, dtype=np.float64)
@@ -326,40 +387,44 @@ def rotated_rescaled_isez(profile: np.ndarray, start: int, end: int) -> dict[str
     }
 
 
-def save_profile_plot(
-    profile: np.ndarray,
-    start_click: float,
-    end_click: float,
-    output_path: Path,
-) -> None:
-    """Save the MATLAB-style raw profile plot with the user's click positions."""
+def make_isez_plot_image(result: ISezResult) -> Image.Image:
+    """Render one result as the ImageJ-stack ISez plot frame.
 
-    values = np.asarray(profile, dtype=np.float64)
-    xs = np.arange(1, values.size + 1, dtype=np.float64)
-    ymin = float(np.nanmin(values))
+    The original MATLAB script used ``saveas(gcf, *_ISez_*.png)`` and the
+    ImageJ macro later opened those PNGs. This function creates the equivalent
+    final frame in memory so Step 4 only writes ``ROI_to_move_stck.tiff`` when
+    the user presses the stack button.
+    """
 
-    fig = Figure(figsize=(10.85, 3.28), dpi=100)
-    ax = fig.add_subplot(111)
-    ax.plot(xs, values, color="black", linewidth=1.2)
-    ax.axvline(start_click, color="#1f77b4", linewidth=1.0)
-    ax.axvline(end_click, color="#d62728", linewidth=1.0)
-    ax.set_xlim(0, 140)
-    ax.set_ylim(ymin, ymin + 80)
-    fig.subplots_adjust(left=0.08, right=0.98, bottom=0.12, top=0.95)
-    fig.savefig(output_path)
+    image = Image.new("RGB", IMAGEJ_ISEZ_CANVAS_SIZE, "white")
+    draw = ImageDraw.Draw(image)
+    x0, y0, x1, y1 = IMAGEJ_PLOT_BOX
+    x_min = result.center - 40.0
+    x_max = result.center + 40.0
+    y_min = -20.0
+    y_max = 120.0
 
+    def to_pixel(px: float, py: float) -> tuple[float, float]:
+        x = x0 + ((float(px) - x_min) / (x_max - x_min)) * (x1 - x0)
+        y = y0 + ((y_max - float(py)) / (y_max - y_min)) * (y1 - y0)
+        return x, y
 
-def save_isez_plot(result_data: dict[str, np.ndarray | float | int], center: float, output_path: Path) -> None:
-    """Save the MATLAB-style rotated/rescaled ISez plot."""
+    draw.rectangle((x0, y0, x1, y1), outline="black", width=1)
+    for tick in np.linspace(x_min, x_max, 5):
+        tx, _ = to_pixel(tick, y_min)
+        draw.line((tx, y1, tx, y1 + 5), fill="black")
+    for tick in [-20, 0, 50, 100, 120]:
+        _, ty = to_pixel(x_min, tick)
+        draw.line((x0 - 5, ty, x0, ty), fill="black")
 
-    fig = Figure(figsize=(6.2, 3.28), dpi=100)
-    ax = fig.add_subplot(111)
-    ax.plot(result_data["x"], result_data["y"], color="black", linewidth=1.2)
-    ax.plot(result_data["baseline_x"], result_data["baseline_y"], color="black", linewidth=1.0)
-    ax.set_xlim(center - 40, center + 40)
-    ax.set_ylim(-20, 120)
-    fig.subplots_adjust(left=0.10, right=0.98, bottom=0.12, top=0.95)
-    fig.savefig(output_path)
+    curve = [to_pixel(px, py) for px, py in zip(result.normalized_x, result.normalized_y)]
+    curve = [(x, y) for x, y in curve if x0 - 2 <= x <= x1 + 2 and y0 - 2 <= y <= y1 + 2]
+    if len(curve) >= 2:
+        draw.line(curve, fill="black", width=2)
+    baseline = [to_pixel(px, py) for px, py in zip(result.baseline_x, result.baseline_y)]
+    if len(baseline) >= 2:
+        draw.line(baseline, fill="black", width=2)
+    return image
 
 
 def analyze_and_save_roi(
@@ -368,13 +433,12 @@ def analyze_and_save_roi(
     *,
     start_click: float,
     end_click: float,
-    source_stem: str,
-    output_dir: str | os.PathLike,
 ) -> ISezResult:
-    """Run the MATLAB ISez analysis for one ROI and save the three outputs."""
+    """Run the MATLAB ISez analysis for one ROI without writing files.
 
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    Confirming a ROI stores the data in memory. The ImageJ-style workbook and
+    TIFF stacks are generated only by ``_build_stack_outputs``.
+    """
 
     profile = intensity_profile(image, roi)
     start = _clamp_profile_index(start_click, profile.size)
@@ -392,14 +456,6 @@ def analyze_and_save_roi(
     center = (start + end) / 2.0
     rescaled = rotated_rescaled_isez(profile, adjusted_start, adjusted_end)
 
-    roi_image_path = output_path / f"{source_stem}_ROI_{roi.suffix}.jpg"
-    profile_path = output_path / f"{source_stem}_Profile_{roi.suffix}.png"
-    isez_path = output_path / f"{source_stem}_ISez_{roi.suffix}.png"
-
-    Image.fromarray(roi_overlay_image(image, roi)).save(roi_image_path, quality=95)
-    save_profile_plot(profile, start_click, end_click, profile_path)
-    save_isez_plot(rescaled, center, isez_path)
-
     return ISezResult(
         roi=roi,
         start=start,
@@ -415,43 +471,328 @@ def analyze_and_save_roi(
         normalized_y=np.asarray(rescaled["y"], dtype=np.float64),
         baseline_x=np.asarray(rescaled["baseline_x"], dtype=np.float64),
         baseline_y=np.asarray(rescaled["baseline_y"], dtype=np.float64),
-        roi_image_path=roi_image_path,
-        profile_path=profile_path,
-        isez_path=isez_path,
     )
 
 
-def write_summary_csv(results: list[ISezResult], path: str | os.PathLike) -> None:
-    """Write one compact summary row per completed ROI."""
+def _worksheet_cell_ref(row: int, col: int) -> str:
+    letters = ""
+    while col:
+        col, rem = divmod(col - 1, 26)
+        letters = chr(65 + rem) + letters
+    return f"{letters}{row}"
 
-    rows = []
-    for result in results:
-        rows.append(
-            {
-                "suffix": result.roi.suffix,
-                "left": result.roi.left,
-                "right": result.roi.right,
-                "low": result.roi.low,
-                "high": result.roi.high,
-                "start": result.start,
-                "end": result.end,
-                "adjusted_start": result.adjusted_start,
-                "adjusted_end": result.adjusted_end,
-                "center": result.center,
-                "slope": result.slope,
-                "max_index": result.max_index,
-                "min_intensity": result.min_intensity,
-                "max_intensity": result.max_intensity,
-                "roi_image": str(result.roi_image_path),
-                "profile_image": str(result.profile_path),
-                "isez_image": str(result.isez_path),
-            }
+
+def _xlsx_cell_xml(row: int, col: int, value) -> str:
+    ref = _worksheet_cell_ref(row, col)
+    if isinstance(value, str):
+        return f'<c r="{ref}" t="inlineStr"><is><t>{escape(value)}</t></is></c>'
+    if value is None:
+        return f'<c r="{ref}"/>'
+    return f'<c r="{ref}"><v>{float(value):.15g}</v></c>'
+
+
+def write_imagej_results_xlsx(rows: list[dict[str, float]], path: str | os.PathLike) -> None:
+    """Write the ImageJ-style Step 4 Results.xlsx workbook.
+
+    ImageJ's Results table is tabular text internally; the old workflow saved
+    it as an Excel workbook. ``openpyxl`` is not a project dependency here, so
+    this writes the small XLSX package directly. The worksheet name is ``in``
+    and the column order follows the GT workbook from ``Examples/step4``.
+    """
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sheet_rows = [RESULTS_HEADERS]
+    for idx, row in enumerate(rows, start=1):
+        sheet_rows.append(
+            [
+                idx,
+                row["Major"],
+                row["Minor"],
+                row["Angle"],
+                row["Circ."],
+                row["AR"],
+                row["Round"],
+                row["Solidity"],
+            ]
         )
 
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()) if rows else ["suffix"])
-        writer.writeheader()
-        writer.writerows(rows)
+    last_ref = _worksheet_cell_ref(len(sheet_rows), len(RESULTS_HEADERS))
+    row_xml = []
+    for r_idx, values in enumerate(sheet_rows, start=1):
+        cells = "".join(_xlsx_cell_xml(r_idx, c_idx, value) for c_idx, value in enumerate(values, start=1))
+        row_xml.append(f'<row r="{r_idx}">{cells}</row>')
+
+    worksheet = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        f'<dimension ref="A1:{last_ref}"/>'
+        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="15"/>'
+        '<cols><col min="1" max="8" width="12" customWidth="1"/></cols>'
+        f'<sheetData>{"".join(row_xml)}</sheetData>'
+        '</worksheet>'
+    )
+    workbook = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="in" sheetId="1" r:id="rId1"/></sheets>'
+        '</workbook>'
+    )
+    rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
+        '</Relationships>'
+    )
+    workbook_rels = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+        '</Relationships>'
+    )
+    content_types = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '</Types>'
+    )
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("[Content_Types].xml", content_types)
+        zf.writestr("_rels/.rels", rels)
+        zf.writestr("xl/workbook.xml", workbook)
+        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
+        zf.writestr("xl/worksheets/sheet1.xml", worksheet)
+
+
+def _imagej_wand_mask(image: Image.Image, point: tuple[int, int] = (512, 179)) -> np.ndarray:
+    """Select the macro's wand region at doWand(512,179).
+
+    Source reference: ImageJ ``ij.gui.Wand``. For these generated black/white
+    ISez frames, the wand selection is equivalent to choosing the connected
+    component with the same grayscale value as the seed pixel. The macro uses
+    the fixed seed point ``(512, 179)`` on every slice.
+    """
+
+    arr = np.asarray(image.convert("L"))
+    x, y = point
+    if not (0 <= y < arr.shape[0] and 0 <= x < arr.shape[1]):
+        raise ValueError("ImageJ wand point is outside the ISez plot frame.")
+
+    seed = int(arr[y, x])
+    mask = arr == seed
+    labels, _count = ndimage.label(mask)
+    label = int(labels[y, x])
+    if label == 0:
+        return np.zeros(arr.shape, dtype=bool)
+    return labels == label
+
+
+def _imagej_ellipse_fit(mask: np.ndarray) -> tuple[float, float, float]:
+    """Port of ImageJ EllipseFitter.getEllipseParam() for an ROI mask.
+
+    Source reference:
+    ``ij.process.EllipseFitter.getEllipseParam()``.
+
+    Key details copied from ImageJ:
+    - compute second-order central moments from mask pixels;
+    - derive ``a11``, ``a12``, ``a22`` from ``u20``, ``u02``, ``u11``;
+    - use the same theta quadrant logic;
+    - scale the ellipse so its area equals the selected pixel count;
+    - return major/minor lengths and angle in degrees.
+    """
+
+    ys, xs = np.where(mask)
+    bit_count = int(xs.size)
+    if bit_count == 0:
+        return 0.0, 0.0, 0.0
+
+    left = int(xs.min())
+    top = int(ys.min())
+    local_x = xs.astype(np.float64) - left
+    local_y = ys.astype(np.float64) - top
+
+    xsum = float(np.sum(local_x))
+    ysum = float(np.sum(local_y))
+    x2sum = float(np.sum(local_x * local_x))
+    y2sum = float(np.sum(local_y * local_y))
+    xysum = float(np.sum(local_x * local_y))
+    n = float(bit_count)
+    xm = xsum / n
+    ym = ysum / n
+    u20 = x2sum / n - xm * xm
+    u02 = y2sum / n - ym * ym
+    u11 = xysum / n - xm * ym
+
+    # The following block mirrors ImageJ's getEllipseParam() variable names.
+    # Keeping those names makes it easier to compare line-by-line with the
+    # Java source while debugging GT differences.
+    half_pi = 1.5707963267949
+    m4 = 4.0 * abs(u02 * u20 - u11 * u11)
+    if m4 < 0.000001:
+        m4 = 0.000001
+    a11 = u02 / m4
+    a12 = u11 / m4
+    a22 = u20 / m4
+    tmp = a11 - a22
+    if tmp == 0.0:
+        tmp = 0.000001
+    theta = 0.5 * math.atan(2.0 * a12 / tmp)
+    if theta < 0.0:
+        theta += half_pi
+    if a12 > 0.0:
+        theta += half_pi
+    elif a12 == 0.0:
+        if a22 > a11:
+            theta = 0.0
+            tmp = a22
+            a22 = a11
+            a11 = tmp
+        elif a11 != a22:
+            theta = half_pi
+
+    sin_theta = math.sin(theta)
+    if sin_theta == 0.0:
+        sin_theta = 0.000001
+    z = a12 * math.cos(theta) / sin_theta
+    major = math.sqrt(1.0 / abs(a22 + z))
+    minor = math.sqrt(1.0 / abs(a11 - z))
+    scale = math.sqrt(bit_count / (math.pi * major * minor))
+    major = major * scale * 2.0
+    minor = minor * scale * 2.0
+    angle = 180.0 * theta / math.pi
+    if angle == 180.0:
+        angle = 0.0
+    if major < minor:
+        major, minor = minor, major
+    return major, minor, angle
+
+
+def _imagej_boundary_points(mask: np.ndarray) -> np.ndarray:
+    """Trace the selected wand region boundary using Moore-neighbor tracing.
+
+    ImageJ circularity uses ``roi.getLength()`` as perimeter in
+    ``Analyzer.saveResults``. For the binary wand region here, tracing the outer
+    boundary with 8-neighbor steps reproduces the perimeter used by ImageJ
+    closely enough to match the GT rows that were not manually edited.
+    """
+
+    ys, xs = np.where(mask)
+    if xs.size == 0:
+        return np.empty((0, 2), dtype=np.float64)
+
+    order = np.lexsort((xs, ys))
+    start = (int(ys[order[0]]), int(xs[order[0]]))
+    directions = [(0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1)]
+    height, width = mask.shape
+    point = start
+    backtrack = 4
+    boundary = []
+
+    for _ in range(mask.size * 4):
+        boundary.append(point)
+        found = False
+        for offset in range(8):
+            idx = (backtrack + 1 + offset) % 8
+            dy, dx = directions[idx]
+            candidate = (point[0] + dy, point[1] + dx)
+            if 0 <= candidate[0] < height and 0 <= candidate[1] < width and mask[candidate]:
+                backtrack = (idx + 4) % 8
+                point = candidate
+                found = True
+                break
+        if not found or (point == start and len(boundary) > 1):
+            break
+
+    return np.asarray([(x, y) for y, x in boundary], dtype=np.float64)
+
+
+def _imagej_perimeter(boundary_points: np.ndarray) -> float:
+    """Length of the wand boundary polygon used for ImageJ circularity."""
+
+    if len(boundary_points) < 2:
+        return 0.0
+    shifted = np.roll(boundary_points, -1, axis=0)
+    return float(np.sum(np.hypot(shifted[:, 0] - boundary_points[:, 0], shifted[:, 1] - boundary_points[:, 1])))
+
+
+def _imagej_convex_hull_area(mask: np.ndarray) -> float:
+    """Return the convex hull area used for ImageJ Solidity.
+
+    Source reference: ``Analyzer.saveResults`` computes:
+    ``Solidity = stats.pixelCount / getArea(roi.getConvexHull())``.
+
+    Pixel centers make the hull slightly too small. ImageJ's polygon hull is
+    effectively around pixel edges for these filled wand regions, so the hull
+    is built from each selected pixel's four corners.
+    """
+
+    ys, xs = np.where(mask)
+    if xs.size < 3:
+        return 0.0
+
+    corners = np.empty((xs.size * 4, 2), dtype=np.float64)
+    corners[0::4, 0] = xs - 0.5
+    corners[0::4, 1] = ys - 0.5
+    corners[1::4, 0] = xs + 0.5
+    corners[1::4, 1] = ys - 0.5
+    corners[2::4, 0] = xs + 0.5
+    corners[2::4, 1] = ys + 0.5
+    corners[3::4, 0] = xs - 0.5
+    corners[3::4, 1] = ys + 0.5
+
+    try:
+        from scipy.spatial import ConvexHull
+
+        return float(ConvexHull(corners).volume)
+    except Exception:
+        return 0.0
+
+
+def imagej_shape_measurements_from_frame(image: Image.Image) -> dict[str, float]:
+    """Measure one ISez plot frame using the Step 4 ImageJ macro workflow.
+
+    Source reference: ``Step 4 analyze ISez.txt`` does:
+    ``run("Set Measurements...", "fit shape invert redirect=None decimal=3")``
+    then ``doWand(512, 179)`` and ``run("Measure")`` for each stack slice.
+
+    Source reference: ``Analyzer.saveResults`` writes these shape columns:
+    - Circ. = min(1, 4*pi*area/perimeter^2)
+    - AR = major/minor
+    - Round = minor/major for the current uncalibrated square-pixel data,
+      equivalent to ImageJ's 4*area/(pi*major^2) after the area-equalized
+      ellipse fit
+    - Solidity = pixelCount/convexHullArea
+    """
+
+    mask = _imagej_wand_mask(image)
+    area = float(np.count_nonzero(mask))
+    if area <= 0:
+        return {key: 0.0 for key in RESULTS_HEADERS[1:]}
+
+    major, minor, angle = _imagej_ellipse_fit(mask)
+    boundary_points = _imagej_boundary_points(mask)
+    perimeter = _imagej_perimeter(boundary_points)
+    circularity = 0.0 if perimeter <= 0 else min(1.0, 4.0 * math.pi * area / (perimeter * perimeter))
+    aspect_ratio = 0.0 if minor <= 0 else major / minor
+    roundness = 0.0 if major <= 0 else minor / major
+    hull_area = _imagej_convex_hull_area(mask)
+    solidity = min(1.0, area / hull_area) if hull_area > 0 else 0.0
+
+    return {
+        "Major": round(major, 3),
+        "Minor": round(minor, 3),
+        "Angle": round(angle, 3),
+        "Circ.": round(circularity, 3),
+        "AR": round(aspect_ratio, 3),
+        "Round": round(roundness, 3),
+        "Solidity": round(solidity, 3),
+    }
 
 
 class Step4Frame(SidebarStepFrame):
@@ -469,12 +810,15 @@ class Step4Frame(SidebarStepFrame):
         self.current_stem = "_flat_LIGHT"
         self.current_roi_idx = 0
         self.completed: dict[str, ISezResult] = {}
+        self.roi_clicks: dict[str, list[float]] = {}
         self.profile_clicks: list[float] = []
         self.figure = None
         self.canvas = None
         self.empty_placeholder = None
         self.ax_profile = None
         self.ax_isez = None
+        self._current_profile = None
+        self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
 
@@ -487,6 +831,7 @@ class Step4Frame(SidebarStepFrame):
         self.slice_var = tk.StringVar(value="0")
         self.start_var = tk.StringVar(value="")
         self.end_var = tk.StringVar(value="")
+        self.confirm_button = None
         # self.auto_advance_var = tk.BooleanVar(value=True)
 
         self._build_ui()
@@ -598,6 +943,16 @@ class Step4Frame(SidebarStepFrame):
         self.plot_holder = ttk.Frame(self.content)
         self.plot_holder.pack(fill="both", expand=True)
 
+        confirm_row = ttk.Frame(self.content)
+        confirm_row.pack(fill="x", pady=(6, 0))
+        self.confirm_button = ttk.Button(
+            confirm_row,
+            text="Confirm and Next ROI",
+            command=self._confirm_current_roi,
+        )
+        self.confirm_button.pack(side="right")
+        self._update_confirm_button_state()
+
         self._render_empty_canvas()
 
     def on_show(self) -> None:
@@ -627,14 +982,14 @@ class Step4Frame(SidebarStepFrame):
                 self.input_dir_var.set(folder)
                 self._input_dir_user_selected = True
                 # 1. Construct the expected full file path
-                dark_hdr_path = os.path.join(folder, "_flat_DARK.hdr")
+                light_hdr_path = os.path.join(folder, "_flat_LIGHT.hdr")
                 # 2. Check if that specific file actually exists on the computer
-                if os.path.exists(dark_hdr_path):
-                    self._load_path(dark_hdr_path)
+                if os.path.exists(light_hdr_path):
+                    self._load_path(light_hdr_path)
                 else:
                     # Optional: You can add an else statement here to print a warning
                     # or show a tkinter messagebox if the file wasn't found.
-                    print(f"Warning: _flat_DARK.hdr not found in {folder}")
+                    print(f"Warning: _flat_LIGHT.hdr not found in {folder}")
     def _browse_output_folder(self) -> None:
         folder = filedialog.askdirectory(
             title="Select folder for Step 4 ISez outputs",
@@ -662,10 +1017,11 @@ class Step4Frame(SidebarStepFrame):
         slice_values = [str(idx) for idx in range(volume.shape[0])]
         self.slice_combo.configure(values=slice_values)
         self.slice_var.set("0")
-        self._set_current_slice()
         self.completed.clear()
+        self.roi_clicks.clear()
         self.current_roi_idx = 0
         self.profile_clicks.clear()
+        self._set_current_slice()
         self._refresh_roi_list()
         self._select_roi_in_list()
         self.image_label_var.set(
@@ -685,34 +1041,72 @@ class Step4Frame(SidebarStepFrame):
         self.slice_var.set(str(idx))
         self.image = np.asarray(self.volume[idx])
         self.profile_clicks.clear()
+        self.roi_clicks.clear()
         self.start_var.set("")
         self.end_var.set("")
         self.completed.clear()
+        self._load_current_roi_clicks()
         self._refresh_roi_list()
         self._render_current_roi()
 
     def _on_roi_selected(self, _event=None) -> None:
+        if self._updating_roi_selection:
+            return
         selection = self.roi_listbox.curselection()
         if not selection:
             return
-        self.current_roi_idx = int(selection[0])
-        self.profile_clicks.clear()
-        self.start_var.set("")
-        self.end_var.set("")
+        selected_idx = int(selection[0])
+        if selected_idx == self.current_roi_idx:
+            return
+        self._remember_current_roi_clicks()
+        self.current_roi_idx = selected_idx
+        self._load_current_roi_clicks()
         self._render_current_roi()
 
     def _move_roi(self, delta: int) -> None:
+        self._remember_current_roi_clicks()
         self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx + delta))
-        self.profile_clicks.clear()
-        self.start_var.set("")
-        self.end_var.set("")
+        self._load_current_roi_clicks()
         self._select_roi_in_list()
         self._render_current_roi()
 
+    def _current_roi_suffix(self) -> str:
+        return self.rois[self.current_roi_idx].suffix
+
+    def _remember_current_roi_clicks(self) -> None:
+        suffix = self._current_roi_suffix()
+        if self.profile_clicks:
+            self.roi_clicks[suffix] = list(self.profile_clicks[:2])
+        else:
+            self.roi_clicks.pop(suffix, None)
+
+    def _load_current_roi_clicks(self) -> None:
+        suffix = self._current_roi_suffix()
+        if suffix in self.roi_clicks:
+            self.profile_clicks = list(self.roi_clicks[suffix][:2])
+        elif suffix in self.completed:
+            result = self.completed[suffix]
+            self.profile_clicks = [float(result.start), float(result.end)]
+        else:
+            self.profile_clicks = []
+        self._sync_entry_vars_from_clicks()
+
+    def _sync_entry_vars_from_clicks(self) -> None:
+        if self.profile_clicks:
+            self.start_var.set(str(_clamp_profile_index(self.profile_clicks[0], self._current_profile_size())))
+        else:
+            self.start_var.set("")
+        if len(self.profile_clicks) >= 2:
+            self.end_var.set(str(_clamp_profile_index(self.profile_clicks[1], self._current_profile_size())))
+        else:
+            self.end_var.set("")
+
     def _select_roi_in_list(self) -> None:
+        self._updating_roi_selection = True
         self.roi_listbox.selection_clear(0, tk.END)
         self.roi_listbox.selection_set(self.current_roi_idx)
         self.roi_listbox.see(self.current_roi_idx)
+        self.after_idle(lambda: setattr(self, "_updating_roi_selection", False))
 
     def _refresh_roi_list(self) -> None:
         self.roi_listbox.delete(0, tk.END)
@@ -724,16 +1118,36 @@ class Step4Frame(SidebarStepFrame):
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
             self.canvas = None
+        self.figure = None
+        self.ax_profile = None
+        self.ax_isez = None
+        self._current_profile = None
+        self._update_confirm_button_state()
         if self.empty_placeholder is not None:
             self.empty_placeholder.destroy()
+            self.empty_placeholder = None
 
-        self.figure = None
         self.empty_placeholder = ttk.Label(
             self.plot_holder,
             text="Load a flattened OCT image",
             anchor="center",
         )
         self.empty_placeholder.pack(fill="both", expand=True)
+
+    def _ensure_plot_canvas(self) -> None:
+        if self.empty_placeholder is not None:
+            self.empty_placeholder.destroy()
+            self.empty_placeholder = None
+        if self.canvas is not None and self.figure is not None:
+            return
+
+        self.figure = Figure(figsize=(11, 7), dpi=100)
+        grid = self.figure.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
+        self.ax_isez = self.figure.add_subplot(grid[0, 0])
+        self.ax_profile = self.figure.add_subplot(grid[1, 0])
+        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.95, hspace=0.28)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
+        self.canvas.mpl_connect("button_press_event", self._on_profile_click)
 
     def _render_current_roi(self) -> None:
         if self.image is None:
@@ -746,21 +1160,13 @@ class Step4Frame(SidebarStepFrame):
         except Exception as exc:
             self.status_var.set(str(exc))
             return
+        self._current_profile = profile
 
-        if self.canvas is not None:
-            self.canvas.get_tk_widget().destroy()
-            self.canvas = None
-        if self.empty_placeholder is not None:
-            self.empty_placeholder.destroy()
-            self.empty_placeholder = None
-
-        self.figure = Figure(figsize=(11, 7), dpi=100)
-        grid = self.figure.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
-        self.ax_isez = self.figure.add_subplot(grid[0, 0])
-        self.ax_profile = self.figure.add_subplot(grid[1, 0])
+        self._ensure_plot_canvas()
 
         xs = np.arange(1, profile.size + 1, dtype=np.float64)
         ymin = float(np.nanmin(profile))
+        self.ax_profile.clear()
         self.ax_profile.plot(xs, profile, color="black", linewidth=1.2)
         self.ax_profile.set_xlim(0, 140)
         self.ax_profile.set_ylim(ymin, ymin + 20)
@@ -772,12 +1178,12 @@ class Step4Frame(SidebarStepFrame):
 
         self._draw_isez_preview(profile)
 
-        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.95, hspace=0.28)
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
-        self.canvas.mpl_connect("button_press_event", self._on_profile_click)
         self.canvas.draw()
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+        canvas_widget = self.canvas.get_tk_widget()
+        if not canvas_widget.winfo_manager():
+            canvas_widget.pack(fill="both", expand=True)
         self._update_profile_status(profile)
+        self._update_confirm_button_state()
 
     def _draw_isez_preview(self, profile: np.ndarray) -> None:
         self.ax_isez.clear()
@@ -837,11 +1243,12 @@ class Step4Frame(SidebarStepFrame):
         if len(self.profile_clicks) >= 2:
             self.end_var.set(str(_clamp_profile_index(self.profile_clicks[1], self._current_profile_size())))
 
+        self._remember_current_roi_clicks()
         self._render_current_roi()
-        if len(self.profile_clicks) == 2: # and self.auto_advance_var.get():
-            self.after(50, lambda: self._save_current_roi(auto_advance=True))
 
     def _current_profile_size(self) -> int:
+        if self._current_profile is not None:
+            return int(self._current_profile.size)
         if self.image is None:
             return 1
         try:
@@ -857,19 +1264,34 @@ class Step4Frame(SidebarStepFrame):
             messagebox.showerror("Profile Selection", "Enter numeric start and end values.")
             return
         self.profile_clicks = [start, end]
+        self._remember_current_roi_clicks()
         self._render_current_roi()
-        self._save_current_roi(auto_advance=True)
 
     def _clear_clicks(self) -> None:
         self.profile_clicks.clear()
+        self.roi_clicks.pop(self._current_roi_suffix(), None)
         self.start_var.set("")
         self.end_var.set("")
         self._render_current_roi()
+
+    def _update_confirm_button_state(self) -> None:
+        if self.confirm_button is None:
+            return
+        label = "Confirm ROI" if self.current_roi_idx >= len(self.rois) - 1 else "Confirm and Next ROI"
+        self.confirm_button.configure(text=label)
+        if len(self.profile_clicks) >= 2 and self.image is not None:
+            self.confirm_button.state(["!disabled"])
+        else:
+            self.confirm_button.state(["disabled"])
+
+    def _confirm_current_roi(self) -> None:
+        self._save_current_roi(auto_advance=True)
 
     def _update_profile_status(self, profile: np.ndarray) -> None:
         roi = self.rois[self.current_roi_idx]
         if len(self.profile_clicks) < 2:
             self.profile_status_var.set(f"ROI {roi.suffix}: click start and end on the profile.")
+            self.stats_var.set("")
             return
 
         start = _clamp_profile_index(self.profile_clicks[0], profile.size)
@@ -884,7 +1306,8 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self.profile_status_var.set(
-            f"ROI {roi.suffix}: selected {start}-{end}; adjusted {adj_start}-{adj_end}."
+            f"ROI {roi.suffix}: selected {start}-{end}; adjusted {adj_start}-{adj_end}. "
+            "Review or edit, then confirm."
         )
         self.stats_var.set(
             f"center: {(start + end) / 2.0:.1f}\n"
@@ -902,41 +1325,29 @@ class Step4Frame(SidebarStepFrame):
             return
 
         roi = self.rois[self.current_roi_idx]
-        outdir = self.output_dir_var.get() or (str(self.current_path.parent) if self.current_path else os.getcwd())
         try:
             result = analyze_and_save_roi(
                 self.image,
                 roi,
                 start_click=self.profile_clicks[0],
                 end_click=self.profile_clicks[1],
-                source_stem=self.current_stem,
-                output_dir=outdir,
             )
             self.completed[roi.suffix] = result
-            self._write_current_summary()
+            self.roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
         except Exception as exc:
             messagebox.showerror("Step 4", f"Could not save ROI {roi.suffix}.\n{exc}")
             return
 
         self._refresh_roi_list()
-        self.status_var.set(f"Saved ROI {roi.suffix}: {result.isez_path.name}")
+        self.status_var.set(f"Confirmed ROI {roi.suffix}.")
 
         if auto_advance and self.current_roi_idx < len(self.rois) - 1:
             self.current_roi_idx += 1
-            self.profile_clicks.clear()
-            self.start_var.set("")
-            self.end_var.set("")
+            self._load_current_roi_clicks()
             self._select_roi_in_list()
             self._render_current_roi()
         else:
             self._select_roi_in_list()
-
-    def _write_current_summary(self) -> None:
-        if not self.completed:
-            return
-        outdir = Path(self.output_dir_var.get() or ".")
-        ordered = [self.completed[roi.suffix] for roi in self.rois if roi.suffix in self.completed]
-        write_summary_csv(ordered, outdir / f"{self.current_stem}_ISez_summary.csv")
 
     def _build_stack_outputs(self) -> None:
         if not self.completed:
@@ -946,28 +1357,42 @@ class Step4Frame(SidebarStepFrame):
         ordered = [self.completed[roi.suffix] for roi in self.rois if roi.suffix in self.completed]
         outdir = Path(self.output_dir_var.get() or ".")
         try:
-            isez_images = [Image.open(result.isez_path).convert("RGB") for result in ordered if result.isez_path.is_file()]
-            if isez_images:
-                stack_path = outdir / f"{self.current_stem}_ISez_stack.tif"
-                isez_images[0].save(stack_path, save_all=True, append_images=isez_images[1:])
+            outdir.mkdir(parents=True, exist_ok=True)
 
+            # ImageJ macro equivalent:
+            # open *_ISez_*.png -> run("Images to Stack") ->
+            # saveAs("Tiff", "ROI_to_move_stck.tif").
+            # We render the plot frames in memory and save only the final stack.
+            isez_images = [make_isez_plot_image(result) for result in ordered]
+            if isez_images:
+                isez_images[0].save(outdir / "ROI_to_move_stck.tiff", save_all=True, append_images=isez_images[1:])
+
+            # MATLAB produced one ROI-overlay JPG per ROI, then the ImageJ macro
+            # stacked those overlays with the original image and ran a max
+            # projection. We skip the intermediate JPGs and write only the final
+            # MAX_Stack.tiff requested for this framework.
             roi_arrays = [
-                np.asarray(Image.open(result.roi_image_path).convert("L"), dtype=np.uint8)
+                roi_overlay_image(self.image, result.roi)
                 for result in ordered
-                if result.roi_image_path.is_file()
             ]
             if roi_arrays:
-                roi_images = [Image.fromarray(arr) for arr in roi_arrays]
-                roi_stack_path = outdir / f"{self.current_stem}_ROI_stack.tif"
-                roi_images[0].save(roi_stack_path, save_all=True, append_images=roi_images[1:])
                 max_projection = np.maximum.reduce(roi_arrays)
-                Image.fromarray(max_projection).save(outdir / f"{self.current_stem}_ROI_max_projection.tif")
+                Image.fromarray(max_projection).save(outdir / "MAX_Stack.tiff")
+
+            # ImageJ macro equivalent:
+            # setTool("wand"); doWand(512, 179); run("Measure") per slice.
+            # The workbook is created here, after the stack button, not during
+            # individual ROI confirmation.
+            write_imagej_results_xlsx(
+                [imagej_shape_measurements_from_frame(image) for image in isez_images],
+                outdir / "Results.xlsx",
+            )
         except Exception as exc:
             messagebox.showerror("Step 4", f"Could not build stack outputs.\n{exc}")
             return
 
         self.status_var.set(f"Built stack outputs in {outdir}.")
-        messagebox.showinfo("Step 4", "Built ISez stack, ROI stack, and ROI max projection.")
+        messagebox.showinfo("Step 4", "Built MAX_Stack.tiff, Results.xlsx, and ROI_to_move_stck.tiff.")
 
 
 def main() -> None:
