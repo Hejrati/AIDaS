@@ -61,6 +61,7 @@ MATLAB_A_LIMIT = 1.0
 # location, doWand(512, 179), lands inside the drawn ISez shape.
 IMAGEJ_ISEZ_CANVAS_SIZE = (969, 513)
 IMAGEJ_PLOT_BOX = (126.0, 38.0, 876.0, 456.0)
+IMAGEJ_PLOT_BOX_ASPECT = (IMAGEJ_PLOT_BOX[3] - IMAGEJ_PLOT_BOX[1]) / (IMAGEJ_PLOT_BOX[2] - IMAGEJ_PLOT_BOX[0])
 
 # Column order and text match the ImageJ Results table produced by the macro's
 # "fit shape" measurement options and 3-decimal precision.
@@ -832,6 +833,8 @@ class Step4Frame(SidebarStepFrame):
         self.start_var = tk.StringVar(value="")
         self.end_var = tk.StringVar(value="")
         self.confirm_button = None
+        self.canvas_clear_button = None
+        self.build_stacks_button = None
         # self.auto_advance_var = tk.BooleanVar(value=True)
 
         self._build_ui()
@@ -919,22 +922,37 @@ class Step4Frame(SidebarStepFrame):
 
         # 1. Start Label & Entry
         ttk.Label(control_row, text="Start").pack(side="left", padx=(0, 2))
-        ttk.Entry(control_row, textvariable=self.start_var, width=8).pack(side="left", padx=(0, 10))
+        self.start_entry = ttk.Entry(control_row, textvariable=self.start_var, width=8)
+        self.start_entry.pack(side="left", padx=(0, 10))
 
         # 2. End Label & Entry
         ttk.Label(control_row, text="End").pack(side="left", padx=(0, 2))
-        ttk.Entry(control_row, textvariable=self.end_var, width=8).pack(side="left", padx=(0, 10))
+        self.end_entry = ttk.Entry(control_row, textvariable=self.end_var, width=8)
+        self.end_entry.pack(side="left", padx=(0, 10))
 
         # 3. Apply Button
         self.apply_icon = load_ui_icon(self, "streamline-stickies-color--validation-1-duo.png")
         self.apply_button = ttk.Button(control_row, image=self.apply_icon, command=self._apply_entry_clicks)
         self.apply_button.pack(side="left", expand=False) 
+        self.clear_icon = load_ui_icon(self, "solar--eraser-bold-duotone.png")
+        self.clear_button = ttk.Button(control_row, image=self.clear_icon, command=self._clear_clicks)
+        self.clear_button.pack(side="left", padx=(4, 0), expand=False)
+        for entry in (self.start_entry, self.end_entry):
+            entry.bind("<Return>", self._apply_entry_clicks)
+            entry.bind("<KP_Enter>", self._apply_entry_clicks)
+            entry.bind("<FocusOut>", self._apply_entry_clicks_if_complete)
 
         # 4. Build Stacks Button
         # Change the parent from 'control_row' to 'roi_box'
         # Use side="bottom" to anchor it to the bottom of the roi_box frame
         self.build_stacks_icon = load_ui_icon(self, "tabler--stack-push.png")
-        self.build_stacks_button = ttk.Button(roi_box, image=self.build_stacks_icon, text="Build Stacks", command=self._build_stack_outputs)
+        self.build_stacks_button = ttk.Button(
+            roi_box,
+            image=self.build_stacks_icon,
+            text="Build Stack",
+            compound="left",
+            command=self._build_stack_outputs,
+        )
         self.build_stacks_button.pack(side="bottom", fill="x", pady=(6, 2))
         # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
         # stats = stats_section.body
@@ -947,11 +965,20 @@ class Step4Frame(SidebarStepFrame):
         confirm_row.pack(fill="x", pady=(6, 0))
         self.confirm_button = ttk.Button(
             confirm_row,
-            text="Confirm and Next ROI",
+            text="Done >>",
             command=self._confirm_current_roi,
         )
         self.confirm_button.pack(side="right")
+        self.canvas_clear_button = ttk.Button(
+            confirm_row,
+            image=self.clear_icon,
+            text="Clear",
+            compound="left",
+            command=self._clear_clicks,
+        )
+        self.canvas_clear_button.pack(side="right", padx=(0, 6))
         self._update_confirm_button_state()
+        self._update_build_stack_button_state()
 
         self._render_empty_canvas()
 
@@ -1114,6 +1141,8 @@ class Step4Frame(SidebarStepFrame):
             mark = "✅" if roi.suffix in self.completed else "❌"
             self.roi_listbox.insert(tk.END, f"{roi.suffix:>5}   {mark}")
 
+        self._update_build_stack_button_state()
+
     def _render_empty_canvas(self) -> None:
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
@@ -1142,10 +1171,11 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self.figure = Figure(figsize=(11, 7), dpi=100)
-        grid = self.figure.add_gridspec(2, 1, height_ratios=[1.0, 1.0])
+        grid = self.figure.add_gridspec(2, 1, height_ratios=[1.25, 1.0])
         self.ax_isez = self.figure.add_subplot(grid[0, 0])
         self.ax_profile = self.figure.add_subplot(grid[1, 0])
-        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.95, hspace=0.28)
+        self.ax_isez.set_box_aspect(IMAGEJ_PLOT_BOX_ASPECT)
+        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.95, hspace=0.32)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
         self.canvas.mpl_connect("button_press_event", self._on_profile_click)
 
@@ -1187,6 +1217,7 @@ class Step4Frame(SidebarStepFrame):
 
     def _draw_isez_preview(self, profile: np.ndarray) -> None:
         self.ax_isez.clear()
+        self.ax_isez.set_box_aspect(IMAGEJ_PLOT_BOX_ASPECT)
         self.ax_isez.set_title("Rotated / rescaled ISez")
         self.ax_isez.set_ylim(-20, 120)
         if len(self.profile_clicks) < 2:
@@ -1206,7 +1237,7 @@ class Step4Frame(SidebarStepFrame):
         if start > end:
             start, end = end, start
         try:
-            adj_start, adj_end, _slope = adjust_isez_bounds(
+            adj_start, adj_end, slope = adjust_isez_bounds(
                 profile,
                 start,
                 end,
@@ -1225,6 +1256,60 @@ class Step4Frame(SidebarStepFrame):
         self.ax_isez.set_ylim(-20, 120)
         self.ax_isez.set_xlabel("profile row")
         self.ax_isez.set_ylabel("rescaled intensity")
+        self._draw_isez_measurement_preview(
+            start=start,
+            end=end,
+            adjusted_start=adj_start,
+            adjusted_end=adj_end,
+            center=center,
+            slope=slope,
+            data=data,
+        )
+
+    def _draw_isez_measurement_preview(
+        self,
+        *,
+        start: int,
+        end: int,
+        adjusted_start: int,
+        adjusted_end: int,
+        center: float,
+        slope: float,
+        data: dict[str, np.ndarray | float | int],
+    ) -> None:
+        result = ISezResult(
+            roi=self.rois[self.current_roi_idx],
+            start=start,
+            end=end,
+            adjusted_start=adjusted_start,
+            adjusted_end=adjusted_end,
+            center=center,
+            slope=slope,
+            max_index=int(data["max_index"]),
+            min_intensity=float(data["min_intensity"]),
+            max_intensity=float(data["max_intensity"]),
+            normalized_x=np.asarray(data["x"], dtype=np.float64),
+            normalized_y=np.asarray(data["y"], dtype=np.float64),
+            baseline_x=np.asarray(data["baseline_x"], dtype=np.float64),
+            baseline_y=np.asarray(data["baseline_y"], dtype=np.float64),
+        )
+        try:
+            measurements = imagej_shape_measurements_from_frame(make_isez_plot_image(result))
+        except Exception:
+            return
+
+        lines = [f"{name}: {measurements[name]:.3f}" for name in RESULTS_HEADERS[1:]]
+        self.ax_isez.text(
+            0.98,
+            0.98,
+            "\n".join(lines),
+            ha="right",
+            va="top",
+            transform=self.ax_isez.transAxes,
+            fontsize=8,
+            family="monospace",
+            bbox={"facecolor": "white", "edgecolor": "#9a9a9a", "alpha": 0.86, "pad": 3},
+        )
 
     def _on_profile_click(self, event) -> None:
         if event.inaxes is not self.ax_profile or event.xdata is None:
@@ -1238,11 +1323,7 @@ class Step4Frame(SidebarStepFrame):
         else:
             self.profile_clicks.append(click)
 
-        if len(self.profile_clicks) >= 1:
-            self.start_var.set(str(_clamp_profile_index(self.profile_clicks[0], self._current_profile_size())))
-        if len(self.profile_clicks) >= 2:
-            self.end_var.set(str(_clamp_profile_index(self.profile_clicks[1], self._current_profile_size())))
-
+        self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
         self._render_current_roi()
 
@@ -1256,16 +1337,44 @@ class Step4Frame(SidebarStepFrame):
         except Exception:
             return 1
 
-    def _apply_entry_clicks(self) -> None:
+    def _entry_clicks_from_vars(self, *, show_errors: bool) -> list[float] | None:
+        start_text = self.start_var.get().strip()
+        end_text = self.end_var.get().strip()
+        if not start_text and not end_text:
+            return None
+        if not start_text or not end_text:
+            if show_errors:
+                messagebox.showerror("Profile Selection", "Enter both start and end values.")
+            return None
+
         try:
-            start = float(self.start_var.get())
-            end = float(self.end_var.get())
+            start = float(start_text)
+            end = float(end_text)
         except ValueError:
-            messagebox.showerror("Profile Selection", "Enter numeric start and end values.")
-            return
-        self.profile_clicks = [start, end]
+            if show_errors:
+                messagebox.showerror("Profile Selection", "Enter numeric start and end values.")
+            return None
+
+        n_points = self._current_profile_size()
+        return [
+            float(_clamp_profile_index(start, n_points)),
+            float(_clamp_profile_index(end, n_points)),
+        ]
+
+    def _apply_entry_clicks(self, _event=None, *, show_errors: bool = True) -> str | None:
+        clicks = self._entry_clicks_from_vars(show_errors=show_errors)
+        if clicks is None:
+            return None
+
+        self.profile_clicks = clicks
+        self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
         self._render_current_roi()
+        return "break"
+
+    def _apply_entry_clicks_if_complete(self, _event=None) -> None:
+        if self.start_var.get().strip() and self.end_var.get().strip():
+            self._apply_entry_clicks(show_errors=False)
 
     def _clear_clicks(self) -> None:
         self.profile_clicks.clear()
@@ -1277,15 +1386,43 @@ class Step4Frame(SidebarStepFrame):
     def _update_confirm_button_state(self) -> None:
         if self.confirm_button is None:
             return
-        label = "Confirm ROI" if self.current_roi_idx >= len(self.rois) - 1 else "Confirm and Next ROI"
+        label = "Build Stack" if self.current_roi_idx >= len(self.rois) - 1 else "Done >>"
         self.confirm_button.configure(text=label)
-        if len(self.profile_clicks) >= 2 and self.image is not None:
+        if len(self.profile_clicks) >= 2 and self.image is not None and self._current_roi_is_editable():
             self.confirm_button.state(["!disabled"])
         else:
             self.confirm_button.state(["disabled"])
+        self._update_clear_button_state()
+
+    def _current_roi_is_editable(self) -> bool:
+        return self._current_roi_suffix() not in self.completed
+
+    def _update_clear_button_state(self) -> None:
+        enabled = bool(self.profile_clicks) and self.image is not None and self._current_roi_is_editable()
+        for button in (getattr(self, "clear_button", None), getattr(self, "canvas_clear_button", None)):
+            if button is None:
+                continue
+            if enabled:
+                button.state(["!disabled"])
+            else:
+                button.state(["disabled"])
+
+    def _all_rois_completed(self) -> bool:
+        return bool(self.rois) and all(roi.suffix in self.completed for roi in self.rois)
+
+    def _update_build_stack_button_state(self) -> None:
+        if self.build_stacks_button is None:
+            return
+        if self._all_rois_completed():
+            self.build_stacks_button.state(["!disabled"])
+        else:
+            self.build_stacks_button.state(["disabled"])
 
     def _confirm_current_roi(self) -> None:
-        self._save_current_roi(auto_advance=True)
+        if self.current_roi_idx >= len(self.rois) - 1:
+            self._save_current_roi(auto_advance=False, build_after=True)
+        else:
+            self._save_current_roi(auto_advance=True)
 
     def _update_profile_status(self, profile: np.ndarray) -> None:
         roi = self.rois[self.current_roi_idx]
@@ -1316,10 +1453,11 @@ class Step4Frame(SidebarStepFrame):
             f"scale min/max: {float(data['min_intensity']):.3f} / {float(data['max_intensity']):.3f}"
         )
 
-    def _save_current_roi(self, *, auto_advance: bool) -> None:
+    def _save_current_roi(self, *, auto_advance: bool, build_after: bool = False) -> None:
         if self.image is None:
             messagebox.showwarning("Step 4", "Load an OCT image first.")
             return
+        self._apply_entry_clicks(show_errors=False)
         if len(self.profile_clicks) < 2:
             messagebox.showwarning("Step 4", "Click or enter both start and end profile positions.")
             return
@@ -1341,6 +1479,12 @@ class Step4Frame(SidebarStepFrame):
         self._refresh_roi_list()
         self.status_var.set(f"Confirmed ROI {roi.suffix}.")
 
+        if build_after:
+            self._select_roi_in_list()
+            self._render_current_roi()
+            self._build_stack_outputs()
+            return
+
         if auto_advance and self.current_roi_idx < len(self.rois) - 1:
             self.current_roi_idx += 1
             self._load_current_roi_clicks()
@@ -1348,10 +1492,20 @@ class Step4Frame(SidebarStepFrame):
             self._render_current_roi()
         else:
             self._select_roi_in_list()
+            self._update_build_stack_button_state()
 
     def _build_stack_outputs(self) -> None:
         if not self.completed:
             messagebox.showwarning("Step 4", "Save at least one ROI before building stack outputs.")
+            return
+        if not self._all_rois_completed():
+            missing = [roi.suffix for roi in self.rois if roi.suffix not in self.completed]
+            messagebox.showwarning(
+                "Step 4",
+                "Build Stack is available after all ROI plots are confirmed.\n"
+                f"Missing: {', '.join(missing)}",
+            )
+            self._update_build_stack_button_state()
             return
 
         ordered = [self.completed[roi.suffix] for roi in self.rois if roi.suffix in self.completed]
