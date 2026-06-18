@@ -31,12 +31,15 @@ stored in ``ROI_to_move_stck.tif``.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import threading
 import math
 import os
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 import zipfile
+from io import BytesIO
 from xml.sax.saxutils import escape
 
 import numpy as np
@@ -48,7 +51,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 
 from aidas.utils.io_utils import read_analyze, read_tiff
-from aidas.utils.ui_utils import SidebarStepFrame, directory_row, load_ui_icon
+from aidas.utils.ui_utils import SidebarStepFrame, load_ui_icon
 
 
 MATLAB_ROI_LOW = 300
@@ -66,6 +69,11 @@ IMAGEJ_PLOT_BOX_ASPECT = (IMAGEJ_PLOT_BOX[3] - IMAGEJ_PLOT_BOX[1]) / (IMAGEJ_PLO
 # Column order and text match the ImageJ Results table produced by the macro's
 # "fit shape" measurement options and 3-decimal precision.
 RESULTS_HEADERS = [" ", "Major", "Minor", "Angle", "Circ.", "AR", "Round", "Solidity"]
+STEP4_OUTPUT_GROUPS = (
+    ("MAX_Stack.tif",),
+    ("ROI_to_move_stck.tif", "ROI_to_move_stck.tiff"),
+    ("Results.xlsx", "Results_org.xlsx"),
+)
 
 
 @dataclass(frozen=True)
@@ -193,6 +201,24 @@ def roi_overlay_image(image: np.ndarray, roi: ISezROI) -> np.ndarray:
     out[low: high_line + 1, left] = 255
     out[low: high_line + 1, right - 1] = 255
     return out
+
+
+def _jpeg_roundtrip_uint8(image: np.ndarray) -> np.ndarray:
+    """Match MATLAB ``imwrite(...jpg)`` before ImageJ stacks the ROI overlays."""
+
+    buffer = BytesIO()
+    Image.fromarray(np.asarray(image, dtype=np.uint8)).save(buffer, format="JPEG")
+    buffer.seek(0)
+    return np.asarray(Image.open(buffer).convert("L"), dtype=np.uint8)
+
+
+def max_stack_projection_image(image: np.ndarray, rois: list[ISezROI]) -> np.ndarray:
+    """Create ``MAX_Stack`` from the original image plus MATLAB ROI JPGs."""
+
+    original = to_uint8_display(image)
+    roi_arrays = [_jpeg_roundtrip_uint8(roi_overlay_image(image, roi)) for roi in rois]
+    return np.maximum.reduce([original, *roi_arrays])
+
 
 
 def _clamp_profile_index(value: float | int, n_points: int) -> int:
@@ -796,6 +822,309 @@ def imagej_shape_measurements_from_frame(image: Image.Image) -> dict[str, float]
     }
 
 
+class Step4BatchROITable(ttk.Frame):
+    """Folder selection table for Step 4 batch ROI review."""
+
+    COLUMNS = ("folder", "status", "outputs")
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.rows = []
+        self._row_by_iid = {}
+        self._checkbox_images = self._make_checkbox_images()
+        self._tree_font = tkfont.nametofont("TkDefaultFont")
+        self._heading_font = self._tree_font.copy()
+        self._heading_font.configure(weight="bold")
+
+        self._tree_style = "Step4BatchROI.Treeview"
+        self._style = ttk.Style(self)
+        try:
+            self._style.configure(self._tree_style, indent=0)
+        except tk.TclError:
+            pass
+
+        self.tree = ttk.Treeview(
+            self,
+            columns=self.COLUMNS,
+            show=("tree", "headings"),
+            selectmode="none",
+            style=self._tree_style,
+        )
+        self.yscroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
+        self.xscroll = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=self.yscroll.set, xscrollcommand=self.xscroll.set)
+
+        self.tree.heading("#0", text="", image=self._checkbox_images["unchecked"], anchor="center", command=self._toggle_all_ready)
+        self.tree.heading("folder", text="Folder")
+        self.tree.heading("status", text="Status")
+        self.tree.heading("outputs", text="Outputs")
+        self.tree.column("#0", width=40, minwidth=40, stretch=False, anchor="center")
+        self.tree.column("folder", width=520, minwidth=220, stretch=False, anchor="w")
+        self.tree.column("status", width=220, minwidth=120, stretch=False, anchor="w")
+        self.tree.column("outputs", width=120, minwidth=80, stretch=False, anchor="center")
+        self.tree.tag_configure("locked", foreground="#6b7280")
+
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        self.yscroll.grid(row=0, column=1, sticky="ns")
+        self.xscroll.grid(row=1, column=0, sticky="ew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.tree.bind("<Button-1>", self._on_click, add="+")
+        self.tree.bind("<Configure>", self._on_tree_configure, add="+")
+
+    def _make_checkbox_images(self):
+        images = {
+            "checked": tk.PhotoImage(width=16, height=16),
+            "unchecked": tk.PhotoImage(width=16, height=16),
+            "locked": tk.PhotoImage(width=16, height=16),
+        }
+        for image in images.values():
+            image.put("#ffffff", to=(0, 0, 16, 16))
+            image.put("#6b7280", to=(2, 2, 14, 3))
+            image.put("#6b7280", to=(2, 13, 14, 14))
+            image.put("#6b7280", to=(2, 2, 3, 14))
+            image.put("#6b7280", to=(13, 2, 14, 14))
+        checked = images["checked"]
+        for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
+            checked.put("#111827", to=(x, y, x + 1, y + 1))
+            checked.put("#111827", to=(x, y + 1, x + 1, y + 2))
+        locked = images["locked"]
+        locked.put("#e5e7eb", to=(3, 3, 13, 13))
+        locked.put("#9ca3af", to=(5, 7, 11, 9))
+        return images
+
+    def set_rows(self, rows):
+        self.rows = list(rows or [])
+        self._row_by_iid = {}
+        self.tree.delete(*self.tree.get_children(""))
+        if not self.rows:
+            self.tree.insert("", "end", values=("No _flat_LIGHT folders were found.", "", ""), tags=("locked",))
+            self._refresh_header_checkbox()
+            return
+        for index, row in enumerate(self.rows):
+            iid = str(index)
+            self._row_by_iid[iid] = row
+            self.tree.insert(
+                "",
+                "end",
+                iid=iid,
+                image=self._image_for_row(row),
+                values=self._values_for_row(row),
+                tags=("locked",) if row.get("locked") else (),
+            )
+        self._fit_columns_to_content()
+        self._refresh_header_checkbox()
+
+    def _image_for_row(self, row):
+        if row.get("locked"):
+            return self._checkbox_images["locked"]
+        return self._checkbox_images["checked"] if row.get("include") else self._checkbox_images["unchecked"]
+
+    @staticmethod
+    def _values_for_row(row):
+        values = row.get("values") or {}
+        return values.get("folder", ""), values.get("status", ""), values.get("outputs", "")
+
+    def _measure_text(self, text, *, heading=False, padding=18):
+        font = self._heading_font if heading else self._tree_font
+        return int(font.measure(str(text or ""))) + int(padding)
+
+    def _fit_columns_to_content(self):
+        widths = {
+            "folder": self._measure_text("Folder", heading=True),
+            "status": self._measure_text("Status", heading=True),
+            "outputs": self._measure_text("Outputs", heading=True),
+        }
+        for row in self.rows:
+            folder, status, outputs = self._values_for_row(row)
+            widths["folder"] = max(widths["folder"], self._measure_text(folder))
+            widths["status"] = max(widths["status"], self._measure_text(status))
+            widths["outputs"] = max(widths["outputs"], self._measure_text(outputs))
+        self.tree.column("folder", width=max(220, widths["folder"]))
+        self.tree.column("status", width=max(120, widths["status"]))
+        self.tree.column("outputs", width=max(80, widths["outputs"]))
+        self._expand_folder_to_view()
+
+    def _on_tree_configure(self, _event=None):
+        self._expand_folder_to_view()
+
+    def _expand_folder_to_view(self):
+        try:
+            view_width = max(1, int(self.tree.winfo_width()))
+            checkbox_width = int(self.tree.column("#0", "width"))
+            folder_width = int(self.tree.column("folder", "width"))
+            status_width = int(self.tree.column("status", "width"))
+            outputs_width = int(self.tree.column("outputs", "width"))
+        except tk.TclError:
+            return
+        desired = max(220, view_width - checkbox_width - status_width - outputs_width - 2)
+        if desired > folder_width:
+            try:
+                self.tree.column("folder", width=desired)
+            except tk.TclError:
+                pass
+
+    def _refresh_row(self, iid, row):
+        try:
+            self.tree.item(iid, image=self._image_for_row(row), values=self._values_for_row(row))
+        except tk.TclError:
+            pass
+
+    def _refresh_header_checkbox(self):
+        ready_rows = [row for row in self.rows if not row.get("locked")]
+        image = self._checkbox_images["checked"] if ready_rows and all(row.get("include") for row in ready_rows) else self._checkbox_images["unchecked"]
+        try:
+            self.tree.heading("#0", image=image)
+        except tk.TclError:
+            pass
+
+    def _on_click(self, event):
+        if self.tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
+            return None
+        if self.tree.identify_column(event.x) != "#0":
+            return None
+        iid = self.tree.identify_row(event.y)
+        row = self._row_by_iid.get(iid)
+        if not row or row.get("locked"):
+            return "break"
+        row["include"] = not bool(row.get("include"))
+        self._refresh_row(iid, row)
+        self._refresh_header_checkbox()
+        return "break"
+
+    def _toggle_all_ready(self):
+        ready_rows = [row for row in self.rows if not row.get("locked")]
+        if not ready_rows:
+            return
+        include = not all(row.get("include") for row in ready_rows)
+        for iid, row in self._row_by_iid.items():
+            if row.get("locked"):
+                continue
+            row["include"] = include
+            self._refresh_row(iid, row)
+        self._refresh_header_checkbox()
+
+    def selected_rows(self):
+        return [row for row in self.rows if row.get("include") and not row.get("locked")]
+
+
+class Step4BatchROISelectionPanel(ttk.Frame):
+    """Embedded panel for selecting Step 4 ROI folders to process."""
+
+    def __init__(self, step_frame, parent, root_dir):
+        super().__init__(parent)
+        self.step_frame = step_frame
+        self.root_dir = Path(root_dir)
+        self.table = None
+        self.rows = []
+        self._build_ui()
+        self._start_scan()
+
+    def _build_ui(self):
+        wrapper = ttk.Frame(self, padding=12)
+        wrapper.pack(fill="both", expand=True)
+        ttk.Label(wrapper, text="Batch ROI", font=("", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            wrapper,
+            text=(
+                "AIDaS will search the selected folder and subfolders for _flat_LIGHT.img/_flat_LIGHT.hdr. "
+                "Folders with existing Step 4 outputs are locked and skipped."
+            ),
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 10))
+
+        top = ttk.Frame(wrapper)
+        top.pack(fill="x", pady=(0, 8))
+        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
+
+        self.table_host = ttk.Frame(wrapper)
+        self.table_host.pack(fill="both", expand=True)
+        self.scan_label = ttk.Label(self.table_host, text="Scanning folders...", anchor="center", justify="center")
+        self.scan_label.pack(fill="both", expand=True)
+
+        run_box = ttk.Frame(wrapper)
+        run_box.pack(fill="x", pady=(10, 0))
+        self.process_button = ttk.Button(run_box, text="Process Selected", command=self._process_selected)
+        self.process_button.pack(side="right")
+        self.process_button.state(["disabled"])
+        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="left")
+
+    def _start_scan(self):
+        self.step_frame.status_var.set(f"Scanning Step 4 ROI folders under {self.root_dir}...")
+        threading.Thread(target=self._scan_worker, daemon=True).start()
+
+    def _scan_worker(self):
+        try:
+            rows, scanned, skipped = self.step_frame._scan_batch_roi_folders(self.root_dir)
+        except Exception as exc:
+            self.after(0, lambda exc=exc: self._scan_failed(exc))
+            return
+        self.after(0, lambda: self._scan_done(rows, scanned, skipped))
+
+    def _scan_failed(self, exc):
+        if not self.winfo_exists():
+            return
+        self.summary_var.set(f"Scan failed: {exc}")
+        self.step_frame.status_var.set("Batch ROI scan failed.")
+        self.process_button.state(["disabled"])
+        messagebox.showerror("Batch ROI", f"Could not scan folders.\n{exc}", parent=self)
+
+    def _show_results_table(self, rows):
+        for child in self.table_host.winfo_children():
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        table = Step4BatchROITable(self.table_host)
+        table.set_rows(rows)
+        table.pack(fill="both", expand=True)
+        self.table = table
+
+    def _scan_done(self, rows, scanned, skipped):
+        if not self.winfo_exists():
+            return
+        self.rows = rows
+        for row in rows:
+            try:
+                folder_text = os.path.relpath(row["folder"], self.root_dir)
+                if folder_text == ".":
+                    folder_text = str(self.root_dir)
+            except ValueError:
+                folder_text = str(row["folder"])
+            row["values"] = {
+                "folder": folder_text,
+                "status": row.get("status", ""),
+                "outputs": row.get("outputs", ""),
+            }
+        self._show_results_table(rows)
+
+        ready = sum(1 for row in rows if not row.get("locked"))
+        complete = sum(1 for row in rows if row.get("locked"))
+        self.summary_var.set(
+            f"Scanned {scanned} folder(s). Found {ready} ready folder(s), "
+            f"{complete} already complete, {skipped} without _flat_LIGHT."
+        )
+        self.step_frame.status_var.set("Batch ROI scan complete. Select folders to process.")
+        if ready:
+            self.process_button.state(["!disabled"])
+        else:
+            self.process_button.state(["disabled"])
+
+    def _process_selected(self):
+        if self.table is None:
+            return
+        rows = self.table.selected_rows()
+        if not rows:
+            messagebox.showwarning("Batch ROI", "Select at least one ready folder.", parent=self)
+            return
+        self.step_frame._start_batch_roi_from_rows(rows)
+
+    def _cancel(self):
+        self.step_frame._close_batch_roi_panel(restore_previous=True)
+
+
 class Step4Frame(SidebarStepFrame):
     """Step 4 tab UI for interactive ISez profile selection and output saving."""
 
@@ -822,6 +1151,15 @@ class Step4Frame(SidebarStepFrame):
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
+        self.batch_roi_root = None
+        self.batch_roi_paths: list[Path] = []
+        self.batch_roi_index = -1
+        self.batch_roi_skipped = 0
+        self.batch_roi_panel = None
+        self.batch_roi_notebook = None
+        self.batch_roi_tab_states: dict[str, dict] = {}
+        self._active_batch_roi_tab = None
+        self.plot_container = None
 
         self.input_dir_var = tk.StringVar(value=self._default_input_folder())
         self.output_dir_var = tk.StringVar(value=self._default_input_folder())
@@ -853,16 +1191,14 @@ class Step4Frame(SidebarStepFrame):
         # Temporarily disable the file-open and Step 3 load buttons to prevent
         # loading files while the feature is disabled for maintenance/testing.
 
-        ttk.Label(source, text="Input dir:").pack(anchor="w", pady=(6, 0))
-        folder_row, _input_entry, input_buttons = directory_row(
+        self.batch_roi_button = ttk.Button(
             source,
-            self,
-            self.input_dir_var,
-            self._browse_input_folder,
-            browse_tooltip="Browse Step 3 output folder",
+            text="Batch ROI...",
+            image=load_ui_icon(self, "glyphs-poly--folder.png"),
+            compound="left",
+            command=self._browse_batch_roi_root,
         )
-        folder_row.pack(fill="x", pady=(0, 8))
-        self.input_search_btn = input_buttons["browse"]
+        self.batch_roi_button.pack(fill="x", pady=(6, 8))
 
         ttk.Label(
             source,
@@ -878,26 +1214,6 @@ class Step4Frame(SidebarStepFrame):
         self.slice_combo = ttk.Combobox(slice_row, textvariable=self.slice_var, values=["0"], state="readonly", width=8)
         self.slice_combo.pack(side="right")
         self.slice_combo.bind("<<ComboboxSelected>>", lambda _event: self._set_current_slice())
-
-        # output_section = self.add_sidebar_section("Output", padding=3, pady=(0, 5))
-        # output = output_section.body
-        # ttk.Label(source, text="Output dir:").pack(anchor="w", pady=(6, 0))
-        # out_row = ttk.Frame(source)
-        # out_row.pack(fill="x")
-        # ttk.Entry(out_row, textvariable=self.output_dir_var).pack(side="left", fill="x", expand=True)
-        # ttk.Button(out_row, text="...", width=3, command=self._browse_output_folder).pack(side="right", padx=(2, 0))
-
-        ttk.Label(source, text="Output dir:").pack(anchor="w", pady=(6, 0))
-        save_dir_row, _output_entry, output_buttons = directory_row(
-            source,
-            self,
-            self.output_dir_var,
-            self._browse_output_folder,
-            browse_tooltip="Browse output folder",
-        )
-        save_dir_row.pack(fill="x", pady=(0, 10))
-        self.out_search_btn = output_buttons["browse"]
-
 
         roi_section = self.add_sidebar_section("ROIs", fill="both", expand=True, pady=(0, 5))
         roi_box = roi_section.body
@@ -958,19 +1274,20 @@ class Step4Frame(SidebarStepFrame):
         # stats = stats_section.body
         # ttk.Label(stats, textvariable=self.stats_var, wraplength=self.SIDEBAR_TEXT_WRAP, justify="left").pack(fill="x")
 
-        self.plot_holder = ttk.Frame(self.content)
-        self.plot_holder.pack(fill="both", expand=True)
+        self.plot_container = ttk.Frame(self.content)
+        self.plot_container.pack(fill="both", expand=True)
+        self.plot_holder = self.plot_container
 
-        confirm_row = ttk.Frame(self.content)
-        confirm_row.pack(fill="x", pady=(6, 0))
+        self.confirm_row = ttk.Frame(self.content)
+        self.confirm_row.pack(fill="x", pady=(6, 0))
         self.confirm_button = ttk.Button(
-            confirm_row,
+            self.confirm_row,
             text="Done >>",
             command=self._confirm_current_roi,
         )
         self.confirm_button.pack(side="right")
         self.canvas_clear_button = ttk.Button(
-            confirm_row,
+            self.confirm_row,
             image=self.clear_icon,
             text="Clear",
             compound="left",
@@ -996,37 +1313,516 @@ class Step4Frame(SidebarStepFrame):
                 return str(folder)
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
+    def _hide_canvas_actions(self) -> None:
+        row = getattr(self, "confirm_row", None)
+        if row is not None and row.winfo_manager():
+            row.pack_forget()
 
-    def _browse_input_folder(self) -> None:
+    def _show_canvas_actions(self) -> None:
+        row = getattr(self, "confirm_row", None)
+        if row is not None and not row.winfo_manager():
+            row.pack(fill="x", pady=(6, 0))
+
+    def _set_batch_folder_label(self, folder: Path | None) -> None:
+        if folder is None:
+            self.image_label_var.set("No image loaded")
+            return
+        self.image_label_var.set(f"Parent: {folder.parent.name}\nCurrent: {folder.name}")
+
+
+    @staticmethod
+    def _step4_outputs_complete(folder: str | os.PathLike) -> bool:
+        folder = Path(folder)
+        return all(any((folder / name).is_file() for name in names) for names in STEP4_OUTPUT_GROUPS)
+
+    @staticmethod
+    def _flat_light_path_for_folder(folder: Path) -> Path | None:
+        img_path = folder / "_flat_LIGHT.img"
+        hdr_path = folder / "_flat_LIGHT.hdr"
+        if img_path.is_file():
+            return hdr_path if hdr_path.is_file() else img_path
+        if hdr_path.is_file():
+            return hdr_path
+        return None
+
+    @staticmethod
+    def _step4_output_count(folder: str | os.PathLike) -> int:
+        folder = Path(folder)
+        return sum(any((folder / name).is_file() for name in names) for names in STEP4_OUTPUT_GROUPS)
+
+    def _scan_batch_roi_folders(self, root_dir: str | os.PathLike) -> tuple[list[dict], int, int]:
+        root = Path(root_dir)
+        candidate_dirs = {root}
+        candidate_dirs.update(path.parent for path in root.rglob("_flat_LIGHT.img"))
+        candidate_dirs.update(path.parent for path in root.rglob("_flat_LIGHT.hdr"))
+
+        rows: list[dict] = []
+        skipped_without_flat_light = 0
+        for folder in sorted(candidate_dirs, key=lambda path: str(path).lower()):
+            flat_light = self._flat_light_path_for_folder(folder)
+            if flat_light is None:
+                skipped_without_flat_light += 1
+                continue
+            output_count = self._step4_output_count(folder)
+            if self._step4_outputs_complete(folder):
+                rows.append(
+                    {
+                        "folder": folder,
+                        "flat_light": flat_light,
+                        "include": False,
+                        "locked": True,
+                        "status": "Already complete",
+                        "outputs": "3/3",
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "folder": folder,
+                    "flat_light": flat_light,
+                    "include": True,
+                    "locked": False,
+                    "status": "Ready",
+                    "outputs": f"{output_count}/3",
+                }
+            )
+        return rows, len(candidate_dirs), skipped_without_flat_light
+
+    def _browse_batch_roi_root(self) -> None:
         folder = filedialog.askdirectory(
-            title="Select folder containing Step 3 _flat_LIGHT output",
+            title="Select root folder for batch Step 4 ROI",
             initialdir=self.input_dir_var.get() or None,
         )
-        if folder:
-            self.input_dir_var.set(folder)
-            self._input_dir_user_selected = True
-            if folder:
-                self.input_dir_var.set(folder)
-                self._input_dir_user_selected = True
-                # 1. Construct the expected full file path
-                light_hdr_path = os.path.join(folder, "_flat_LIGHT.hdr")
-                # 2. Check if that specific file actually exists on the computer
-                if os.path.exists(light_hdr_path):
-                    self._load_path(light_hdr_path)
-                else:
-                    # Optional: You can add an else statement here to print a warning
-                    # or show a tkinter messagebox if the file wasn't found.
-                    print(f"Warning: _flat_LIGHT.hdr not found in {folder}")
-    def _browse_output_folder(self) -> None:
-        folder = filedialog.askdirectory(
-            title="Select folder for Step 4 ISez outputs",
-            initialdir=self.output_dir_var.get() or None,
-        )
-        if folder:
-            self.output_dir_var.set(folder)
-            self._output_dir_user_selected = True
+        if not folder:
+            return
 
-    def _load_path(self, path: str | os.PathLike) -> None:
+        self._open_batch_roi_panel(Path(folder))
+
+    def _open_batch_roi_panel(self, root_dir: Path) -> None:
+        self._close_batch_roi_panel(restore_previous=False)
+        self._hide_canvas_actions()
+        if self.canvas is not None:
+            self.canvas.get_tk_widget().destroy()
+            self.canvas = None
+        if self.batch_roi_notebook is not None:
+            try:
+                self.batch_roi_notebook.destroy()
+            except tk.TclError:
+                pass
+            self.batch_roi_notebook = None
+        for child in self.plot_container.winfo_children():
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self.plot_holder = self.plot_container
+        self.figure = None
+        self.ax_profile = None
+        self.ax_isez = None
+        self._current_profile = None
+        if self.empty_placeholder is not None:
+            self.empty_placeholder.destroy()
+            self.empty_placeholder = None
+
+        self.batch_roi_root = Path(root_dir)
+        self.input_dir_var.set(str(self.batch_roi_root))
+        self._input_dir_user_selected = True
+        self._set_batch_folder_label(self.batch_roi_root)
+        self.batch_roi_panel = Step4BatchROISelectionPanel(self, self.plot_container, self.batch_roi_root)
+        self.batch_roi_panel.pack(fill="both", expand=True)
+
+    def _close_batch_roi_panel(self, *, restore_previous: bool) -> None:
+        panel = self.batch_roi_panel
+        self.batch_roi_panel = None
+        if panel is not None:
+            try:
+                panel.destroy()
+            except tk.TclError:
+                pass
+        if restore_previous:
+            self._show_canvas_actions()
+            if self.image is not None:
+                self._render_current_roi()
+            else:
+                self._render_empty_canvas()
+
+    def _start_batch_roi_from_rows(self, rows: list[dict]) -> None:
+        paths = [Path(row["flat_light"]) for row in rows if row.get("flat_light")]
+        if not paths:
+            messagebox.showwarning("Batch ROI", "Select at least one ready folder.")
+            return
+        self._close_batch_roi_panel(restore_previous=False)
+        self.batch_roi_paths = paths
+        self.batch_roi_index = -1
+        self.batch_roi_skipped = 0
+        self._open_batch_roi_tabs(paths)
+
+    def _open_batch_roi_tabs(self, paths: list[Path]) -> None:
+        self._show_canvas_actions()
+        for child in self.plot_container.winfo_children():
+            try:
+                child.destroy()
+            except tk.TclError:
+                pass
+        self.canvas = None
+        self.figure = None
+        self.ax_profile = None
+        self.ax_isez = None
+        self.empty_placeholder = None
+        self._current_profile = None
+        self.batch_roi_tab_states = {}
+        self._active_batch_roi_tab = None
+
+        self._configure_batch_roi_tab_style()
+        notebook = ttk.Notebook(self.plot_container, style="Step4Batch.TNotebook")
+        notebook.pack(fill="both", expand=True)
+        notebook.bind("<Button-1>", self._on_batch_roi_notebook_click, add="+")
+        notebook.bind("<Motion>", self._on_batch_roi_notebook_motion, add="+")
+        notebook.bind("<<NotebookTabChanged>>", self._on_batch_roi_tab_changed, add="+")
+        notebook.bind("<Configure>", self._on_batch_roi_notebook_configure, add="+")
+        self.batch_roi_notebook = notebook
+
+        for idx, path in enumerate(paths, start=1):
+            frame = ttk.Frame(notebook)
+            tab_key = str(frame)
+            folder = path.parent
+            self.batch_roi_tab_states[tab_key] = {
+                "path": path,
+                "folder": folder,
+                "base_label": f"{idx}. {folder.name}",
+                "loaded": False,
+                "completed": {},
+                "roi_clicks": {},
+                "current_roi_idx": 0,
+                "profile_clicks": [],
+                "complete": False,
+            }
+            notebook.add(frame, text=self._batch_roi_tab_text(self.batch_roi_tab_states[tab_key]))
+
+        first_tab = notebook.tabs()[0] if notebook.tabs() else None
+        if first_tab:
+            self._activate_batch_roi_tab(notebook.nametowidget(first_tab))
+
+    def _configure_batch_roi_tab_style(self) -> None:
+        try:
+            style = ttk.Style(self)
+            style.configure("Step4Batch.TNotebook", background="#f0f0f0", borderwidth=1)
+        except tk.TclError:
+            pass
+
+    def _batch_roi_tab_name_limit(self) -> int:
+        notebook = self.batch_roi_notebook
+        if notebook is None:
+            return 18
+        try:
+            tab_count = max(1, len(notebook.tabs()))
+            width = max(260, notebook.winfo_width())
+        except tk.TclError:
+            return 18
+        per_tab = max(70, width // tab_count)
+        return max(6, min(18, (per_tab - 54) // 7))
+
+    @staticmethod
+    def _compact_batch_roi_name(name: str, limit: int) -> str:
+        name = str(name or "Folder")
+        if len(name) <= limit:
+            return name
+        if limit <= 3:
+            return name[:limit]
+        return f"{name[: limit - 3]}..."
+
+    def _batch_roi_tab_text(self, state: dict, done: int | None = None, *, active: bool = False) -> str:
+        total = len(self.rois)
+        if done is None:
+            done = len(state.get("completed") or {})
+        folder = state.get("folder")
+        raw_label = state.get("base_label") or (folder.name if folder else "Folder")
+        if ". " in raw_label:
+            prefix, name = raw_label.split(". ", 1)
+            tab_name = name if active else self._compact_batch_roi_name(name, self._batch_roi_tab_name_limit())
+            label = f"{prefix}. {tab_name}"
+        else:
+            label = raw_label if active else self._compact_batch_roi_name(raw_label, self._batch_roi_tab_name_limit())
+        done_prefix = "[Done] " if state.get("complete") or done >= total else ""
+        return f"{done_prefix}{label} ({done}/{total})    ×"
+
+    def _refresh_batch_roi_tab_labels(self) -> None:
+        notebook = self.batch_roi_notebook
+        if notebook is None:
+            return
+        for tab_id in notebook.tabs():
+            try:
+                tab_key = str(notebook.nametowidget(tab_id))
+            except tk.TclError:
+                continue
+            state = self.batch_roi_tab_states.get(tab_key)
+            if state is None:
+                continue
+            done = len(state.get("completed") or {})
+            active = tab_key == self._active_batch_roi_tab
+            try:
+                notebook.tab(tab_id, text=self._batch_roi_tab_text(state, done, active=active))
+            except tk.TclError:
+                pass
+
+    def _on_batch_roi_notebook_configure(self, _event) -> None:
+        self._refresh_batch_roi_tab_labels()
+
+    def _sync_active_batch_roi_state(self) -> None:
+        tab_key = self._active_batch_roi_tab
+        if not tab_key:
+            return
+        state = self.batch_roi_tab_states.get(tab_key)
+        if state is None:
+            return
+        state["completed"] = dict(self.completed)
+        state["roi_clicks"] = {key: list(value) for key, value in self.roi_clicks.items()}
+        state["current_roi_idx"] = int(self.current_roi_idx)
+        state["profile_clicks"] = list(self.profile_clicks[:2])
+        state["slice"] = self.slice_var.get()
+        state["volume"] = self.volume
+        state["image"] = self.image
+        state["current_path"] = self.current_path
+        state["current_stem"] = self.current_stem
+        state["canvas"] = self.canvas
+        state["figure"] = self.figure
+        state["ax_profile"] = self.ax_profile
+        state["ax_isez"] = self.ax_isez
+        state["empty_placeholder"] = self.empty_placeholder
+        state["current_profile"] = self._current_profile
+
+    def _activate_batch_roi_tab(self, tab) -> None:
+        self._sync_active_batch_roi_state()
+        tab_key = str(tab)
+        state = self.batch_roi_tab_states.get(tab_key)
+        if state is None:
+            return
+        self._active_batch_roi_tab = tab_key
+        self._refresh_batch_roi_tab_labels()
+        self.plot_holder = tab
+        self._set_batch_folder_label(state.get("folder"))
+        if state.get("loaded") and self._restore_batch_roi_tab_from_cache(state):
+            return
+        self.canvas = None
+        self.figure = None
+        self.ax_profile = None
+        self.ax_isez = None
+        self.empty_placeholder = None
+        self._current_profile = None
+        self._load_path(state["path"], restore_state=state)
+
+    def _restore_batch_roi_tab_from_cache(self, state: dict) -> bool:
+        canvas = state.get("canvas")
+        figure = state.get("figure")
+        if canvas is None or figure is None:
+            return False
+        try:
+            widget = canvas.get_tk_widget()
+            widget.winfo_exists()
+        except tk.TclError:
+            return False
+
+        self.volume = state.get("volume")
+        self.image = state.get("image")
+        self.current_path = state.get("current_path") or Path(state["path"])
+        self.current_stem = state.get("current_stem") or self.current_path.stem
+        self.canvas = canvas
+        self.figure = figure
+        self.ax_profile = state.get("ax_profile")
+        self.ax_isez = state.get("ax_isez")
+        self.empty_placeholder = state.get("empty_placeholder")
+        self._current_profile = state.get("current_profile")
+        self.completed = dict(state.get("completed") or {})
+        self.roi_clicks = {key: list(value) for key, value in (state.get("roi_clicks") or {}).items()}
+        self.current_roi_idx = int(state.get("current_roi_idx") or 0)
+        self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
+        self.profile_clicks = list((state.get("profile_clicks") or [])[:2])
+
+        if self.volume is not None:
+            slice_values = [str(idx) for idx in range(self.volume.shape[0])]
+            self.slice_combo.configure(values=slice_values)
+        self.slice_var.set(str(state.get("slice") or "0"))
+        self.input_dir_var.set(str(self.current_path.parent))
+        if not self._output_dir_user_selected:
+            self.output_dir_var.set(str(self.current_path.parent))
+        self._set_batch_folder_label(state.get("folder"))
+        self._sync_entry_vars_from_clicks()
+        self._refresh_roi_list()
+        self._select_roi_in_list()
+        self._update_profile_status(self._current_profile)
+        self._update_confirm_button_state()
+        self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
+        return True
+
+    def _on_batch_roi_tab_changed(self, event) -> None:
+        notebook = event.widget
+        try:
+            selected = notebook.select()
+        except tk.TclError:
+            return
+        if selected:
+            self._activate_batch_roi_tab(notebook.nametowidget(selected))
+
+    @staticmethod
+    def _batch_roi_tab_bounds(notebook, index: int, y: int):
+        try:
+            bbox = notebook.bbox(index)
+        except tk.TclError:
+            bbox = None
+        if bbox and bbox[2] > 0:
+            x0, _y0, width, _height = bbox
+            return x0, x0 + width
+
+        try:
+            width = max(1, notebook.winfo_width())
+        except tk.TclError:
+            return None
+        first_x = None
+        last_x = None
+        probe_y = max(1, int(y))
+        for probe_x in range(width):
+            try:
+                probe_index = notebook.index(f"@{probe_x},{probe_y}")
+            except tk.TclError:
+                if first_x is not None:
+                    break
+                continue
+            if probe_index != index:
+                if first_x is not None:
+                    break
+                continue
+            if first_x is None:
+                first_x = probe_x
+            last_x = probe_x
+        if first_x is None or last_x is None:
+            return None
+        return first_x, last_x + 1
+
+    @classmethod
+    def _batch_roi_close_tab_at(cls, notebook, x: int, y: int):
+        try:
+            index = notebook.index(f"@{x},{y}")
+        except tk.TclError:
+            return None
+        bounds = cls._batch_roi_tab_bounds(notebook, index, y)
+        if not bounds:
+            return None
+        left, right = bounds
+        close_width = min(24, max(14, right - left))
+        if right - close_width <= x <= right:
+            try:
+                return notebook.nametowidget(notebook.tabs()[index])
+            except (tk.TclError, IndexError):
+                return None
+        return None
+
+    def _on_batch_roi_notebook_click(self, event):
+        notebook = event.widget
+        tab = self._batch_roi_close_tab_at(notebook, event.x, event.y)
+        if tab is None:
+            return None
+        self._close_batch_roi_tab(notebook, tab)
+        return "break"
+
+    def _on_batch_roi_notebook_motion(self, event):
+        try:
+            event.widget.configure(cursor="hand2" if self._batch_roi_close_tab_at(event.widget, event.x, event.y) is not None else "")
+        except tk.TclError:
+            pass
+
+    def _close_batch_roi_tab(self, notebook, tab) -> None:
+        tab_key = str(tab)
+        if tab_key == self._active_batch_roi_tab:
+            self._sync_active_batch_roi_state()
+        self.batch_roi_tab_states.pop(tab_key, None)
+        try:
+            notebook.forget(tab)
+        except tk.TclError:
+            return
+        try:
+            tab.destroy()
+        except tk.TclError:
+            pass
+        if tab_key == self._active_batch_roi_tab:
+            self._active_batch_roi_tab = None
+            if self.canvas is not None:
+                try:
+                    self.canvas.get_tk_widget().destroy()
+                except tk.TclError:
+                    pass
+                self.canvas = None
+            tabs = notebook.tabs()
+            if tabs:
+                self._activate_batch_roi_tab(notebook.nametowidget(tabs[0]))
+            else:
+                self.batch_roi_notebook = None
+                self.plot_holder = self.plot_container
+                self._render_empty_canvas()
+
+    def _update_active_batch_roi_tab_progress(self) -> None:
+        tab_key = self._active_batch_roi_tab
+        notebook = self.batch_roi_notebook
+        if not tab_key or notebook is None:
+            return
+        state = self.batch_roi_tab_states.get(tab_key)
+        if state is None:
+            return
+        done = len(state.get("completed") or self.completed)
+        try:
+            notebook.tab(tab_key, text=self._batch_roi_tab_text(state, done, active=True))
+        except tk.TclError:
+            pass
+
+    def _mark_active_batch_roi_complete(self) -> None:
+        tab_key = self._active_batch_roi_tab
+        if not tab_key:
+            return
+        state = self.batch_roi_tab_states.get(tab_key)
+        if state is None:
+            return
+        state["complete"] = True
+        self._sync_active_batch_roi_state()
+        self._update_active_batch_roi_tab_progress()
+
+    def _select_next_incomplete_batch_roi_tab(self) -> bool:
+        notebook = self.batch_roi_notebook
+        if notebook is None:
+            return False
+        tabs = list(notebook.tabs())
+        if not tabs:
+            return False
+        try:
+            current = notebook.select()
+            start_index = tabs.index(current) if current in tabs else -1
+        except (tk.TclError, ValueError):
+            start_index = -1
+
+        for offset in range(1, len(tabs) + 1):
+            tab_id = tabs[(start_index + offset) % len(tabs)]
+            state = self.batch_roi_tab_states.get(str(notebook.nametowidget(tab_id)))
+            if state is not None and not state.get("complete"):
+                notebook.select(tab_id)
+                return True
+        return False
+
+    def _load_next_batch_roi(self) -> None:
+        next_index = self.batch_roi_index + 1
+        if next_index >= len(self.batch_roi_paths):
+            self.status_var.set(
+                f"Batch ROI complete. Processed {len(self.batch_roi_paths)} folder(s); "
+                f"skipped {self.batch_roi_skipped} already complete."
+            )
+            messagebox.showinfo("Batch ROI", "All incomplete Step 4 folders in this batch are done.")
+            return
+
+        self.batch_roi_index = next_index
+        path = self.batch_roi_paths[self.batch_roi_index]
+        self.status_var.set(
+            f"Batch ROI {self.batch_roi_index + 1}/{len(self.batch_roi_paths)}: {path.parent}"
+        )
+        self._load_path(path)
+
+    def _load_path(self, path: str | os.PathLike, *, restore_state: dict | None = None) -> None:
         try:
             volume = load_oct_volume(path)
         except Exception as exc:
@@ -1051,10 +1847,31 @@ class Step4Frame(SidebarStepFrame):
         self._set_current_slice()
         self._refresh_roi_list()
         self._select_roi_in_list()
-        self.image_label_var.set(
-            f"{self.current_path.name}\nstack: {volume.shape[0]} slice(s), "
-            f"{volume.shape[2]} x {volume.shape[1]}, {volume.dtype}"
-        )
+        if restore_state is not None:
+            self.completed = dict(restore_state.get("completed") or {})
+            self.roi_clicks = {key: list(value) for key, value in (restore_state.get("roi_clicks") or {}).items()}
+            self.current_roi_idx = int(restore_state.get("current_roi_idx") or 0)
+            self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
+            self._load_current_roi_clicks()
+            saved_clicks = list((restore_state.get("profile_clicks") or [])[:2])
+            suffix = self._current_roi_suffix()
+            if saved_clicks and suffix not in self.roi_clicks and suffix not in self.completed:
+                self.profile_clicks = saved_clicks
+                self._sync_entry_vars_from_clicks()
+            self._refresh_roi_list()
+            self._select_roi_in_list()
+            self._render_current_roi()
+            restore_state["loaded"] = True
+            self._sync_active_batch_roi_state()
+            self._update_active_batch_roi_tab_progress()
+
+        if restore_state is not None or self.batch_roi_paths:
+            self._set_batch_folder_label(self.current_path.parent)
+        else:
+            self.image_label_var.set(
+                f"{self.current_path.name}\nstack: {volume.shape[0]} slice(s), "
+                f"{volume.shape[2]} x {volume.shape[1]}, {volume.dtype}"
+            )
         self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
 
     def _set_current_slice(self) -> None:
@@ -1478,6 +2295,9 @@ class Step4Frame(SidebarStepFrame):
 
         self._refresh_roi_list()
         self.status_var.set(f"Confirmed ROI {roi.suffix}.")
+        if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
+            self._sync_active_batch_roi_state()
+            self._update_active_batch_roi_tab_progress()
 
         if build_after:
             self._select_roi_in_list()
@@ -1522,16 +2342,11 @@ class Step4Frame(SidebarStepFrame):
                 isez_images[0].save(outdir / "ROI_to_move_stck.tiff", save_all=True, append_images=isez_images[1:])
 
             # MATLAB produced one ROI-overlay JPG per ROI, then the ImageJ macro
-            # stacked those overlays with the original image and ran a max
-            # projection. We skip the intermediate JPGs and write only the final
-            # MAX_Stack.tiff requested for this framework.
-            roi_arrays = [
-                roi_overlay_image(self.image, result.roi)
-                for result in ordered
-            ]
-            if roi_arrays:
-                max_projection = np.maximum.reduce(roi_arrays)
-                Image.fromarray(max_projection).save(outdir / "MAX_Stack.tiff")
+            # stacked the original image plus those JPGs and ran a max
+            # projection before saving MAX_Stack.tif. The app does not apply
+            # extra ROI image processing here.
+            max_projection = max_stack_projection_image(self.image, [result.roi for result in ordered])
+            Image.fromarray(max_projection).save(outdir / "MAX_Stack.tif")
 
             # ImageJ macro equivalent:
             # setTool("wand"); doWand(512, 179); run("Measure") per slice.
@@ -1546,7 +2361,15 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self.status_var.set(f"Built stack outputs in {outdir}.")
-        messagebox.showinfo("Step 4", "Built MAX_Stack.tiff, Results.xlsx, and ROI_to_move_stck.tiff.")
+        messagebox.showinfo("Step 4", "Built MAX_Stack.tif, Results.xlsx, and ROI_to_move_stck.tiff.")
+        if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
+            self._mark_active_batch_roi_complete()
+            if not self._select_next_incomplete_batch_roi_tab():
+                self.status_var.set("Batch ROI complete. All selected folder tabs are done.")
+                messagebox.showinfo("Batch ROI", "All selected Step 4 folders are done.")
+            return
+        if self.batch_roi_paths and self.batch_roi_index >= 0:
+            self._load_next_batch_roi()
 
 
 def main() -> None:
