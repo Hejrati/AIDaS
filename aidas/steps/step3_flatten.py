@@ -24,7 +24,6 @@ except Exception:
     pyreadr = None
 
 from aidas.utils.io_utils import read_analyze
-from aidas.utils.batch_ui import BatchTable
 from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
 )
@@ -1192,26 +1191,14 @@ class RBatchSelectionPanel(ttk.Frame):
 class RBatchRunPanel(ttk.Frame):
     """Embedded progress panel for concurrent folder-level R script runs."""
 
-    TABLE_COLUMNS = (
-        ("folder", "Folder", 560, "w"),
-        ("status", "Status", 380, "w"),
-        ("progress", "Progress", 92, "center"),
-    )
-    COLUMN_MIN_WIDTHS = {
-        "folder": 320,
-        "status": 160,
-        "progress": 76,
-    }
-    COLUMN_MAX_WIDTHS = {
-        "progress": 92,
-    }
-
     def __init__(self, step_frame, parent, folders, workers):
         super().__init__(parent)
         self.step_frame = step_frame
         self.folders = [Path(folder) for folder in folders]
         self.workers = workers
         self.row_by_folder = {}
+        self.step_states_by_folder = {}
+        self.current_step_by_folder = {}
         self._build_ui()
 
     def _build_ui(self):
@@ -1229,23 +1216,21 @@ class RBatchRunPanel(ttk.Frame):
         for folder in self.folders:
             row = {
                 "folder": folder,
+                "include": False,
+                "locked": True,
                 "values": {
                     "folder": str(folder),
                     "status": "Queued",
-                    "progress": "0%",
+                    "inputs": "0%",
                 },
             }
             rows.append(row)
             self.row_by_folder[str(folder)] = row
+            self.step_states_by_folder[str(folder)] = []
+            self.current_step_by_folder[str(folder)] = None
 
-        self.table = BatchTable(
-            wrapper,
-            columns=self.TABLE_COLUMNS,
-            min_widths=self.COLUMN_MIN_WIDTHS,
-            max_widths=self.COLUMN_MAX_WIDTHS,
-            stretch_column="folder",
-            empty_message="No folders are queued.",
-        )
+        self.table = RBatchSelectionTable(wrapper)
+        self.table.tree.heading("inputs", text="Progress")
         self.table.pack(fill="both", expand=True)
         self.table.set_rows(rows)
 
@@ -1256,13 +1241,14 @@ class RBatchRunPanel(ttk.Frame):
             anchor="w", pady=(4, 10)
         )
 
-        log_frame = ttk.LabelFrame(wrapper, text="Batch log")
-        log_frame.pack(fill="both", expand=False, pady=(10, 0))
-        self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled")
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="right", fill="y")
+        step_frame = ttk.LabelFrame(wrapper, text="Step progress")
+        step_frame.pack(fill="both", expand=False, pady=(10, 0))
+        self.step_text = tk.Text(step_frame, height=8, wrap="word", state="disabled")
+        step_scroll = ttk.Scrollbar(step_frame, orient="vertical", command=self.step_text.yview)
+        self.step_text.configure(yscrollcommand=step_scroll.set)
+        self.step_text.pack(side="left", fill="both", expand=True)
+        step_scroll.pack(side="right", fill="y")
+        self._render_step_progress()
 
     def update_folder(self, folder, status=None, progress=None):
         row = self.row_by_folder.get(str(folder))
@@ -1272,18 +1258,81 @@ class RBatchRunPanel(ttk.Frame):
         if status is not None:
             values["status"] = status
         if progress is not None:
-            values["progress"] = f"{int(max(0, min(100, float(progress))))}%"
-        self.table.update_row(row, values=values)
+            values["inputs"] = f"{int(max(0, min(100, float(progress))))}%"
+        row["values"] = values
+        for iid, candidate in self.table._row_by_iid.items():
+            if candidate is row:
+                self.table._refresh_row(iid, row)
+                self.table._fit_columns_to_content()
+                break
+        if status is not None:
+            if status == "Completed":
+                self._finish_current_step(folder, "Done")
+                self._append_step(folder, "Completed", "Done")
+            elif status == "Failed":
+                self._finish_current_step(folder, "Failed")
+            else:
+                self._start_step(folder, status)
 
     def set_summary(self, text):
         self.summary_var.set(text)
 
+    def _append_step(self, folder, label, state):
+        key = str(folder)
+        entries = self.step_states_by_folder.setdefault(key, [])
+        if entries and entries[-1]["label"] == label:
+            entries[-1]["state"] = state
+        else:
+            entries.append({"label": label, "state": state})
+        self._render_step_progress()
+
+    def _finish_current_step(self, folder, state):
+        key = str(folder)
+        current = self.current_step_by_folder.get(key)
+        if not current:
+            return
+        entries = self.step_states_by_folder.setdefault(key, [])
+        for entry in reversed(entries):
+            if entry["label"] == current:
+                entry["state"] = state
+                break
+        self.current_step_by_folder[key] = None
+        self._render_step_progress()
+
+    def _start_step(self, folder, label):
+        if label in {"Validating", "Running R script", "Starting R script"}:
+            return
+        key = str(folder)
+        current = self.current_step_by_folder.get(key)
+        if current == label:
+            return
+        if current:
+            self._finish_current_step(folder, "Done")
+        self.current_step_by_folder[key] = label
+        self._append_step(folder, label, "Running")
+
+    def _render_step_progress(self):
+        if not hasattr(self, "step_text"):
+            return
+        lines = []
+        for folder in self.folders:
+            entries = self.step_states_by_folder.get(str(folder), [])
+            if not entries:
+                lines.append("Queued...")
+                continue
+            for entry in entries:
+                suffix = "..." if entry["state"] == "Running" else f"... {entry['state']}"
+                lines.append(f"{entry['label']}{suffix}")
+        self.step_text.configure(state="normal")
+        self.step_text.delete("1.0", "end")
+        self.step_text.insert("end", "\n".join(lines))
+        if lines:
+            self.step_text.insert("end", "\n")
+        self.step_text.see("end")
+        self.step_text.configure(state="disabled")
+
     def log(self, text):
         line = f"{datetime.now().strftime('%H:%M:%S')}  {text}"
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", line + "\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
         try:
             with (app_log_dir() / "step3_batch_activity.log").open("a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
@@ -1318,7 +1367,7 @@ class Step3Frame(SidebarStepFrame):
         "startup": (1, "Starting R script"),
         "input-config": (2, "Reading R input configuration"),
         "load-images": (5, "Loading Analyze volumes in R"),
-        "fovea-center": (8, "Finding fovea center"),
+        "fovea-center": (8, "Calculating vertex"),
         "rpe-line": (11, "Reading RPE line"),
         "rpe-spline": (14, "Fitting RPE spline"),
         "apparent-angle": (17, "Computing apparent angles"),
@@ -1330,10 +1379,10 @@ class Step3Frame(SidebarStepFrame):
         "grand-mean": (59, "Building grand mean image"),
         "rough-vit-loop": (63, "Aligning retina profiles"),
         "python-export": (72, "Exporting R arrays"),
-        "layer-borders": (78, "Identifying retinal layer borders"),
+        "layer-borders": (78, "Drawing borders"),
         "main-normalization": (86, "Spatially normalizing main retina"),
         "fovea-normalization": (92, "Spatially normalizing fovea"),
-        "final-export": (97, "Writing final R outputs"),
+        "final-export": (97, "Drawing borders and writing outputs"),
         "done": (100, "R processing complete"),
     }
 
@@ -1351,6 +1400,10 @@ class Step3Frame(SidebarStepFrame):
         self.r_setup_panel = None
         self.r_batch_panel = None
         self.r_batch_run_panel = None
+        self.batch_results_notebook = None
+        self.batch_result_folders = []
+        self.batch_result_tab_states = {}
+        self._active_batch_result_tab = None
         self.r_setup_button = None
         self.r_batch_button = None
         self._busy = False
@@ -1392,11 +1445,9 @@ class Step3Frame(SidebarStepFrame):
             state="readonly",
         )
         view_combo.pack(fill="x", pady=2)
-        view_combo.bind("<<ComboboxSelected>>", lambda _: self._render())
+        view_combo.bind("<<ComboboxSelected>>", lambda _: self._on_view_selected())
 
         ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(8, 4))
-        self.progress = ttk.Progressbar(process, mode="determinate", maximum=100)
-        self.progress.pack(fill="x", pady=2)
         progress_text_frame = ttk.Frame(process, height=44)
         progress_text_frame.pack(fill="x", pady=(0, 4))
         progress_text_frame.pack_propagate(False)
@@ -1849,7 +1900,6 @@ class Step3Frame(SidebarStepFrame):
         self.output_sdb_dir = str(folder)
         self.results = results
         self._load_original_light_for_preview(folder)
-        self.progress.configure(value=100)
         self.progress_text_var.set("Loaded R results")
         self.view_var.set("DARK_MARKED_find_vertex")
         self.info_var.set(
@@ -1866,7 +1916,14 @@ class Step3Frame(SidebarStepFrame):
         return True
 
     def _load_result_png(self, filename):
-        png_path = Path(self.output_sdb_dir or self.current_sdb_dir) / filename
+        return self._load_result_png_from_folder(self.output_sdb_dir or self.current_sdb_dir, filename)
+
+    def _load_result_png_from_folder(self, folder, filename):
+        png_path = Path(folder) / filename
+        if not png_path.is_file() and filename.startswith("_tissueBorders__"):
+            matches = sorted(Path(folder).glob("_tissueBorders__*.png"))
+            if matches:
+                png_path = matches[0]
         if not png_path.is_file():
             raise FileNotFoundError(f"{filename} not found in {png_path.parent}")
         with Image.open(png_path) as img:
@@ -1984,7 +2041,6 @@ class Step3Frame(SidebarStepFrame):
         self.results = None
         self.original_light_volume = None
         self.view_var.set("DARK_MARKED_find_vertex")
-        self.progress.configure(value=0)
         self.progress_text_var.set("Idle")
         self._render()
 
@@ -2049,6 +2105,10 @@ class Step3Frame(SidebarStepFrame):
         self.r_setup_panel = None
         self.r_batch_panel = None
         self.r_batch_run_panel = None
+        self.batch_results_notebook = None
+        self.batch_result_folders = []
+        self.batch_result_tab_states = {}
+        self._active_batch_result_tab = None
 
     def _open_r_setup_wizard(self, on_finish=None):
         self._clear_plot_holder()
@@ -2148,7 +2208,6 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_run_panel.pack(fill="both", expand=True)
         self._busy = True
         self._set_process_buttons("disabled")
-        self.progress.configure(value=0)
         self.progress_text_var.set("Batch running")
         self.status_var.set(f"Running Step 3 R script for {len(folders)} folder(s).")
         threading.Thread(
@@ -2279,14 +2338,10 @@ class Step3Frame(SidebarStepFrame):
                     result = {"folder": folder, "returncode": 1, "stdout": "", "stderr": str(exc), "cmd": []}
                 results.append(result)
                 completed += 1
-                overall = (completed / max(1, total)) * 100.0
                 status = "Completed" if result["returncode"] == 0 else "Failed"
                 self.after(
                     0,
-                    lambda f=folder, s=status, o=overall: (
-                        self._batch_panel_update(f, status=s, progress=100),
-                        self.progress.configure(value=o),
-                    ),
+                    lambda f=folder, s=status: self._batch_panel_update(f, status=s, progress=100),
                 )
 
         self.after(0, lambda: self._on_batch_r_done(results))
@@ -2296,7 +2351,6 @@ class Step3Frame(SidebarStepFrame):
         self._set_process_buttons("normal")
         success = sum(1 for result in results if result["returncode"] == 0)
         failed = len(results) - success
-        self.progress.configure(value=100)
         self.progress_text_var.set("Batch completed")
         self.status_var.set(f"Batch Step 3 complete: {success} succeeded, {failed} failed.")
         if self.r_batch_run_panel is not None:
@@ -2311,8 +2365,8 @@ class Step3Frame(SidebarStepFrame):
         )
 
         successful_folders = [Path(result["folder"]) for result in results if result["returncode"] == 0]
-        if len(successful_folders) == 1:
-            self._load_r_results_from_folder(successful_folders[0], show_errors=False)
+        if successful_folders:
+            self._open_batch_r_result_tabs(successful_folders)
 
     def _write_r_run_log(self, output_dir, returncode, stdout, stderr, cmd):
         log_path = app_log_dir() / f"step3_rscript_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log"
@@ -2333,8 +2387,9 @@ class Step3Frame(SidebarStepFrame):
     def _tutorial_asset_path(self):
         return self._resource_path(Path("assets") / self.TUTORIAL_IMAGE_NAME)
 
-    def _display_preview_image(self, image, background="#ffffff"):
-        label = tk.Label(self.plot_holder, bg=background, borderwidth=0, highlightthickness=0)
+    def _display_preview_image(self, image, background="#ffffff", parent=None):
+        parent = self.plot_holder if parent is None else parent
+        label = tk.Label(parent, bg=background, borderwidth=0, highlightthickness=0)
         label.pack(fill="both", expand=True)
         source = image.convert("RGB")
 
@@ -2351,15 +2406,259 @@ class Step3Frame(SidebarStepFrame):
             fitted = ImageOps.contain(source, (width, height), Image.Resampling.LANCZOS)
             canvas = Image.new("RGB", (width, height), background)
             canvas.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
-            self._preview_photo = ImageTk.PhotoImage(canvas)
+            label.preview_photo = ImageTk.PhotoImage(canvas)
             try:
-                label.configure(image=self._preview_photo)
+                label.configure(image=label.preview_photo)
             except tk.TclError:
                 return
 
         label.bind("<Configure>", redraw, add="+")
-        self.canvas = label
+        if parent is self.plot_holder:
+            self.canvas = label
         self.after(0, redraw)
+
+    def _configure_batch_result_tab_style(self):
+        try:
+            style = ttk.Style(self)
+            style.configure("Step3Batch.TNotebook", background="#f0f0f0", borderwidth=1)
+        except tk.TclError:
+            pass
+
+    def _batch_result_tab_name_limit(self):
+        notebook = self.batch_results_notebook
+        if notebook is None:
+            return 18
+        try:
+            tab_count = max(1, len(notebook.tabs()))
+            width = max(260, notebook.winfo_width())
+        except tk.TclError:
+            return 18
+        per_tab = max(70, width // tab_count)
+        return max(6, min(18, (per_tab - 54) // 7))
+
+    @staticmethod
+    def _compact_batch_result_name(name, limit):
+        name = str(name or "Folder")
+        if len(name) <= limit:
+            return name
+        if limit <= 3:
+            return name[:limit]
+        return f"{name[: limit - 3]}..."
+
+    def _batch_result_tab_text(self, state, *, active=False):
+        folder = Path(state.get("folder") or "")
+        raw_label = state.get("base_label") or folder.name or str(folder)
+        if ". " in raw_label:
+            prefix, name = raw_label.split(". ", 1)
+            tab_name = name if active else self._compact_batch_result_name(name, self._batch_result_tab_name_limit())
+            label = f"{prefix}. {tab_name}"
+        else:
+            label = raw_label if active else self._compact_batch_result_name(raw_label, self._batch_result_tab_name_limit())
+        return f"{label}    x"
+
+    def _refresh_batch_result_tab_labels(self):
+        notebook = self.batch_results_notebook
+        if notebook is None:
+            return
+        for tab_id in notebook.tabs():
+            try:
+                tab_key = str(notebook.nametowidget(tab_id))
+            except tk.TclError:
+                continue
+            state = self.batch_result_tab_states.get(tab_key)
+            if state is None:
+                continue
+            try:
+                notebook.tab(tab_id, text=self._batch_result_tab_text(state, active=tab_key == self._active_batch_result_tab))
+            except tk.TclError:
+                pass
+
+    def _on_batch_result_notebook_configure(self, _event):
+        self._refresh_batch_result_tab_labels()
+
+    def _on_batch_result_tab_changed(self, event):
+        notebook = event.widget
+        try:
+            selected = notebook.select()
+        except tk.TclError:
+            return
+        if not selected:
+            return
+        self._active_batch_result_tab = str(notebook.nametowidget(selected))
+        self._refresh_batch_result_tab_labels()
+
+    @staticmethod
+    def _batch_result_tab_bounds(notebook, index, y):
+        try:
+            bbox = notebook.bbox(index)
+        except tk.TclError:
+            bbox = None
+        if bbox and bbox[2] > 0:
+            x0, _y0, width, _height = bbox
+            return x0, x0 + width
+
+        try:
+            width = max(1, notebook.winfo_width())
+        except tk.TclError:
+            return None
+        first_x = None
+        last_x = None
+        probe_y = max(1, int(y))
+        for probe_x in range(width):
+            try:
+                probe_index = notebook.index(f"@{probe_x},{probe_y}")
+            except tk.TclError:
+                if first_x is not None:
+                    break
+                continue
+            if probe_index != index:
+                if first_x is not None:
+                    break
+                continue
+            if first_x is None:
+                first_x = probe_x
+            last_x = probe_x
+        if first_x is None or last_x is None:
+            return None
+        return first_x, last_x + 1
+
+    @classmethod
+    def _batch_result_close_tab_at(cls, notebook, x, y):
+        try:
+            index = notebook.index(f"@{x},{y}")
+        except tk.TclError:
+            return None
+        bounds = cls._batch_result_tab_bounds(notebook, index, y)
+        if not bounds:
+            return None
+        left, right = bounds
+        close_width = min(24, max(14, right - left))
+        if right - close_width <= x <= right:
+            try:
+                return notebook.nametowidget(notebook.tabs()[index])
+            except (tk.TclError, IndexError):
+                return None
+        return None
+
+    def _on_batch_result_notebook_click(self, event):
+        notebook = event.widget
+        tab = self._batch_result_close_tab_at(notebook, event.x, event.y)
+        if tab is None:
+            return None
+        self._close_batch_result_tab(notebook, tab)
+        return "break"
+
+    def _on_batch_result_notebook_motion(self, event):
+        try:
+            cursor = "hand2" if self._batch_result_close_tab_at(event.widget, event.x, event.y) is not None else ""
+            event.widget.configure(cursor=cursor)
+        except tk.TclError:
+            pass
+
+    def _close_batch_result_tab(self, notebook, tab):
+        tab_key = str(tab)
+        state = self.batch_result_tab_states.pop(tab_key, None)
+        if state is not None:
+            folder = Path(state["folder"])
+            self.batch_result_folders = [item for item in self.batch_result_folders if Path(item) != folder]
+        try:
+            notebook.forget(tab)
+        except tk.TclError:
+            return
+        try:
+            tab.destroy()
+        except tk.TclError:
+            pass
+        if tab_key == self._active_batch_result_tab:
+            self._active_batch_result_tab = None
+            tabs = notebook.tabs()
+            if tabs:
+                notebook.select(tabs[0])
+                self._active_batch_result_tab = str(notebook.nametowidget(tabs[0]))
+                self._refresh_batch_result_tab_labels()
+            else:
+                self.batch_results_notebook = None
+                self.batch_result_folders = []
+                self._render()
+
+    @staticmethod
+    def _result_png_name_for_view(view):
+        if view == "DARK_MARKED_find_vertex":
+            return "DARK_MARKED_find_vertex.png"
+        if view == "_tissueBorders__DARK":
+            return "_tissueBorders__DARK.png"
+        return None
+
+    def _render_result_image_for_folder(self, parent, folder):
+        view = self.view_var.get()
+        filename = self._result_png_name_for_view(view)
+        if filename is None:
+            image = _placeholder_image(
+                f"Unknown Step 3 view:\n{view}",
+                size=(1600, 1000),
+                title="Step 3 Results",
+            )
+        else:
+            try:
+                image = self._load_result_png_from_folder(folder, filename)
+            except Exception as exc:
+                image = _placeholder_image(
+                    f"Could not load {filename}:\n{exc}",
+                    size=(1600, 1000),
+                    title=filename,
+                )
+        self._display_preview_image(image, parent=parent)
+
+    def _open_batch_r_result_tabs(self, folders):
+        folders = [Path(folder) for folder in folders]
+        if not folders:
+            return
+        self._clear_plot_holder()
+        self.batch_result_folders = folders
+        self.batch_result_tab_states = {}
+        self._active_batch_result_tab = None
+        self._configure_batch_result_tab_style()
+        notebook = ttk.Notebook(self.plot_holder, style="Step3Batch.TNotebook")
+        notebook.pack(fill="both", expand=True)
+        notebook.bind("<Button-1>", self._on_batch_result_notebook_click, add="+")
+        notebook.bind("<Motion>", self._on_batch_result_notebook_motion, add="+")
+        notebook.bind("<Leave>", lambda event: event.widget.configure(cursor=""), add="+")
+        notebook.bind("<<NotebookTabChanged>>", self._on_batch_result_tab_changed, add="+")
+        notebook.bind("<Configure>", self._on_batch_result_notebook_configure, add="+")
+        self.batch_results_notebook = notebook
+
+        for index, folder in enumerate(folders, start=1):
+            frame = ttk.Frame(notebook)
+            tab_key = str(frame)
+            state = {
+                "folder": folder,
+                "base_label": f"{index}. {folder.name or folder}",
+            }
+            self.batch_result_tab_states[tab_key] = state
+            notebook.add(frame, text=self._batch_result_tab_text(state))
+            ttk.Label(frame, text=str(folder), anchor="w", padding=4).pack(fill="x")
+            image_host = ttk.Frame(frame)
+            image_host.pack(fill="both", expand=True)
+            self._render_result_image_for_folder(image_host, folder)
+
+        first_tab = notebook.tabs()[0] if notebook.tabs() else None
+        if first_tab:
+            notebook.select(first_tab)
+            self._active_batch_result_tab = str(notebook.nametowidget(first_tab))
+            self._refresh_batch_result_tab_labels()
+
+        self.current_sdb_dir = str(folders[0])
+        self.output_sdb_dir = str(folders[0])
+        self.results = None
+        self.original_light_volume = None
+        self.status_var.set(f"Opened Step 3 results for {len(folders)} folder(s).")
+        self.info_var.set("Batch Step 3 R results opened:\n" + "\n".join(str(folder) for folder in folders))
+
+    def _on_view_selected(self):
+        if self.batch_result_folders:
+            self._open_batch_r_result_tabs(self.batch_result_folders)
+        else:
+            self._render()
 
     def _render_tutorial(self):
         tutorial_path = self._tutorial_asset_path()

@@ -172,6 +172,31 @@ export.python.final.arrays <- function() {
   write.python.array("FLATTENED_LIGHT_RETINA_RRC_N_FOVEA_PROFILES", FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles)
 }
 
+save.tissue.border.plot <- function(filename, flattened, rpe, olm, onl.opl, inl.ipl, rnfl.gcl, vitreous.retina) {
+  target <- file.path(OUTDIR, filename)
+  x.axis <- seq(-100, 2750, 1)
+  y.axis <- seq(-30, 430, 1)
+  n <- min(length(x.axis), nrow(rpe), nrow(olm), nrow(onl.opl), nrow(inl.ipl), nrow(rnfl.gcl), nrow(vitreous.retina))
+
+  png(filename=target, width=1600, height=520)
+  on.exit(dev.off(), add=TRUE)
+  image(
+    as.vector(x.axis),
+    as.vector(y.axis),
+    as.matrix(flattened[, dim(flattened)[2]:1, 1]),
+    xlab="Distance from Fovea (microns)",
+    ylab="Distance from RPE (microns)",
+    col=gray.colors(254)
+  )
+  matlines(x.axis[1:n], 431 - rpe[1:n, 1], col="red")
+  matlines(x.axis[1:n], 431 - olm[1:n, 1], col="blue")
+  matlines(x.axis[1:n], 431 - onl.opl[1:n, 1], col="red")
+  matlines(x.axis[1:n], 431 - inl.ipl[1:n, 1], col="blue")
+  matlines(x.axis[1:n], 431 - rnfl.gcl[1:n, 1], col="red")
+  matlines(x.axis[1:n], 431 - vitreous.retina[1:n, 1], col="blue")
+  invisible(target)
+}
+
 
 dbg("input-config", "Input directory:", INPUTDIR)
 dbg("input-config", "Output directory:", OUTDIR)
@@ -3549,6 +3574,28 @@ MAIN.DARK.OUTPUTS.fovea=cbind(MAIN.DARK.OUTPUTS.fovea[,1],APPARENT.ANGLES.FOR.DA
 colnames(MAIN.DARK.OUTPUTS.fovea)<-c("INDEX","apparent.angle.fovea..degrees","RPE.to.OLM.distance")
 MAIN.LIGHT.OUTPUTS.fovea=cbind(MAIN.LIGHT.OUTPUTS.fovea[,1],APPARENT.ANGLES.FOR.LIGHT[,2],MAIN.LIGHT.OUTPUTS.fovea[,2])
 colnames(MAIN.LIGHT.OUTPUTS.fovea)<-c("INDEX","apparent.angle.fovea..degrees","RPE.to.OLM.distance")
+
+dbg("final-export", "Writing tissue-border preview PNGs")
+save.tissue.border.plot(
+  paste("_tissueBorders__", TO.PROCESS.DARK, ".png", sep=""),
+  FLATTENED.DARK.RETINA.RRC,
+  R.RPE.POSITION.DARK,
+  R.OLM.POSITION.DARK,
+  R.ONL.OPL.POSITION.DARK,
+  R.INL.IPL.POSITION.DARK,
+  R.RNFL.GCL.POSITION.DARK,
+  R.VITREOUS.RETINA.POSITION.DARK
+)
+save.tissue.border.plot(
+  paste("_tissueBorders__", TO.PROCESS.LIGHT, ".png", sep=""),
+  FLATTENED.LIGHT.RETINA.RRC,
+  R.RPE.POSITION.LIGHT,
+  R.OLM.POSITION.LIGHT,
+  R.ONL.OPL.POSITION.LIGHT,
+  R.INL.IPL.POSITION.LIGHT,
+  R.RNFL.GCL.POSITION.LIGHT,
+  R.VITREOUS.RETINA.POSITION.LIGHT
+)
 
 rm(APPARENT.ANGLES.FOR.DARK,APPARENT.ANGLES.FOR.LIGHT)
 rm(VITREOUS.RETINA.POSITION.DARK,VITREOUS.RETINA.POSITION.LIGHT)

@@ -49,6 +49,7 @@ from scipy import ndimage
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.ui_utils import SidebarStepFrame, load_ui_icon
@@ -59,10 +60,17 @@ MATLAB_ROI_HIGH = 450
 MATLAB_ROI_TOP_LINE = 450
 MATLAB_A_LIMIT = 1.0
 
-# These dimensions are the generated plot-frame geometry used before applying
-# the ImageJ macro measurement. They are kept fixed so the same wand seed
-# location, doWand(512, 179), lands inside the drawn ISez shape.
+# These are the Step 4 macro/MATLAB plot properties. The GT
+# ``ROI_to_move_stck.tif`` frames are 969 x 513 px, the macro applies
+# ``doWand(512, 179)``, then measures with
+# ``fit shape invert redirect=None decimal=3``.
 IMAGEJ_ISEZ_CANVAS_SIZE = (969, 513)
+IMAGEJ_WAND_POINT = (512, 179)
+IMAGEJ_RESULTS_DECIMALS = 3
+MATLAB_ISEZ_X_HALF_WIDTH = 40.0
+MATLAB_ISEZ_Y_LIMITS = (-20.0, 120.0)
+MATLAB_AXIS_LINE_WIDTH = 1
+MATLAB_DATA_LINE_WIDTH = 2
 IMAGEJ_PLOT_BOX = (126.0, 38.0, 876.0, 456.0)
 IMAGEJ_PLOT_BOX_ASPECT = (IMAGEJ_PLOT_BOX[3] - IMAGEJ_PLOT_BOX[1]) / (IMAGEJ_PLOT_BOX[2] - IMAGEJ_PLOT_BOX[0])
 
@@ -419,38 +427,37 @@ def make_isez_plot_image(result: ISezResult) -> Image.Image:
 
     The original MATLAB script used ``saveas(gcf, *_ISez_*.png)`` and the
     ImageJ macro later opened those PNGs. This function creates the equivalent
-    final frame in memory so Step 4 only writes ``ROI_to_move_stck.tiff`` when
+    final frame in memory so Step 4 only writes ``ROI_to_move_stck.tif`` when
     the user presses the stack button.
     """
 
     image = Image.new("RGB", IMAGEJ_ISEZ_CANVAS_SIZE, "white")
     draw = ImageDraw.Draw(image)
     x0, y0, x1, y1 = IMAGEJ_PLOT_BOX
-    x_min = result.center - 40.0
-    x_max = result.center + 40.0
-    y_min = -20.0
-    y_max = 120.0
+    x_min = result.center - MATLAB_ISEZ_X_HALF_WIDTH
+    x_max = result.center + MATLAB_ISEZ_X_HALF_WIDTH
+    y_min, y_max = MATLAB_ISEZ_Y_LIMITS
 
     def to_pixel(px: float, py: float) -> tuple[float, float]:
         x = x0 + ((float(px) - x_min) / (x_max - x_min)) * (x1 - x0)
         y = y0 + ((y_max - float(py)) / (y_max - y_min)) * (y1 - y0)
         return x, y
 
-    draw.rectangle((x0, y0, x1, y1), outline="black", width=1)
+    draw.rectangle((x0, y0, x1, y1), outline="black", width=MATLAB_AXIS_LINE_WIDTH)
     for tick in np.linspace(x_min, x_max, 5):
         tx, _ = to_pixel(tick, y_min)
-        draw.line((tx, y1, tx, y1 + 5), fill="black")
+        draw.line((tx, y1, tx, y1 + 5), fill="black", width=MATLAB_AXIS_LINE_WIDTH)
     for tick in [-20, 0, 50, 100, 120]:
         _, ty = to_pixel(x_min, tick)
-        draw.line((x0 - 5, ty, x0, ty), fill="black")
+        draw.line((x0 - 5, ty, x0, ty), fill="black", width=MATLAB_AXIS_LINE_WIDTH)
 
     curve = [to_pixel(px, py) for px, py in zip(result.normalized_x, result.normalized_y)]
     curve = [(x, y) for x, y in curve if x0 - 2 <= x <= x1 + 2 and y0 - 2 <= y <= y1 + 2]
     if len(curve) >= 2:
-        draw.line(curve, fill="black", width=2)
+        draw.line(curve, fill="black", width=MATLAB_DATA_LINE_WIDTH)
     baseline = [to_pixel(px, py) for px, py in zip(result.baseline_x, result.baseline_y)]
     if len(baseline) >= 2:
-        draw.line(baseline, fill="black", width=2)
+        draw.line(baseline, fill="black", width=MATLAB_DATA_LINE_WIDTH)
     return image
 
 
@@ -597,7 +604,7 @@ def write_imagej_results_xlsx(rows: list[dict[str, float]], path: str | os.PathL
         zf.writestr("xl/worksheets/sheet1.xml", worksheet)
 
 
-def _imagej_wand_mask(image: Image.Image, point: tuple[int, int] = (512, 179)) -> np.ndarray:
+def _imagej_wand_mask(image: Image.Image, point: tuple[int, int] = IMAGEJ_WAND_POINT) -> np.ndarray:
     """Select the macro's wand region at doWand(512,179).
 
     Source reference: ImageJ ``ij.gui.Wand``. For these generated black/white
@@ -812,13 +819,13 @@ def imagej_shape_measurements_from_frame(image: Image.Image) -> dict[str, float]
     solidity = min(1.0, area / hull_area) if hull_area > 0 else 0.0
 
     return {
-        "Major": round(major, 3),
-        "Minor": round(minor, 3),
-        "Angle": round(angle, 3),
-        "Circ.": round(circularity, 3),
-        "AR": round(aspect_ratio, 3),
-        "Round": round(roundness, 3),
-        "Solidity": round(solidity, 3),
+        "Major": round(major, IMAGEJ_RESULTS_DECIMALS),
+        "Minor": round(minor, IMAGEJ_RESULTS_DECIMALS),
+        "Angle": round(angle, IMAGEJ_RESULTS_DECIMALS),
+        "Circ.": round(circularity, IMAGEJ_RESULTS_DECIMALS),
+        "AR": round(aspect_ratio, IMAGEJ_RESULTS_DECIMALS),
+        "Round": round(roundness, IMAGEJ_RESULTS_DECIMALS),
+        "Solidity": round(solidity, IMAGEJ_RESULTS_DECIMALS),
     }
 
 
@@ -1146,7 +1153,7 @@ class Step4Frame(SidebarStepFrame):
         self.canvas = None
         self.empty_placeholder = None
         self.ax_profile = None
-        self.ax_isez = None
+        self.ax_roi_grid = None
         self._current_profile = None
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
@@ -1167,12 +1174,12 @@ class Step4Frame(SidebarStepFrame):
         self.status_var = tk.StringVar(value="Ready - load a flattened OCT image to begin.")
         self.profile_status_var = tk.StringVar(value="Click start and end on the profile canvas.")
         self.stats_var = tk.StringVar(value="")
-        self.slice_var = tk.StringVar(value="0")
         self.start_var = tk.StringVar(value="")
         self.end_var = tk.StringVar(value="")
         self.confirm_button = None
-        self.canvas_clear_button = None
         self.build_stacks_button = None
+        self.roi_table = None
+        self._auto_saving_roi = False
         # self.auto_advance_var = tk.BooleanVar(value=True)
 
         self._build_ui()
@@ -1208,23 +1215,32 @@ class Step4Frame(SidebarStepFrame):
             justify="left",
         ).pack(fill="x", pady=(6, 0))
 
-        slice_row = ttk.Frame(source)
-        slice_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(slice_row, text="Slice").pack(side="left")
-        self.slice_combo = ttk.Combobox(slice_row, textvariable=self.slice_var, values=["0"], state="readonly", width=8)
-        self.slice_combo.pack(side="right")
-        self.slice_combo.bind("<<ComboboxSelected>>", lambda _event: self._set_current_slice())
-
         roi_section = self.add_sidebar_section("ROIs", fill="both", expand=True, pady=(0, 5))
         roi_box = roi_section.body
         list_frame = ttk.Frame(roi_box)
         list_frame.pack(fill="both", expand=True)
-        self.roi_listbox = tk.Listbox(list_frame, height=10, exportselection=False)
-        roi_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.roi_listbox.yview)
-        self.roi_listbox.configure(yscrollcommand=roi_scroll.set)
-        self.roi_listbox.pack(side="left", fill="both", expand=True)
-        roi_scroll.pack(side="right", fill="y")
-        self.roi_listbox.bind("<<ListboxSelect>>", self._on_roi_selected)
+        columns = ("roi", *RESULTS_HEADERS[1:])
+        self.roi_table = ttk.Treeview(
+            list_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            height=10,
+        )
+        roi_yscroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.roi_table.yview)
+        roi_xscroll = ttk.Scrollbar(list_frame, orient="horizontal", command=self.roi_table.xview)
+        self.roi_table.configure(yscrollcommand=roi_yscroll.set, xscrollcommand=roi_xscroll.set)
+        self.roi_table.heading("roi", text="ROI")
+        self.roi_table.column("roi", width=44, minwidth=40, stretch=False, anchor="center")
+        for column in RESULTS_HEADERS[1:]:
+            self.roi_table.heading(column, text=column)
+            self.roi_table.column(column, width=70, minwidth=58, stretch=False, anchor="center")
+        self.roi_table.grid(row=0, column=0, sticky="nsew")
+        roi_yscroll.grid(row=0, column=1, sticky="ns")
+        roi_xscroll.grid(row=1, column=0, sticky="ew")
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        self.roi_table.bind("<<TreeviewSelect>>", self._on_roi_selected)
 
         nav = ttk.Frame(roi_box)
         nav.pack(fill="x", pady=(6, 0))
@@ -1280,20 +1296,6 @@ class Step4Frame(SidebarStepFrame):
 
         self.confirm_row = ttk.Frame(self.content)
         self.confirm_row.pack(fill="x", pady=(6, 0))
-        self.confirm_button = ttk.Button(
-            self.confirm_row,
-            text="Done >>",
-            command=self._confirm_current_roi,
-        )
-        self.confirm_button.pack(side="right")
-        self.canvas_clear_button = ttk.Button(
-            self.confirm_row,
-            image=self.clear_icon,
-            text="Clear",
-            compound="left",
-            command=self._clear_clicks,
-        )
-        self.canvas_clear_button.pack(side="right", padx=(0, 6))
         self._update_confirm_button_state()
         self._update_build_stack_button_state()
 
@@ -1418,7 +1420,6 @@ class Step4Frame(SidebarStepFrame):
         self.plot_holder = self.plot_container
         self.figure = None
         self.ax_profile = None
-        self.ax_isez = None
         self._current_profile = None
         if self.empty_placeholder is not None:
             self.empty_placeholder.destroy()
@@ -1467,7 +1468,7 @@ class Step4Frame(SidebarStepFrame):
         self.canvas = None
         self.figure = None
         self.ax_profile = None
-        self.ax_isez = None
+        self.ax_roi_grid = None
         self.empty_placeholder = None
         self._current_profile = None
         self.batch_roi_tab_states = {}
@@ -1579,7 +1580,6 @@ class Step4Frame(SidebarStepFrame):
         state["roi_clicks"] = {key: list(value) for key, value in self.roi_clicks.items()}
         state["current_roi_idx"] = int(self.current_roi_idx)
         state["profile_clicks"] = list(self.profile_clicks[:2])
-        state["slice"] = self.slice_var.get()
         state["volume"] = self.volume
         state["image"] = self.image
         state["current_path"] = self.current_path
@@ -1587,7 +1587,7 @@ class Step4Frame(SidebarStepFrame):
         state["canvas"] = self.canvas
         state["figure"] = self.figure
         state["ax_profile"] = self.ax_profile
-        state["ax_isez"] = self.ax_isez
+        state["ax_roi_grid"] = self.ax_roi_grid
         state["empty_placeholder"] = self.empty_placeholder
         state["current_profile"] = self._current_profile
 
@@ -1606,7 +1606,7 @@ class Step4Frame(SidebarStepFrame):
         self.canvas = None
         self.figure = None
         self.ax_profile = None
-        self.ax_isez = None
+        self.ax_roi_grid = None
         self.empty_placeholder = None
         self._current_profile = None
         self._load_path(state["path"], restore_state=state)
@@ -1629,7 +1629,7 @@ class Step4Frame(SidebarStepFrame):
         self.canvas = canvas
         self.figure = figure
         self.ax_profile = state.get("ax_profile")
-        self.ax_isez = state.get("ax_isez")
+        self.ax_roi_grid = state.get("ax_roi_grid")
         self.empty_placeholder = state.get("empty_placeholder")
         self._current_profile = state.get("current_profile")
         self.completed = dict(state.get("completed") or {})
@@ -1638,10 +1638,6 @@ class Step4Frame(SidebarStepFrame):
         self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
         self.profile_clicks = list((state.get("profile_clicks") or [])[:2])
 
-        if self.volume is not None:
-            slice_values = [str(idx) for idx in range(self.volume.shape[0])]
-            self.slice_combo.configure(values=slice_values)
-        self.slice_var.set(str(state.get("slice") or "0"))
         self.input_dir_var.set(str(self.current_path.parent))
         if not self._output_dir_user_selected:
             self.output_dir_var.set(str(self.current_path.parent))
@@ -1837,14 +1833,11 @@ class Step4Frame(SidebarStepFrame):
         if not self._output_dir_user_selected:
             self.output_dir_var.set(str(self.current_path.parent))
 
-        slice_values = [str(idx) for idx in range(volume.shape[0])]
-        self.slice_combo.configure(values=slice_values)
-        self.slice_var.set("0")
         self.completed.clear()
         self.roi_clicks.clear()
         self.current_roi_idx = 0
         self.profile_clicks.clear()
-        self._set_current_slice()
+        self._set_slice_zero()
         self._refresh_roi_list()
         self._select_roi_in_list()
         if restore_state is not None:
@@ -1869,21 +1862,15 @@ class Step4Frame(SidebarStepFrame):
             self._set_batch_folder_label(self.current_path.parent)
         else:
             self.image_label_var.set(
-                f"{self.current_path.name}\nstack: {volume.shape[0]} slice(s), "
+                f"{self.current_path.name}\nusing slice 0 of {volume.shape[0]} slice(s), "
                 f"{volume.shape[2]} x {volume.shape[1]}, {volume.dtype}"
             )
         self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
 
-    def _set_current_slice(self) -> None:
+    def _set_slice_zero(self) -> None:
         if self.volume is None:
             return
-        try:
-            idx = int(self.slice_var.get())
-        except ValueError:
-            idx = 0
-        idx = max(0, min(idx, self.volume.shape[0] - 1))
-        self.slice_var.set(str(idx))
-        self.image = np.asarray(self.volume[idx])
+        self.image = np.asarray(self.volume[0])
         self.profile_clicks.clear()
         self.roi_clicks.clear()
         self.start_var.set("")
@@ -1896,10 +1883,15 @@ class Step4Frame(SidebarStepFrame):
     def _on_roi_selected(self, _event=None) -> None:
         if self._updating_roi_selection:
             return
-        selection = self.roi_listbox.curselection()
+        if self.roi_table is None:
+            return
+        selection = self.roi_table.selection()
         if not selection:
             return
-        selected_idx = int(selection[0])
+        try:
+            selected_idx = int(selection[0])
+        except (TypeError, ValueError):
+            return
         if selected_idx == self.current_roi_idx:
             return
         self._remember_current_roi_clicks()
@@ -1946,18 +1938,37 @@ class Step4Frame(SidebarStepFrame):
             self.end_var.set("")
 
     def _select_roi_in_list(self) -> None:
+        if self.roi_table is None:
+            return
         self._updating_roi_selection = True
-        self.roi_listbox.selection_clear(0, tk.END)
-        self.roi_listbox.selection_set(self.current_roi_idx)
-        self.roi_listbox.see(self.current_roi_idx)
+        iid = str(self.current_roi_idx)
+        self.roi_table.selection_set(iid)
+        self.roi_table.focus(iid)
+        self.roi_table.see(iid)
         self.after_idle(lambda: setattr(self, "_updating_roi_selection", False))
 
-    def _refresh_roi_list(self) -> None:
-        self.roi_listbox.delete(0, tk.END)
-        for roi in self.rois:
-            mark = "✅" if roi.suffix in self.completed else "❌"
-            self.roi_listbox.insert(tk.END, f"{roi.suffix:>5}   {mark}")
+    def _roi_metric_values(self, roi: ISezROI) -> tuple[str, ...]:
+        result = self.completed.get(roi.suffix)
+        if result is None:
+            return tuple("" for _name in RESULTS_HEADERS[1:])
+        try:
+            measurements = imagej_shape_measurements_from_frame(make_isez_plot_image(result))
+        except Exception:
+            return tuple("" for _name in RESULTS_HEADERS[1:])
+        return tuple(f"{float(measurements.get(name, 0.0)):.3f}" for name in RESULTS_HEADERS[1:])
 
+    def _refresh_roi_list(self) -> None:
+        if self.roi_table is None:
+            return
+        self.roi_table.delete(*self.roi_table.get_children(""))
+        for index, roi in enumerate(self.rois):
+            self.roi_table.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(roi.suffix, *self._roi_metric_values(roi)),
+            )
+        self._select_roi_in_list()
         self._update_build_stack_button_state()
 
     def _render_empty_canvas(self) -> None:
@@ -1966,7 +1977,7 @@ class Step4Frame(SidebarStepFrame):
             self.canvas = None
         self.figure = None
         self.ax_profile = None
-        self.ax_isez = None
+        self.ax_roi_grid = None
         self._current_profile = None
         self._update_confirm_button_state()
         if self.empty_placeholder is not None:
@@ -1987,14 +1998,29 @@ class Step4Frame(SidebarStepFrame):
         if self.canvas is not None and self.figure is not None:
             return
 
-        self.figure = Figure(figsize=(11, 7), dpi=100)
-        grid = self.figure.add_gridspec(2, 1, height_ratios=[1.25, 1.0])
-        self.ax_isez = self.figure.add_subplot(grid[0, 0])
+        self.figure = Figure(figsize=(8.5, 5.2), dpi=100)
+        grid = self.figure.add_gridspec(2, 1, height_ratios=[1.35, 0.95])
+        self.ax_roi_grid = self.figure.add_subplot(grid[0, 0])
         self.ax_profile = self.figure.add_subplot(grid[1, 0])
-        self.ax_isez.set_box_aspect(IMAGEJ_PLOT_BOX_ASPECT)
-        self.figure.subplots_adjust(left=0.08, right=0.98, bottom=0.08, top=0.95, hspace=0.32)
+        self.figure.subplots_adjust(left=0.065, right=0.965, bottom=0.085, top=0.985, hspace=0.13)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
         self.canvas.mpl_connect("button_press_event", self._on_profile_click)
+        self.canvas.get_tk_widget().bind("<Configure>", self._on_plot_canvas_configure, add="+")
+
+    def _on_plot_canvas_configure(self, event) -> None:
+        if self.figure is None:
+            return
+        width = max(320, int(event.width))
+        height = max(260, int(event.height))
+        dpi = float(self.figure.dpi or 100)
+        current_w, current_h = self.figure.get_size_inches()
+        next_w = width / dpi
+        next_h = height / dpi
+        if abs(current_w - next_w) < 0.02 and abs(current_h - next_h) < 0.02:
+            return
+        self.figure.set_size_inches(next_w, next_h, forward=False)
+        if self.canvas is not None:
+            self.canvas.draw_idle()
 
     def _render_current_roi(self) -> None:
         if self.image is None:
@@ -2010,6 +2036,7 @@ class Step4Frame(SidebarStepFrame):
         self._current_profile = profile
 
         self._ensure_plot_canvas()
+        self._draw_roi_overview_grid()
 
         xs = np.arange(1, profile.size + 1, dtype=np.float64)
         ymin = float(np.nanmin(profile))
@@ -2017,13 +2044,20 @@ class Step4Frame(SidebarStepFrame):
         self.ax_profile.plot(xs, profile, color="black", linewidth=1.2)
         self.ax_profile.set_xlim(0, 140)
         self.ax_profile.set_ylim(ymin, ymin + 20)
-        self.ax_profile.set_title(f"ROI {roi.suffix}: click start, then end")
-        self.ax_profile.set_xlabel("profile row")
+        self.ax_profile.set_position([0.12, 0.085, 0.78, 0.30])
+        self.ax_profile.text(
+            0.01,
+            0.96,
+            f"ROI {roi.suffix}",
+            ha="left",
+            va="top",
+            transform=self.ax_profile.transAxes,
+            fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.72, "pad": 2},
+        )
         for idx, click in enumerate(self.profile_clicks[:2]):
             color = "#1f77b4" if idx == 0 else "#d62728"
             self.ax_profile.axvline(click, color=color, linewidth=1.2)
-
-        self._draw_isez_preview(profile)
 
         self.canvas.draw()
         canvas_widget = self.canvas.get_tk_widget()
@@ -2032,74 +2066,38 @@ class Step4Frame(SidebarStepFrame):
         self._update_profile_status(profile)
         self._update_confirm_button_state()
 
-    def _draw_isez_preview(self, profile: np.ndarray) -> None:
-        self.ax_isez.clear()
-        self.ax_isez.set_box_aspect(IMAGEJ_PLOT_BOX_ASPECT)
-        self.ax_isez.set_title("Rotated / rescaled ISez")
-        self.ax_isez.set_ylim(-20, 120)
-        if len(self.profile_clicks) < 2:
-            self.ax_isez.text(
-                0.5,
-                0.5,
-                "Waiting for two profile clicks",
-                ha="center",
-                va="center",
-                transform=self.ax_isez.transAxes,
-            )
-            self.ax_isez.set_axis_off()
-            return
+    def _roi_overview_result(self, index: int) -> ISezResult | None:
+        if self.image is None or index >= len(self.rois):
+            return None
+        roi = self.rois[index]
+        if roi.suffix in self.completed:
+            return self.completed[roi.suffix]
 
-        start = _clamp_profile_index(self.profile_clicks[0], profile.size)
-        end = _clamp_profile_index(self.profile_clicks[1], profile.size)
-        if start > end:
-            start, end = end, start
+        if index == self.current_roi_idx:
+            clicks = list(self.profile_clicks[:2])
+        else:
+            clicks = list((self.roi_clicks.get(roi.suffix) or [])[:2])
+        if len(clicks) < 2:
+            return None
+
         try:
-            adj_start, adj_end, slope = adjust_isez_bounds(
-                profile,
-                start,
-                end,
-                right_click_x=max(self.profile_clicks[:2]),
-            )
+            profile = intensity_profile(self.image, roi)
+            start = _clamp_profile_index(clicks[0], profile.size)
+            end = _clamp_profile_index(clicks[1], profile.size)
+            if start > end:
+                start, end = end, start
+            adj_start, adj_end, slope = adjust_isez_bounds(profile, start, end, right_click_x=max(clicks))
             data = rotated_rescaled_isez(profile, adj_start, adj_end)
-        except Exception as exc:
-            self.ax_isez.text(0.5, 0.5, str(exc), ha="center", va="center", transform=self.ax_isez.transAxes)
-            self.ax_isez.set_axis_off()
-            return
+        except Exception:
+            return None
 
         center = (start + end) / 2.0
-        self.ax_isez.plot(data["x"], data["y"], color="black", linewidth=1.2)
-        self.ax_isez.plot(data["baseline_x"], data["baseline_y"], color="black", linewidth=1.0)
-        self.ax_isez.set_xlim(center - 40, center + 40)
-        self.ax_isez.set_ylim(-20, 120)
-        self.ax_isez.set_xlabel("profile row")
-        self.ax_isez.set_ylabel("rescaled intensity")
-        self._draw_isez_measurement_preview(
+        return ISezResult(
+            roi=roi,
             start=start,
             end=end,
             adjusted_start=adj_start,
             adjusted_end=adj_end,
-            center=center,
-            slope=slope,
-            data=data,
-        )
-
-    def _draw_isez_measurement_preview(
-        self,
-        *,
-        start: int,
-        end: int,
-        adjusted_start: int,
-        adjusted_end: int,
-        center: float,
-        slope: float,
-        data: dict[str, np.ndarray | float | int],
-    ) -> None:
-        result = ISezResult(
-            roi=self.rois[self.current_roi_idx],
-            start=start,
-            end=end,
-            adjusted_start=adjusted_start,
-            adjusted_end=adjusted_end,
             center=center,
             slope=slope,
             max_index=int(data["max_index"]),
@@ -2110,23 +2108,81 @@ class Step4Frame(SidebarStepFrame):
             baseline_x=np.asarray(data["baseline_x"], dtype=np.float64),
             baseline_y=np.asarray(data["baseline_y"], dtype=np.float64),
         )
-        try:
-            measurements = imagej_shape_measurements_from_frame(make_isez_plot_image(result))
-        except Exception:
+
+    def _draw_roi_overview_grid(self) -> None:
+        ax = self.ax_roi_grid
+        if ax is None:
             return
 
-        lines = [f"{name}: {measurements[name]:.3f}" for name in RESULTS_HEADERS[1:]]
-        self.ax_isez.text(
-            0.98,
-            0.98,
-            "\n".join(lines),
-            ha="right",
-            va="top",
-            transform=self.ax_isez.transAxes,
-            fontsize=8,
-            family="monospace",
-            bbox={"facecolor": "white", "edgecolor": "#9a9a9a", "alpha": 0.86, "pad": 3},
-        )
+        ax.clear()
+        ax.set_xlim(0, 7)
+        ax.set_ylim(0, 3)
+        ax.set_axis_off()
+        ax.set_facecolor("#fbfbfb")
+
+        for index in range(21):
+            col = index % 7
+            row = 2 - (index // 7)
+            active = index == self.current_roi_idx
+            edge = "#111827" if active else "#d1d5db"
+            width = 1.2 if active else 0.6
+            ax.add_patch(Rectangle((col, row), 1, 1, facecolor="#fbfbfb", edgecolor=edge, linewidth=width))
+
+            if index >= len(self.rois):
+                continue
+
+            roi = self.rois[index]
+            done = roi.suffix in self.completed
+            ax.text(
+                col + 0.04,
+                row + 0.94,
+                str(index + 1),
+                ha="left",
+                va="top",
+                fontsize=7,
+                color="#111827",
+            )
+            ax.text(
+                col + 0.96,
+                row + 0.94,
+                "\u2713" if done else "x",
+                ha="right",
+                va="top",
+                fontsize=7,
+                color="#047857" if done else "#b91c1c",
+                weight="bold",
+            )
+
+            result = self._roi_overview_result(index)
+            if result is None:
+                continue
+
+            center = float(result.center)
+            x_min = center - MATLAB_ISEZ_X_HALF_WIDTH
+            x_max = center + MATLAB_ISEZ_X_HALF_WIDTH
+            y_min, y_max = MATLAB_ISEZ_Y_LIMITS
+
+            def to_cell(xs, ys):
+                xs = np.asarray(xs, dtype=np.float64)
+                ys = np.asarray(ys, dtype=np.float64)
+                x_scaled = col + 0.08 + ((xs - x_min) / (x_max - x_min)) * 0.84
+                y_scaled = row + 0.10 + ((ys - y_min) / (y_max - y_min)) * 0.78
+                mask = (
+                    np.isfinite(x_scaled)
+                    & np.isfinite(y_scaled)
+                    & (x_scaled >= col + 0.04)
+                    & (x_scaled <= col + 0.96)
+                    & (y_scaled >= row + 0.04)
+                    & (y_scaled <= row + 0.90)
+                )
+                return x_scaled[mask], y_scaled[mask]
+
+            x_curve, y_curve = to_cell(result.normalized_x, result.normalized_y)
+            if x_curve.size >= 2:
+                ax.plot(x_curve, y_curve, color="black", linewidth=0.75)
+            x_base, y_base = to_cell(result.baseline_x, result.baseline_y)
+            if x_base.size >= 2:
+                ax.plot(x_base, y_base, color="black", linewidth=0.55)
 
     def _on_profile_click(self, event) -> None:
         if event.inaxes is not self.ax_profile or event.xdata is None:
@@ -2143,6 +2199,8 @@ class Step4Frame(SidebarStepFrame):
         self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
         self._render_current_roi()
+        if len(self.profile_clicks) >= 2:
+            self.after_idle(self._auto_save_current_roi)
 
     def _current_profile_size(self) -> int:
         if self._current_profile is not None:
@@ -2178,7 +2236,7 @@ class Step4Frame(SidebarStepFrame):
             float(_clamp_profile_index(end, n_points)),
         ]
 
-    def _apply_entry_clicks(self, _event=None, *, show_errors: bool = True) -> str | None:
+    def _apply_entry_clicks(self, _event=None, *, show_errors: bool = True, auto_save: bool = True) -> str | None:
         clicks = self._entry_clicks_from_vars(show_errors=show_errors)
         if clicks is None:
             return None
@@ -2187,6 +2245,8 @@ class Step4Frame(SidebarStepFrame):
         self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
         self._render_current_roi()
+        if auto_save and len(self.profile_clicks) >= 2:
+            self.after_idle(self._auto_save_current_roi)
         return "break"
 
     def _apply_entry_clicks_if_complete(self, _event=None) -> None:
@@ -2194,29 +2254,27 @@ class Step4Frame(SidebarStepFrame):
             self._apply_entry_clicks(show_errors=False)
 
     def _clear_clicks(self) -> None:
+        suffix = self._current_roi_suffix()
         self.profile_clicks.clear()
-        self.roi_clicks.pop(self._current_roi_suffix(), None)
+        self.roi_clicks.pop(suffix, None)
+        self.completed.pop(suffix, None)
         self.start_var.set("")
         self.end_var.set("")
+        self._refresh_roi_list()
+        if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
+            self._sync_active_batch_roi_state()
+            self._update_active_batch_roi_tab_progress()
         self._render_current_roi()
 
     def _update_confirm_button_state(self) -> None:
-        if self.confirm_button is None:
-            return
-        label = "Build Stack" if self.current_roi_idx >= len(self.rois) - 1 else "Done >>"
-        self.confirm_button.configure(text=label)
-        if len(self.profile_clicks) >= 2 and self.image is not None and self._current_roi_is_editable():
-            self.confirm_button.state(["!disabled"])
-        else:
-            self.confirm_button.state(["disabled"])
         self._update_clear_button_state()
 
     def _current_roi_is_editable(self) -> bool:
         return self._current_roi_suffix() not in self.completed
 
     def _update_clear_button_state(self) -> None:
-        enabled = bool(self.profile_clicks) and self.image is not None and self._current_roi_is_editable()
-        for button in (getattr(self, "clear_button", None), getattr(self, "canvas_clear_button", None)):
+        enabled = bool(self.profile_clicks) and self.image is not None
+        for button in (getattr(self, "clear_button", None),):
             if button is None:
                 continue
             if enabled:
@@ -2235,11 +2293,16 @@ class Step4Frame(SidebarStepFrame):
         else:
             self.build_stacks_button.state(["disabled"])
 
-    def _confirm_current_roi(self) -> None:
-        if self.current_roi_idx >= len(self.rois) - 1:
-            self._save_current_roi(auto_advance=False, build_after=True)
-        else:
+    def _auto_save_current_roi(self) -> None:
+        if self._auto_saving_roi or self.image is None:
+            return
+        if len(self.profile_clicks) < 2 or not self._current_roi_is_editable():
+            return
+        self._auto_saving_roi = True
+        try:
             self._save_current_roi(auto_advance=True)
+        finally:
+            self._auto_saving_roi = False
 
     def _update_profile_status(self, profile: np.ndarray) -> None:
         roi = self.rois[self.current_roi_idx]
@@ -2274,7 +2337,7 @@ class Step4Frame(SidebarStepFrame):
         if self.image is None:
             messagebox.showwarning("Step 4", "Load an OCT image first.")
             return
-        self._apply_entry_clicks(show_errors=False)
+        self._apply_entry_clicks(show_errors=False, auto_save=False)
         if len(self.profile_clicks) < 2:
             messagebox.showwarning("Step 4", "Click or enter both start and end profile positions.")
             return
@@ -2312,6 +2375,9 @@ class Step4Frame(SidebarStepFrame):
             self._render_current_roi()
         else:
             self._select_roi_in_list()
+            self._draw_roi_overview_grid()
+            if self.canvas is not None:
+                self.canvas.draw()
             self._update_build_stack_button_state()
 
     def _build_stack_outputs(self) -> None:
@@ -2336,10 +2402,11 @@ class Step4Frame(SidebarStepFrame):
             # ImageJ macro equivalent:
             # open *_ISez_*.png -> run("Images to Stack") ->
             # saveAs("Tiff", "ROI_to_move_stck.tif").
-            # We render the plot frames in memory and save only the final stack.
+            # We render the plot frames in memory because this workflow does
+            # not save the intermediate MATLAB PNG files.
             isez_images = [make_isez_plot_image(result) for result in ordered]
             if isez_images:
-                isez_images[0].save(outdir / "ROI_to_move_stck.tiff", save_all=True, append_images=isez_images[1:])
+                isez_images[0].save(outdir / "ROI_to_move_stck.tif", save_all=True, append_images=isez_images[1:])
 
             # MATLAB produced one ROI-overlay JPG per ROI, then the ImageJ macro
             # stacked the original image plus those JPGs and ran a max
@@ -2361,7 +2428,7 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self.status_var.set(f"Built stack outputs in {outdir}.")
-        messagebox.showinfo("Step 4", "Built MAX_Stack.tif, Results.xlsx, and ROI_to_move_stck.tiff.")
+        messagebox.showinfo("Step 4", "Built MAX_Stack.tif, Results.xlsx, and ROI_to_move_stck.tif.")
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._mark_active_batch_roi_complete()
             if not self._select_next_incomplete_batch_roi_tab():
