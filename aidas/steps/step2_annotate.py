@@ -16,7 +16,7 @@ Core Functionality:
   • Foveal Center Line: Always-visible draggable vertical marker for the
     foveal center X-coordinate with nudge buttons and keyboard entry.
   • Export: CSV export of all boundary row coordinates (one row per boundary).
-  • MARKED Images: Generate Light_MARKED and Dark_MARKED Analyze volumes
+  • MARKED Images: Generate Light_MARKED Analyze volumes
     (8-bit) with boundary pixels marked at specific intensity values per
     ImageJ macro conventions. Auto-scales boundaries if output size differs
     from input.
@@ -61,7 +61,7 @@ COMMON_MARK_VALUES = {
     "RPE": 255,
     FOVEA_BOUNDARY_NAME: 243,
 }
-DARK_FIRST_SLICE_EXTRA_MARK_VALUES = {
+ADDITIONAL_MARK_VALUES = {
     "ELM": 254,
     "ONL-OPL": 253,
     "INL-IPL": 252,
@@ -79,9 +79,7 @@ MARKED_BOUNDARY_WIDTHS = {
     "Fovea-Center": 1,
 }
 LIGHT_MARKED_BASENAME = "Light_MARKED"
-DARK_MARKED_BASENAME = "Dark_MARKED"
 LIGHT_SOURCE_BASENAME = "Light"
-DARK_SOURCE_BASENAME = "Dark"
 IMG_DEFAULT_DIR = os.path.expanduser("~/Desktop")
 SUPPORTED_IMAGE_FILETYPES = [
     ("Analyze image", "*.img"),
@@ -173,7 +171,7 @@ def _resize_to_standard_format(volume_3d):
         return volume_3d.copy()
     
     # Resize each slice independently using nearest-neighbor indexing so the
-    # original dtype is preserved for 16-bit LIGHT/DARK volumes.
+    # original dtype is preserved for 16-bit LIGHT volumes.
     y_idx = np.arange(current_height, dtype=np.int64)
     x_idx = np.floor(np.arange(target_width) * current_width / target_width).astype(np.int64)
     y_idx = np.clip(y_idx, 0, current_height - 1)
@@ -313,7 +311,7 @@ class Step2BatchSegmentationTable(ttk.Frame):
                 "",
                 "end",
                 text="",
-                values=("No folders with Light.img or Dark.img were found.", "", ""),
+                values=("No folders with Light.img were found.", "", ""),
                 tags=("locked",),
             )
             self._refresh_header_checkbox()
@@ -460,7 +458,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         ttk.Label(
             wrapper,
             text=(
-                "AIDaS will search the selected folder and subfolders for Light.img and Dark.img. "
+                "AIDaS will search the selected folder and subfolders for Light.img. "
                 "Folders with existing MARKED segmentation are shown as already segmented and skipped."
             ),
             wraplength=760,
@@ -551,7 +549,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         ready_images = sum(len(row.get("image_paths") or []) for row in rows if not row["locked"])
         self.summary_var.set(
             f"Scanned {scanned} folder(s). Found {ready} ready folder(s) with {ready_images} image(s) to segment, "
-            f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img or Dark.img."
+            f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img."
         )
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
         try:
@@ -818,7 +816,8 @@ class Step2Frame(SidebarStepFrame):
         #     fill="x",
         #     padx=(0, 2),
         # )
-        self.button_save_icon = load_ui_icon(self, "glyphs-poly--save.png")
+        self.button_save_icon = load_ui_icon(self, "ic--baseline-save.png")
+        self.button_save_all_icon = load_ui_icon(self, "ic--sharp-save-all.png")
         self.saved_button = ttk.Button(saved_buttons, text="Save", command=self._save_current_marked_image_button, 
                    image=self.button_save_icon, compound="left")
         self.saved_button.pack(
@@ -826,6 +825,14 @@ class Step2Frame(SidebarStepFrame):
             anchor="center",
             padx=4,
         )
+        self.save_all_button = ttk.Button(
+            saved_buttons,
+            text="Save All",
+            command=self._save_all_batch_result_tabs_button,
+            image=self.button_save_all_icon,
+            compound="left",
+        )
+        self.save_all_button.pack(side="left", anchor="center", padx=4)
 
         # help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
         # help_box = help_section.body
@@ -943,15 +950,12 @@ class Step2Frame(SidebarStepFrame):
         self._update_batch_ai_button_state()
 
     def _scan_step2_batch_segmentation_folders(self, root_dir):
-        """Return folder rows showing ready and already-segmented Light/Dark inputs."""
+        """Return folder rows showing ready and already-segmented Light inputs."""
         root_dir = os.path.abspath(root_dir)
         rows = []
         scanned = 0
         skipped = 0
-        targets = (
-            ("Light", "light.img", "light_marked.img"),
-            ("Dark", "dark.img", "dark_marked.img"),
-        )
+        targets = (("Light", "light.img", "light_marked.img"),)
 
         for folder, dirnames, filenames in os.walk(root_dir):
             dirnames.sort(key=str.lower)
@@ -1010,7 +1014,7 @@ class Step2Frame(SidebarStepFrame):
                 image_paths.append(path)
 
         if not image_paths:
-            messagebox.showwarning("Batch Step 2", "No unsegmented Light.img or Dark.img files were selected.")
+            messagebox.showwarning("Batch Step 2", "No unsegmented Light.img files were selected.")
             return
 
         self._close_step2_batch_segmentation_panel(restore_previous=True)
@@ -2214,10 +2218,7 @@ class Step2Frame(SidebarStepFrame):
         return self._marked_output_basepath(basename)
 
     def _source_output_basepaths(self):
-        return [
-            self._source_output_basepath(LIGHT_SOURCE_BASENAME),
-            self._source_output_basepath(DARK_SOURCE_BASENAME),
-        ]
+        return [self._source_output_basepath(LIGHT_SOURCE_BASENAME)]
 
     def _reference_marked_volume_spec(self):
         """Get the target dimensions and dtype for MARKED output volumes.
@@ -2306,17 +2307,16 @@ class Step2Frame(SidebarStepFrame):
     def _apply_mark_values(self, target_image, mark_values):
         self._apply_mark_values_to_image(target_image, self.boundary_traces, mark_values)
 
-    def _build_marked_volumes(self):
-        """Generate Light_MARKED and Dark_MARKED 8-bit Analyze volumes from traced boundaries.
+    def _build_marked_volume(self):
+        """Generate a Light_MARKED 8-bit Analyze volume from traced boundaries.
 
-        Creates two volumes in standard output format (test1 dimensions):
-          - Light_MARKED: RPE and Fovea marked on a light background (230)
-          - Dark_MARKED: All 6 boundaries + Fovea marked on a dark background
+        The volume contains all six traced boundaries and the fovea marker on
+        the capped source-image background.
 
         All output volumes are automatically resized to standard format (current annotation height × 2133 width, 2 slices).
 
         Returns:
-            Tuple (light_volume, dark_volume): Two 3-D uint8 numpy arrays in standard format.
+            A 3-D uint8 numpy array in standard format.
         """
         target_slices, target_h, target_w, _target_dtype = self._reference_marked_volume_spec()
         base_marked = self._build_marked_image()
@@ -2366,16 +2366,10 @@ class Step2Frame(SidebarStepFrame):
         else:
             original_traces = None
 
-        # Standard MARKED format: 8-bit with base intensities capped at 230,
-        # All traced boundaries on both LIGHT and DARK slices.
+        # Standard MARKED format: 8-bit with base intensities capped at 230.
         light_slice = np.array(base_marked, copy=True)
         self._apply_mark_values(light_slice, COMMON_MARK_VALUES)
-        self._apply_mark_values(light_slice, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
-
-        dark_marked_slice = np.array(base_marked, copy=True)
-        self._apply_mark_values(dark_marked_slice, COMMON_MARK_VALUES)
-        # Apply all traced boundaries (including extra layers) to dark volume on all slices
-        self._apply_mark_values(dark_marked_slice, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
+        self._apply_mark_values(light_slice, ADDITIONAL_MARK_VALUES)
 
         # Restore original traces if we modified them
         if original_traces is not None:
@@ -2384,22 +2378,20 @@ class Step2Frame(SidebarStepFrame):
         # Create volume with standard number of slices (always 2 in standard format)
         nslices = max(1, int(target_slices))
         light_volume = np.stack([light_slice] * nslices, axis=0).astype(np.uint8, copy=False)
-        dark_volume = np.stack([dark_marked_slice] * nslices, axis=0).astype(np.uint8, copy=False)
-        
+
         # Ensure output volumes are in standard format
         light_volume = _resize_to_standard_format(light_volume)
-        dark_volume = _resize_to_standard_format(dark_volume)
-        
-        return light_volume, dark_volume
+
+        return light_volume
 
     def _source_image_for_original_save(self):
         """Return the 16-bit source image that corresponds to current annotations."""
         return self.image_data
 
-    def _save_light_dark_images(self, reference_shape=None):
-        """Export unmarked LIGHT and DARK Analyze volumes from the current image.
+    def _save_light_image(self, reference_shape=None):
+        """Export an unmarked LIGHT Analyze volume from the current image.
 
-        These outputs use the 16-bit image that corresponds to the current
+        This output uses the 16-bit image that corresponds to the current
         annotation coordinates, resized to the saved MARKED volume shape.
 
         Returns:
@@ -2429,7 +2421,7 @@ class Step2Frame(SidebarStepFrame):
         return saved_paths
 
     def _save_marked_images(self, require_complete=False, prompt_on_incomplete=False):
-        """Generate and save Light_MARKED and Dark_MARKED Analyze volumes.
+        """Generate and save a Light_MARKED Analyze volume.
 
         The MARKED volumes are 8-bit Analyze files with boundary pixels marked at
         specific intensity values per ImageJ macro conventions. Boundaries are
@@ -2458,18 +2450,14 @@ class Step2Frame(SidebarStepFrame):
             if not proceed:
                 return False
 
-        light_marked, dark_marked = self._build_marked_volumes()
+        light_marked = self._build_marked_volume()
         saved_paths = []
 
         light_base_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME)
         write_analyze(light_base_path, light_marked)
         saved_paths.append(light_base_path)
 
-        dark_base_path = self._marked_output_basepath(DARK_MARKED_BASENAME)
-        write_analyze(dark_base_path, dark_marked)
-        saved_paths.append(dark_base_path)
-
-        saved_paths.extend(self._save_light_dark_images(reference_shape=light_marked.shape))
+        saved_paths.extend(self._save_light_image(reference_shape=light_marked.shape))
 
         self.status_var.set(
             "Saved marked images -> "
@@ -2500,7 +2488,7 @@ class Step2Frame(SidebarStepFrame):
 
         marked_slice = np.array(base_marked, copy=True)
         self._apply_mark_values_to_image(marked_slice, traces, COMMON_MARK_VALUES)
-        self._apply_mark_values_to_image(marked_slice, traces, DARK_FIRST_SLICE_EXTRA_MARK_VALUES)
+        self._apply_mark_values_to_image(marked_slice, traces, ADDITIONAL_MARK_VALUES)
 
         nslices = max(1, int(target_slices))
         volume = np.stack([marked_slice] * nslices, axis=0).astype(np.uint8, copy=False)
@@ -2530,13 +2518,15 @@ class Step2Frame(SidebarStepFrame):
         traces = state.get("traces") if state else None
         return bool(traces) and all(name in traces for name in BOUNDARY_NAMES)
 
-    def _save_batch_result_state(self, tab_key):
+    def _save_batch_result_state(self, tab_key, save_orientation_pair=False):
         state = self._batch_result_states.get(tab_key)
         if not state:
             return None
 
         if tab_key == getattr(self, "_active_batch_result_tab", None):
             self._sync_active_batch_result_state()
+            if save_orientation_pair:
+                return self._save_current_marked_orientation_pair()
             return self._save_current_marked_image(sync_active=False)
 
         saved_context = {
@@ -2561,6 +2551,8 @@ class Step2Frame(SidebarStepFrame):
             self._input_analyze_template = state.get("template")
             self._source_was_8bit = bool(state.get("source_was_8bit", False))
             self._set_completion_from_traces()
+            if save_orientation_pair:
+                return self._save_current_marked_orientation_pair()
             return self._save_current_marked_image(sync_active=False)
         finally:
             self.current_file = saved_context["current_file"]
@@ -2573,6 +2565,26 @@ class Step2Frame(SidebarStepFrame):
             for name, value in saved_context["completion"].items():
                 if name in self.boundary_completion_vars:
                     self.boundary_completion_vars[name].set(value)
+
+    def _save_current_marked_orientation_pair(self):
+        """Save the current batch result as nasal and horizontally mirrored temporal data."""
+        if self.image_data is None or not self.boundary_traces:
+            return None
+        if not self.current_file or self.current_file == "Step 1 output":
+            raise ValueError("The batch image does not have a source file path.")
+
+        source_base = os.path.splitext(os.path.basename(self.current_file))[0] + "_MARKED"
+        parent = os.path.dirname(os.path.abspath(self.current_file))
+        nasal_base = os.path.join(parent, "nasal", source_base)
+        temporal_base = os.path.join(parent, "temporal", source_base)
+        os.makedirs(os.path.dirname(nasal_base), exist_ok=True)
+        os.makedirs(os.path.dirname(temporal_base), exist_ok=True)
+
+        volume = self._build_current_marked_volume()
+        write_analyze(nasal_base, volume)
+        # Analyze volumes are (slice, row, column); reversing columns mirrors left/right.
+        write_analyze(temporal_base, np.ascontiguousarray(np.flip(volume, axis=2)))
+        return nasal_base, temporal_base
 
     def _save_all_batch_result_tabs(self):
         self._sync_active_batch_result_state()
@@ -2602,22 +2614,75 @@ class Step2Frame(SidebarStepFrame):
                 return []
 
         saved = []
+        saved_tab_keys = []
         failures = []
         for tab_key in tab_keys:
             state = self._batch_result_states.get(tab_key)
             try:
-                out_base = self._save_batch_result_state(tab_key)
-                if out_base:
-                    saved.append(out_base)
+                output_pair = self._save_batch_result_state(tab_key, save_orientation_pair=True)
+                if output_pair:
+                    saved.append(output_pair)
+                    saved_tab_keys.append(tab_key)
             except (OSError, ValueError, RuntimeError) as exc:
                 name = os.path.basename((state or {}).get("input") or tab_key)
                 failures.append(f"{name}: {exc}")
 
+        self._close_saved_batch_result_tabs(saved_tab_keys)
         if failures:
             messagebox.showerror("Save error", "Could not save some open tabs:\n" + "\n".join(failures[:8]))
         if saved:
-            self.status_var.set(f"Saved {len(saved)} open batch tab(s).")
+            self.status_var.set(
+                f"Saved and closed {len(saved)} batch tab(s) in nasal and temporal folders."
+            )
         return saved
+
+    def _close_saved_batch_result_tabs(self, tab_keys):
+        """Close already-saved batch tabs without showing per-tab save prompts."""
+        notebook = getattr(self, "batch_results_notebook", None)
+        if notebook is None:
+            return
+
+        for tab_key in tab_keys:
+            canvas = self._batch_result_tab_canvases.pop(tab_key, None)
+            self._batch_result_states.pop(tab_key, None)
+            if canvas in self._batch_result_canvases:
+                self._batch_result_canvases.remove(canvas)
+            try:
+                tab = notebook.nametowidget(tab_key)
+                notebook.forget(tab)
+                tab.destroy()
+            except tk.TclError:
+                pass
+
+        if notebook.tabs():
+            selected = notebook.select()
+            if selected:
+                self._activate_batch_result_tab(notebook.nametowidget(selected))
+            self.image_info_var.set(f"AI batch results | {len(notebook.tabs())} image(s)")
+            return
+
+        notebook.destroy()
+        self.batch_results_notebook = None
+        self._batch_result_canvases = []
+        self._batch_result_tab_canvases = {}
+        self._batch_result_states = {}
+        self._active_batch_result_tab = None
+        self._single_editor_state = None
+        self._show_single_image_canvas()
+        self._clear_image_display("All batch result images were saved and closed.")
+
+    def _save_all_batch_result_tabs_button(self):
+        if getattr(self, "batch_results_notebook", None) is None or not self._batch_result_states:
+            messagebox.showinfo("No open tabs", "There are no open batch result tabs to save.")
+            return
+
+        saved = self._save_all_batch_result_tabs()
+        if saved:
+            messagebox.showinfo(
+                "Saved All",
+                f"Saved and closed {len(saved)} image(s).\n\n"
+                "Nasal images were saved unchanged; temporal images were mirrored left to right.",
+            )
 
     def _save_current_marked_image_button(self):
         if self.image_data is None:
@@ -2646,7 +2711,7 @@ class Step2Frame(SidebarStepFrame):
             saved = self._save_all_batch_result_tabs()
             if saved:
                 message_lines = ["Saved open batch tabs:"]
-                message_lines.extend(path + ".img" for path in saved[:12])
+                message_lines.extend(pair[0] + ".img" for pair in saved[:12])
                 if len(saved) > 12:
                     message_lines.append(f"...and {len(saved) - 12} more.")
                 messagebox.showinfo("Saved", "\n".join(message_lines))
@@ -2669,8 +2734,7 @@ class Step2Frame(SidebarStepFrame):
             return
 
         light_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME) + ".img"
-        dark_path = self._marked_output_basepath(DARK_MARKED_BASENAME) + ".img"
-        message_lines = ["Saved MARKED images:", light_path, dark_path]
+        message_lines = ["Saved MARKED image:", light_path]
         message_lines.extend([path + ".img" for path in self._source_output_basepaths()])
         messagebox.showinfo("Saved", "\n".join(message_lines))
 
@@ -2972,7 +3036,7 @@ class Step2Frame(SidebarStepFrame):
         return np.clip(arr, 0, 255).astype(np.uint8)
 
     def _image_int16_for_original_save(self, image):
-        """Convert unmarked LIGHT/DARK save data to signed 16-bit for Analyze.
+        """Convert unmarked LIGHT save data to signed 16-bit for Analyze.
 
         Step 1/Analyze data may already be signed int16. Preserve those values
         exactly; clipping negatives to zero can turn valid OCT signal black.
@@ -3013,7 +3077,7 @@ class Step2Frame(SidebarStepFrame):
 
         SDB data arrives from Step 1 already opened as 16-bit; keep that data
         as-is. If a user opens an 8-bit image directly, promote it to a real
-        16-bit working copy so LIGHT/DARK saves never become 8-bit originals.
+        16-bit working copy so LIGHT saves never become 8-bit originals.
         """
         arr, source_was_8bit = self._coerce_image_for_annotation(image)
         self._source_was_8bit = source_was_8bit
@@ -3292,11 +3356,17 @@ class Step2Frame(SidebarStepFrame):
         for path in paths:
             ext = os.path.splitext(path)[1].lower()
             dedupe_path = os.path.splitext(path)[0] if ext in {".hdr", ".img"} else path
+            if os.path.basename(dedupe_path).lower() != LIGHT_SOURCE_BASENAME.lower():
+                continue
             norm = os.path.normcase(os.path.abspath(dedupe_path))
             if norm in seen:
                 continue
             seen.add(norm)
             image_paths.append(path)
+
+        if not image_paths:
+            messagebox.showwarning("Batch Step 2", "Select one or more Light.img files.")
+            return
 
         manual_fovea_by_key = None
         if manual_fovea_by_path is not None:
