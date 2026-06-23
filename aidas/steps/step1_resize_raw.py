@@ -305,7 +305,7 @@ class Step1Frame(SidebarStepFrame):
         self.undo_crop_btn = ttk.Button(roi_actions, text="Undo", command=self._reset, state="disabled", image=self.undo_crop_btn_icon, compound="left")
         self.undo_crop_btn.pack(fill="x", pady=(0, 10))
         
-        self.save_all_btn_icon = load_ui_icon(self, "glyphs-poly--save.png")
+        self.save_all_btn_icon = load_ui_icon(self, "ic--baseline-save.png")
         self.save_all_btn = ttk.Button(roi, text="Save All (TIFF, IMG, HDR)", command=self._save_all_formats, state="disabled", image=self.save_all_btn_icon, compound="left")
         self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 2))
 
