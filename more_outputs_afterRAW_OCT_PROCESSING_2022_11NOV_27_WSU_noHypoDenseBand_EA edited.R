@@ -3,8 +3,19 @@
 ## or after opening the file saved by "RAW_OCT_PROCESSING".R (which should have the prefix "_done_"
 
 
-### this assumes the light and dark images are one-and-done (rather than each being unique) and so just takes the first
-### member of each stack. 
+### LIGHT is the only required channel. Keep the legacy DARK-named output slots
+### as in-memory aliases so existing filenames and downstream indexing remain
+### unchanged without requiring any DARK objects in the loaded workspace.
+if(!exists("TO.PROCESS.DARK")) TO.PROCESS.DARK="DARK"
+if(!exists("FLATTENED.DARK.RETINA.RRC")) FLATTENED.DARK.RETINA.RRC=FLATTENED.LIGHT.RETINA.RRC
+if(!exists("R.RPE.POSITION.DARK")) R.RPE.POSITION.DARK=R.RPE.POSITION.LIGHT
+if(!exists("R.OLM.POSITION.DARK")) R.OLM.POSITION.DARK=R.OLM.POSITION.LIGHT
+if(!exists("R.ONL.OPL.POSITION.DARK")) R.ONL.OPL.POSITION.DARK=R.ONL.OPL.POSITION.LIGHT
+if(!exists("R.INL.IPL.POSITION.DARK")) R.INL.IPL.POSITION.DARK=R.INL.IPL.POSITION.LIGHT
+if(!exists("R.RNFL.GCL.POSITION.DARK")) R.RNFL.GCL.POSITION.DARK=R.RNFL.GCL.POSITION.LIGHT
+if(!exists("R.VITREOUS.RETINA.POSITION.DARK")) R.VITREOUS.RETINA.POSITION.DARK=R.VITREOUS.RETINA.POSITION.LIGHT
+
+### The first member of the LIGHT stack is used for the compatibility plots.
 
 
 dev.new(width=12,height=4)
@@ -61,11 +72,11 @@ THICKNESS.EXPORT[4,]=c(NA,(R.OLM.POSITION.LIGHT[1:2851,1]-R.ONL.OPL.POSITION.LIG
 THICKNESS.EXPORT[5,]=c(NA,(R.ONL.OPL.POSITION.LIGHT[1:2851,1]-R.INL.IPL.POSITION.LIGHT[1:2851,1]))
 THICKNESS.EXPORT[6,]=c(NA,(R.INL.IPL.POSITION.LIGHT[1:2851,1]-R.RNFL.GCL.POSITION.LIGHT[1:2851,1]))
 THICKNESS.EXPORT[7,]=c(NA,(R.RNFL.GCL.POSITION.LIGHT[1:2851,1]-R.VITREOUS.RETINA.POSITION.LIGHT[1:2851,1]))
-# Add summed layers for DARK, EA
-summed_dark = as.numeric(THICKNESS.EXPORT[4, 2:2852]) +
+# Add summed layers for LIGHT, EA
+summed_light = as.numeric(THICKNESS.EXPORT[4, 2:2852]) +
               as.numeric(THICKNESS.EXPORT[5, 2:2852]) +
               as.numeric(THICKNESS.EXPORT[6, 2:2852])
-THICKNESS.EXPORT[8, ] = c(NA, summed_dark)
+THICKNESS.EXPORT[8, ] = c(NA, summed_light)
 
 THICKNESS.EXPORT[,1]=c("Distance_from_Fundus_um",
                        "WholeRetina_um",
@@ -85,11 +96,11 @@ THICKNESS.EXPORT[4,]=c(NA,(R.OLM.POSITION.DARK[1:2851,1]-R.ONL.OPL.POSITION.DARK
 THICKNESS.EXPORT[5,]=c(NA,(R.ONL.OPL.POSITION.DARK[1:2851,1]-R.INL.IPL.POSITION.DARK[1:2851,1]))
 THICKNESS.EXPORT[6,]=c(NA,(R.INL.IPL.POSITION.DARK[1:2851,1]-R.RNFL.GCL.POSITION.DARK[1:2851,1]))
 THICKNESS.EXPORT[7,]=c(NA,(R.RNFL.GCL.POSITION.DARK[1:2851,1]-R.VITREOUS.RETINA.POSITION.DARK[1:2851,1]))
-# Add summed layers for LIGHT, EA
-summed_light = as.numeric(THICKNESS.EXPORT[4, 2:2852]) +
+# Add summed layers for the legacy DARK-compatible output, EA
+summed_dark = as.numeric(THICKNESS.EXPORT[4, 2:2852]) +
                as.numeric(THICKNESS.EXPORT[5, 2:2852]) +
                as.numeric(THICKNESS.EXPORT[6, 2:2852])
-THICKNESS.EXPORT[8, ] = c(NA, summed_light)
+THICKNESS.EXPORT[8, ] = c(NA, summed_dark)
 THICKNESS.EXPORT[,1]=c("Distance_from_Fundus_um",
                        "WholeRetina_um",
                        "RPE_to_OLM_um",

@@ -11,25 +11,27 @@
 #####
 # Enter the name of each ANALYZE file here.
 #  Omit the ".hdr"/".img" extension.
-# You should have four ANALYZE images:
+# You should have two ANALYZE images:
 #
-#  LIGHT, DARK, LIGHT_MARKED, and DARK_MARKED.
+#  LIGHT and LIGHT_MARKED. The historical DARK channel was a duplicate of
+#  LIGHT; this script keeps paired-channel compatibility arrays internally so
+#  downstream indexing and thickness calculations remain unchanged.
 #  Each _MARKED image (each slice of each image) should:
 #     (1) be 8-bit, and max set to 230, other than:
 #     (2) have the RPE marked as 255
 #     (3) have a line showing the center of the fovea marked as 243
-#  Moreover, the first slice of the DARK_MARKED image should have the following marked:
+#  The first slice of the LIGHT_MARKED image should have the following marked:
 #      254 is the ELM
 #      253 is the ONL/OPL border
 #      252 is the INL/IPL border
 #      250 is the RNFL/GCL border
 #      249 is the RNFL/vitreous border
 #
-# IMAGE.INDEX.LIGHT and IMAGE.INDEX.DARK should list the order of images.
-# if, for instance, there were 5 dark images taken with no omissions,
-# then IMAGE.INDEX.DARK=c(1,2,3,4,5)
-# but images 1 and 4 of 5 was removed from the # ANALYZE files, 
-# (e.g., due to low signal-to-noise), then IMAGE.INDEX.DARK=c(2,3,5)
+# IMAGE.INDEX.LIGHT should list the order of images. The compatibility DARK
+# index is copied from it so removing DARK cannot shift paired array indexes.
+# For example, if five images were taken with no omissions, use
+# IMAGE.INDEX.LIGHT=c(1,2,3,4,5). If images 1 and 4 were removed, use
+# IMAGE.INDEX.LIGHT=c(2,3,5).
 # the number of items in this list has to match the number of slices in the
 # respective ANALYZE file.
 # 
@@ -120,12 +122,14 @@ dir.create(OUTDIR, showWarnings=FALSE, recursive=TRUE)
 OUTDIR <- normalizePath(OUTDIR, mustWork=TRUE)
 setwd(INPUTDIR)
 
-REFERENCE.DARK=strip.analyze.extension(arg.or.env(3, "AIDAS_REFERENCE_DARK", "DARK_MARKED"))
 REFERENCE.LIGHT=strip.analyze.extension(arg.or.env(4, "AIDAS_REFERENCE_LIGHT", "LIGHT_MARKED"))
-TO.PROCESS.DARK=strip.analyze.extension(arg.or.env(5, "AIDAS_TO_PROCESS_DARK", "DARK"))
 TO.PROCESS.LIGHT=strip.analyze.extension(arg.or.env(6, "AIDAS_TO_PROCESS_LIGHT", "LIGHT"))
 IMAGE.INDEX.LIGHT=parse.index(arg.or.env(7, "AIDAS_IMAGE_INDEX_LIGHT", ""))
-IMAGE.INDEX.DARK=parse.index(arg.or.env(8, "AIDAS_IMAGE_INDEX_DARK", ""))
+# These names are retained only for legacy output filenames and R object names.
+# No DARK Analyze input is read.
+REFERENCE.DARK="DARK_MARKED"
+TO.PROCESS.DARK="DARK"
+IMAGE.INDEX.DARK=IMAGE.INDEX.LIGHT
 PIXEL.WIDTH=as.numeric(arg.or.env(9, "AIDAS_PIXEL_WIDTH", "3.89")) #<-- microns per pixel
 PYEXPORTDIR <- file.path(OUTDIR, "step3_r_arrays")
 dir.create(PYEXPORTDIR, showWarnings=FALSE, recursive=TRUE)
@@ -262,18 +266,19 @@ DFforSECONDfit=10
 #
 # load everything; sometimes it loads as four-dimensional instead of three-dimensional; correct this
 dbg("load-images", "Loading Analyze volumes")
-REF.DARK<-f.read.analyze.volume(paste(REFERENCE.DARK,".hdr",sep=""))
 REF.LIGHT<-f.read.analyze.volume(paste(REFERENCE.LIGHT,".hdr",sep=""))
-DARK<-f.read.analyze.volume(paste(TO.PROCESS.DARK,".hdr",sep=""))
 LIGHT<-f.read.analyze.volume(paste(TO.PROCESS.LIGHT,".hdr",sep=""))
-if(length(dim(REF.DARK))==4) REF.DARK=REF.DARK[,,,1]
 if(length(dim(REF.LIGHT))==4) REF.LIGHT=REF.LIGHT[,,,1]
-if(length(dim(DARK))==4) DARK=DARK[,,,1]
 if(length(dim(LIGHT))==4) LIGHT=LIGHT[,,,1]
+# Preserve the legacy paired-channel dimensions and loop structure exactly.
+# The former DARK inputs in every ground-truth fixture are pixel-identical to
+# their LIGHT counterparts, so these aliases reproduce the original values.
+REF.DARK=REF.LIGHT
+DARK=LIGHT
 dbg("load-images", "REF.DARK dim:", paste(dim(REF.DARK), collapse="x"), "REF.LIGHT dim:", paste(dim(REF.LIGHT), collapse="x"))
 dbg("load-images", "DARK dim:", paste(dim(DARK), collapse="x"), "LIGHT dim:", paste(dim(LIGHT), collapse="x"))
 if(is.null(IMAGE.INDEX.LIGHT)) IMAGE.INDEX.LIGHT=seq(1, dim(LIGHT)[3], 1)
-if(is.null(IMAGE.INDEX.DARK)) IMAGE.INDEX.DARK=seq(1, dim(DARK)[3], 1)
+IMAGE.INDEX.DARK=IMAGE.INDEX.LIGHT
 if(length(IMAGE.INDEX.LIGHT) != dim(LIGHT)[3]) {
   stop(paste0("IMAGE.INDEX.LIGHT length ", length(IMAGE.INDEX.LIGHT), " does not match LIGHT slices ", dim(LIGHT)[3], "."))
 }
@@ -3704,10 +3709,65 @@ EXPORT[1,]=t(as.data.frame(c(paste("fovea",TO.PROCESS.LIGHT,sep=""),"angle","who
 EXPORT=t(EXPORT)
 write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_fovea_light_profiles_",TO.PROCESS.LIGHT,".txt",sep="")))
 
+## Export per-position layer thicknesses here as part of the non-interactive
+## Step 3 run. Historically these two files were produced only by the separate
+## more_outputs_afterRAW... script, so the application never created them.
+write.thickness.table <- function(channel.name,
+                                  rpe.position,
+                                  olm.position,
+                                  onl.opl.position,
+                                  inl.ipl.position,
+                                  rnfl.gcl.position,
+                                  vitreous.position) {
+  THICKNESS.EXPORT=as.data.frame(matrix(,7,2852))
+  THICKNESS.EXPORT[1,]=c(NA,seq(-100,2750,1))
+  THICKNESS.EXPORT[2,]=c(NA,(rpe.position[1:2851,1]-vitreous.position[1:2851,1]))
+  THICKNESS.EXPORT[3,]=c(NA,(rpe.position[1:2851,1]-olm.position[1:2851,1]))
+  THICKNESS.EXPORT[4,]=c(NA,(olm.position[1:2851,1]-onl.opl.position[1:2851,1]))
+  THICKNESS.EXPORT[5,]=c(NA,(onl.opl.position[1:2851,1]-inl.ipl.position[1:2851,1]))
+  THICKNESS.EXPORT[6,]=c(NA,(inl.ipl.position[1:2851,1]-rnfl.gcl.position[1:2851,1]))
+  THICKNESS.EXPORT[7,]=c(NA,(rnfl.gcl.position[1:2851,1]-vitreous.position[1:2851,1]))
+  summed.layers=as.numeric(THICKNESS.EXPORT[4,2:2852])+
+                as.numeric(THICKNESS.EXPORT[5,2:2852])+
+                as.numeric(THICKNESS.EXPORT[6,2:2852])
+  THICKNESS.EXPORT[8,]=c(NA,summed.layers)
+  THICKNESS.EXPORT[,1]=c("Distance_from_Fundus_um",
+                         "WholeRetina_um",
+                         "RPE_to_OLM_um",
+                         "OLM_to_ONL_OPLborder_um",
+                         "ONL_OPLborder_to_INL_IPLborder_um",
+                         "INL_IPLborder_to_RNFL_GCLborder_um",
+                         "RNFL_GCLborder_to_vitreous_um",
+                         "Summed_layers")
+  write(t(t(THICKNESS.EXPORT)),
+        ncol=nrow(THICKNESS.EXPORT),
+        file=file.path(OUTDIR,paste("_thickness_vs_distance_from_fovea_",channel.name,".txt",sep="")),
+        sep="\t")
+}
+
+write.thickness.table(
+  TO.PROCESS.DARK,
+  R.RPE.POSITION.DARK,
+  R.OLM.POSITION.DARK,
+  R.ONL.OPL.POSITION.DARK,
+  R.INL.IPL.POSITION.DARK,
+  R.RNFL.GCL.POSITION.DARK,
+  R.VITREOUS.RETINA.POSITION.DARK
+)
+write.thickness.table(
+  TO.PROCESS.LIGHT,
+  R.RPE.POSITION.LIGHT,
+  R.OLM.POSITION.LIGHT,
+  R.ONL.OPL.POSITION.LIGHT,
+  R.INL.IPL.POSITION.LIGHT,
+  R.RNFL.GCL.POSITION.LIGHT,
+  R.VITREOUS.RETINA.POSITION.LIGHT
+)
+
 export.python.final.arrays()
 
 ## and cleanup before a final Save
-rm(EXPORT.2.buff,EXPORT.2,EXPORT)
+rm(EXPORT.2.buff,EXPORT.2,EXPORT,write.thickness.table)
 
 save.image(file.path(OUTDIR, paste("_done_",TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,".RData",sep="")))
 dbg("done", "R processing complete")

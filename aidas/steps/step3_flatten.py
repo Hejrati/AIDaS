@@ -1018,7 +1018,7 @@ class RBatchSelectionPanel(ttk.Frame):
         ttk.Label(
             wrapper,
             text=(
-                "AIDaS will search the selected folder and subfolders for complete Step 3 inputs. "
+                "AIDaS will search the selected folder and subfolders for Light.img and Light_MARKED.img. "
                 "Folders containing existing RData are shown as skipped and will not be processed."
             ),
             wraplength=760,
@@ -1109,7 +1109,7 @@ class RBatchSelectionPanel(ttk.Frame):
                         "values": {
                             "folder": folder_text,
                             "status": status,
-                            "inputs": "4",
+                            "inputs": str(len(self.step_frame.REQUIRED_INPUTS)),
                         },
                     }
                 )
@@ -1151,7 +1151,7 @@ class RBatchSelectionPanel(ttk.Frame):
         skipped = sum(1 for row in rows if row["locked"])
         self.summary_var.set(
             f"Scanned {scanned} folders. Found {ready} ready folder(s), {skipped} skipped folder(s) with RData. "
-            f"{missing} folder(s) did not contain all four required inputs."
+            f"{missing} folder(s) did not contain both required Light inputs."
         )
         max_workers = self._max_worker_count(ready)
         self.workers_spin.configure(to=max_workers)
@@ -1350,9 +1350,7 @@ class Step3Frame(SidebarStepFrame):
     MIN_DEPTH_INWARD_UM = 450.0
     CENTERED_FOVEA_GUARD_PX = 100
     REQUIRED_INPUTS = (
-        ("Dark_MARKED", ("Dark_MARKED", "DARK_MARKED"), "Dark_MARKED.hdr/.img", 8),
         ("Light_MARKED", ("Light_MARKED", "LIGHT_MARKED"), "Light_MARKED.hdr/.img", 8),
-        ("DARK", ("DARK", "Dark"), "DARK.hdr/.img", 16),
         ("LIGHT", ("LIGHT", "Light"), "LIGHT.hdr/.img", 16),
     )
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
@@ -1967,10 +1965,10 @@ class Step3Frame(SidebarStepFrame):
     @classmethod
     def _validate_input_stack_shapes(cls, stack_info):
         shapes = {label: info["shape"] for label, info in stack_info.items()}
-        expected = shapes["Dark_MARKED"]
+        expected = shapes["Light_MARKED"]
         mismatched = {label: shape for label, shape in shapes.items() if shape != expected}
         if mismatched:
-            lines = [f"Dark_MARKED: {expected}"]
+            lines = [f"Light_MARKED: {expected}"]
             lines.extend(f"{label}: {shape}" for label, shape in mismatched.items())
             raise ValueError(
                 "Step 3 inputs must all have the same Analyze stack shape "
@@ -2175,12 +2173,16 @@ class Step3Frame(SidebarStepFrame):
         return {
             "input_dir": str(folder.resolve()),
             "output_dir": str(folder.resolve()),
-            "reference_dark": self._analyze_base_name(input_paths["Dark_MARKED"]),
+            # Keep the legacy paired-channel labels and indexes so the R array
+            # layout remains byte-for-byte compatible. The R script aliases
+            # both compatibility slots to the LIGHT data instead of reading
+            # DARK input files.
+            "reference_dark": "DARK_MARKED",
             "reference_light": self._analyze_base_name(input_paths["Light_MARKED"]),
-            "to_process_dark": self._analyze_base_name(input_paths["DARK"]),
+            "to_process_dark": "DARK",
             "to_process_light": self._analyze_base_name(input_paths["LIGHT"]),
             "image_index_light": self._r_index_string(input_info["LIGHT"]["shape"][0]),
-            "image_index_dark": self._r_index_string(input_info["DARK"]["shape"][0]),
+            "image_index_dark": self._r_index_string(input_info["LIGHT"]["shape"][0]),
             "pixel_width": str(self.PIXEL_WIDTH_UM),
         }
 
@@ -2295,6 +2297,21 @@ class Step3Frame(SidebarStepFrame):
             stdout = "".join(output_lines)
             log_path = self._write_r_run_log(r_config["output_dir"], 1, stdout, str(exc), cmd)
             return {"folder": folder, "returncode": 1, "stdout": stdout, "stderr": str(exc), "cmd": cmd, "log": log_path}
+
+        if returncode == 0:
+            output_dir = Path(r_config["output_dir"])
+            required_exports = (
+                output_dir / f"_thickness_vs_distance_from_fovea_{r_config['to_process_dark']}.txt",
+                output_dir / f"_thickness_vs_distance_from_fovea_{r_config['to_process_light']}.txt",
+            )
+            missing_exports = [path.name for path in required_exports if not path.is_file()]
+            if missing_exports:
+                returncode = 1
+                output_lines.append(
+                    "ERROR: R completed without required thickness export(s): "
+                    + ", ".join(missing_exports)
+                    + "\n"
+                )
 
         stdout = "".join(output_lines)
         log_path = self._write_r_run_log(r_config["output_dir"], returncode, stdout, "", cmd)

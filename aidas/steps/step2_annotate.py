@@ -2567,7 +2567,7 @@ class Step2Frame(SidebarStepFrame):
                     self.boundary_completion_vars[name].set(value)
 
     def _save_current_marked_orientation_pair(self):
-        """Save the current batch result as nasal and horizontally mirrored temporal data."""
+        """Save original and MARKED Light volumes for nasal and temporal orientations."""
         if self.image_data is None or not self.boundary_traces:
             return None
         if not self.current_file or self.current_file == "Step 1 output":
@@ -2577,13 +2577,20 @@ class Step2Frame(SidebarStepFrame):
         parent = os.path.dirname(os.path.abspath(self.current_file))
         nasal_base = os.path.join(parent, "nasal", source_base)
         temporal_base = os.path.join(parent, "temporal", source_base)
+        nasal_light_base = os.path.join(parent, "nasal", LIGHT_SOURCE_BASENAME)
+        temporal_light_base = os.path.join(parent, "temporal", LIGHT_SOURCE_BASENAME)
         os.makedirs(os.path.dirname(nasal_base), exist_ok=True)
         os.makedirs(os.path.dirname(temporal_base), exist_ok=True)
 
         volume = self._build_current_marked_volume()
+        source_image = self._image_int16_for_original_save(self.image_data)
+        source_volume = np.stack([source_image, source_image], axis=0)
+        source_volume = _resize_volume_to_shape(source_volume, volume.shape)
         write_analyze(nasal_base, volume)
+        write_analyze(nasal_light_base, source_volume)
         # Analyze volumes are (slice, row, column); reversing columns mirrors left/right.
         write_analyze(temporal_base, np.ascontiguousarray(np.flip(volume, axis=2)))
+        write_analyze(temporal_light_base, np.ascontiguousarray(np.flip(source_volume, axis=2)))
         return nasal_base, temporal_base
 
     def _save_all_batch_result_tabs(self):
@@ -2632,7 +2639,7 @@ class Step2Frame(SidebarStepFrame):
             messagebox.showerror("Save error", "Could not save some open tabs:\n" + "\n".join(failures[:8]))
         if saved:
             self.status_var.set(
-                f"Saved and closed {len(saved)} batch tab(s) in nasal and temporal folders."
+                f"Saved original and MARKED Light volumes and closed {len(saved)} batch tab(s)."
             )
         return saved
 
@@ -2681,7 +2688,8 @@ class Step2Frame(SidebarStepFrame):
             messagebox.showinfo(
                 "Saved All",
                 f"Saved and closed {len(saved)} image(s).\n\n"
-                "Nasal images were saved unchanged; temporal images were mirrored left to right.",
+                "Each nasal and temporal folder contains Light and Light_MARKED.\n"
+                "Temporal images were mirrored left to right.",
             )
 
     def _save_current_marked_image_button(self):
@@ -2692,7 +2700,31 @@ class Step2Frame(SidebarStepFrame):
             messagebox.showinfo("Nothing to save", "Trace or load boundaries before saving a MARKED output.")
             return
 
+        active_tab = getattr(self, "_active_batch_result_tab", None)
         try:
+            if active_tab and active_tab in self._batch_result_states:
+                if not self._all_required_boundaries_complete():
+                    proceed = messagebox.askyesno(
+                        "Boundaries incomplete",
+                        "Not all six preset boundaries are complete. Save this image anyway?",
+                    )
+                    if not proceed:
+                        return
+                output_pair = self._save_batch_result_state(
+                    active_tab,
+                    save_orientation_pair=True,
+                )
+                if output_pair:
+                    self.status_var.set(
+                        "Saved Light and Light_MARKED in the nasal and temporal folders."
+                    )
+                    messagebox.showinfo(
+                        "Saved",
+                        "Saved original and MARKED Light volumes in:\n"
+                        f"{os.path.dirname(output_pair[0])}\n"
+                        f"{os.path.dirname(output_pair[1])}",
+                    )
+                return
             out_base = self._save_current_marked_image(prompt_on_incomplete=True)
         except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Save error", f"Could not save current MARKED image:\n{exc}")
@@ -3862,13 +3894,13 @@ class Step2Frame(SidebarStepFrame):
             return True
 
         try:
-            out_base = self._save_batch_result_state(tab_key)
+            out_base = self._save_batch_result_state(tab_key, save_orientation_pair=True)
         except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Save error", f"Could not save {name}:\n{exc}")
             return False
 
         if out_base:
-            self.status_var.set(f"Saved {out_base}.img")
+            self.status_var.set("Saved Light and Light_MARKED in nasal and temporal folders.")
         return True
 
     def _aidas_should_use_stored_analyze_y(self):
