@@ -1244,8 +1244,8 @@ class Step4Frame(SidebarStepFrame):
 
         nav = ttk.Frame(roi_box)
         nav.pack(fill="x", pady=(6, 0))
-        ttk.Button(nav, text="Prev", command=lambda: self._move_roi(-1)).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(nav, text="Next", command=lambda: self._move_roi(1)).pack(side="right", expand=True, fill="x", padx=(2, 0))
+        ttk.Button(nav, text="< Prev", command=lambda: self._move_roi(-1)).pack(side="left", expand=True, fill="x", padx=(0, 2))
+        ttk.Button(nav, text="Next >", command=lambda: self._move_roi(1)).pack(side="right", expand=True, fill="x", padx=(2, 0))
 
         # Create a SINGLE frame for the horizontal controls
         control_row = ttk.Frame(roi_box)
