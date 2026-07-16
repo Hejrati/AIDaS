@@ -24,11 +24,12 @@ except Exception:
     pyreadr = None
 
 from aidas.utils.io_utils import read_analyze
+from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
 )
 from aidas.utils.log_paths import app_log_dir
-from aidas.utils.ui_utils import SidebarStepFrame
+from aidas.utils.ui_utils import SidebarStepFrame, resource_path
 
 
 def _normalize_analyze_path(base_path):
@@ -146,10 +147,11 @@ class RSetupWizard(ttk.Frame):
 
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(10, 0))
-        self.back_button = ttk.Button(footer, text="Back", command=self._back)
-        self.back_button.pack(side="right", padx=(4, 0))
-        self.next_button = ttk.Button(footer, text="Next", command=self._next)
+        self.next_button = ttk.Button(footer, text="Next >>", command=self._next)
         self.next_button.pack(side="right", padx=(4, 0))
+        self.back_button = ttk.Button(footer, text="<< Back", command=self._back)
+        self.back_button.pack(side="right", padx=(4, 0))
+
         self.cancel_button = ttk.Button(footer, text="Cancel", command=self._cancel)
         self.cancel_button.pack(side="right")
 
@@ -190,7 +192,7 @@ class RSetupWizard(ttk.Frame):
                 label.configure(style="WizardStep.TLabel")
 
         self.back_button.configure(state="disabled" if self.current_step == 0 else "normal")
-        self.next_button.configure(text="Finish" if self.current_step == len(self.STEPS) - 1 else "Next")
+        self.next_button.configure(text="Finish" if self.current_step == len(self.STEPS) - 1 else "Next >>")
         if self.current_step == 1 and self.rscript_path is None:
             self.next_button.configure(state="disabled")
         elif self.current_step == 2 and self.rscript_path is None:
@@ -1084,15 +1086,18 @@ class RBatchSelectionPanel(ttk.Frame):
         scanned = 0
         missing = 0
         try:
-            folders = [self.root_dir]
-            folders.extend(path for path in self.root_dir.rglob("*") if path.is_dir())
+            folders, access_errors = walk_accessible_directories(self.root_dir)
             for folder in folders:
-                scanned += 1
-                input_paths = self.step_frame._find_input_paths(folder)
-                if any(input_paths.get(label) is None for label, *_rest in self.step_frame.REQUIRED_INPUTS):
-                    missing += 1
+                try:
+                    scanned += 1
+                    input_paths = self.step_frame._find_input_paths(folder)
+                    if any(input_paths.get(label) is None for label, *_rest in self.step_frame.REQUIRED_INPUTS):
+                        missing += 1
+                        continue
+                    has_rdata = self.step_frame._folder_has_r_data(folder)
+                except OSError as exc:
+                    access_errors.append((folder, str(exc)))
                     continue
-                has_rdata = self.step_frame._folder_has_r_data(folder)
                 status = "Skipped: RData exists" if has_rdata else "Ready"
                 try:
                     folder_text = str(folder.relative_to(self.root_dir))
@@ -1114,9 +1119,9 @@ class RBatchSelectionPanel(ttk.Frame):
                     }
                 )
         except Exception as exc:
-            self.after(0, lambda: self._scan_failed(exc))
+            self.after(0, lambda exc=exc: self._scan_failed(exc))
             return
-        self.after(0, lambda: self._scan_done(rows, scanned, missing))
+        self.after(0, lambda: self._scan_done(rows, scanned, missing, access_errors))
 
     def _scan_failed(self, exc):
         if not self.winfo_exists():
@@ -1142,7 +1147,7 @@ class RBatchSelectionPanel(ttk.Frame):
         table.pack(fill="both", expand=True)
         self.table = table
 
-    def _scan_done(self, rows, scanned, missing):
+    def _scan_done(self, rows, scanned, missing, access_errors):
         if not self.winfo_exists():
             return
         self.rows = rows
@@ -1151,7 +1156,8 @@ class RBatchSelectionPanel(ttk.Frame):
         skipped = sum(1 for row in rows if row["locked"])
         self.summary_var.set(
             f"Scanned {scanned} folders. Found {ready} ready folder(s), {skipped} skipped folder(s) with RData. "
-            f"{missing} folder(s) did not contain both required Light inputs."
+            f"{missing} folder(s) did not contain both required Light inputs. "
+            f"{len(access_errors)} inaccessible folder(s) skipped."
         )
         max_workers = self._max_worker_count(ready)
         self.workers_spin.configure(to=max_workers)
@@ -1167,6 +1173,12 @@ class RBatchSelectionPanel(ttk.Frame):
                 self.workers_spin.configure(state="disabled")
         except tk.TclError:
             pass
+        if access_errors:
+            messagebox.showwarning(
+                "Batch Step 3 - folders skipped",
+                skipped_directories_warning(access_errors),
+                parent=self,
+            )
 
     def _run_selected(self):
         if self.table is None:
@@ -1469,7 +1481,8 @@ class Step3Frame(SidebarStepFrame):
 
     @staticmethod
     def _script_path():
-        return Path(__file__).resolve().parents[2] / Step3Frame.R_SCRIPT_NAME
+        """Return the Step 3 script from source or PyInstaller's bundle."""
+        return Path(resource_path(Step3Frame.R_SCRIPT_NAME))
 
     def _resolve_rscript_executable(self):
         configured = None if self.preferences is None else self.preferences.get("rscript_path")

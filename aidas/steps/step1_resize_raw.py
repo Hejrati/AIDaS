@@ -14,6 +14,7 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 
 from aidas.image_canvas import ImageCanvas
+from aidas.utils.filesystem import skipped_directories_warning
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
 from aidas.utils.ui_utils import (
     HoverToolTip,
@@ -823,7 +824,16 @@ class Step1Frame(SidebarStepFrame):
             return
 
         filt = self.sdb_filter_var.get().lower().strip()
-        files = [f for f in os.listdir(d) if f.lower().endswith(".sdb")]
+        try:
+            files = [f for f in os.listdir(d) if f.lower().endswith(".sdb")]
+        except OSError as exc:
+            self.status_var.set(f"Could not open SDB directory: {d}")
+            messagebox.showwarning(
+                "SDB folder skipped",
+                skipped_directories_warning([(d, str(exc))]),
+                parent=self,
+            )
+            return
         files.sort(key=str.lower)
 
         for f in files:

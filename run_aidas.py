@@ -14,19 +14,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 AI_WORKER_ARG = "--aidas-ai-worker"
 
 
-def main() -> None:
+def main() -> int:
     '''Launch the AIDaS application or a private AI worker process.'''
     if len(sys.argv) > 1 and sys.argv[1] == AI_WORKER_ARG:
         from aidas.ai_for_aidas_cli import main as ai_worker_main
 
         sys.argv = [sys.argv[0], *sys.argv[2:]]
         ai_worker_main()
-        return
+        return 0
 
-    from aidas.app import AIDaSApp
+    from aidas.app import main as app_main
 
-    app = AIDaSApp()
-    app.mainloop()
+    return app_main()
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

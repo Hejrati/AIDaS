@@ -45,13 +45,13 @@ from xml.sax.saxutils import escape
 import numpy as np
 from PIL import Image
 from PIL import ImageDraw
-from scipy import ndimage
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
 from aidas.utils.io_utils import read_analyze, read_tiff
+from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.ui_utils import SidebarStepFrame, load_ui_icon
 
 
@@ -620,6 +620,11 @@ def _imagej_wand_mask(image: Image.Image, point: tuple[int, int] = IMAGEJ_WAND_P
 
     seed = int(arr[y, x])
     mask = arr == seed
+    # SciPy is only needed when Step 4 performs this measurement. Importing it
+    # here keeps application and debugger startup out of SciPy's large import
+    # graph without changing the measurement implementation.
+    from scipy import ndimage
+
     labels, _count = ndimage.label(mask)
     label = int(labels[y, x])
     if label == 0:
@@ -1064,11 +1069,11 @@ class Step4BatchROISelectionPanel(ttk.Frame):
 
     def _scan_worker(self):
         try:
-            rows, scanned, skipped = self.step_frame._scan_batch_roi_folders(self.root_dir)
+            rows, scanned, skipped, access_errors = self.step_frame._scan_batch_roi_folders(self.root_dir)
         except Exception as exc:
             self.after(0, lambda exc=exc: self._scan_failed(exc))
             return
-        self.after(0, lambda: self._scan_done(rows, scanned, skipped))
+        self.after(0, lambda: self._scan_done(rows, scanned, skipped, access_errors))
 
     def _scan_failed(self, exc):
         if not self.winfo_exists():
@@ -1089,7 +1094,7 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         table.pack(fill="both", expand=True)
         self.table = table
 
-    def _scan_done(self, rows, scanned, skipped):
+    def _scan_done(self, rows, scanned, skipped, access_errors):
         if not self.winfo_exists():
             return
         self.rows = rows
@@ -1111,13 +1116,20 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         complete = sum(1 for row in rows if row.get("locked"))
         self.summary_var.set(
             f"Scanned {scanned} folder(s). Found {ready} ready folder(s), "
-            f"{complete} already complete, {skipped} without _flat_LIGHT."
+            f"{complete} already complete, {skipped} without _flat_LIGHT. "
+            f"{len(access_errors)} inaccessible folder(s) skipped."
         )
         self.step_frame.status_var.set("Batch ROI scan complete. Select folders to process.")
         if ready:
             self.process_button.state(["!disabled"])
         else:
             self.process_button.state(["disabled"])
+        if access_errors:
+            messagebox.showwarning(
+                "Batch ROI - folders skipped",
+                skipped_directories_warning(access_errors),
+                parent=self,
+            )
 
     def _process_selected(self):
         if self.table is None:
@@ -1147,6 +1159,8 @@ class Step4Frame(SidebarStepFrame):
         self.current_stem = "_flat_LIGHT"
         self.current_roi_idx = 0
         self.completed: dict[str, ISezResult] = {}
+        self._flashing_updated_rois: set[str] = set()
+        self._roi_update_animation_jobs: dict[str, str] = {}
         self.roi_clicks: dict[str, list[float]] = {}
         self.profile_clicks: list[float] = []
         self.figure = None
@@ -1352,21 +1366,28 @@ class Step4Frame(SidebarStepFrame):
         folder = Path(folder)
         return sum(any((folder / name).is_file() for name in names) for names in STEP4_OUTPUT_GROUPS)
 
-    def _scan_batch_roi_folders(self, root_dir: str | os.PathLike) -> tuple[list[dict], int, int]:
+    def _scan_batch_roi_folders(self, root_dir: str | os.PathLike) -> tuple[list[dict], int, int, list]:
         root = Path(root_dir)
-        candidate_dirs = {root}
-        candidate_dirs.update(path.parent for path in root.rglob("_flat_LIGHT.img"))
-        candidate_dirs.update(path.parent for path in root.rglob("_flat_LIGHT.hdr"))
+        candidate_dirs, access_errors = walk_accessible_directories(root)
 
         rows: list[dict] = []
         skipped_without_flat_light = 0
         for folder in sorted(candidate_dirs, key=lambda path: str(path).lower()):
-            flat_light = self._flat_light_path_for_folder(folder)
+            try:
+                flat_light = self._flat_light_path_for_folder(folder)
+            except OSError as exc:
+                access_errors.append((folder, str(exc)))
+                continue
             if flat_light is None:
                 skipped_without_flat_light += 1
                 continue
-            output_count = self._step4_output_count(folder)
-            if self._step4_outputs_complete(folder):
+            try:
+                output_count = self._step4_output_count(folder)
+                outputs_complete = self._step4_outputs_complete(folder)
+            except OSError as exc:
+                access_errors.append((folder, str(exc)))
+                continue
+            if outputs_complete:
                 rows.append(
                     {
                         "folder": folder,
@@ -1388,7 +1409,7 @@ class Step4Frame(SidebarStepFrame):
                     "outputs": f"{output_count}/3",
                 }
             )
-        return rows, len(candidate_dirs), skipped_without_flat_light
+        return rows, len(candidate_dirs), skipped_without_flat_light, access_errors
 
     def _browse_batch_roi_root(self) -> None:
         folder = filedialog.askdirectory(
@@ -1592,6 +1613,7 @@ class Step4Frame(SidebarStepFrame):
         state["current_profile"] = self._current_profile
 
     def _activate_batch_roi_tab(self, tab) -> None:
+        self._cancel_roi_update_animations(redraw=True)
         self._sync_active_batch_roi_state()
         tab_key = str(tab)
         state = self.batch_roi_tab_states.get(tab_key)
@@ -1729,6 +1751,7 @@ class Step4Frame(SidebarStepFrame):
     def _close_batch_roi_tab(self, notebook, tab) -> None:
         tab_key = str(tab)
         if tab_key == self._active_batch_roi_tab:
+            self._cancel_roi_update_animations(redraw=False)
             self._sync_active_batch_roi_state()
         self.batch_roi_tab_states.pop(tab_key, None)
         try:
@@ -1819,6 +1842,7 @@ class Step4Frame(SidebarStepFrame):
         self._load_path(path)
 
     def _load_path(self, path: str | os.PathLike, *, restore_state: dict | None = None) -> None:
+        self._cancel_roi_update_animations(redraw=False)
         try:
             volume = load_oct_volume(path)
         except Exception as exc:
@@ -2005,7 +2029,16 @@ class Step4Frame(SidebarStepFrame):
         self.figure.subplots_adjust(left=0.065, right=0.965, bottom=0.085, top=0.985, hspace=0.13)
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
         self.canvas.mpl_connect("button_press_event", self._on_profile_click)
+        self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
         self.canvas.get_tk_widget().bind("<Configure>", self._on_plot_canvas_configure, add="+")
+
+    def _on_plot_motion(self, event) -> None:
+        if self.canvas is None:
+            return
+        try:
+            self.canvas.get_tk_widget().configure(cursor="hand2" if event.inaxes is self.ax_roi_grid else "")
+        except tk.TclError:
+            pass
 
     def _on_plot_canvas_configure(self, event) -> None:
         if self.figure is None:
@@ -2070,11 +2103,15 @@ class Step4Frame(SidebarStepFrame):
         if self.image is None or index >= len(self.rois):
             return None
         roi = self.rois[index]
-        if roi.suffix in self.completed:
-            return self.completed[roi.suffix]
-
         if index == self.current_roi_idx:
             clicks = list(self.profile_clicks[:2])
+            # A completed ROI can be edited.  Prefer the current two-point
+            # selection so the overview previews the replacement result before
+            # the idle auto-save updates ``self.completed`` and the table.
+            if len(clicks) < 2:
+                return self.completed.get(roi.suffix)
+        elif roi.suffix in self.completed:
+            return self.completed[roi.suffix]
         else:
             clicks = list((self.roi_clicks.get(roi.suffix) or [])[:2])
         if len(clicks) < 2:
@@ -2124,8 +2161,9 @@ class Step4Frame(SidebarStepFrame):
             col = index % 7
             row = 2 - (index // 7)
             active = index == self.current_roi_idx
-            edge = "#111827" if active else "#d1d5db"
-            width = 1.2 if active else 0.6
+            updated = index < len(self.rois) and self.rois[index].suffix in self._flashing_updated_rois
+            edge = "#b45309" if updated else ("#111827" if active else "#d1d5db")
+            width = 2.0 if updated else (1.2 if active else 0.6)
             ax.add_patch(Rectangle((col, row), 1, 1, facecolor="#fbfbfb", edgecolor=edge, linewidth=width))
 
             if index >= len(self.rois):
@@ -2140,16 +2178,17 @@ class Step4Frame(SidebarStepFrame):
                 ha="left",
                 va="top",
                 fontsize=7,
-                color="#111827",
+                color="#b45309" if updated else "#111827",
+                weight="bold" if updated else "normal",
             )
             ax.text(
                 col + 0.96,
                 row + 0.94,
-                "\u2713" if done else "x",
+                "\u21bb" if updated else ("\u2713" if done else "x"),
                 ha="right",
                 va="top",
                 fontsize=7,
-                color="#047857" if done else "#b91c1c",
+                color="#b45309" if updated else ("#047857" if done else "#b91c1c"),
                 weight="bold",
             )
 
@@ -2184,7 +2223,69 @@ class Step4Frame(SidebarStepFrame):
             if x_base.size >= 2:
                 ax.plot(x_base, y_base, color="black", linewidth=0.55)
 
+    def _redraw_roi_update_flash(self) -> None:
+        if self.ax_roi_grid is None:
+            return
+        self._draw_roi_overview_grid()
+        if self.canvas is not None:
+            self.canvas.draw_idle()
+
+    def _cancel_roi_update_animation(self, suffix: str, *, redraw: bool) -> None:
+        job = self._roi_update_animation_jobs.pop(suffix, None)
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._flashing_updated_rois.discard(suffix)
+        if redraw:
+            self._redraw_roi_update_flash()
+
+    def _cancel_roi_update_animations(self, *, redraw: bool) -> None:
+        jobs = list(self._roi_update_animation_jobs.values())
+        self._roi_update_animation_jobs.clear()
+        for job in jobs:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        had_flashing_rois = bool(self._flashing_updated_rois)
+        self._flashing_updated_rois.clear()
+        if redraw and had_flashing_rois:
+            self._redraw_roi_update_flash()
+
+    def _start_roi_update_animation(self, suffix: str) -> None:
+        """Briefly pulse an updated ROI cell, then restore normal styling."""
+        self._cancel_roi_update_animation(suffix, redraw=False)
+        flashes_remaining = 8
+
+        def flash() -> None:
+            nonlocal flashes_remaining
+            if suffix not in self.completed:
+                self._roi_update_animation_jobs.pop(suffix, None)
+                self._flashing_updated_rois.discard(suffix)
+                self._redraw_roi_update_flash()
+                return
+
+            if suffix in self._flashing_updated_rois:
+                self._flashing_updated_rois.discard(suffix)
+            else:
+                self._flashing_updated_rois.add(suffix)
+            self._redraw_roi_update_flash()
+            flashes_remaining -= 1
+
+            if flashes_remaining > 0:
+                self._roi_update_animation_jobs[suffix] = self.after(140, flash)
+            else:
+                self._flashing_updated_rois.discard(suffix)
+                self._roi_update_animation_jobs.pop(suffix, None)
+
+        flash()
+
     def _on_profile_click(self, event) -> None:
+        if event.inaxes is self.ax_roi_grid:
+            self._select_roi_from_grid_click(event)
+            return
         if event.inaxes is not self.ax_profile or event.xdata is None:
             return
         if self.image is None:
@@ -2201,6 +2302,28 @@ class Step4Frame(SidebarStepFrame):
         self._render_current_roi()
         if len(self.profile_clicks) >= 2:
             self.after_idle(self._auto_save_current_roi)
+
+    def _select_roi_from_grid_click(self, event) -> None:
+        """Select the ROI represented by a click anywhere in its grid cell."""
+        if event.xdata is None or event.ydata is None:
+            return
+        x = float(event.xdata)
+        y = float(event.ydata)
+        if not (0.0 <= x < 7.0 and 0.0 <= y < 3.0):
+            return
+
+        column = int(math.floor(x))
+        row_from_bottom = int(math.floor(y))
+        index = (2 - row_from_bottom) * 7 + column
+        if not (0 <= index < len(self.rois)):
+            return
+
+        if index != self.current_roi_idx:
+            self._remember_current_roi_clicks()
+            self.current_roi_idx = index
+            self._load_current_roi_clicks()
+        self._select_roi_in_list()
+        self._render_current_roi()
 
     def _current_profile_size(self) -> int:
         if self._current_profile is not None:
@@ -2255,6 +2378,7 @@ class Step4Frame(SidebarStepFrame):
 
     def _clear_clicks(self) -> None:
         suffix = self._current_roi_suffix()
+        self._cancel_roi_update_animation(suffix, redraw=False)
         self.profile_clicks.clear()
         self.roi_clicks.pop(suffix, None)
         self.completed.pop(suffix, None)
@@ -2268,9 +2392,6 @@ class Step4Frame(SidebarStepFrame):
 
     def _update_confirm_button_state(self) -> None:
         self._update_clear_button_state()
-
-    def _current_roi_is_editable(self) -> bool:
-        return self._current_roi_suffix() not in self.completed
 
     def _update_clear_button_state(self) -> None:
         enabled = bool(self.profile_clicks) and self.image is not None
@@ -2296,11 +2417,15 @@ class Step4Frame(SidebarStepFrame):
     def _auto_save_current_roi(self) -> None:
         if self._auto_saving_roi or self.image is None:
             return
-        if len(self.profile_clicks) < 2 or not self._current_roi_is_editable():
+        if len(self.profile_clicks) < 2:
             return
+        replacing_completed_roi = self._current_roi_suffix() in self.completed
         self._auto_saving_roi = True
         try:
-            self._save_current_roi(auto_advance=True)
+            # New ROIs retain the quick auto-advance workflow.  When revising
+            # an existing ROI, stay on it so the user can verify the updated
+            # plot and measurement row.
+            self._save_current_roi(auto_advance=not replacing_completed_roi)
         finally:
             self._auto_saving_roi = False
 
@@ -2343,6 +2468,7 @@ class Step4Frame(SidebarStepFrame):
             return
 
         roi = self.rois[self.current_roi_idx]
+        replacing_completed_roi = roi.suffix in self.completed
         try:
             result = analyze_and_save_roi(
                 self.image,
@@ -2357,7 +2483,10 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self._refresh_roi_list()
-        self.status_var.set(f"Confirmed ROI {roi.suffix}.")
+        action = "Updated" if replacing_completed_roi else "Confirmed"
+        self.status_var.set(f"{action} ROI {roi.suffix}.")
+        if replacing_completed_roi:
+            self._start_roi_update_animation(roi.suffix)
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._sync_active_batch_roi_state()
             self._update_active_batch_roi_tab_progress()

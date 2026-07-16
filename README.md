@@ -264,10 +264,22 @@ pip install pyinstaller
 python -m PyInstaller AIDaS.spec --clean
 ```
 
-The build is created in `dist/AIDaS/`. The spec bundles the app assets,
+The build is created as the single file `dist/AIDaS.exe`. The spec bundles the
+app assets, the release `.R` scripts located at the project root,
 AI_ForAIDAS `.pth` model files, and the PyTorch runtime collected from the
-build environment. Users running the generated app should not need a separate
-conda environment for the AI_ForAIDAS model.
+build environment. Users do not need to copy R scripts or model/data files next
+to the executable, and they do not need a separate conda environment for the
+AI_ForAIDAS model.
+
+Step 3 still requires the R interpreter and its required R packages. The app's
+**Setup R and Packages** wizard detects or installs those runtime dependencies;
+the workflow `.R` files themselves are extracted from `AIDaS.exe` automatically
+while the app is running.
+
+The release uses a full-size branded bootloader splash, so the actual AIDaS
+welcome screen and copyright notice appear while the one-file executable is
+being extracted. That same screen remains visible until the ready main window
+replaces it; frozen builds do not create an extra intermediate Tk splash.
 
 Do not use the minimal `--onefile --name AIDaS run_aidas.py` command for release
 builds; it does not include the model/data files defined in `AIDaS.spec`.
@@ -286,7 +298,7 @@ python -m PyInstaller AIDaS.spec --clean
 If `AIDaS.exe` has the new icon but the desktop shortcut still shows the old icon, Windows is using cached icon data.
 
 1. Delete the old desktop shortcut (do not delete the EXE)
-2. Run `dist/AIDaS/AIDaS.exe` once directly
+2. Run `dist/AIDaS.exe` once directly
 3. Create a new desktop shortcut from the new EXE
 4. If still unchanged, clear icon cache and restart Explorer:
 

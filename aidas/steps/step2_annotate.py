@@ -39,6 +39,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
 from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
+from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_utils import NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to, load_ui_icon
@@ -497,11 +498,11 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
 
     def _scan_worker(self):
         try:
-            rows, scanned, skipped = self.step_frame._scan_step2_batch_segmentation_folders(self.root_dir)
+            rows, scanned, skipped, access_errors = self.step_frame._scan_step2_batch_segmentation_folders(self.root_dir)
         except Exception as exc:
             self.after(0, lambda exc=exc: self._scan_failed(exc))
             return
-        self.after(0, lambda: self._scan_done(rows, scanned, skipped))
+        self.after(0, lambda: self._scan_done(rows, scanned, skipped, access_errors))
 
     def _scan_failed(self, exc):
         if not self.winfo_exists():
@@ -526,7 +527,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         table.pack(fill="both", expand=True)
         self.table = table
 
-    def _scan_done(self, rows, scanned, skipped):
+    def _scan_done(self, rows, scanned, skipped, access_errors):
         if not self.winfo_exists():
             return
         self.rows = rows
@@ -549,7 +550,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         ready_images = sum(len(row.get("image_paths") or []) for row in rows if not row["locked"])
         self.summary_var.set(
             f"Scanned {scanned} folder(s). Found {ready} ready folder(s) with {ready_images} image(s) to segment, "
-            f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img."
+            f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img. "
+            f"{len(access_errors)} inaccessible folder(s) skipped."
         )
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
         try:
@@ -559,6 +561,12 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
                 self.next_button.state(["disabled"])
         except tk.TclError:
             pass
+        if access_errors:
+            messagebox.showwarning(
+                "Batch Step 2 - folders skipped",
+                skipped_directories_warning(access_errors),
+                parent=self,
+            )
 
     def _run_selected(self):
         if self.table is None:
@@ -957,8 +965,15 @@ class Step2Frame(SidebarStepFrame):
         skipped = 0
         targets = (("Light", "light.img", "light_marked.img"),)
 
-        for folder, dirnames, filenames in os.walk(root_dir):
-            dirnames.sort(key=str.lower)
+        folders, access_errors = walk_accessible_directories(root_dir)
+        for folder_path in folders:
+            folder = str(folder_path)
+            try:
+                with os.scandir(folder) as entries:
+                    filenames = [entry.name for entry in entries if entry.is_file()]
+            except OSError as exc:
+                access_errors.append((folder_path, str(exc)))
+                continue
             scanned += 1
             lower_files = {name.lower(): name for name in filenames}
             pending = []
@@ -1000,7 +1015,7 @@ class Step2Frame(SidebarStepFrame):
             )
 
         rows.sort(key=lambda row: os.path.relpath(row["folder"], root_dir).lower())
-        return rows, scanned, skipped
+        return rows, scanned, skipped, access_errors
 
     def _start_step2_batch_segmentation_from_rows(self, rows, root_dir):
         image_paths = []

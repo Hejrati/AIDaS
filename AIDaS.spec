@@ -3,6 +3,7 @@
 import importlib.util
 from pathlib import Path
 
+from PyInstaller.building.splash import Splash as PyInstallerSplash
 from PyInstaller.utils.hooks import collect_all
 
 
@@ -23,6 +24,38 @@ hiddenimports = [
     "torch.nn",
     "torch.nn.functional",
 ]
+
+
+def collect_r_scripts():
+    """Bundle only the release R scripts stored at the project root."""
+    script_paths = sorted(
+        (path for path in project_root.iterdir() if path.is_file() and path.suffix.lower() == ".r"),
+        key=lambda path: path.name.lower(),
+    )
+
+    if not script_paths:
+        raise RuntimeError("Cannot build AIDaS because no R scripts were found.")
+
+    for source_path in script_paths:
+        datas.append((str(source_path), "."))
+
+
+collect_r_scripts()
+
+
+class AIDaSSplash(PyInstallerSplash):
+    """PyInstaller splash with AIDaS identity and no Tk taskbar entry."""
+
+    def generate_script(self):
+        script = super().generate_script()
+        identity_script = (
+            'wm title . "AIDaS"\n'
+            'if {$tcl_platform(platform) eq "windows"} { wm attributes . -toolwindow 1 }\n'
+            'wm iconphoto . -default splash_image\n'
+        )
+        script = script.replace("raise .", identity_script + "raise .")
+        Path(self.script_name).write_text(script, encoding="utf-8")
+        return script
 
 
 def collect_package(package_name, required=True):
@@ -75,11 +108,24 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+splash = AIDaSSplash(
+    str(project_root / "assets" / "startup_splash.png"),
+    binaries=a.binaries,
+    datas=a.datas,
+    text_pos=None,
+    max_img_size=(572, 816),
+    minify_script=True,
+    always_on_top=True,
+)
+
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,
+    a.datas,
+    splash,
+    splash.binaries,
     [],
-    exclude_binaries=True,
     name='AIDaS',
     debug=False,
     bootloader_ignore_signals=False,
@@ -92,14 +138,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(project_root / "assets" / "aidas.ico"),
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name='AIDaS',
 )
