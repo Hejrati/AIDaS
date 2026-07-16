@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Machine Vision and Pattern Recognition Lab, Wayne State University
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
 """Entry point for the AIDaS OCT Image Processing application.
 
 Usage:

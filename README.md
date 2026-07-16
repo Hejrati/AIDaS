@@ -401,3 +401,13 @@ python -m PyInstaller AIDaS.spec --clean
 Use `python -m pip` rather than a standalone `pip` command so installation and
 the PyInstaller build use the same interpreter.
 
+## License
+
+Copyright © 2026 Machine Vision and Pattern Recognition Lab, Wayne State University.
+
+AIDaS is free software licensed under the [GNU Affero General Public License,
+version 3 or later](LICENSE) (`AGPL-3.0-or-later`). You may use, study, modify,
+and redistribute it under the terms of that license. Distributed versions must
+preserve the license notices and provide the corresponding source code as
+required by the AGPL.
+

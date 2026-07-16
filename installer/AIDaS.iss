@@ -22,6 +22,7 @@ AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
+LicenseFile=..\LICENSE
 DefaultDirName={localappdata}\Programs\AIDaS
 DefaultGroupName=AIDaS
 DisableProgramGroupPage=yes
@@ -59,6 +60,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; AIDaS.exe is private to this application. ignoreversion deliberately replaces
 ; the prior executable while leaving every user-created file and directory alone.
 Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\AIDaS"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"

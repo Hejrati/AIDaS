@@ -1,7 +1,7 @@
 """Main Tkinter application and branded information windows for AIDaS."""
 
-# Copyright (c) 2026 Behzad Hejrati
-# https://github.com/Hejrati
+# SPDX-FileCopyrightText: 2026 Machine Vision and Pattern Recognition Lab, Wayne State University
+# SPDX-License-Identifier: AGPL-3.0-or-later
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ LAB_URL_TEXT = "mvprl.cs.wayne.edu"
 UNIVERSITY_NAME = "Wayne State University"
 COPYRIGHT_NOTICE = (
     "Copyright (c) 2026 Machine Vision and Pattern Recognition Lab, "
-    "Wayne State University. All rights reserved."
+    "Wayne State University. Licensed under GNU AGPL v3 or later."
 )
 LAB_DESCRIPTION = (
     "Established in 2002, Machine Vision and Pattern Recognition Lab aims at\n"
