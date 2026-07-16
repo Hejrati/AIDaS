@@ -21,3 +21,7 @@ sdb_images/
 step3_r_package_setup.log
 debug_pipeline_all_blocks.py
 tools/
+Step 1 resize raw.txt
+Step 2 Human Prep for Daves OCT analysis program.txt.txt
+Step 3 rename and ELM line.txt
+Step 4 analyze ISez.txt
