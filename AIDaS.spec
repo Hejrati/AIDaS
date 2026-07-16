@@ -3,8 +3,7 @@
 import importlib.util
 from pathlib import Path
 
-from PyInstaller.building.splash import Splash as PyInstallerSplash
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_dynamic_libs
 
 
 project_root = Path(SPECPATH)
@@ -12,17 +11,17 @@ project_root = Path(SPECPATH)
 datas = [
     (str(project_root / "assets"), "assets"),
     (
-        str(project_root / "OCT Segmenter" / "AI_ForAIDAS" / "model_img.pth"),
+        str(project_root / "OCT Segmenter" / "AI_ForAIDAS" / "model_img.onnx"),
         "OCT Segmenter/AI_ForAIDAS",
     ),
 ]
-binaries = []
+binaries = collect_dynamic_libs("pyreadr")
 hiddenimports = [
-    "aidas.ai_for_aidas_cli",
-    "aidas.ai_for_aidas_inference",
-    "torch",
-    "torch.nn",
-    "torch.nn.functional",
+    "aidas.ai.worker",
+    "aidas.ai.client",
+    "aidas.ai.inference",
+    "onnxruntime",
+    "onnxruntime.capi._pybind_state",
 ]
 
 
@@ -43,54 +42,25 @@ def collect_r_scripts():
 collect_r_scripts()
 
 
-class AIDaSSplash(PyInstallerSplash):
-    """PyInstaller splash with AIDaS identity and no Tk taskbar entry."""
-
-    def generate_script(self):
-        script = super().generate_script()
-        identity_script = (
-            'wm title . "AIDaS"\n'
-            'if {$tcl_platform(platform) eq "windows"} { wm attributes . -toolwindow 1 }\n'
-            'wm iconphoto . -default splash_image\n'
-        )
-        script = script.replace("raise .", identity_script + "raise .")
-        Path(self.script_name).write_text(script, encoding="utf-8")
-        return script
-
-
-def collect_package(package_name, required=True):
-    if importlib.util.find_spec(package_name) is None:
-        if required:
-            raise RuntimeError(
-                f"Cannot bundle {package_name!r}; install the project requirements before running PyInstaller."
-            )
-        return
-
-    package_datas, package_binaries, package_hiddenimports = collect_all(package_name)
-    datas.extend(package_datas)
-    binaries.extend(package_binaries)
-    hiddenimports.extend(package_hiddenimports)
-
-
-for package_name in (
-    "torch",
+required_runtime_imports = (
     "numpy",
     "scipy",
     "PIL",
     "matplotlib",
-):
-    collect_package(package_name)
-
-
-for package_name in (
     "pyreadr",
-    "xarray",
-    "imgviz",
-    "prettytable",
-    "art",
-    "cmap",
-):
-    collect_package(package_name, required=False)
+    "packaging",
+    "onnxruntime",
+)
+missing_runtime_imports = [
+    package_name
+    for package_name in required_runtime_imports
+    if importlib.util.find_spec(package_name) is None
+]
+if missing_runtime_imports:
+    raise RuntimeError(
+        "Cannot build AIDaS because required runtime packages are missing: "
+        f"{', '.join(missing_runtime_imports)}. Install requirements.txt first."
+    )
 
 
 a = Analysis(
@@ -100,31 +70,46 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
-    hooksconfig={},
+    hooksconfig={"matplotlib": {"backends": ["TkAgg"]}},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "torch",
+        "tensorflow",
+        "onnx",
+        "psutil",
+        "pytest",
+        "_pytest",
+        "IPython",
+        "dask",
+        "sphinx",
+        "sphinxcontrib",
+        "docutils",
+        "jedi",
+        "parso",
+        "pyarrow",
+        "numba",
+        "llvmlite",
+        "fsspec",
+        "jinja2",
+        "pygments",
+        "chardet",
+        "win32com",
+        "pythoncom",
+        "pywintypes",
+        "botocore",
+        "boto3",
+        "s3fs",
+    ],
     noarchive=False,
     optimize=0,
 )
 pyz = PYZ(a.pure)
-
-splash = AIDaSSplash(
-    str(project_root / "assets" / "startup_splash.png"),
-    binaries=a.binaries,
-    datas=a.datas,
-    text_pos=None,
-    max_img_size=(572, 816),
-    minify_script=True,
-    always_on_top=True,
-)
 
 exe = EXE(
     pyz,
     a.scripts,
     a.binaries,
     a.datas,
-    splash,
-    splash.binaries,
     [],
     name='AIDaS',
     debug=False,

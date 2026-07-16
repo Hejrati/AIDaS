@@ -3,10 +3,12 @@ cropped_selected_images/
 build/
 aidas.spec
 dist/
+release/
 __pycache__/
 *.pyc
 OCT Segmenter\Model\human_OCT.h5
 .vscode/
+.venv-build/
 segmenter_output/
 aidas\__pycache__/*
 aidas\steps\__pycache__/*

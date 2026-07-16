@@ -1,4 +1,4 @@
-name: aidas-env
+name: aidas
 channels:
   - defaults
 dependencies:
@@ -9,9 +9,9 @@ dependencies:
 
 # Notes:
 # - This file uses conda only to create the Python environment.
-# - All main AIDaS app and AI_ForAIDAS packages are installed with pip
-#   from requirements.txt to avoid mixing conda and pip runtime libraries.
+# - All application runtime and executable build packages are installed with
+#   pip from requirements.txt to avoid mixing conda and pip libraries.
 # - To create the environment locally:
 #
 # conda env create -f environment.yml
-# conda activate aidas-env
+# conda activate aidas

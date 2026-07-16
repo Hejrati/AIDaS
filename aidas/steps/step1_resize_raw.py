@@ -13,7 +13,7 @@ from tkinter import ttk, filedialog, messagebox
 
 import numpy as np
 
-from aidas.image_canvas import ImageCanvas
+from aidas.canvas.image_canvas import ImageCanvas
 from aidas.utils.filesystem import skipped_directories_warning
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
 from aidas.utils.ui_utils import (
@@ -179,6 +179,15 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_filter_var = tk.StringVar(value="")
         self.sdb_filter_var.trace_add("write", lambda *_: self.refresh_sdb_list())
         ttk.Entry(filt_frame, textvariable=self.sdb_filter_var).pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        self.sdb_scan_more_label = ttk.Label(
+            sdb,
+            text="",
+            foreground="#0066cc",
+            cursor="hand2",
+        )
+        self.sdb_scan_more_label.pack(anchor="w", pady=(0, 4))
+        self.sdb_scan_tooltip = HoverToolTip(self.sdb_scan_more_label, "")
 
         lb_frame = ttk.Frame(sdb)
         lb_frame.pack(fill="both", expand=True, pady=(4, 6))
@@ -819,6 +828,8 @@ class Step1Frame(SidebarStepFrame):
         """
         self.sdb_listbox.delete(0, "end")
         self._sdb_files.clear()
+        self.sdb_scan_more_label.configure(text="")
+        self.sdb_scan_tooltip.text = ""
         d = self.sdb_dir_var.get()
         if not d or not os.path.isdir(d):
             return
@@ -828,11 +839,8 @@ class Step1Frame(SidebarStepFrame):
             files = [f for f in os.listdir(d) if f.lower().endswith(".sdb")]
         except OSError as exc:
             self.status_var.set(f"Could not open SDB directory: {d}")
-            messagebox.showwarning(
-                "SDB folder skipped",
-                skipped_directories_warning([(d, str(exc))]),
-                parent=self,
-            )
+            self.sdb_scan_more_label.configure(text="More")
+            self.sdb_scan_tooltip.text = skipped_directories_warning([(d, str(exc))])
             return
         files.sort(key=str.lower)
 

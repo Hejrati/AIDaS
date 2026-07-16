@@ -25,12 +25,9 @@ Core Functionality:
 
 import csv
 import datetime
-import json
 import os
-import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
@@ -38,11 +35,12 @@ from tkinter import filedialog, font as tkfont, messagebox, ttk
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
-from aidas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
+from aidas.ai.client import AIWorkerClient
+from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
-from aidas.utils.ui_utils import NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to, load_ui_icon
+from aidas.utils.ui_utils import HoverToolTip, NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to, load_ui_icon
 
 
 BOUNDARY_PRESETS = [
@@ -474,6 +472,9 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             fill="x",
             expand=True,
         )
+        self.more_label = ttk.Label(top, text="", foreground="#0066cc", cursor="hand2")
+        self.more_label.pack(side="right", padx=(8, 0))
+        self.more_tooltip = HoverToolTip(self.more_label, "")
 
         self.table_host = ttk.Frame(wrapper)
         self.table_host.pack(fill="both", expand=True)
@@ -507,13 +508,14 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set(f"Scan failed: {exc}")
+        self.summary_var.set("Scan failed. Move the mouse over More for details.")
+        self.more_label.configure(text="More")
+        self.more_tooltip.text = f"Could not scan folders.\n{exc}"
         self.step_frame.status_var.set("Batch segmentation scan failed.")
         try:
             self.next_button.state(["disabled"])
         except tk.TclError:
             pass
-        messagebox.showerror("Batch Step 2", f"Could not scan folders.\n{exc}", parent=self)
 
     def _show_results_table(self, rows):
         for child in self.table_host.winfo_children():
@@ -548,11 +550,14 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         ready = sum(1 for row in rows if not row["locked"])
         already_segmented = sum(1 for row in rows if row["locked"])
         ready_images = sum(len(row.get("image_paths") or []) for row in rows if not row["locked"])
-        self.summary_var.set(
+        summary = (
             f"Scanned {scanned} folder(s). Found {ready} ready folder(s) with {ready_images} image(s) to segment, "
             f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img. "
             f"{len(access_errors)} inaccessible folder(s) skipped."
         )
+        self.summary_var.set(summary)
+        self.more_label.configure(text="More" if access_errors else "")
+        self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
         try:
             if ready:
@@ -561,13 +566,6 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
                 self.next_button.state(["disabled"])
         except tk.TclError:
             pass
-        if access_errors:
-            messagebox.showwarning(
-                "Batch Step 2 - folders skipped",
-                skipped_directories_warning(access_errors),
-                parent=self,
-            )
-
     def _run_selected(self):
         if self.table is None:
             return
@@ -649,7 +647,7 @@ class Step2Frame(SidebarStepFrame):
 
         app_root = self._app_root()
         self.ai_for_aidas_root = os.path.join(app_root, "OCT Segmenter", "AI_ForAIDAS")
-        self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.pth")
+        self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.onnx")
 
         self.build_standard_layout()
         right = self.content
@@ -2889,7 +2887,7 @@ class Step2Frame(SidebarStepFrame):
         """Return the isolated AI_ForAIDAS worker command."""
         if getattr(sys, "frozen", False):
             return [sys.executable, "--aidas-ai-worker"]
-        return [sys.executable, "-m", "aidas.ai_for_aidas_cli"]
+        return [sys.executable, "-m", "aidas.ai.worker"]
 
     def _aidas_worker_env(self):
         """Return an environment for AI_ForAIDAS worker subprocesses."""
@@ -2918,131 +2916,11 @@ class Step2Frame(SidebarStepFrame):
                 pass
         return kwargs
 
-    def _run_aidas_prediction_worker_process(
-        self,
-        image,
-        *,
-        model_path,
-        device_name,
-        progress_callback=None,
-    ):
-        """Run PyTorch AI_ForAIDAS in a clean subprocess and return arrays."""
-        temp_dir = tempfile.mkdtemp(prefix="aidas_ai_for_aidas_")
-        image_npy = os.path.join(temp_dir, "image.npy")
-        output_npz = os.path.join(temp_dir, "prediction.npz")
-        try:
-            np.save(image_npy, np.ascontiguousarray(image))
-            cmd = self._aidas_worker_command() + [
-                "--image-npy",
-                image_npy,
-                "--model",
-                model_path,
-                "--device",
-                device_name,
-                "--output-npz",
-                output_npz,
-            ]
-
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-                env=self._aidas_worker_env(),
-                **self._hidden_subprocess_kwargs(),
-            )
-
-            stdout_lines = []
-            if process.stdout is not None:
-                for line in process.stdout:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    stdout_lines.append(text)
-                    try:
-                        message = json.loads(text)
-                    except json.JSONDecodeError:
-                        continue
-                    if message.get("type") == "progress" and progress_callback is not None:
-                        progress_callback(
-                            float(message.get("fraction", 0.0)),
-                            str(message.get("stage") or ""),
-                        )
-
-            return_code = process.wait()
-            stdout = "\n".join(stdout_lines).strip()
-            stderr = ""
-            if return_code != 0:
-                details = stdout or "(worker produced no output)"
-                raise RuntimeError(
-                    "AI_ForAIDAS worker process failed.\n\n"
-                    f"Command: {subprocess.list2cmdline(cmd)}\n"
-                    f"Return code: {return_code}\n\n"
-                    f"{details}"
-                )
-            if not os.path.isfile(output_npz):
-                raise RuntimeError(
-                    "AI_ForAIDAS worker finished without writing prediction output.\n\n"
-                    f"Command: {subprocess.list2cmdline(cmd)}\n"
-                    f"STDOUT:\n{stdout or '(empty)'}\n\n"
-                    f"STDERR:\n{stderr or '(empty)'}"
-                )
-
-            with np.load(output_npz) as data:
-                fovea_arr = np.asarray(data["fovea_x"])
-                fovea_x = int(fovea_arr[0]) if fovea_arr.size else -1
-                device_arr = np.asarray(data["device"])
-                device = str(device_arr[0]) if device_arr.size else "unknown"
-                return {
-                    "boundaries": np.asarray(data["boundaries"], dtype=np.float32),
-                    "fovea_x": None if fovea_x < 0 else fovea_x,
-                    "device": device,
-                    "stdout": stdout,
-                    "stderr": stderr,
-                    "command": subprocess.list2cmdline(cmd),
-                }
-        finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-
     def _app_root(self):
         bundled_root = getattr(sys, "_MEIPASS", None)
         if bundled_root:
             return os.path.abspath(bundled_root)
         return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-
-    def _missing_torch_message(self, exc=None):
-        original = f"\n\nOriginal error:\n{exc}" if exc else ""
-        if getattr(sys, "frozen", False):
-            return (
-                "AI_ForAIDAS requires PyTorch to be bundled with the AIDaS app.\n\n"
-                "Build the Windows executable from AIDaS.spec in a Python environment that has torch installed, "
-                "so PyInstaller can collect the PyTorch runtime and include it in dist/AIDaS.\n\n"
-                "End users should not need a separate conda environment for the AI_ForAIDAS model."
-                f"{original}"
-            )
-
-        return (
-            "AI_ForAIDAS requires PyTorch in the Python environment running AIDaS.\n\n"
-            f"Current Python:\n{sys.executable}\n\n"
-            "Run from an activated environment, for example:\n"
-            "  conda activate aidas-env\n"
-            "  python run_aidas.py\n\n"
-            "If torch is missing or damaged in that environment, reinstall it there."
-            f"{original}"
-        )
-
-    @staticmethod
-    def _is_missing_torch_error(exc):
-        text = str(exc).lower()
-        return (
-            "requires pytorch" in text
-            or "could not load its windows dlls" in text
-            or "no module named 'torch'" in text
-            or "no module named torch" in text
-            or "winerror 127" in text
-            or "shm.dll" in text
-        )
 
     def _image_uint8(self, image):
         """Convert image to 8-bit (0-255) range with auto-scaling.
@@ -3422,9 +3300,11 @@ class Step2Frame(SidebarStepFrame):
                 for path, x in manual_fovea_by_path.items()
             }
 
-        device_name = "auto"
+        provider_name = "auto"
+        device_id = 0
         self._append_segmenter_log(
-            f"Starting AI_ForAIDAS batch for {len(image_paths)} image(s); model={model_path}; device={device_name}"
+            f"Starting AI_ForAIDAS batch for {len(image_paths)} image(s); "
+            f"model={model_path}; provider={provider_name}; DirectML adapter={device_id}"
         )
         self._set_segmentation_running(
             True,
@@ -3435,7 +3315,7 @@ class Step2Frame(SidebarStepFrame):
 
         worker = threading.Thread(
             target=self._run_aidas_batch_segmenter_worker,
-            args=(image_paths, model_path, device_name, manual_fovea_by_key),
+            args=(image_paths, model_path, provider_name, device_id, manual_fovea_by_key),
             daemon=True,
         )
         worker.start()
@@ -3444,7 +3324,8 @@ class Step2Frame(SidebarStepFrame):
         self,
         image_paths,
         model_path,
-        device_name,
+        provider_name,
+        device_id,
         manual_fovea_by_key=None,
     ):
         results = []
@@ -3453,7 +3334,8 @@ class Step2Frame(SidebarStepFrame):
             "AIDaS Step 2 AI_ForAIDAS Batch Segmentation",
             f"Boundary model: {model_path}",
             f"Manual fovea lines: {'yes' if manual_fovea_by_key is not None else 'no'}",
-            f"Requested device: {device_name}",
+            f"Requested provider: {provider_name}",
+            f"DirectML adapter: {device_id}",
             f"Images: {len(image_paths)}",
             "",
         ]
@@ -3475,60 +3357,87 @@ class Step2Frame(SidebarStepFrame):
             self.after(0, lambda: self.status_var.set(f"AI_ForAIDAS batch {index}/{total}: {name} - {label}"))
 
         try:
-            for index, path in enumerate(image_paths, start=1):
-                report_status(index, path)
-                try:
-                    image, template, _source_was_8bit = self._read_image_for_annotation(path)
-                    model_input_uses_stored_y = template is not None
-                    image_for_ai = np.array(image, copy=True)
-                    if model_input_uses_stored_y:
-                        image_for_ai = np.ascontiguousarray(np.flipud(image_for_ai))
+            worker_client = AIWorkerClient(
+                self._aidas_worker_command(),
+                model_path=model_path,
+                provider_name=provider_name,
+                device_id=device_id,
+                env=self._aidas_worker_env(),
+                popen_kwargs=self._hidden_subprocess_kwargs(),
+                startup_progress_callback=lambda fraction, stage: report_model_progress(
+                    1,
+                    len(image_paths),
+                    image_paths[0],
+                    fraction,
+                    stage,
+                ),
+            )
+            with worker_client:
+                startup = worker_client.startup_result or {}
+                device = startup.get("device") or device
+                log_lines.append(f"Worker: {worker_client.command_line}")
+                log_lines.append(
+                    f"Execution provider: {startup.get('execution_provider') or 'unknown'}"
+                )
+                if startup.get("fallback_reason"):
+                    log_lines.append(f"CPU fallback: {startup['fallback_reason']}")
+                log_lines.append("")
 
-                    prediction = self._run_aidas_prediction_worker_process(
-                        image_for_ai,
-                        model_path=model_path,
-                        device_name=device_name,
-                        progress_callback=lambda fraction, stage, i=index, t=len(image_paths), p=path: (
-                            report_model_progress(i, t, p, fraction, stage)
-                        ),
-                    )
-                    if prediction.get("device"):
-                        device = prediction["device"]
-                    fovea_x = None
-                    manual_fovea = manual_fovea_by_key is not None
-                    if manual_fovea_by_key is not None:
-                        fovea_x = manual_fovea_by_key.get(self._image_pair_key(path))
-                    if fovea_x is not None:
-                        fovea_x = int(np.clip(int(fovea_x), 0, max(0, image.shape[1] - 1)))
-                    boundaries = self._aidas_boundaries_from_model_to_display(
-                        prediction["boundaries"],
-                        image_for_ai.shape[0],
-                        model_input_uses_stored_y,
-                    )
-                    traces, _order = self._boundary_traces_from_rows(
-                        boundaries,
-                        image.shape,
-                        source_label=f"AI_ForAIDAS prediction for {os.path.basename(path)}",
-                    )
-                    results.append({
-                        "input": path,
-                        "boundaries": np.asarray(boundaries, dtype=np.float32),
-                        "traces": traces,
-                        "fovea_x": fovea_x,
-                    })
-                    log_lines.append(f"OK: {path}")
-                    log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
-                    log_lines.append(f"  Worker: {prediction.get('command', '(unknown command)')}")
-                    if fovea_x is not None:
-                        log_lines.append(f"  Fovea x (manual): {int(fovea_x)}")
-                    elif manual_fovea:
-                        log_lines.append("  Fovea x: skipped by user")
-                except Exception as exc:
-                    failures.append({"input": path, "error": str(exc)})
-                    log_lines.append(f"FAILED: {path}")
-                    log_lines.append(f"  Error: {exc}")
-                finally:
-                    self.after(0, lambda i=index, t=len(image_paths): self._set_segmenter_progress_value(i, t))
+                for index, path in enumerate(image_paths, start=1):
+                    report_status(index, path)
+                    try:
+                        image, template, _source_was_8bit = self._read_image_for_annotation(path)
+                        model_input_uses_stored_y = template is not None
+                        image_for_ai = np.array(image, copy=True)
+                        if model_input_uses_stored_y:
+                            image_for_ai = np.ascontiguousarray(np.flipud(image_for_ai))
+
+                        prediction = worker_client.predict(
+                            image_for_ai,
+                            progress_callback=lambda fraction, stage, i=index, t=len(image_paths), p=path: (
+                                report_model_progress(i, t, p, fraction, stage)
+                            ),
+                        )
+                        if prediction.get("device"):
+                            device = prediction["device"]
+                        if prediction.get("fallback_reason"):
+                            log_lines.append(
+                                f"  CPU fallback: {prediction['fallback_reason']}"
+                            )
+                        fovea_x = None
+                        manual_fovea = manual_fovea_by_key is not None
+                        if manual_fovea_by_key is not None:
+                            fovea_x = manual_fovea_by_key.get(self._image_pair_key(path))
+                        if fovea_x is not None:
+                            fovea_x = int(np.clip(int(fovea_x), 0, max(0, image.shape[1] - 1)))
+                        boundaries = self._aidas_boundaries_from_model_to_display(
+                            prediction["boundaries"],
+                            image_for_ai.shape[0],
+                            model_input_uses_stored_y,
+                        )
+                        traces, _order = self._boundary_traces_from_rows(
+                            boundaries,
+                            image.shape,
+                            source_label=f"AI_ForAIDAS prediction for {os.path.basename(path)}",
+                        )
+                        results.append({
+                            "input": path,
+                            "boundaries": np.asarray(boundaries, dtype=np.float32),
+                            "traces": traces,
+                            "fovea_x": fovea_x,
+                        })
+                        log_lines.append(f"OK: {path}")
+                        log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
+                        if fovea_x is not None:
+                            log_lines.append(f"  Fovea x (manual): {int(fovea_x)}")
+                        elif manual_fovea:
+                            log_lines.append("  Fovea x: skipped by user")
+                    except Exception as exc:
+                        failures.append({"input": path, "error": str(exc)})
+                        log_lines.append(f"FAILED: {path}")
+                        log_lines.append(f"  Error: {exc}")
+                    finally:
+                        self.after(0, lambda i=index, t=len(image_paths): self._set_segmenter_progress_value(i, t))
         except Exception as exc:
             batch_exception = str(exc)
             log_lines.append(f"FATAL: {batch_exception}")

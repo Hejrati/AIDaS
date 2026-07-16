@@ -13,14 +13,19 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, ttk
 
+from PIL import Image, ImageTk
+
 from aidas import __version__
-from aidas.config import Config
-from aidas.single_instance import SingleInstanceGuard
+from aidas.core.config import Config
+from aidas.core.display import centered_geometry, enable_per_monitor_dpi_awareness
+from aidas.core.single_instance import SingleInstanceGuard
+from aidas.services.update_service import launch_installer
+from aidas.services.update_ui import UpdateController
 from aidas.utils.ui_utils import apply_app_icon_to, build_app_menu, resource_path
 
 
 APP_TITLE = "AIDaS"
-APP_SUBTITLE = "OCT image processing"
+APP_SUBTITLE = "OCT Image Processing"
 LAB_ACRONYM = "MVPRL"
 LAB_NAME = "Machine Vision and Pattern Recognition Lab"
 LAB_URL = "https://mvprl.cs.wayne.edu"
@@ -40,115 +45,153 @@ WINDOW_BG = "#f7f8fa"
 BRAND_NAVY = "#103b64"
 BRAND_RED = "#c0002b"
 BODY_TEXT = "#07111c"
-SPLASH_MINIMUM_MS = 2200
-
-
-def _bootloader_splash_is_alive() -> bool:
-    """Return whether this frozen process owns a live PyInstaller splash."""
-    try:
-        import pyi_splash
-
-        return bool(pyi_splash.is_alive())
-    except (ImportError, OSError, RuntimeError):
-        return False
-
-
-def _close_bootloader_splash() -> None:
-    """Close PyInstaller's early splash without affecting source runs."""
-    try:
-        import pyi_splash
-
-        if pyi_splash.is_alive():
-            pyi_splash.close()
-    except (ImportError, OSError, RuntimeError):
-        # Source runs have no pyi_splash module, and a splash failure must not
-        # prevent the application from starting or showing a startup notice.
-        pass
+SPLASH_MINIMUM_MS = 700
 
 
 def _center_geometry(window: tk.Misc, width: int, height: int, *, parent=None) -> str:
     """Return geometry that centers a window on its parent or the screen."""
-    window.update_idletasks()
-    if parent is not None and parent.winfo_viewable():
-        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - width) // 2)
-        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - height) // 2)
-    else:
-        x = max(0, (window.winfo_screenwidth() - width) // 2)
-        y = max(0, (window.winfo_screenheight() - height) // 2)
-    return f"{width}x{height}+{x}+{y}"
+    return centered_geometry(window, width, height, parent=parent)
 
 
 class SplashWindow(tk.Toplevel):
-    """Borderless startup window styled after the original AIDaS splash."""
+    """Dynamic startup window that reports initialization progress."""
 
-    WIDTH = 572
+    GOLDEN_RATIO = (1 + 5**0.5) / 2
     HEIGHT = 816
+    WIDTH = round(HEIGHT / GOLDEN_RATIO)
+    REFERENCE_SCREEN_WIDTH = 1920
+    REFERENCE_SCREEN_HEIGHT = 1080
 
     def __init__(self, parent: tk.Tk) -> None:
         super().__init__(parent)
+        self.withdraw()
         self.overrideredirect(True)
         self.configure(bg=BRAND_NAVY)
-        self.geometry(_center_geometry(self, self.WIDTH, self.HEIGHT))
+
+        screen_width = max(1, self.winfo_screenwidth())
+        screen_height = max(1, self.winfo_screenheight())
+        self.scale = min(
+            screen_width / self.REFERENCE_SCREEN_WIDTH,
+            screen_height / self.REFERENCE_SCREEN_HEIGHT,
+        )
+        # The same factor drives both dimensions, preserving a portrait
+        # golden-ratio frame (height / width = phi) on every display.
+        splash_height = max(1, round(self.HEIGHT * self.scale))
+        splash_width = max(1, round(splash_height / self.GOLDEN_RATIO))
+
+        def px(value: int) -> int:
+            return max(1, round(value * self.scale))
+
+        def font_size(value: int) -> int:
+            return max(6, round(value * self.scale))
 
         panel = tk.Frame(self, bg=WINDOW_BG, bd=0, highlightthickness=0)
         panel.pack(fill="both", expand=True, padx=1, pady=1)
 
         logo_path = resource_path(os.path.join("assets", "aidas.png"))
-        self.logo_image = tk.PhotoImage(file=logo_path)
+        logo_size = px(450)
+        with Image.open(logo_path) as logo:
+            resized_logo = logo.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
+            self.logo_image = ImageTk.PhotoImage(resized_logo)
         tk.Label(
             panel,
             image=self.logo_image,
             bg=WINDOW_BG,
             bd=0,
             highlightthickness=0,
-        ).pack(pady=(24, 0))
+        ).pack(pady=(px(24), 0))
 
         tk.Label(
             panel,
             text=APP_TITLE,
-            font=("Segoe UI", 28, "bold"),
+            font=("Segoe UI", font_size(28), "bold"),
             fg=BRAND_NAVY,
             bg=WINDOW_BG,
-        ).pack(pady=(14, 0))
+        ).pack(pady=(px(14), 0))
         tk.Label(
             panel,
             text=APP_SUBTITLE,
-            font=("Segoe UI", 11),
+            font=("Segoe UI", font_size(11)),
             fg=BRAND_NAVY,
             bg=WINDOW_BG,
-        ).pack(pady=(1, 0))
+        ).pack(pady=(px(1), 0))
         tk.Label(
             panel,
             text=LAB_ACRONYM,
-            font=("Segoe UI", 19, "bold"),
+            font=("Segoe UI", font_size(19), "bold"),
             fg=BRAND_RED,
             bg=WINDOW_BG,
-        ).pack(pady=(20, 0))
+        ).pack(pady=(px(20), 0))
         tk.Label(
             panel,
             text=LAB_NAME,
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", font_size(9), "bold"),
             fg=BODY_TEXT,
             bg=WINDOW_BG,
-        ).pack(pady=(1, 0))
+        ).pack(pady=(px(1), 0))
+        copyright_panel = tk.Frame(panel, bg=WINDOW_BG, bd=0, highlightthickness=0)
+        # Reserve the copyright footer before the branding widgets consume
+        # the available height.
+        copyright_panel.pack(
+            side="bottom",
+            fill="x",
+            padx=px(42),
+            pady=(0, px(34)),
+            before=panel.winfo_children()[0],
+        )
+
         tk.Label(
-            panel,
+            copyright_panel,
             text=COPYRIGHT_NOTICE,
-            font=("Segoe UI", 8),
+            font=("Segoe UI", font_size(8)),
             fg=BODY_TEXT,
             bg=WINDOW_BG,
             justify="center",
-            wraplength=530,
-        ).pack(pady=(20, 0))
+            wraplength=px(420),
+        ).pack(fill="x")
+
+        # This region receives all space remaining between the MVPR branding
+        # and copyright footer. Expanding it centers the loading line exactly
+        # between those two sections.
+        loading_region = tk.Frame(panel, bg=WINDOW_BG, bd=0, highlightthickness=0)
+        loading_region.pack(fill="both", expand=True, padx=px(42))
+        progress_header = tk.Frame(loading_region, bg=WINDOW_BG, bd=0, highlightthickness=0)
+        progress_header.pack(fill="x", expand=True)
+        self.status_var = tk.StringVar(value="Starting AIDaS...")
+        self.percent_var = tk.StringVar(value="0%")
         tk.Label(
-            panel,
-            text=UNIVERSITY_NAME,
-            font=("Segoe UI", 8),
+            progress_header,
+            textvariable=self.status_var,
+            font=("Segoe UI", font_size(9)),
             fg=BODY_TEXT,
             bg=WINDOW_BG,
-        ).pack(pady=(16, 0))
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+        tk.Label(
+            progress_header,
+            textvariable=self.percent_var,
+            font=("Segoe UI", font_size(9), "bold"),
+            fg=BRAND_NAVY,
+            bg=WINDOW_BG,
+            anchor="e",
+        ).pack(
+            side="right",
+            # Reserve room for the percentage before the variable-length
+            # loading message is laid out.
+            before=progress_header.winfo_children()[0],
+        )
 
+        self.attributes("-topmost", True)
+        self.geometry(_center_geometry(self, splash_width, splash_height))
+        self.deiconify()
         self.lift()
+
+    def set_progress(self, value: float, message: str) -> None:
+        """Update the visible startup stage and percentage immediately."""
+        percent = max(0.0, min(float(value), 100.0))
+        self.percent_var.set(f"{percent:.0f}%")
+        self.status_var.set(str(message))
+        self.update_idletasks()
 
 
 class AboutDialog(tk.Toplevel):
@@ -260,6 +303,7 @@ class AIDaSApp(tk.Tk):
     """Root application window."""
 
     def __init__(self) -> None:
+        enable_per_monitor_dpi_awareness()
         super().__init__()
         self.withdraw()
         self.title("AIDaS — Retinal Image Processing")
@@ -269,14 +313,8 @@ class AIDaSApp(tk.Tk):
         self._set_app_icon()
 
         self._splash_started_at = time.monotonic()
-        self._bootloader_splash_active = _bootloader_splash_is_alive()
-        self._splash = None
-        if not self._bootloader_splash_active:
-            self._splash = SplashWindow(self)
-            # Source runs have no bootloader splash, so paint the Tk fallback
-            # before importing the processing views and models.
-            self.update_idletasks()
-            self.update()
+        self._splash = SplashWindow(self)
+        self._set_splash_progress(3, "Starting AIDaS...")
 
         try:
             self._build_application()
@@ -285,25 +323,43 @@ class AIDaSApp(tk.Tk):
                 splash = self._splash
                 if splash is not None and splash.winfo_exists():
                     splash.destroy()
-                _close_bootloader_splash()
             finally:
                 self.destroy()
             raise
 
+        self._set_splash_progress(100, "Ready")
         elapsed_ms = int((time.monotonic() - self._splash_started_at) * 1000)
-        delay_ms = 0 if self._bootloader_splash_active else max(0, SPLASH_MINIMUM_MS - elapsed_ms)
+        delay_ms = max(0, SPLASH_MINIMUM_MS - elapsed_ms)
         self.after(delay_ms, self._finish_startup)
+
+    def _set_splash_progress(self, value: float, message: str) -> None:
+        """Paint one startup stage while the main window is still hidden."""
+        splash = getattr(self, "_splash", None)
+        if splash is None or not splash.winfo_exists():
+            return
+        splash.set_progress(value, message)
+        self.update_idletasks()
+        self.update()
 
     def _build_application(self) -> None:
         """Build the main UI while the splash remains visible."""
-        # Keep these imports behind the splash: the processing modules load
-        # scientific and imaging libraries that can take noticeable time.
+        # Keep scientific and imaging imports behind the splash and expose each
+        # expensive stage instead of leaving the startup window motionless.
+        self._set_splash_progress(8, "Loading Step 1 image tools...")
         from aidas.steps.step1_resize_raw import Step1Frame
+
+        self._set_splash_progress(18, "Loading Step 2 canvas and AI tools...")
         from aidas.steps.step2_annotate import Step2Frame
+
+        self._set_splash_progress(30, "Loading Step 3 flattening tools...")
         from aidas.steps.step3_flatten import Step3Frame
+
+        self._set_splash_progress(42, "Loading Step 4 analysis tools...")
         from aidas.steps.step4_analyze_isez import Step4Frame
 
+        self._set_splash_progress(50, "Loading preferences...")
         self.preferences = Config()
+        self._set_splash_progress(54, "Applying the interface theme...")
         self.style = ttk.Style()
         available_themes = self.style.theme_names()
         default_theme = "xpnative" if "xpnative" in available_themes else available_themes[0]
@@ -315,12 +371,23 @@ class AIDaSApp(tk.Tk):
             self.style.theme_use(available_themes[0])
             self.preferences.set("theme", available_themes[0])
 
+        self._set_splash_progress(58, "Starting application services...")
+        self.update_controller = UpdateController(
+            self,
+            preferences=self.preferences,
+            current_version=__version__,
+            status_callback=self._set_status_message,
+            restart_blocker_callback=self._update_restart_blocker,
+            install_callback=self._queue_update_install,
+        )
         self._build_menu()
         self.bind_all("<Alt-F4>", lambda _event: self.destroy())
 
+        self._set_splash_progress(62, "Creating the application workspace...")
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=(2, 5), pady=(5, 1))
 
+        self._set_splash_progress(66, "Preparing Step 1 - Load, Resize & Crop...")
         self.step1 = Step1Frame(
             self.notebook,
             preferences=self.preferences,
@@ -328,6 +395,7 @@ class AIDaSApp(tk.Tk):
         )
         self.notebook.add(self.step1, text="  Step 1 — Load, Resize & Crop  ")
 
+        self._set_splash_progress(74, "Preparing Step 2 - Annotate and Segment...")
         self.step2 = Step2Frame(
             self.notebook,
             preferences=self.preferences,
@@ -336,12 +404,15 @@ class AIDaSApp(tk.Tk):
         )
         self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
 
+        self._set_splash_progress(83, "Preparing Step 3 - Flatten Retina...")
         self.step3 = Step3Frame(self.notebook, preferences=self.preferences)
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
 
+        self._set_splash_progress(91, "Preparing Step 4 - Analyze ISEZ...")
         self.step4 = Step4Frame(self.notebook, preferences=self.preferences)
         self.notebook.add(self.step4, text="  Step 4 — Analyze ISEZ  ")
 
+        self._set_splash_progress(97, "Finalizing the main window...")
         self.status = ttk.Label(
             self,
             text=f"AIDaS v{__version__} — ready",
@@ -360,12 +431,10 @@ class AIDaSApp(tk.Tk):
         self._center_window()
         self.deiconify()
         self.lift()
-        # Paint the ready main window underneath the always-on-top bootloader
-        # splash, then close that splash for a direct, gap-free handoff.
         self.update_idletasks()
         self.update()
-        _close_bootloader_splash()
         self.focus_force()
+        self.after(1500, self.update_controller.check_automatically)
 
     @staticmethod
     def _resource_path(relative_path: str) -> str:
@@ -379,8 +448,35 @@ class AIDaSApp(tk.Tk):
             current_theme=self.style.theme_use(),
             set_theme_command=self._set_theme,
             browse_sdb_command=self._menu_browse_sdb,
+            check_updates_command=self.update_controller.check_now,
             about_command=self._show_about,
         )
+
+    def _set_status_message(self, message: str) -> None:
+        """Show a transient application-level status without assuming startup is complete."""
+        status = getattr(self, "status", None)
+        if status is not None:
+            status.config(text=f"AIDaS v{__version__} — {message}")
+
+    def _update_restart_blocker(self) -> str | None:
+        """Describe work that must finish before replacing the application."""
+        step2 = getattr(self, "step2", None)
+        if step2 is not None and getattr(step2, "_segmenter_running", False):
+            return "Step 2 AI segmentation is still running."
+
+        step3 = getattr(self, "step3", None)
+        if step3 is not None:
+            if getattr(step3, "_busy", False):
+                return "Step 3 R batch processing is still running."
+            setup_panel = getattr(step3, "r_setup_panel", None)
+            if setup_panel is not None and getattr(setup_panel, "busy", False):
+                return "Step 3 R or package setup is still running."
+        return None
+
+    def _queue_update_install(self, installer_path) -> None:
+        """Close the UI; main() starts Setup after releasing the app mutex."""
+        self._pending_update_installer = installer_path
+        self.destroy()
 
     def _set_app_icon(self) -> None:
         """Set the taskbar icon if available; never fail startup if missing."""
@@ -466,11 +562,9 @@ def main() -> int:
     guard = SingleInstanceGuard()
     try:
         if not guard.acquire():
-            _close_bootloader_splash()
             _show_native_notice(APP_TITLE, "AIDaS is already running.")
             return 0
     except OSError as exc:
-        _close_bootloader_splash()
         _show_native_notice(
             APP_TITLE,
             f"AIDaS could not verify that only one instance is running.\n\n{exc}",
@@ -478,11 +572,40 @@ def main() -> int:
         )
         return 1
 
+    app = None
+    pending_update = None
+    interrupted = False
     try:
         app = AIDaSApp()
-        app.mainloop()
+        try:
+            app.mainloop()
+        except KeyboardInterrupt:
+            # Stopping a VS Code debug session (or pressing Ctrl+C in a
+            # terminal) interrupts Tk's blocking event loop.  Treat that as a
+            # normal user-requested shutdown instead of emitting a traceback.
+            interrupted = True
+            try:
+                app.destroy()
+            except tk.TclError:
+                pass
+        if not interrupted:
+            pending_update = getattr(app, "_pending_update_installer", None)
     finally:
         guard.close()
+
+    if interrupted:
+        return 0
+
+    if pending_update is not None:
+        try:
+            launch_installer(pending_update)
+        except Exception as exc:
+            _show_native_notice(
+                "AIDaS Update",
+                f"The verified update was downloaded, but Windows could not start the installer.\n\n{exc}",
+                error=True,
+            )
+            return 1
     return 0
 
 

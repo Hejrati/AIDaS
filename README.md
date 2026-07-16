@@ -15,11 +15,11 @@ The easiest way to run AIDaS on Windows is to use the standalone executable:
 This document lists what you need before running AIDaS as a Python application.
 
 ### 1. Operating System
-- Linux, macOS, or Windows
-- This project is currently developed and tested on Linux
+- Windows 10 version 1903 or newer is recommended for DirectML GPU inference
+- Linux and macOS use the ONNX Runtime CPU execution provider
 
 ### 2. Python
-- Python 3.11 is recommended for the main AIDaS app and AI_ForAIDAS PyTorch model
+- Python 3.11 is recommended for the main AIDaS app
 - `pip` available for package installation
 
 ### 3. System Packages
@@ -37,10 +37,10 @@ sudo apt install -y python3-tk
 ```
 
 ## 4. Python Dependencies
-Install the main AIDaS app and AI_ForAIDAS PyTorch dependencies from the root `requirements.txt`:
+Install the main AIDaS app and ONNX inference runtime from `requirements.txt`:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
 Alternatively, create the conda environment from `environment.yml`. This uses
@@ -49,7 +49,7 @@ conda only for Python itself; app packages are installed by pip from
 
 ```bash
 conda env create -f environment.yml
-conda activate aidas-env
+conda activate aidas
 ```
 
 ## 5. Input Data Requirements
@@ -81,18 +81,26 @@ input and output files.
 
 ### Installation
 
-Install the AI_ForAIDAS PyTorch segmenter from the root dependency file before launching it:
+The installed Step 2 segmenter uses the ONNX model and is fully covered by the
+single application requirements file:
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
 
-Or create the root environment. It still installs the app packages with pip
-from `requirements.txt`:
+Or create the complete Conda environment:
 
 ```bash
 conda env create -f environment.yml
-conda activate aidas-env
+conda activate aidas
+```
+
+The legacy model-training and ONNX-export scripts are developer tools, not
+parts of the installed application. Install their large optional dependencies
+only on a machine used to retrain or export the model:
+
+```bash
+python -m pip install torch onnx
 ```
 
 Then launch the segmenter:
@@ -173,12 +181,22 @@ Boundary encoding in MARKED files:
 - Boundary y-coordinates extracted via soft-argmax
 - Optimizer: Adam, lr=1e-3, ReduceLROnPlateau
 - Best checkpoint saved based on validation loss
+- The installed app runs `model_img.onnx`; `model_img.pth` remains the training checkpoint
 
 ```bash
 python train.py --epochs 60 --save-path model_img.pth
 ```
 
 Key arguments: `--epochs`, `--lr`, `--save-path`, `--data-dir`
+
+After training, export and verify the checkpoint from the repository root:
+
+```bash
+python tools/export_segmentation_onnx.py
+```
+
+On a Windows development computer, use `--verify-provider dml` to compare the
+export against PyTorch while executing the ONNX graph through DirectML.
 
 ### Inference Pipeline
 
@@ -222,6 +240,7 @@ python gather_training_data.py
 |------|-------------|
 | `model.pth` | Original model trained on TIFF images |
 | `model_img.pth` | Current boundary model trained on `.img` data |
+| `model_img.onnx` | Exported runtime model bundled with AIDaS |
 | `model_img_baseline.pth` | Saved baseline before further modifications |
 
 ### Segmenter Folder Structure
@@ -235,6 +254,7 @@ OCT Segmenter/AI_ForAIDAS/
   segment_analyze.py        Direct .img inference
   gather_training_data.py   Data collection utility
   model_img.pth             Trained boundary model
+  model_img.onnx            Exported model used by installed AIDaS
   model_img_baseline.pth    Baseline boundary model
   model.pth                 Original TIFF-trained model
   test/
@@ -254,40 +274,78 @@ OCT Segmenter/AI_ForAIDAS/
 - Both slices per `.img` file are identical, so only slice 0 is used for training
 - Backups are in `backup/` if you need to restore the original scripts
 
+## Application Package Structure
+
+Runtime Python code is grouped by responsibility under `aidas/`:
+
+```text
+aidas/
+|-- app.py                 Application composition and main window
+|-- ai/                    Runtime inference and isolated AI worker
+|-- canvas/                Reusable image display and annotation canvas
+|-- core/                  Preferences and single-instance lifecycle
+|-- services/              Update discovery, download, installation, and update UI
+|-- steps/                 The four OCT workflow screens
+`-- utils/                 Shared filesystem, image, I/O, logging, and UI helpers
+```
+
+`OCT Segmenter/AI_ForAIDAS/` remains a separate developer workspace for model
+training and experimentation. The installed application uses the ONNX runtime
+adapter in `aidas/ai/`, while PyInstaller bundles only the exported model from
+that workspace. PyTorch and the `.pth` checkpoint are not included in releases.
+
+### Step 2 GPU inference
+
+On Windows, `onnxruntime-directml` allows the same ONNX model to run on recent
+AMD, NVIDIA, and Intel DirectX 12 GPUs without CUDA or ROCm. Step 2 automatically
+selects `DmlExecutionProvider` on adapter 0. `CPUExecutionProvider` is always
+configured as the fallback, and AIDaS retries on CPU if DirectML cannot initialize
+or execute the graph. The selected provider and any fallback reason are written
+to the Step 2 segmentation log. A batch keeps one isolated worker process and
+one optimized model session alive, so the executable and model are not reloaded
+for every image.
+
+DirectML remains supported by ONNX Runtime, although new Windows execution-provider
+development is moving to WinML. The provider selection is isolated in
+`aidas/ai/inference.py` so WinML-registered providers can be added later without
+changing the model or Step 2. See the [ONNX Runtime DirectML documentation](https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html).
+
+Startup uses a live Tkinter window with a determinate progress bar and status
+messages for module loading and construction of each workflow step. No splash
+screenshot is generated or stored. In a one-file Windows build, the dynamic
+window appears after PyInstaller finishes extracting the executable.
+
 ## Building the Windows Executable
 
-To create a standalone Windows build, install the app requirements in the build
-environment, then use the spec file:
+To create a standalone Windows build, install the complete requirements in the
+active build environment, then use the spec file. The dependency list includes
+PyInstaller and its required Windows compatibility package, `pywin32-ctypes`:
 
 ```bash
-pip install pyinstaller
+python -m pip install -r requirements.txt
 python -m PyInstaller AIDaS.spec --clean
 ```
 
-The build is created as the single file `dist/AIDaS.exe`. The spec bundles the
-app assets, the release `.R` scripts located at the project root,
-AI_ForAIDAS `.pth` model files, and the PyTorch runtime collected from the
-build environment. Users do not need to copy R scripts or model/data files next
-to the executable, and they do not need a separate conda environment for the
-AI_ForAIDAS model.
+The build is created as the single file `dist/AIDaS.exe`. The spec requires and
+bundles every Python runtime package from `requirements.txt`, along with the app
+assets, release `.R` scripts, AI_ForAIDAS `.onnx` model, and ONNX Runtime
+DirectML provider libraries. It explicitly excludes the development-only
+PyTorch package. Users do not need to install Python packages, copy R scripts or
+model/data files next to the executable, install CUDA/ROCm, or create a separate
+conda environment.
 
 Step 3 still requires the R interpreter and its required R packages. The app's
 **Setup R and Packages** wizard detects or installs those runtime dependencies;
 the workflow `.R` files themselves are extracted from `AIDaS.exe` automatically
 while the app is running.
 
-The release uses a full-size branded bootloader splash, so the actual AIDaS
-welcome screen and copyright notice appear while the one-file executable is
-being extracted. That same screen remains visible until the ready main window
-replaces it; frozen builds do not create an extra intermediate Tk splash.
-
 Do not use the minimal `--onefile --name AIDaS run_aidas.py` command for release
 builds; it does not include the model/data files defined in `AIDaS.spec`.
 
 ### Build with Spec File (Recommended)
 
-Build from `AIDaS.spec` so app name, icon, bundled assets, AI model files, and
-hidden PyTorch imports stay consistent:
+Build from `AIDaS.spec` so app name, icon, bundled assets, ONNX model, and
+DirectML provider DLLs stay consistent:
 
 ```bash
 python -m PyInstaller AIDaS.spec --clean
@@ -325,4 +383,21 @@ Use the module form instead:
 ```bash
 python -m PyInstaller AIDaS.spec --clean
 ```
+
+### Troubleshooting: PyInstaller cannot import `pywintypes` or `win32api`
+
+This error means `pywin32-ctypes`, a PyInstaller dependency on Windows, is
+missing from the Python environment that runs the build. Activate the intended
+environment and reinstall the complete project requirements with the same
+Python interpreter:
+
+```powershell
+conda activate aidas
+python -m pip install -r requirements.txt
+python -c "from win32ctypes.pywin32 import pywintypes, win32api; print('pywin32-ctypes OK')"
+python -m PyInstaller AIDaS.spec --clean
+```
+
+Use `python -m pip` rather than a standalone `pip` command so installation and
+the PyInstaller build use the same interpreter.
 

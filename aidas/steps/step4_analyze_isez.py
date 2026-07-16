@@ -52,7 +52,7 @@ from matplotlib.patches import Rectangle
 
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
-from aidas.utils.ui_utils import SidebarStepFrame, load_ui_icon
+from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame, load_ui_icon
 
 
 MATLAB_ROI_LOW = 300
@@ -1050,6 +1050,9 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         top.pack(fill="x", pady=(0, 8))
         self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
         ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
+        self.more_label = ttk.Label(top, text="", foreground="#0066cc", cursor="hand2")
+        self.more_label.pack(side="right", padx=(8, 0))
+        self.more_tooltip = HoverToolTip(self.more_label, "")
 
         self.table_host = ttk.Frame(wrapper)
         self.table_host.pack(fill="both", expand=True)
@@ -1078,10 +1081,11 @@ class Step4BatchROISelectionPanel(ttk.Frame):
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set(f"Scan failed: {exc}")
+        self.summary_var.set("Scan failed. Move the mouse over More for details.")
+        self.more_label.configure(text="More")
+        self.more_tooltip.text = f"Could not scan folders.\n{exc}"
         self.step_frame.status_var.set("Batch ROI scan failed.")
         self.process_button.state(["disabled"])
-        messagebox.showerror("Batch ROI", f"Could not scan folders.\n{exc}", parent=self)
 
     def _show_results_table(self, rows):
         for child in self.table_host.winfo_children():
@@ -1114,23 +1118,19 @@ class Step4BatchROISelectionPanel(ttk.Frame):
 
         ready = sum(1 for row in rows if not row.get("locked"))
         complete = sum(1 for row in rows if row.get("locked"))
-        self.summary_var.set(
+        summary = (
             f"Scanned {scanned} folder(s). Found {ready} ready folder(s), "
             f"{complete} already complete, {skipped} without _flat_LIGHT. "
             f"{len(access_errors)} inaccessible folder(s) skipped."
         )
+        self.summary_var.set(summary)
+        self.more_label.configure(text="More" if access_errors else "")
+        self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         self.step_frame.status_var.set("Batch ROI scan complete. Select folders to process.")
         if ready:
             self.process_button.state(["!disabled"])
         else:
             self.process_button.state(["disabled"])
-        if access_errors:
-            messagebox.showwarning(
-                "Batch ROI - folders skipped",
-                skipped_directories_warning(access_errors),
-                parent=self,
-            )
-
     def _process_selected(self):
         if self.table is None:
             return
@@ -1414,7 +1414,7 @@ class Step4Frame(SidebarStepFrame):
     def _browse_batch_roi_root(self) -> None:
         folder = filedialog.askdirectory(
             title="Select root folder for batch Step 4 ROI",
-            initialdir=self.input_dir_var.get() or None,
+            initialdir=str(Path.home() / "Desktop"),
         )
         if not folder:
             return

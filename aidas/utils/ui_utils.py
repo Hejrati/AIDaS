@@ -100,7 +100,16 @@ def directory_row(
     return row, entry, buttons
 
 
-def build_app_menu(root, *, themes, current_theme, set_theme_command, browse_sdb_command, about_command):
+def build_app_menu(
+    root,
+    *,
+    themes,
+    current_theme,
+    set_theme_command,
+    browse_sdb_command,
+    check_updates_command,
+    about_command,
+):
     """Build the shared application menu bar."""
     menubar = tk.Menu(root)
 
@@ -117,6 +126,9 @@ def build_app_menu(root, *, themes, current_theme, set_theme_command, browse_sdb
 
     help_menu = tk.Menu(menubar, tearoff=0)
     help_menu.add_cascade(label="Theme", menu=theme_menu)
+    help_menu.add_separator()
+    help_menu.add_command(label="Check for Updates...", command=check_updates_command)
+    help_menu.add_separator()
     help_menu.add_command(label="About", command=about_command)
     menubar.add_cascade(label="Help", menu=help_menu)
 

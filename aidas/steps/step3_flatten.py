@@ -29,7 +29,7 @@ from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
 )
 from aidas.utils.log_paths import app_log_dir
-from aidas.utils.ui_utils import SidebarStepFrame, resource_path
+from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame, resource_path
 
 
 def _normalize_analyze_path(base_path):
@@ -1035,6 +1035,9 @@ class RBatchSelectionPanel(ttk.Frame):
             fill="x",
             expand=True,
         )
+        self.more_label = ttk.Label(top, text="", foreground="#0066cc", cursor="hand2")
+        self.more_label.pack(side="right", padx=(8, 0))
+        self.more_tooltip = HoverToolTip(self.more_label, "")
 
         self.table_host = ttk.Frame(wrapper)
         self.table_host.pack(fill="both", expand=True)
@@ -1126,14 +1129,15 @@ class RBatchSelectionPanel(ttk.Frame):
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set(f"Scan failed: {exc}")
+        self.summary_var.set("Scan failed. Move the mouse over More for details.")
+        self.more_label.configure(text="More")
+        self.more_tooltip.text = f"Could not scan folders.\n{exc}"
         self.step_frame.status_var.set("Batch scan failed.")
         try:
             self.next_button.state(["disabled"])
             self.workers_spin.configure(state="disabled")
         except tk.TclError:
             pass
-        messagebox.showerror("Batch Step 3", f"Could not scan folders.\n{exc}", parent=self)
 
     def _show_results_table(self, rows):
         for child in self.table_host.winfo_children():
@@ -1154,11 +1158,14 @@ class RBatchSelectionPanel(ttk.Frame):
         self._show_results_table(rows)
         ready = sum(1 for row in rows if not row["locked"])
         skipped = sum(1 for row in rows if row["locked"])
-        self.summary_var.set(
+        summary = (
             f"Scanned {scanned} folders. Found {ready} ready folder(s), {skipped} skipped folder(s) with RData. "
             f"{missing} folder(s) did not contain both required Light inputs. "
             f"{len(access_errors)} inaccessible folder(s) skipped."
         )
+        self.summary_var.set(summary)
+        self.more_label.configure(text="More" if access_errors else "")
+        self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         max_workers = self._max_worker_count(ready)
         self.workers_spin.configure(to=max_workers)
         self.workers_var.set(min(4, max_workers))
@@ -1173,13 +1180,6 @@ class RBatchSelectionPanel(ttk.Frame):
                 self.workers_spin.configure(state="disabled")
         except tk.TclError:
             pass
-        if access_errors:
-            messagebox.showwarning(
-                "Batch Step 3 - folders skipped",
-                skipped_directories_warning(access_errors),
-                parent=self,
-            )
-
     def _run_selected(self):
         if self.table is None:
             return

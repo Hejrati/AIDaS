@@ -1,8 +1,12 @@
-# Main AIDaS / AI_ForAIDAS requirements.
-numpy>=2.4
+# Complete runtime and Windows executable build requirements for AIDaS.
+numpy>=1.26,<2
 scipy>=1.17
 Pillow>=12
 matplotlib>=3.10
 pyreadr>=0.5
-xarray>=2026.4
-torch>=2.12
+packaging>=24
+onnxruntime-directml>=1.23,<2; sys_platform == "win32"
+onnxruntime>=1.23,<2; sys_platform != "win32"
+pyinstaller>=6.19,<7
+# PyInstaller to support Windows builds on non-Windows platforms, we need to include pywin32-ctypes as a dependency.
+pywin32-ctypes>=0.2.3,<0.3; sys_platform == "win32"
