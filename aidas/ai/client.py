@@ -67,8 +67,7 @@ class AIWorkerClient:
             str(host),
             "--connect-port",
             str(port),
-            "--connect-token",
-            self._connect_token,
+            f"--connect-token={self._connect_token}",
         ]
 
     @property
@@ -79,7 +78,10 @@ class AIWorkerClient:
             token_index = redacted.index("--connect-token") + 1
             redacted[token_index] = "<redacted>"
         except (ValueError, IndexError):
-            pass
+            for index, argument in enumerate(redacted):
+                if argument.startswith("--connect-token="):
+                    redacted[index] = "--connect-token=<redacted>"
+                    break
         return subprocess.list2cmdline(redacted)
 
     def _open_listener(self):

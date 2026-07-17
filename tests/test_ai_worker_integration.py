@@ -9,6 +9,7 @@ import unittest
 import numpy as np
 
 from aidas.ai.client import AIWorkerClient
+from aidas.ai.worker import build_parser
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,6 +39,24 @@ class AIWorkerIntegrationTests(unittest.TestCase):
         self.assertEqual(second["execution_provider"], "CPUExecutionProvider")
         self.assertEqual(first["boundaries"].shape, (6, 127))
         self.assertEqual(second["boundaries"].shape, (6, 257))
+
+
+class AIWorkerCommandLineTests(unittest.TestCase):
+    def test_connect_token_can_start_with_dash(self):
+        class _Listener:
+            @staticmethod
+            def getsockname():
+                return ("127.0.0.1", 60551)
+
+        client = AIWorkerClient(
+            [sys.executable],
+            model_path=str(MODEL_PATH),
+            provider_name="cpu",
+        )
+        client._listener = _Listener()
+        client._connect_token = "-token-starts-with-dash"
+        args = build_parser().parse_args(client.worker_command[1:])
+        self.assertEqual(args.connect_token, "-token-starts-with-dash")
 
 
 if __name__ == "__main__":
