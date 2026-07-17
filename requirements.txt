@@ -5,6 +5,7 @@ Pillow>=12
 matplotlib>=3.10
 pyreadr>=0.5
 packaging>=24
+truststore>=0.10,<1
 onnxruntime-directml>=1.23,<2; sys_platform == "win32"
 onnxruntime>=1.23,<2; sys_platform != "win32"
 pyinstaller>=6.19,<7

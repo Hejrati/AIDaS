@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ import urllib.error
 import urllib.request
 
 from packaging.version import InvalidVersion, Version
+import truststore
 
 
 GITHUB_REPOSITORY = "Hejrati/AIDaS"
@@ -98,7 +100,12 @@ def _read_limited(response, limit: int) -> bytes:
 
 def _open_url(request: urllib.request.Request, *, timeout: int = 30):
     try:
-        return urllib.request.urlopen(request, timeout=timeout)
+        # The packaged app must not depend on an OpenSSL CA file being present
+        # beside the executable. Use the operating system's native trust store
+        # (Windows CryptoAPI on installed builds), including organization-
+        # managed roots, while keeping certificate and hostname checks enabled.
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        return urllib.request.urlopen(request, timeout=timeout, context=context)
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise UpdateError(
@@ -110,6 +117,12 @@ def _open_url(request: urllib.request.Request, *, timeout: int = 30):
         raise UpdateError(f"The update server returned HTTP {exc.code}.") from exc
     except urllib.error.URLError as exc:
         reason = getattr(exc, "reason", exc)
+        if isinstance(reason, ssl.SSLCertVerificationError):
+            raise UpdateError(
+                "The system could not validate GitHub's HTTPS certificate. "
+                "Check the Windows date and time and ensure any organization-managed "
+                "root certificate is installed in the Windows certificate store."
+            ) from exc
         raise UpdateError(f"Could not reach GitHub: {reason}") from exc
     except OSError as exc:
         raise UpdateError(f"Could not reach GitHub: {exc}") from exc

@@ -49,6 +49,7 @@ required_runtime_imports = (
     "matplotlib",
     "pyreadr",
     "packaging",
+    "truststore",
     "onnxruntime",
 )
 missing_runtime_imports = [

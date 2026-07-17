@@ -5,8 +5,11 @@ import json
 import io
 import os
 from pathlib import Path
+import ssl
 import tempfile
 import unittest
+import urllib.error
+import urllib.request
 from unittest import mock
 
 from packaging.version import Version
@@ -15,12 +18,43 @@ from aidas.services.update_service import (
     ReleaseInfo,
     UpdateError,
     _fetch_release_payloads,
+    _open_url,
     _verified_existing_installer,
     download_installer,
     find_available_update,
     select_available_update,
     update_cache_dir,
 )
+
+
+class SecureTransportTests(unittest.TestCase):
+    def test_https_uses_the_native_system_certificate_store(self):
+        request = urllib.request.Request("https://api.github.com/repos/Hejrati/AIDaS/releases")
+        native_context = object()
+        response = object()
+
+        with mock.patch(
+            "aidas.services.update_service.truststore.SSLContext",
+            return_value=native_context,
+        ) as context_factory, mock.patch(
+            "aidas.services.update_service.urllib.request.urlopen",
+            return_value=response,
+        ) as urlopen:
+            self.assertIs(_open_url(request, timeout=17), response)
+
+        context_factory.assert_called_once_with(ssl.PROTOCOL_TLS_CLIENT)
+        urlopen.assert_called_once_with(request, timeout=17, context=native_context)
+
+    def test_certificate_failure_has_actionable_system_trust_message(self):
+        request = urllib.request.Request("https://api.github.com/repos/Hejrati/AIDaS/releases")
+        verification_error = ssl.SSLCertVerificationError(1, "certificate verify failed")
+
+        with mock.patch(
+            "aidas.services.update_service.urllib.request.urlopen",
+            side_effect=urllib.error.URLError(verification_error),
+        ):
+            with self.assertRaisesRegex(UpdateError, "Windows certificate store"):
+                _open_url(request)
 
 
 class ReleaseDiscoveryTests(unittest.TestCase):

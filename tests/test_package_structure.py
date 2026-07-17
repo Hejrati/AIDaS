@@ -55,6 +55,7 @@ class PackageStructureTests(unittest.TestCase):
         self.assertIn('"pytest",', spec_text)
         self.assertIn('"TkAgg"', spec_text)
         self.assertIn("onnxruntime-directml", requirements)
+        self.assertIn("truststore>=", requirements)
         self.assertIn("pyinstaller>=", requirements.lower())
         self.assertIn("pywin32-ctypes>=", requirements.lower())
         self.assertNotIn("torch>=", requirements)
@@ -68,6 +69,7 @@ class PackageStructureTests(unittest.TestCase):
             '"matplotlib"',
             '"pyreadr"',
             '"packaging"',
+            '"truststore"',
             '"onnxruntime"',
         ):
             with self.subTest(package=runtime_package):
