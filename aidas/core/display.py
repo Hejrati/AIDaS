@@ -103,27 +103,60 @@ def centered_position(bounds: MonitorBounds, width: int, height: int) -> tuple[i
     return x, y
 
 
-def centered_geometry(window, width: int, height: int, *, parent=None) -> str:
-    """Return Tk geometry centered on a parent or the pointer's current display."""
+def work_area_bounds(window, *, parent=None) -> MonitorBounds:
+    """Return the usable bounds for a parent or the pointer's current display."""
     window.update_idletasks()
     if parent is not None and parent.winfo_viewable():
-        bounds = (
+        return (
             parent.winfo_rootx(),
             parent.winfo_rooty(),
             parent.winfo_rootx() + parent.winfo_width(),
             parent.winfo_rooty() + parent.winfo_height(),
         )
-    else:
-        bounds = monitor_work_area_at_pointer()
-        if bounds is None:
-            left = int(window.winfo_vrootx())
-            top = int(window.winfo_vrooty())
-            bounds = (
-                left,
-                top,
-                left + int(window.winfo_vrootwidth()),
-                top + int(window.winfo_vrootheight()),
-            )
+
+    bounds = monitor_work_area_at_pointer()
+    if bounds is not None:
+        return bounds
+
+    left = int(window.winfo_vrootx())
+    top = int(window.winfo_vrooty())
+    return (
+        left,
+        top,
+        left + int(window.winfo_vrootwidth()),
+        top + int(window.winfo_vrootheight()),
+    )
+
+
+def fit_size_to_bounds(
+    bounds: MonitorBounds,
+    width: int,
+    height: int,
+    *,
+    maximum_fraction: float = 0.9,
+) -> tuple[int, int, float]:
+    """Scale a design size down uniformly until it fits usable bounds."""
+    left, top, right, bottom = (int(value) for value in bounds)
+    available_width = max(1, right - left)
+    available_height = max(1, bottom - top)
+    fraction = max(0.1, min(float(maximum_fraction), 1.0))
+    source_width = max(1, int(width))
+    source_height = max(1, int(height))
+    scale = min(
+        1.0,
+        available_width * fraction / source_width,
+        available_height * fraction / source_height,
+    )
+    return (
+        max(1, round(source_width * scale)),
+        max(1, round(source_height * scale)),
+        scale,
+    )
+
+
+def centered_geometry(window, width: int, height: int, *, parent=None) -> str:
+    """Return Tk geometry centered on a parent or the pointer's current display."""
+    bounds = work_area_bounds(window, parent=parent)
 
     x, y = centered_position(bounds, width, height)
     return f"{int(width)}x{int(height)}{x:+d}{y:+d}"

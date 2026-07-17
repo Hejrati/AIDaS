@@ -140,11 +140,14 @@ class UpdateController:
 
         self.preferences.set("last_successful_update_check", int(time.time()))
         if release is None:
-            self.status_callback(f"AIDaS {self.current_version} is up to date")
+            self.status_callback(f"No update newer than AIDaS {self.current_version} is available")
             if manual:
                 messagebox.showinfo(
                     "AIDaS Updates",
-                    f"AIDaS {self.current_version} is up to date, including preview releases.",
+                    f"No release newer than AIDaS {self.current_version} is available, "
+                    "including preview releases.\n\n"
+                    "A rebuilt release with the same version number is not an update. "
+                    "The published version must be higher than the installed version.",
                     parent=self.root,
                 )
             return

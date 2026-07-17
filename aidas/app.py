@@ -17,7 +17,12 @@ from PIL import Image, ImageTk
 
 from aidas import __version__
 from aidas.core.config import Config
-from aidas.core.display import centered_geometry, enable_per_monitor_dpi_awareness
+from aidas.core.display import (
+    centered_geometry,
+    enable_per_monitor_dpi_awareness,
+    fit_size_to_bounds,
+    work_area_bounds,
+)
 from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
@@ -56,10 +61,9 @@ def _center_geometry(window: tk.Misc, width: int, height: int, *, parent=None) -
 class SplashWindow(tk.Toplevel):
     """Dynamic startup window that reports initialization progress."""
 
-    GOLDEN_RATIO = (1 + 5**0.5) / 2
-    HEIGHT = 680
-    WIDTH = round(HEIGHT / GOLDEN_RATIO)
-    MAX_SCREEN_FRACTION = 0.78
+    WIDTH = 480
+    HEIGHT = 620
+    MAX_SCREEN_FRACTION = 0.88
 
     def __init__(self, parent: tk.Tk) -> None:
         super().__init__(parent)
@@ -67,99 +71,82 @@ class SplashWindow(tk.Toplevel):
         self.overrideredirect(True)
         self.configure(bg=BRAND_NAVY)
 
-        screen_width = max(1, self.winfo_screenwidth())
-        screen_height = max(1, self.winfo_screenheight())
-        # Never enlarge the splash beyond its deliberately compact design
-        # size. On smaller displays, scale every dimension down together so
-        # that the complete layout always remains on screen.
-        self.scale = min(
-            1.0,
-            screen_width * self.MAX_SCREEN_FRACTION / self.WIDTH,
-            screen_height * self.MAX_SCREEN_FRACTION / self.HEIGHT,
+        bounds = work_area_bounds(self)
+        dpi_scale = max(0.75, float(self.winfo_fpixels("1i")) / 96.0)
+        splash_width, splash_height, fit_scale = fit_size_to_bounds(
+            bounds,
+            round(self.WIDTH * dpi_scale),
+            round(self.HEIGHT * dpi_scale),
+            maximum_fraction=self.MAX_SCREEN_FRACTION,
         )
-        # The same factor drives both dimensions, preserving a portrait
-        # golden-ratio frame (height / width = phi) on every display.
-        splash_height = max(1, round(self.HEIGHT * self.scale))
-        splash_width = max(1, round(splash_height / self.GOLDEN_RATIO))
+        # Preserve the same apparent size at higher DPI when room permits,
+        # then uniformly shrink everything when the monitor is too small.
+        self.scale = dpi_scale * fit_scale
 
         def px(value: int) -> int:
             return max(1, round(value * self.scale))
 
-        def font_size(value: int) -> int:
-            return max(6, round(value * self.scale))
+        def font(value: int, *styles: str) -> tuple:
+            # Negative Tk font sizes are pixels. This prevents the operating
+            # system's DPI scaling from making text larger than its layout.
+            return ("Segoe UI", -max(7, round(value * self.scale)), *styles)
 
         panel = tk.Frame(self, bg=WINDOW_BG, bd=0, highlightthickness=0)
         panel.pack(fill="both", expand=True, padx=1, pady=1)
+        panel.grid_columnconfigure(0, weight=1)
+        panel.grid_rowconfigure(5, weight=1)
 
         logo_path = resource_path(os.path.join("assets", "aidas.png"))
-        logo_size = px(330)
+        logo_size = px(240)
         with Image.open(logo_path) as logo:
             resized_logo = logo.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
             self.logo_image = ImageTk.PhotoImage(resized_logo)
-        tk.Label(
+        logo_label = tk.Label(
             panel,
             image=self.logo_image,
             bg=WINDOW_BG,
             bd=0,
             highlightthickness=0,
-        ).pack(pady=(px(24), 0))
+        )
+        logo_label.grid(row=0, column=0, pady=(px(22), 0))
 
         tk.Label(
             panel,
             text=APP_TITLE,
-            font=("Segoe UI", font_size(28), "bold"),
+            font=font(34, "bold"),
             fg=BRAND_NAVY,
             bg=WINDOW_BG,
-        ).pack(pady=(px(14), 0))
+        ).grid(row=1, column=0, pady=(px(12), 0))
         tk.Label(
             panel,
             text=APP_SUBTITLE,
-            font=("Segoe UI", font_size(11)),
+            font=font(15),
             fg=BRAND_NAVY,
             bg=WINDOW_BG,
-        ).pack(pady=(px(1), 0))
+        ).grid(row=2, column=0, pady=(px(1), 0))
         tk.Label(
             panel,
             text=LAB_ACRONYM,
-            font=("Segoe UI", font_size(19), "bold"),
+            font=font(24, "bold"),
             fg=BRAND_RED,
             bg=WINDOW_BG,
-        ).pack(pady=(px(20), 0))
+        ).grid(row=3, column=0, pady=(px(16), 0))
         tk.Label(
             panel,
             text=LAB_NAME,
-            font=("Segoe UI", font_size(9), "bold"),
-            fg=BODY_TEXT,
-            bg=WINDOW_BG,
-        ).pack(pady=(px(1), 0))
-        copyright_panel = tk.Frame(panel, bg=WINDOW_BG, bd=0, highlightthickness=0)
-        # Reserve the copyright footer before the branding widgets consume
-        # the available height.
-        copyright_panel.pack(
-            side="bottom",
-            fill="x",
-            padx=px(42),
-            pady=(0, px(34)),
-            before=panel.winfo_children()[0],
-        )
-
-        tk.Label(
-            copyright_panel,
-            text=COPYRIGHT_NOTICE,
-            font=("Segoe UI", font_size(8)),
+            font=font(13, "bold"),
             fg=BODY_TEXT,
             bg=WINDOW_BG,
             justify="center",
-            wraplength=px(420),
-        ).pack(fill="x")
+            wraplength=max(1, splash_width - px(36)),
+        ).grid(row=4, column=0, sticky="ew", padx=px(18), pady=(px(2), 0))
 
-        # This region receives all space remaining between the MVPR branding
-        # and copyright footer. Expanding it centers the loading line exactly
-        # between those two sections.
         loading_region = tk.Frame(panel, bg=WINDOW_BG, bd=0, highlightthickness=0)
-        loading_region.pack(fill="both", expand=True, padx=px(42))
+        loading_region.grid(row=5, column=0, sticky="nsew", padx=px(32), pady=px(12))
+        loading_region.grid_rowconfigure(0, weight=1)
+        loading_region.grid_columnconfigure(0, weight=1)
         progress_header = tk.Frame(loading_region, bg=WINDOW_BG, bd=0, highlightthickness=0)
-        progress_header.pack(fill="x", expand=True)
+        progress_header.grid(row=0, column=0, sticky="ew")
         progress_header.grid_columnconfigure(0, weight=1)
         progress_header.grid_columnconfigure(1, weight=0)
         self.status_var = tk.StringVar(value="Starting AIDaS...")
@@ -167,25 +154,35 @@ class SplashWindow(tk.Toplevel):
         self.status_label = tk.Label(
             progress_header,
             textvariable=self.status_var,
-            font=("Segoe UI", font_size(9)),
+            font=font(13),
             fg=BODY_TEXT,
             bg=WINDOW_BG,
             anchor="w",
             justify="left",
             # Keep the status text inside its column even if a future startup
             # stage has a substantially longer description.
-            wraplength=max(px(180), splash_width - px(150)),
+            wraplength=max(px(120), splash_width - px(140)),
         )
         self.status_label.grid(row=0, column=0, sticky="ew", padx=(0, px(12)))
         tk.Label(
             progress_header,
             textvariable=self.percent_var,
-            font=("Segoe UI", font_size(9), "bold"),
+            font=font(13, "bold"),
             fg=BRAND_NAVY,
             bg=WINDOW_BG,
             anchor="e",
             width=4,
         ).grid(row=0, column=1, sticky="ne")
+
+        tk.Label(
+            panel,
+            text=COPYRIGHT_NOTICE,
+            font=font(11),
+            fg=BODY_TEXT,
+            bg=WINDOW_BG,
+            justify="center",
+            wraplength=max(1, splash_width - px(48)),
+        ).grid(row=6, column=0, sticky="ew", padx=px(24), pady=(0, px(22)))
 
         self.attributes("-topmost", True)
         self.geometry(_center_geometry(self, splash_width, splash_height))
@@ -203,99 +200,139 @@ class SplashWindow(tk.Toplevel):
 class AboutDialog(tk.Toplevel):
     """Branded, modal About window opened from the Help menu."""
 
-    WIDTH = 452
-    HEIGHT = 380
+    PREFERRED_WIDTH = 520
+    MAX_SCREEN_FRACTION = 0.9
 
     def __init__(self, parent: tk.Tk) -> None:
         super().__init__(parent)
         self.withdraw()
         self.title("About AIDaS")
         self.configure(bg="#f2f2f2")
-        self.resizable(False, False)
+        self.resizable(True, True)
         self.transient(parent)
         apply_app_icon_to(self)
 
-        tk.Label(
-            self,
+        bounds = work_area_bounds(self, parent=parent)
+        available_width = max(1, bounds[2] - bounds[0])
+        available_height = max(1, bounds[3] - bounds[1])
+        dpi_scale = max(0.75, float(self.winfo_fpixels("1i")) / 96.0)
+        maximum_width = max(1, round(available_width * self.MAX_SCREEN_FRACTION))
+        maximum_height = max(1, round(available_height * self.MAX_SCREEN_FRACTION))
+        dialog_width = max(1, min(round(self.PREFERRED_WIDTH * dpi_scale), maximum_width))
+        content_wrap = max(40, dialog_width - 64)
+
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+        canvas = tk.Canvas(self, bg="#f2f2f2", bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        content = tk.Frame(canvas, bg="#f2f2f2", bd=0, highlightthickness=0)
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+        self._about_canvas = canvas
+        self._about_content = content
+        self._about_content_window = content_window
+        self._wrapped_about_labels: list[tk.Label] = []
+
+        def add_label(*, text: str, font, **options) -> tk.Label:
+            label = tk.Label(
+                content,
+                text=text,
+                font=font,
+                fg=options.pop("fg", "#000000"),
+                bg="#f2f2f2",
+                justify=options.pop("justify", "center"),
+                wraplength=content_wrap,
+                **options,
+            )
+            self._wrapped_about_labels.append(label)
+            return label
+
+        add_label(
             text=APP_TITLE,
             font=("Segoe UI", 18, "bold"),
-            fg="#000000",
-            bg="#f2f2f2",
         ).pack(pady=(22, 0))
-        tk.Label(
-            self,
+        add_label(
             text=f"{APP_SUBTITLE} - Version {__version__}",
             font=("Segoe UI", 9),
-            fg="#000000",
-            bg="#f2f2f2",
         ).pack(pady=(2, 0))
-        tk.Label(
-            self,
+        add_label(
             text=LAB_ACRONYM,
             font=("Segoe UI", 11, "bold"),
             fg=BRAND_RED,
-            bg="#f2f2f2",
         ).pack(pady=(16, 0))
-        tk.Label(
-            self,
+        add_label(
             text=LAB_NAME,
             font=("Segoe UI", 9),
-            fg="#000000",
-            bg="#f2f2f2",
         ).pack(pady=(5, 0))
 
-        link = tk.Label(
-            self,
+        link = add_label(
             text=LAB_URL_TEXT,
             font=("Segoe UI", 9, "underline"),
             fg="#0066cc",
-            bg="#f2f2f2",
             cursor="hand2",
         )
         link.pack(pady=(11, 0))
         link.bind("<Button-1>", lambda _event: webbrowser.open_new_tab(LAB_URL))
 
-        tk.Label(
-            self,
-            text=LAB_DESCRIPTION,
+        add_label(
+            text=" ".join(LAB_DESCRIPTION.splitlines()),
             font=("Segoe UI", 8),
-            fg="#000000",
-            bg="#f2f2f2",
-            justify="center",
         ).pack(pady=(13, 0))
-        tk.Label(
-            self,
+        add_label(
             text=UNIVERSITY_NAME,
             font=("Segoe UI", 8),
-            fg="#000000",
-            bg="#f2f2f2",
         ).pack(pady=(10, 0))
-        tk.Label(
-            self,
+        add_label(
             text=COPYRIGHT_NOTICE,
             font=("Segoe UI", 8),
-            fg="#000000",
-            bg="#f2f2f2",
-            justify="center",
-            wraplength=410,
         ).pack(pady=(10, 0))
-        tk.Label(
-            self,
+        add_label(
             text=f"Python {sys.version.split()[0]}",
             font=("Segoe UI", 8),
-            fg="#000000",
-            bg="#f2f2f2",
-        ).pack(pady=(0, 0))
+        ).pack(pady=(2, 16))
 
-        ttk.Button(self, text="OK", width=10, command=self._close).pack(pady=(9, 0))
+        button_panel = ttk.Frame(self, padding=(12, 8, 12, 12))
+        button_panel.grid(row=1, column=0, columnspan=2, sticky="ew")
+        ttk.Button(button_panel, text="OK", width=10, command=self._close).pack()
+
+        content.bind("<Configure>", self._sync_about_scroll_region)
+        canvas.bind("<Configure>", self._resize_about_content)
+        self.bind("<MouseWheel>", self._scroll_about)
 
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
         self.bind("<Return>", lambda _event: self._close())
-        self.geometry(_center_geometry(self, self.WIDTH, self.HEIGHT, parent=parent))
+        self.update_idletasks()
+        desired_height = content.winfo_reqheight() + button_panel.winfo_reqheight()
+        preferred_minimum_height = min(round(240 * dpi_scale), maximum_height)
+        dialog_height = max(1, min(maximum_height, max(preferred_minimum_height, desired_height)))
+        self.minsize(
+            min(round(320 * dpi_scale), dialog_width),
+            min(round(240 * dpi_scale), dialog_height),
+        )
+        self.geometry(_center_geometry(self, dialog_width, dialog_height, parent=parent))
         self.deiconify()
         self.grab_set()
         self.focus_force()
+
+    def _sync_about_scroll_region(self, _event=None) -> None:
+        self._about_canvas.configure(scrollregion=self._about_canvas.bbox("all"))
+
+    def _resize_about_content(self, event) -> None:
+        width = max(1, int(event.width))
+        self._about_canvas.itemconfigure(self._about_content_window, width=width)
+        wraplength = max(40, width - 40)
+        for label in self._wrapped_about_labels:
+            label.configure(wraplength=wraplength)
+        self._sync_about_scroll_region()
+
+    def _scroll_about(self, event) -> str:
+        if event.delta:
+            self._about_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
 
     def _close(self) -> None:
         try:

@@ -100,6 +100,10 @@ class ReleaseSelectionTests(unittest.TestCase):
         release = select_available_update([release_payload("1.5.4")], "1.5.5")
         self.assertIsNone(release)
 
+    def test_same_version_rebuild_is_not_reoffered_forever(self):
+        release = select_available_update([release_payload("2.0.0")], "2.0.0")
+        self.assertIsNone(release)
+
     def test_installer_asset_must_match_release_version(self):
         payload = release_payload("1.5.6")
         payload["assets"][0]["name"] = "AIDaS-Setup-1.5.5.exe"
