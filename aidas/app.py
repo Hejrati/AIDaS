@@ -57,10 +57,9 @@ class SplashWindow(tk.Toplevel):
     """Dynamic startup window that reports initialization progress."""
 
     GOLDEN_RATIO = (1 + 5**0.5) / 2
-    HEIGHT = 816
+    HEIGHT = 680
     WIDTH = round(HEIGHT / GOLDEN_RATIO)
-    REFERENCE_SCREEN_WIDTH = 1920
-    REFERENCE_SCREEN_HEIGHT = 1080
+    MAX_SCREEN_FRACTION = 0.78
 
     def __init__(self, parent: tk.Tk) -> None:
         super().__init__(parent)
@@ -70,9 +69,13 @@ class SplashWindow(tk.Toplevel):
 
         screen_width = max(1, self.winfo_screenwidth())
         screen_height = max(1, self.winfo_screenheight())
+        # Never enlarge the splash beyond its deliberately compact design
+        # size. On smaller displays, scale every dimension down together so
+        # that the complete layout always remains on screen.
         self.scale = min(
-            screen_width / self.REFERENCE_SCREEN_WIDTH,
-            screen_height / self.REFERENCE_SCREEN_HEIGHT,
+            1.0,
+            screen_width * self.MAX_SCREEN_FRACTION / self.WIDTH,
+            screen_height * self.MAX_SCREEN_FRACTION / self.HEIGHT,
         )
         # The same factor drives both dimensions, preserving a portrait
         # golden-ratio frame (height / width = phi) on every display.
@@ -89,7 +92,7 @@ class SplashWindow(tk.Toplevel):
         panel.pack(fill="both", expand=True, padx=1, pady=1)
 
         logo_path = resource_path(os.path.join("assets", "aidas.png"))
-        logo_size = px(450)
+        logo_size = px(330)
         with Image.open(logo_path) as logo:
             resized_logo = logo.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
             self.logo_image = ImageTk.PhotoImage(resized_logo)
@@ -157,16 +160,23 @@ class SplashWindow(tk.Toplevel):
         loading_region.pack(fill="both", expand=True, padx=px(42))
         progress_header = tk.Frame(loading_region, bg=WINDOW_BG, bd=0, highlightthickness=0)
         progress_header.pack(fill="x", expand=True)
+        progress_header.grid_columnconfigure(0, weight=1)
+        progress_header.grid_columnconfigure(1, weight=0)
         self.status_var = tk.StringVar(value="Starting AIDaS...")
         self.percent_var = tk.StringVar(value="0%")
-        tk.Label(
+        self.status_label = tk.Label(
             progress_header,
             textvariable=self.status_var,
             font=("Segoe UI", font_size(9)),
             fg=BODY_TEXT,
             bg=WINDOW_BG,
             anchor="w",
-        ).pack(side="left", fill="x", expand=True)
+            justify="left",
+            # Keep the status text inside its column even if a future startup
+            # stage has a substantially longer description.
+            wraplength=max(px(180), splash_width - px(150)),
+        )
+        self.status_label.grid(row=0, column=0, sticky="ew", padx=(0, px(12)))
         tk.Label(
             progress_header,
             textvariable=self.percent_var,
@@ -174,12 +184,8 @@ class SplashWindow(tk.Toplevel):
             fg=BRAND_NAVY,
             bg=WINDOW_BG,
             anchor="e",
-        ).pack(
-            side="right",
-            # Reserve room for the percentage before the variable-length
-            # loading message is laid out.
-            before=progress_header.winfo_children()[0],
-        )
+            width=4,
+        ).grid(row=0, column=1, sticky="ne")
 
         self.attributes("-topmost", True)
         self.geometry(_center_geometry(self, splash_width, splash_height))

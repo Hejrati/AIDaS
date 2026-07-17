@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import io
 import os
 from pathlib import Path
@@ -8,16 +9,38 @@ import tempfile
 import unittest
 from unittest import mock
 
+from packaging.version import Version
+
 from aidas.services.update_service import (
     ReleaseInfo,
     UpdateError,
+    _fetch_release_payloads,
     _verified_existing_installer,
     download_installer,
     find_available_update,
     select_available_update,
     update_cache_dir,
 )
-from packaging.version import Version
+
+
+class ReleaseDiscoveryTests(unittest.TestCase):
+    def test_empty_github_release_list_is_reported_as_configuration_error(self):
+        class Response:
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            @staticmethod
+            def read(_limit):
+                return json.dumps([]).encode("utf-8")
+
+        with mock.patch("aidas.services.update_service._open_url", return_value=Response()):
+            with self.assertRaisesRegex(UpdateError, "No AIDaS releases"):
+                _fetch_release_payloads()
 
 
 def release_payload(version: str, *, prerelease: bool = False, digest: str | None = None):

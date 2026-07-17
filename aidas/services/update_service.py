@@ -125,7 +125,13 @@ def _fetch_release_payloads() -> list[dict[str, Any]]:
         raise UpdateError("GitHub returned invalid release metadata.") from exc
     if not isinstance(payload, list):
         raise UpdateError("GitHub returned an unexpected release response.")
-    return [item for item in payload if isinstance(item, dict)]
+    releases = [item for item in payload if isinstance(item, dict)]
+    if not releases:
+        raise UpdateError(
+            "No AIDaS releases are currently published on GitHub. "
+            "The publisher must restore or publish a release before in-app updates can work."
+        )
+    return releases
 
 
 def _version_from_tag(tag_name: str) -> Version:
