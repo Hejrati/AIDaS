@@ -182,14 +182,35 @@ jobs:
           IS_PRERELEASE: ${{ steps.metadata.outputs.prerelease }}
         run: |
           $installer = Join-Path "release" $env:INSTALLER_NAME
-          $arguments = @(
-            "release", "create", "${{ github.ref_name }}",
-            $installer, "$installer.sha256",
-            "--verify-tag",
-            "--generate-notes",
-            "--title", "AIDaS $env:VERSION"
-          )
-          if ($env:IS_PRERELEASE -eq "true") {
-            $arguments += "--prerelease"
+          $tag = "${{ github.ref_name }}"
+
+          # A rerun may find a draft or partially published release left by a
+          # previous attempt. Reuse it and replace the generated assets instead
+          # of failing because its tag already exists.
+          gh release view $tag *> $null
+          $releaseExists = $LASTEXITCODE -eq 0
+
+          if ($releaseExists) {
+            gh release upload $tag $installer "$installer.sha256" --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Uploading release assets failed." }
+
+            gh release edit $tag `
+              --title "AIDaS $env:VERSION" `
+              --draft=false `
+              --prerelease=$env:IS_PRERELEASE
+            if ($LASTEXITCODE -ne 0) { throw "Publishing the existing release failed." }
           }
-          gh @arguments
+          else {
+            $arguments = @(
+              "release", "create", $tag,
+              $installer, "$installer.sha256",
+              "--verify-tag",
+              "--generate-notes",
+              "--title", "AIDaS $env:VERSION"
+            )
+            if ($env:IS_PRERELEASE -eq "true") {
+              $arguments += "--prerelease"
+            }
+            gh @arguments
+            if ($LASTEXITCODE -ne 0) { throw "Creating the GitHub release failed." }
+          }

@@ -55,5 +55,14 @@ class InstallerSafetyTests(unittest.TestCase):
         self.assertIn("createallsubdirs", self.script)
 
 
+class ReleaseWorkflowTests(unittest.TestCase):
+    def test_release_publish_step_is_safe_to_rerun(self):
+        workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+        self.assertIn("gh release view $tag", workflow)
+        self.assertIn("gh release upload $tag $installer", workflow)
+        self.assertIn("--clobber", workflow)
+        self.assertIn("--draft=false", workflow)
+
+
 if __name__ == "__main__":
     unittest.main()
