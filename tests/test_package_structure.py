@@ -36,6 +36,11 @@ class PackageStructureTests(unittest.TestCase):
         self.assertIn('"aidas.ai.inference"', spec_text)
         self.assertNotIn("aidas.ai_for_aidas_", spec_text)
 
+    def test_pyinstaller_uses_onedir_to_avoid_runtime_extraction(self):
+        spec_text = (PROJECT_ROOT / "AIDaS.spec").read_text(encoding="utf-8")
+        self.assertIn("exclude_binaries=True", spec_text)
+        self.assertIn("collect = COLLECT(", spec_text)
+
     def test_packaged_ai_has_one_nonredundant_runtime_requirements_file(self):
         spec_text = (PROJECT_ROOT / "AIDaS.spec").read_text(encoding="utf-8")
         requirements = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")

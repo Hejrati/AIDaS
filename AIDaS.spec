@@ -108,9 +108,8 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    a.binaries,
-    a.datas,
     [],
+    exclude_binaries=True,
     name='AIDaS',
     debug=False,
     bootloader_ignore_signals=False,
@@ -123,4 +122,13 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=str(project_root / "assets" / "aidas.ico"),
+)
+
+collect = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="AIDaS",
 )

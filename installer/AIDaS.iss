@@ -57,9 +57,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-; AIDaS.exe is private to this application. ignoreversion deliberately replaces
-; the prior executable while leaving every user-created file and directory alone.
-Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; Install the complete PyInstaller one-directory application. Keeping these
+; runtime files beside AIDaS.exe avoids one-file extraction stalls at startup.
+Source: "..\dist\AIDaS\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

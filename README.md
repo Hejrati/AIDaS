@@ -4,10 +4,10 @@ A desktop application for processing OCT images.
 
 ## Quick Start (Windows)
 
-The easiest way to run AIDaS on Windows is to use the standalone executable:
+The easiest way to run AIDaS on Windows is to use the release installer:
 
-1. Download `AIDaS.exe` from the `dist/` folder
-2. Double-click `AIDaS.exe` to launch the application
+1. Download `AIDaS-Setup-<version>.exe` from the GitHub Releases page
+2. Run the installer, then launch AIDaS from the Start menu
 3. **No Python installation required!**
 
 ## Prerequisites for Running from Source
@@ -310,37 +310,40 @@ development is moving to WinML. The provider selection is isolated in
 `aidas/ai/inference.py` so WinML-registered providers can be added later without
 changing the model or Step 2. See the [ONNX Runtime DirectML documentation](https://onnxruntime.ai/docs/execution-providers/DirectML-ExecutionProvider.html).
 
-Startup uses a live Tkinter window with a determinate progress bar and status
-messages for module loading and construction of each workflow step. No splash
-screenshot is generated or stored. In a one-file Windows build, the dynamic
-window appears after PyInstaller finishes extracting the executable.
+Startup uses a live Tkinter splash window with status messages for module loading
+and construction of each workflow step. No splash screenshot is generated or
+stored. The Windows release uses PyInstaller's one-directory layout so the
+application does not need to unpack a large archive on every launch.
 
 ## Building the Windows Executable
 
-To create a standalone Windows build, install the complete requirements in the
-active build environment, then use the spec file. The dependency list includes
+To create a standalone Windows build, use a clean virtual environment so Conda
+or per-user packages cannot leak into the release. The dependency list includes
 PyInstaller and its required Windows compatibility package, `pywin32-ctypes`:
 
-```bash
-python -m pip install -r requirements.txt
-python -m PyInstaller AIDaS.spec --clean
+```powershell
+python -m venv .venv-release
+.\.venv-release\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv-release\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv-release\Scripts\python.exe -m PyInstaller AIDaS.spec --clean --noconfirm
 ```
 
-The build is created as the single file `dist/AIDaS.exe`. The spec requires and
-bundles every Python runtime package from `requirements.txt`, along with the app
-assets, release `.R` scripts, AI_ForAIDAS `.onnx` model, and ONNX Runtime
-DirectML provider libraries. It explicitly excludes the development-only
-PyTorch package. Users do not need to install Python packages, copy R scripts or
-model/data files next to the executable, install CUDA/ROCm, or create a separate
-conda environment.
+The build is created at `dist/AIDaS/`, with the launch executable at
+`dist/AIDaS/AIDaS.exe`. The spec requires and bundles every Python runtime
+package from `requirements.txt`, along with the app assets, release `.R` scripts,
+AI_ForAIDAS `.onnx` model, and ONNX Runtime DirectML provider libraries. It
+explicitly excludes the development-only PyTorch package. Users receive this
+complete directory through the installer and do not need to install Python
+packages, copy R scripts or model/data files, install CUDA/ROCm, or create a
+separate conda environment.
 
 Step 3 still requires the R interpreter and its required R packages. The app's
 **Setup R and Packages** wizard detects or installs those runtime dependencies;
-the workflow `.R` files themselves are extracted from `AIDaS.exe` automatically
-while the app is running.
+the workflow `.R` files are bundled with the application automatically.
 
-Do not use the minimal `--onefile --name AIDaS run_aidas.py` command for release
-builds; it does not include the model/data files defined in `AIDaS.spec`.
+Do not use a minimal PyInstaller command for release builds; it does not include
+the model/data files or the reliable one-directory layout defined in
+`AIDaS.spec`.
 
 ### Build with Spec File (Recommended)
 
@@ -356,7 +359,7 @@ python -m PyInstaller AIDaS.spec --clean
 If `AIDaS.exe` has the new icon but the desktop shortcut still shows the old icon, Windows is using cached icon data.
 
 1. Delete the old desktop shortcut (do not delete the EXE)
-2. Run `dist/AIDaS.exe` once directly
+2. Run `dist/AIDaS/AIDaS.exe` once directly
 3. Create a new desktop shortcut from the new EXE
 4. If still unchanged, clear icon cache and restart Explorer:
 

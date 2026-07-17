@@ -35,7 +35,7 @@ jobs:
         id: metadata
         shell: pwsh
         run: |
-          python tools/release_metadata.py `
+          python release_tools/release_metadata.py `
             --tag "${{ github.ref_name }}" `
             --github-output "$env:GITHUB_OUTPUT"
 
@@ -49,7 +49,7 @@ jobs:
 
       - name: Smoke-test the packaged ONNX worker
         shell: pwsh
-        run: python tools/smoke_test_binary.py dist/AIDaS.exe
+        run: python release_tools/smoke_test_binary.py dist/AIDaS/AIDaS.exe
 
       - name: Optionally sign the application executable
         id: signing
@@ -84,7 +84,7 @@ jobs:
           & $signTool sign /fd SHA256 /td SHA256 `
             /tr "http://timestamp.digicert.com" `
             /f $certificatePath /p $env:SIGNING_CERTIFICATE_PASSWORD `
-            "dist\AIDaS.exe"
+            "dist\AIDaS\AIDaS.exe"
           if ($LASTEXITCODE -ne 0) { throw "Signing AIDaS.exe failed." }
 
           "enabled=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -122,6 +122,43 @@ jobs:
             /p $env:SIGNING_CERTIFICATE_PASSWORD `
             (Join-Path "release" $env:INSTALLER_NAME)
           if ($LASTEXITCODE -ne 0) { throw "Signing the installer failed." }
+
+      - name: Smoke-test the installed application
+        shell: pwsh
+        env:
+          INSTALLER_NAME: ${{ steps.metadata.outputs.installer_name }}
+        run: |
+          $installer = (Resolve-Path (Join-Path "release" $env:INSTALLER_NAME)).Path
+          $installDirectory = Join-Path $env:RUNNER_TEMP "AIDaS-installer-smoke"
+          $installResult = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/NOICONS",
+            "/DIR=$installDirectory"
+          )
+          if ($installResult.ExitCode -ne 0) {
+            throw "AIDaS installer smoke test failed with exit code $($installResult.ExitCode)."
+          }
+
+          $installedExecutable = Join-Path $installDirectory "AIDaS.exe"
+          try {
+            python release_tools/smoke_test_binary.py $installedExecutable
+            if ($LASTEXITCODE -ne 0) { throw "Installed AIDaS worker smoke test failed." }
+          }
+          finally {
+            $uninstaller = Join-Path $installDirectory "unins000.exe"
+            if (Test-Path -LiteralPath $uninstaller) {
+              $uninstallResult = Start-Process -FilePath $uninstaller -Wait -PassThru -ArgumentList @(
+                "/VERYSILENT",
+                "/SUPPRESSMSGBOXES",
+                "/NORESTART"
+              )
+              if ($uninstallResult.ExitCode -ne 0) {
+                Write-Warning "Installer smoke-test cleanup exited with code $($uninstallResult.ExitCode)."
+              }
+            }
+          }
 
       - name: Create SHA-256 checksum
         shell: pwsh

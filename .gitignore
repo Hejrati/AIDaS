@@ -9,6 +9,7 @@ __pycache__/
 OCT Segmenter\Model\human_OCT.h5
 .vscode/
 .venv-build/
+.venv-release/
 segmenter_output/
 aidas\__pycache__/*
 aidas\steps\__pycache__/*

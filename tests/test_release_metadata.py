@@ -7,7 +7,7 @@ import unittest
 from packaging.version import Version
 
 from aidas.core.single_instance import SingleInstanceGuard
-from tools.release_metadata import metadata, read_project_version, windows_file_version
+from release_tools.release_metadata import metadata, read_project_version, windows_file_version
 
 
 class ReleaseMetadataTests(unittest.TestCase):
@@ -48,6 +48,11 @@ class InstallerSafetyTests(unittest.TestCase):
 
     def test_installer_checks_the_same_mutex_created_by_aidas(self):
         self.assertIn(f"AppMutex={SingleInstanceGuard.WINDOWS_MUTEX_NAME}", self.script)
+
+    def test_installer_copies_the_complete_onedir_application(self):
+        self.assertIn(r'Source: "..\dist\AIDaS\*"', self.script)
+        self.assertIn("recursesubdirs", self.script)
+        self.assertIn("createallsubdirs", self.script)
 
 
 if __name__ == "__main__":
