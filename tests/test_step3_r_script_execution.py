@@ -125,7 +125,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             self.assertEqual(len(commands), 2)
             self.assertEqual(Path(commands[0][2]), main_script)
             self.assertEqual(commands[1][2], "-e")
-            self.assertIn(str(output_script).replace("\\", "/"), commands[1][3])
+            self.assertIn(output_script.resolve().as_posix(), commands[1][3])
             self.assertIn(Step3Frame.R_WORKSPACE_FILES[1], commands[1][3])
 
     def test_silent_process_is_stopped_when_timeout_expires(self):
