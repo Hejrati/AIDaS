@@ -16,6 +16,7 @@ from aidas.services.update_service import (
     find_available_update,
     supports_in_app_install,
 )
+from aidas.utils.ui_utils import apply_app_icon_to
 
 
 AUTO_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -27,6 +28,8 @@ class DownloadProgressDialog(tk.Toplevel):
 
     def __init__(self, parent: tk.Misc, release: ReleaseInfo, cancel_command) -> None:
         super().__init__(parent)
+        self.withdraw()
+        apply_app_icon_to(self)
         self.title("Downloading AIDaS Update")
         self.resizable(False, False)
         self.transient(parent)
@@ -50,6 +53,7 @@ class DownloadProgressDialog(tk.Toplevel):
         x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
         y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 2)
         self.geometry(f"+{x}+{y}")
+        self.deiconify()
 
     def set_progress(self, downloaded: int, total: int) -> None:
         percent = 0.0 if total <= 0 else min(100.0, downloaded * 100.0 / total)

@@ -838,7 +838,9 @@ class SidebarStepFrame(ttk.Frame):
 
         if sidebar_width is None:
             sidebar_width = self.SIDEBAR_WIDTH
-        self._sidebar_width = max(1, int(sidebar_width))
+        self._sidebar_design_width = max(1, int(sidebar_width))
+        self._layout_dpi_scale = None
+        self._sync_scaled_layout_values()
         self._last_workspace_width = None
 
         self.workspace = tk.PanedWindow(
@@ -867,7 +869,7 @@ class SidebarStepFrame(ttk.Frame):
             style="AIDaS.Sidebar.TFrame",
             padding=sidebar_padding,
         )
-        self.sidebar = ScrollableSidebar(self.sidebar_shell, width=sidebar_width)
+        self.sidebar = ScrollableSidebar(self.sidebar_shell, width=self._sidebar_width)
         self.sidebar.pack(fill="both", expand=True)
         self.ctrl = self.sidebar.content
 
@@ -883,15 +885,15 @@ class SidebarStepFrame(ttk.Frame):
 
         self.workspace.add(
             self.sidebar_shell,
-            minsize=self.SIDEBAR_MINIMUM,
+            minsize=self._sidebar_minimum,
             stretch="never",
         )
         self.workspace.add(
             self.content_shell,
-            minsize=self.CONTENT_MINIMUM,
+            minsize=self._content_minimum,
             stretch="always",
         )
-        self._pane_minima = (self.SIDEBAR_MINIMUM, self.CONTENT_MINIMUM)
+        self._pane_minima = (self._sidebar_minimum, self._content_minimum)
         self.workspace.bind("<Configure>", self._on_workspace_configure, add="+")
         self.workspace.bind("<Button-1>", self._lock_sidebar_sash, add="+")
         self.workspace.bind("<B1-Motion>", self._lock_sidebar_sash, add="+")
@@ -913,10 +915,30 @@ class SidebarStepFrame(ttk.Frame):
         return left, top, right, bottom
 
     def _on_workspace_configure(self, event):
-        if event.width == self._last_workspace_width:
+        scale_changed = self._sync_scaled_layout_values()
+        if event.width == self._last_workspace_width and not scale_changed:
             return
         self._last_workspace_width = event.width
         self.after_idle(self._apply_workspace_layout)
+
+    def _sync_scaled_layout_values(self):
+        """Keep fixed pane measurements visually stable across monitor DPI levels."""
+
+        try:
+            dpi_scale = float(self.winfo_fpixels("1i")) / 96.0
+        except (tk.TclError, TypeError, ValueError):
+            dpi_scale = 1.0
+        dpi_scale = min(3.0, max(0.75, dpi_scale))
+        if self._layout_dpi_scale is not None and abs(
+            dpi_scale - self._layout_dpi_scale
+        ) < 0.01:
+            return False
+
+        self._layout_dpi_scale = dpi_scale
+        self._sidebar_width = max(1, round(self._sidebar_design_width * dpi_scale))
+        self._sidebar_minimum = max(1, round(self.SIDEBAR_MINIMUM * dpi_scale))
+        self._content_minimum = max(1, round(self.CONTENT_MINIMUM * dpi_scale))
+        return True
 
     def _lock_sidebar_sash(self, event):
         """Keep the divider fixed while leaving controls in both panes interactive."""
@@ -939,13 +961,13 @@ class SidebarStepFrame(ttk.Frame):
             sidebar_width = workspace_sidebar_width(
                 width,
                 sidebar_width=self._sidebar_width,
-                sidebar_minimum=self.SIDEBAR_MINIMUM,
-                content_minimum=self.CONTENT_MINIMUM,
+                sidebar_minimum=self._sidebar_minimum,
+                content_minimum=self._content_minimum,
             )
             available = max(2, width - LAYOUT.divider_width)
-            if available >= self.SIDEBAR_MINIMUM + self.CONTENT_MINIMUM:
-                sidebar_floor = self.SIDEBAR_MINIMUM
-                content_floor = self.CONTENT_MINIMUM
+            if available >= self._sidebar_minimum + self._content_minimum:
+                sidebar_floor = self._sidebar_minimum
+                content_floor = self._content_minimum
             else:
                 sidebar_floor = max(1, sidebar_width)
                 content_floor = max(1, available - sidebar_width)

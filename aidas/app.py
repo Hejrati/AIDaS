@@ -76,6 +76,7 @@ class SplashWindow(tk.Toplevel):
     def __init__(self, parent: tk.Tk) -> None:
         super().__init__(parent)
         self.withdraw()
+        apply_app_icon_to(self)
         self.overrideredirect(True)
         self.configure(bg=BRAND_NAVY)
 
@@ -554,7 +555,10 @@ class AIDaSApp(tk.Tk):
             self._icon_ico_path = ico_path
             try:
                 self.iconbitmap(ico_path)
-                return
+                try:
+                    self.iconbitmap(default=ico_path)
+                except tk.TclError:
+                    pass
             except tk.TclError:
                 pass
 

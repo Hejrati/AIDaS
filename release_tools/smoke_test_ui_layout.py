@@ -7,16 +7,41 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+from tkinter import ttk
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from aidas.app import AIDaSApp
-from aidas.utils.ui_layout import workspace_sidebar_width
+from aidas.utils.ui_layout import LAYOUT, workspace_sidebar_width
 
 
 WINDOW_SIZES = ((1800, 1000), (1280, 820), (1024, 680))
+
+
+def _descendants(widget):
+    for child in widget.winfo_children():
+        yield child
+        yield from _descendants(child)
+
+
+def _sidebar_horizontal_overflow(step):
+    left = step.sidebar.canvas.winfo_rootx()
+    right = left + step.sidebar.canvas.winfo_width()
+    overflow = []
+    for widget in _descendants(step.ctrl):
+        if not widget.winfo_ismapped() or widget.winfo_width() <= 1:
+            continue
+        widget_left = widget.winfo_rootx()
+        widget_right = widget_left + widget.winfo_width()
+        clipped_width = (
+            isinstance(widget, ttk.Button)
+            and widget.winfo_width() + 1 < widget.winfo_reqwidth()
+        )
+        if widget_left < left - 1 or widget_right > right + 1 or clipped_width:
+            overflow.append(str(widget))
+    return overflow
 
 
 def main() -> int:
@@ -65,6 +90,31 @@ def main() -> int:
                 assert step.sidebar_shell.winfo_width() == sidebar_width, (
                     f"Step {step_number} allowed its fixed sidebar divider to move."
                 )
+                overflow = _sidebar_horizontal_overflow(step)
+                assert not overflow, (
+                    f"Step {step_number} has controls outside the sidebar viewport: "
+                    + ", ".join(overflow[:5])
+                )
+                if (width, height) == WINDOW_SIZES[-1]:
+                    step.sidebar.canvas.yview_moveto(1.0)
+                    app.update_idletasks()
+                    mapped_controls = [
+                        widget
+                        for widget in _descendants(step.ctrl)
+                        if widget.winfo_ismapped() and widget.winfo_height() > 1
+                    ]
+                    lowest_control = max(
+                        widget.winfo_rooty() + widget.winfo_height()
+                        for widget in mapped_controls
+                    )
+                    viewport_bottom = (
+                        step.sidebar.canvas.winfo_rooty()
+                        + step.sidebar.canvas.winfo_height()
+                    )
+                    assert lowest_control <= viewport_bottom + 1, (
+                        f"Step {step_number} cannot scroll to its lowest sidebar control."
+                    )
+                    step.sidebar.canvas.yview_moveto(0.0)
                 if step_number == 1:
                     action_heights = {
                         step.crop_btn.winfo_reqheight(),
@@ -100,6 +150,25 @@ def main() -> int:
                         overlap,
                     )
                 )
+
+        app.tk.call("tk", "scaling", 2.0)
+        app.geometry("1800x1000")
+        app.update()
+        dpi_scale = float(app.winfo_fpixels("1i")) / 96.0
+        expected_scaled_sidebar = round(LAYOUT.sidebar_width * dpi_scale)
+        for step_number, step in enumerate(steps, start=1):
+            app.notebook.select(step_number - 1)
+            step._sync_scaled_layout_values()
+            step._apply_workspace_layout()
+            app.update()
+            assert abs(step.sidebar_shell.winfo_width() - expected_scaled_sidebar) <= 2, (
+                f"Step {step_number} did not scale its sidebar for high DPI."
+            )
+            overflow = _sidebar_horizontal_overflow(step)
+            assert not overflow, (
+                f"Step {step_number} clips controls at high DPI: "
+                + ", ".join(overflow[:5])
+            )
     finally:
         app.destroy()
 

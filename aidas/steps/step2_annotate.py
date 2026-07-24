@@ -725,6 +725,7 @@ class Step2Frame(SidebarStepFrame):
         self.boundary_incomplete_listbox = tk.Listbox(
             incomplete_box,
             height=6,
+            width=1,
             selectmode="browse",
             exportselection=False,
         )
@@ -737,6 +738,7 @@ class Step2Frame(SidebarStepFrame):
         self.boundary_completed_listbox = tk.Listbox(
             completed_box,
             height=6,
+            width=1,
             selectmode="browse",
             exportselection=False,
         )
@@ -748,16 +750,24 @@ class Step2Frame(SidebarStepFrame):
 
         workflow_buttons = ttk.Frame(workflow)
         workflow_buttons.pack(fill="x", pady=(6, 0))
+        workflow_buttons.grid_columnconfigure(0, weight=1, uniform="boundary_actions")
+        workflow_buttons.grid_columnconfigure(1, weight=1, uniform="boundary_actions")
         self.button_finish_icon = load_ui_icon(self, "el--ok.png")
         self.finish_boundary_btn = ttk.Button(workflow_buttons, text="Done", command=self._finish_boundary, image=self.button_finish_icon, compound="left")
-        self.finish_boundary_btn.pack(side="left", expand=True, fill="x", padx=(0, 2))
+        self.finish_boundary_btn.grid(row=0, column=0, sticky="ew", padx=(0, 2))
         self.clear_all_traces_btn_icon = load_ui_icon(self, "solar--eraser-bold-duotone.png")
         self.clear_all_traces_btn = ttk.Button(workflow_buttons, text="Clear", command=self._clear_all_traces, 
                                                image=self.clear_all_traces_btn_icon, compound="left")
         self.button_revert_icon = load_ui_icon(self, "grommet-icons--revert.png")
-        self.clear_all_traces_btn.pack(side="left", fill="x", padx=(2, 2))
+        self.clear_all_traces_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
         self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary, image=self.button_revert_icon, compound="left")
-        self.revert_boundary_btn.pack(side="left", expand=True, fill="x", padx=(2, 0))
+        self.revert_boundary_btn.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(4, 0),
+        )
 
         self.segmenter_progress_var = tk.StringVar(value="Idle")
         self.segmenter_progress = ttk.Progressbar(workflow, mode="determinate", maximum=6, value=0)
@@ -804,7 +814,9 @@ class Step2Frame(SidebarStepFrame):
         self._set_fovea_controls_enabled(False)
 
         saved_buttons = ttk.Frame(segmentation)
-        saved_buttons.pack( pady=(6, 0))
+        saved_buttons.pack(fill="x", pady=(6, 0))
+        saved_buttons.grid_columnconfigure(0, weight=1, uniform="save_actions")
+        saved_buttons.grid_columnconfigure(1, weight=1, uniform="save_actions")
         self.saved_buttons_frame = saved_buttons  # Store reference for later state management
         # ttk.Button(saved_buttons, text="Export CSV", command=self._export_csv).pack(
         #     side="left",
@@ -816,11 +828,7 @@ class Step2Frame(SidebarStepFrame):
         self.button_save_all_icon = load_ui_icon(self, "ic--sharp-save-all.png")
         self.saved_button = ttk.Button(saved_buttons, text="Save", command=self._save_current_marked_image_button, 
                    image=self.button_save_icon, compound="left")
-        self.saved_button.pack(
-            side="left",
-            anchor="center",
-            padx=4,
-        )
+        self.saved_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
         self.save_all_button = ttk.Button(
             saved_buttons,
             text="Save All",
@@ -828,7 +836,7 @@ class Step2Frame(SidebarStepFrame):
             image=self.button_save_all_icon,
             compound="left",
         )
-        self.save_all_button.pack(side="left", anchor="center", padx=4)
+        self.save_all_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
 
         # help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
         # help_box = help_section.body
