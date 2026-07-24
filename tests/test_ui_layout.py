@@ -6,12 +6,16 @@ from aidas.utils.ui_layout import LAYOUT, workspace_sidebar_width
 
 
 class WorkspaceLayoutTests(unittest.TestCase):
-    def test_design_width_keeps_the_standard_thirty_seventy_split(self):
-        usable = LAYOUT.design_width - LAYOUT.divider_width
+    def test_main_window_uses_three_quarters_of_the_work_area(self):
+        self.assertEqual(LAYOUT.screen_fraction, 0.75)
+
+    def test_design_width_keeps_the_compact_fixed_sidebar(self):
         sidebar = workspace_sidebar_width(LAYOUT.design_width)
 
-        self.assertEqual(sidebar, round(usable * LAYOUT.sidebar_ratio))
-        self.assertEqual(usable - sidebar, 892)
+        self.assertEqual(sidebar, LAYOUT.sidebar_width)
+
+    def test_large_workspace_does_not_enlarge_the_sidebar(self):
+        self.assertEqual(workspace_sidebar_width(3000), LAYOUT.sidebar_width)
 
     def test_minimum_window_keeps_both_panes_usable(self):
         usable = LAYOUT.minimum_width - LAYOUT.divider_width
@@ -27,16 +31,26 @@ class WorkspaceLayoutTests(unittest.TestCase):
         self.assertGreater(sidebar, 0)
         self.assertLess(sidebar, width - LAYOUT.divider_width)
 
-    def test_invalid_ratio_is_bounded(self):
+    def test_requested_width_is_bounded_by_available_space(self):
         width = 1000
 
         self.assertEqual(
-            workspace_sidebar_width(width, ratio=-3, sidebar_minimum=0, content_minimum=0),
-            round((width - LAYOUT.divider_width) * 0.10),
+            workspace_sidebar_width(
+                width,
+                sidebar_width=-3,
+                sidebar_minimum=0,
+                content_minimum=0,
+            ),
+            1,
         )
         self.assertEqual(
-            workspace_sidebar_width(width, ratio=4, sidebar_minimum=0, content_minimum=0),
-            round((width - LAYOUT.divider_width) * 0.90),
+            workspace_sidebar_width(
+                width,
+                sidebar_width=2000,
+                sidebar_minimum=0,
+                content_minimum=0,
+            ),
+            width - LAYOUT.divider_width,
         )
 
 

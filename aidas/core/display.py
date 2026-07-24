@@ -180,6 +180,22 @@ def fit_size_to_bounds(
     )
 
 
+def fractional_size_of_bounds(
+    bounds: MonitorBounds,
+    fraction: float,
+) -> tuple[int, int]:
+    """Return a fixed fraction of the available width and height."""
+
+    left, top, right, bottom = (int(value) for value in bounds)
+    available_width = max(1, right - left)
+    available_height = max(1, bottom - top)
+    safe_fraction = max(0.1, min(float(fraction), 1.0))
+    return (
+        max(1, round(available_width * safe_fraction)),
+        max(1, round(available_height * safe_fraction)),
+    )
+
+
 def centered_geometry(window, width: int, height: int, *, parent=None) -> str:
     """Return Tk geometry centered on a parent or the pointer's current display."""
     bounds = work_area_bounds(window, parent=parent)

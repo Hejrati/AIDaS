@@ -16,14 +16,18 @@ from aidas.app import AIDaSApp
 from aidas.utils.ui_layout import workspace_sidebar_width
 
 
-WINDOW_SIZES = ((1280, 820), (1024, 680))
+WINDOW_SIZES = ((1800, 1000), (1280, 820), (1024, 680))
 
 
 def main() -> int:
     app = AIDaSApp()
     results = []
     try:
-        app.deiconify()
+        app._finish_startup()
+        app.update_idletasks()
+        assert (app.winfo_width(), app.winfo_height()) == app._startup_window_size, (
+            "The revealed main window does not match its adaptive startup size."
+        )
         steps = (app.step1, app.step2, app.step3, app.step4)
         for width, height in WINDOW_SIZES:
             app.geometry(f"{width}x{height}")
@@ -47,6 +51,44 @@ def main() -> int:
                     f"Step {step_number} split is {sidebar_width}px; expected "
                     f"{expected_sidebar}px at {width}x{height}."
                 )
+                sash_x, sash_y = step.workspace.sash_coord(0)
+                step.workspace.event_generate(
+                    "<ButtonPress-1>", x=sash_x, y=sash_y + 10
+                )
+                step.workspace.event_generate(
+                    "<B1-Motion>", x=sash_x + 80, y=sash_y + 10
+                )
+                step.workspace.event_generate(
+                    "<ButtonRelease-1>", x=sash_x + 80, y=sash_y + 10
+                )
+                app.update_idletasks()
+                assert step.sidebar_shell.winfo_width() == sidebar_width, (
+                    f"Step {step_number} allowed its fixed sidebar divider to move."
+                )
+                if step_number == 1:
+                    action_heights = {
+                        step.crop_btn.winfo_reqheight(),
+                        step.undo_crop_btn.winfo_reqheight(),
+                        step.save_all_btn.winfo_reqheight(),
+                    }
+                    assert len(action_heights) == 1, (
+                        "Step 1 Crop, Undo, and Save buttons do not have a "
+                        "consistent requested height."
+                    )
+                    action_buttons = (
+                        step.crop_btn,
+                        step.undo_crop_btn,
+                        step.save_all_btn,
+                    )
+                    action_gaps = {
+                        later.winfo_rooty()
+                        - (earlier.winfo_rooty() + earlier.winfo_height())
+                        for earlier, later in zip(action_buttons, action_buttons[1:])
+                    }
+                    assert len(action_gaps) == 1, (
+                        "Step 1 Crop, Undo, and Save buttons do not have "
+                        "consistent vertical spacing."
+                    )
                 results.append(
                     (
                         width,

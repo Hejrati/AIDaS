@@ -22,6 +22,7 @@ from aidas.core.display import (
     centered_geometry,
     enable_per_monitor_dpi_awareness,
     fit_size_to_bounds,
+    fractional_size_of_bounds,
     work_area_bounds,
 )
 from aidas.core.single_instance import SingleInstanceGuard
@@ -359,12 +360,10 @@ class AIDaSApp(tk.Tk):
         self.title("AIDaS — Retinal Image Processing")
         self.configure(background=COLORS.application)
         bounds = work_area_bounds(self)
-        app_width, app_height, _scale = fit_size_to_bounds(
-            bounds,
-            LAYOUT.design_width,
-            LAYOUT.design_height,
-            maximum_fraction=LAYOUT.screen_fraction,
+        app_width, app_height = fractional_size_of_bounds(
+            bounds, LAYOUT.screen_fraction
         )
+        self._startup_window_size = (app_width, app_height)
         self.geometry(f"{app_width}x{app_height}")
         self.minsize(
             min(LAYOUT.minimum_width, app_width),
@@ -391,7 +390,8 @@ class AIDaSApp(tk.Tk):
         self._set_splash_progress(100, "Ready")
         elapsed_ms = int((time.monotonic() - self._splash_started_at) * 1000)
         delay_ms = max(0, SPLASH_MINIMUM_MS - elapsed_ms)
-        self.after(delay_ms, self._finish_startup)
+        self._startup_finished = False
+        self._finish_startup_after_id = self.after(delay_ms, self._finish_startup)
 
     def _set_splash_progress(self, value: float, message: str) -> None:
         """Paint one startup stage while the main window is still hidden."""
@@ -485,11 +485,16 @@ class AIDaSApp(tk.Tk):
 
     def _finish_startup(self) -> None:
         """Close the splash and reveal the fully initialized main window."""
+        if self._startup_finished:
+            return
+        self._startup_finished = True
+        self._finish_startup_after_id = None
         splash = getattr(self, "_splash", None)
         if splash is not None and splash.winfo_exists():
             splash.destroy()
         self._splash = None
-        self._center_window()
+        width, height = self._startup_window_size
+        self.geometry(_center_geometry(self, width, height))
         self.deiconify()
         self.update_idletasks()
         self._center_window(account_for_decorations=True)

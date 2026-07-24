@@ -13,9 +13,9 @@ class LayoutTokens:
     design_height: int = 820
     minimum_width: int = 1024
     minimum_height: int = 680
-    screen_fraction: float = 0.94
+    screen_fraction: float = 0.75
 
-    sidebar_ratio: float = 0.30
+    sidebar_width: int = 380
     sidebar_minimum: int = 320
     content_minimum: int = 560
     divider_width: int = 6
@@ -49,27 +49,26 @@ def workspace_sidebar_width(
     total_width: int,
     *,
     divider_width: int = LAYOUT.divider_width,
-    ratio: float = LAYOUT.sidebar_ratio,
+    sidebar_width: int = LAYOUT.sidebar_width,
     sidebar_minimum: int = LAYOUT.sidebar_minimum,
     content_minimum: int = LAYOUT.content_minimum,
 ) -> int:
-    """Return a non-overlapping sidebar width for a horizontal workspace.
+    """Return a compact sidebar width without overlapping the content pane.
 
-    The requested ratio is retained whenever both panes can satisfy their
-    minimum usable widths.  If an embedding window is unusually small, the
-    function degrades predictably instead of producing a negative pane size.
+    The preferred width stays fixed whenever both panes can satisfy their
+    minimum usable widths. If an embedding window is unusually narrow, the
+    sidebar contracts only as much as required to preserve the content pane.
     """
 
     available = max(0, int(total_width) - max(0, int(divider_width)))
     if available == 0:
         return 0
 
-    safe_ratio = min(0.90, max(0.10, float(ratio)))
-    desired = round(available * safe_ratio)
+    desired = max(1, int(sidebar_width))
     sidebar_minimum = max(0, int(sidebar_minimum))
     content_minimum = max(0, int(content_minimum))
 
     if available >= sidebar_minimum + content_minimum:
         return min(max(desired, sidebar_minimum), available - content_minimum)
 
-    return min(max(1, desired), max(1, available - 1))
+    return min(desired, max(1, available - 1))

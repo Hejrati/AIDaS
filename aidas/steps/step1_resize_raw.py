@@ -300,18 +300,31 @@ class Step1Frame(SidebarStepFrame):
         roi_actions = ttk.Frame(roi)
         roi_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
 
-        # UX Improvement: Applied "Accent.TButton" style if a modern theme is loaded.
-        self.crop_btn_icon = load_ui_icon(self, "material-symbols-light--crop.png")
-        self.crop_btn = ttk.Button(roi_actions, text="Crop & Scale", command=self._crop_and_scale, image=self.crop_btn_icon, compound="left", style="Accent.TButton")
-        self.crop_btn.pack(fill="x", pady=(0, 6))
+        action_icon_size = 16
+        action_spacing = 6
+        self.crop_btn_icon = load_ui_icon(
+            self, "material-symbols-light--crop.png", size=action_icon_size
+        )
+        self.crop_btn = ttk.Button(
+            roi_actions,
+            text="Crop & Scale",
+            command=self._crop_and_scale,
+            image=self.crop_btn_icon,
+            compound="left",
+        )
+        self.crop_btn.pack(fill="x", pady=(0, action_spacing))
         
-        self.undo_crop_btn_icon = load_ui_icon(self, "grommet-icons--revert.png")
+        self.undo_crop_btn_icon = load_ui_icon(
+            self, "grommet-icons--revert.png", size=action_icon_size
+        )
         self.undo_crop_btn = ttk.Button(roi_actions, text="Undo", command=self._reset, state="disabled", image=self.undo_crop_btn_icon, compound="left")
-        self.undo_crop_btn.pack(fill="x", pady=(0, 10))
+        self.undo_crop_btn.pack(fill="x", pady=(0, action_spacing))
         
-        self.save_all_btn_icon = load_ui_icon(self, "ic--baseline-save.png")
-        self.save_all_btn = ttk.Button(roi, text="Save All (TIFF, IMG, HDR)", command=self._save_all_formats, state="disabled", image=self.save_all_btn_icon, compound="left")
-        self.save_all_btn.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(6, 2))
+        self.save_all_btn_icon = load_ui_icon(
+            self, "ic--baseline-save.png", size=action_icon_size
+        )
+        self.save_all_btn = ttk.Button(roi_actions, text="Save All (TIFF, IMG, HDR)", command=self._save_all_formats, state="disabled", image=self.save_all_btn_icon, compound="left")
+        self.save_all_btn.pack(fill="x", pady=(0, action_spacing))
 
         # # ── View ──
         # view_section = self.add_sidebar_section("View", padding=3, pady=(2, 6))

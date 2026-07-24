@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from aidas.core.display import centered_decorated_position, centered_position, fit_size_to_bounds
+from aidas.core.display import (
+    centered_decorated_position,
+    centered_position,
+    fit_size_to_bounds,
+    fractional_size_of_bounds,
+)
 
 
 class DisplayPositionTests(unittest.TestCase):
@@ -32,6 +37,18 @@ class DisplayPositionTests(unittest.TestCase):
 
 
 class DisplaySizingTests(unittest.TestCase):
+    def test_fractional_size_uses_both_work_area_dimensions(self):
+        self.assertEqual(
+            fractional_size_of_bounds((-1920, 40, 0, 1080), 0.75),
+            (1440, 780),
+        )
+
+    def test_fractional_size_bounds_invalid_fraction(self):
+        bounds = (0, 0, 1000, 800)
+
+        self.assertEqual(fractional_size_of_bounds(bounds, -1), (100, 80))
+        self.assertEqual(fractional_size_of_bounds(bounds, 2), (1000, 800))
+
     def test_design_size_is_not_enlarged_on_large_display(self):
         self.assertEqual(
             fit_size_to_bounds((0, 0, 3840, 2160), 480, 620),

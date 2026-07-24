@@ -1,6 +1,7 @@
 """UI helpers shared across AIDaS Tkinter views."""
 
 import base64
+import math
 import os
 import sys
 import tkinter as tk
@@ -109,8 +110,8 @@ def remember_image(owner, image):
     return image
 
 
-def load_ui_icon(owner, filename):
-    """Load a PhotoImage from assets and retain it on `owner`."""
+def load_ui_icon(owner, filename, *, size=None):
+    """Load a PhotoImage from assets, optionally resizing it to exact pixels."""
     path = asset_path(filename)
     try:
         image = tk.PhotoImage(file=path)
@@ -118,6 +119,22 @@ def load_ui_icon(owner, filename):
         with open(path, "rb") as handle:
             data = base64.b64encode(handle.read())
         image = tk.PhotoImage(data=data)
+    if size is not None:
+        target_width, target_height = (size, size) if isinstance(size, int) else size
+        target_width = max(1, int(target_width))
+        target_height = max(1, int(target_height))
+        source_width = max(1, image.width())
+        source_height = max(1, image.height())
+        if (source_width, source_height) != (target_width, target_height):
+            width_gcd = math.gcd(source_width, target_width)
+            height_gcd = math.gcd(source_height, target_height)
+            image = image.zoom(
+                target_width // width_gcd,
+                target_height // height_gcd,
+            ).subsample(
+                source_width // width_gcd,
+                source_height // height_gcd,
+            )
     return remember_image(owner, image)
 
 
@@ -796,9 +813,8 @@ class CollapsibleSection(ttk.Frame):
 class SidebarStepFrame(ttk.Frame):
     """Standard left-sidebar/right-content layout for AIDaS step pages."""
 
-    SIDEBAR_WIDTH = 380
+    SIDEBAR_WIDTH = LAYOUT.sidebar_width
     SIDEBAR_TEXT_WRAP = 344
-    SIDEBAR_RATIO = LAYOUT.sidebar_ratio
     SIDEBAR_MINIMUM = LAYOUT.sidebar_minimum
     CONTENT_MINIMUM = LAYOUT.content_minimum
     SECTION_PADDING = 8
@@ -811,7 +827,6 @@ class SidebarStepFrame(ttk.Frame):
         sidebar_pack=None,
         content_pack=None,
         status_var=None,
-        sidebar_ratio=None,
     ):
         """Create a shared step layout with `self.ctrl` and `self.content`.
 
@@ -823,7 +838,7 @@ class SidebarStepFrame(ttk.Frame):
 
         if sidebar_width is None:
             sidebar_width = self.SIDEBAR_WIDTH
-        self._sidebar_ratio = self.SIDEBAR_RATIO if sidebar_ratio is None else float(sidebar_ratio)
+        self._sidebar_width = max(1, int(sidebar_width))
         self._last_workspace_width = None
 
         self.workspace = tk.PanedWindow(
@@ -833,6 +848,7 @@ class SidebarStepFrame(ttk.Frame):
             borderwidth=0,
             opaqueresize=True,
             sashwidth=LAYOUT.divider_width,
+            sashcursor="arrow",
             sashrelief="flat",
             showhandle=False,
         )
@@ -868,7 +884,7 @@ class SidebarStepFrame(ttk.Frame):
         self.workspace.add(
             self.sidebar_shell,
             minsize=self.SIDEBAR_MINIMUM,
-            stretch="always",
+            stretch="never",
         )
         self.workspace.add(
             self.content_shell,
@@ -877,7 +893,10 @@ class SidebarStepFrame(ttk.Frame):
         )
         self._pane_minima = (self.SIDEBAR_MINIMUM, self.CONTENT_MINIMUM)
         self.workspace.bind("<Configure>", self._on_workspace_configure, add="+")
-        self.after_idle(self._apply_workspace_ratio)
+        self.workspace.bind("<Button-1>", self._lock_sidebar_sash, add="+")
+        self.workspace.bind("<B1-Motion>", self._lock_sidebar_sash, add="+")
+        self.workspace.bind("<ButtonRelease-1>", self._lock_sidebar_sash, add="+")
+        self.after_idle(self._apply_workspace_layout)
 
         return self.ctrl, self.content
 
@@ -897,10 +916,21 @@ class SidebarStepFrame(ttk.Frame):
         if event.width == self._last_workspace_width:
             return
         self._last_workspace_width = event.width
-        self.after_idle(self._apply_workspace_ratio)
+        self.after_idle(self._apply_workspace_layout)
 
-    def _apply_workspace_ratio(self):
-        """Keep the standard pane ratio while respecting both usability minima."""
+    def _lock_sidebar_sash(self, event):
+        """Keep the divider fixed while leaving controls in both panes interactive."""
+
+        try:
+            if self.workspace.identify(event.x, event.y):
+                self.after_idle(self._apply_workspace_layout)
+                return "break"
+        except tk.TclError:
+            pass
+        return None
+
+    def _apply_workspace_layout(self):
+        """Keep a compact fixed sidebar while respecting both pane minima."""
 
         try:
             width = self.workspace.winfo_width()
@@ -908,7 +938,7 @@ class SidebarStepFrame(ttk.Frame):
                 return
             sidebar_width = workspace_sidebar_width(
                 width,
-                ratio=self._sidebar_ratio,
+                sidebar_width=self._sidebar_width,
                 sidebar_minimum=self.SIDEBAR_MINIMUM,
                 content_minimum=self.CONTENT_MINIMUM,
             )
@@ -924,7 +954,7 @@ class SidebarStepFrame(ttk.Frame):
                 self.workspace.paneconfigure(self.sidebar_shell, minsize=sidebar_floor)
                 self.workspace.paneconfigure(self.content_shell, minsize=content_floor)
                 self._pane_minima = pane_minima
-                self.after_idle(self._apply_workspace_ratio)
+                self.after_idle(self._apply_workspace_layout)
                 return
             self.workspace.sash_place(0, sidebar_width, 0)
         except tk.TclError:
