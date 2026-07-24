@@ -103,6 +103,32 @@ def centered_position(bounds: MonitorBounds, width: int, height: int) -> tuple[i
     return x, y
 
 
+def centered_decorated_position(
+    bounds: MonitorBounds,
+    client_width: int,
+    client_height: int,
+    *,
+    frame_left: int = 0,
+    frame_top: int = 0,
+    frame_right: int | None = None,
+    frame_bottom: int | None = None,
+) -> tuple[int, int]:
+    """Center the complete OS window while Tk sizes its client area.
+
+    Tk's geometry width and height describe the client area, while its x and y
+    position describe the decorated window.  Accounting for the title bar and
+    borders prevents an apparently low/right startup position on Windows.
+    """
+
+    left = max(0, int(frame_left))
+    top = max(0, int(frame_top))
+    right = left if frame_right is None else max(0, int(frame_right))
+    bottom = left if frame_bottom is None else max(0, int(frame_bottom))
+    outer_width = max(1, int(client_width)) + left + right
+    outer_height = max(1, int(client_height)) + top + bottom
+    return centered_position(bounds, outer_width, outer_height)
+
+
 def work_area_bounds(window, *, parent=None) -> MonitorBounds:
     """Return the usable bounds for a parent or the pointer's current display."""
     window.update_idletasks()

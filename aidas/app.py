@@ -18,6 +18,7 @@ from PIL import Image, ImageTk
 from aidas import __version__
 from aidas.core.config import Config
 from aidas.core.display import (
+    centered_decorated_position,
     centered_geometry,
     enable_per_monitor_dpi_awareness,
     fit_size_to_bounds,
@@ -26,7 +27,13 @@ from aidas.core.display import (
 from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
-from aidas.utils.ui_utils import apply_app_icon_to, build_app_menu, resource_path
+from aidas.utils.ui_layout import COLORS, LAYOUT
+from aidas.utils.ui_utils import (
+    apply_app_icon_to,
+    build_app_menu,
+    configure_aidas_styles,
+    resource_path,
+)
 
 
 APP_TITLE = "AIDaS"
@@ -350,8 +357,19 @@ class AIDaSApp(tk.Tk):
         super().__init__()
         self.withdraw()
         self.title("AIDaS — Retinal Image Processing")
-        self.geometry("1280x820")
-        self.minsize(900, 600)
+        self.configure(background=COLORS.application)
+        bounds = work_area_bounds(self)
+        app_width, app_height, _scale = fit_size_to_bounds(
+            bounds,
+            LAYOUT.design_width,
+            LAYOUT.design_height,
+            maximum_fraction=LAYOUT.screen_fraction,
+        )
+        self.geometry(f"{app_width}x{app_height}")
+        self.minsize(
+            min(LAYOUT.minimum_width, app_width),
+            min(LAYOUT.minimum_height, app_height),
+        )
         self._about_dialog = None
         self._set_app_icon()
 
@@ -413,6 +431,7 @@ class AIDaSApp(tk.Tk):
         else:
             self.style.theme_use(available_themes[0])
             self.preferences.set("theme", available_themes[0])
+        configure_aidas_styles(self.style)
 
         self._set_splash_progress(58, "Starting application services...")
         self.update_controller = UpdateController(
@@ -427,8 +446,8 @@ class AIDaSApp(tk.Tk):
         self.bind_all("<Alt-F4>", lambda _event: self.destroy())
 
         self._set_splash_progress(62, "Creating the application workspace...")
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill="both", expand=True, padx=(2, 5), pady=(5, 1))
+        self.notebook = ttk.Notebook(self, style="AIDaS.TNotebook")
+        self.notebook.pack(fill="both", expand=True)
 
         self._set_splash_progress(66, "Preparing Step 1 - Load, Resize & Crop...")
         self.step1 = Step1Frame(
@@ -459,9 +478,8 @@ class AIDaSApp(tk.Tk):
         self.status = ttk.Label(
             self,
             text=f"AIDaS v{__version__} — ready",
-            relief="sunken",
+            style="AIDaS.Status.TLabel",
             anchor="w",
-            padding=2,
         )
         self.status.pack(side="bottom", fill="x")
 
@@ -473,8 +491,9 @@ class AIDaSApp(tk.Tk):
         self._splash = None
         self._center_window()
         self.deiconify()
-        self.lift()
         self.update_idletasks()
+        self._center_window(account_for_decorations=True)
+        self.lift()
         self.update()
         self.focus_force()
         self.after(1500, self.update_controller.check_automatically)
@@ -542,12 +561,25 @@ class AIDaSApp(tk.Tk):
             except tk.TclError:
                 pass
 
-    def _center_window(self) -> None:
-        """Center the main window horizontally at the top of the screen."""
+    def _center_window(self, *, account_for_decorations: bool = False) -> None:
+        """Center the standard application window in the active work area."""
         self.update_idletasks()
         width = self.winfo_width()
-        x = (self.winfo_screenwidth() // 2) - (width // 2)
-        self.geometry(f"+{x}+0")
+        height = self.winfo_height()
+        if not account_for_decorations:
+            self.geometry(_center_geometry(self, width, height))
+            return
+
+        frame_left = max(0, self.winfo_rootx() - self.winfo_x())
+        frame_top = max(0, self.winfo_rooty() - self.winfo_y())
+        x, y = centered_decorated_position(
+            work_area_bounds(self),
+            width,
+            height,
+            frame_left=frame_left,
+            frame_top=frame_top,
+        )
+        self.geometry(f"{width}x{height}{x:+d}{y:+d}")
 
     def _menu_browse_sdb(self) -> None:
         self.notebook.select(0)
@@ -564,6 +596,8 @@ class AIDaSApp(tk.Tk):
     def _set_theme(self, theme_name: str) -> None:
         """Change the application theme and save the preference."""
         self.style.theme_use(theme_name)
+        configure_aidas_styles(self.style)
+        self.configure(background=COLORS.application)
         self.preferences.set("theme", theme_name)
         self._build_menu()
         self.status.config(text=f"AIDaS v{__version__} — theme changed to '{theme_name}'")

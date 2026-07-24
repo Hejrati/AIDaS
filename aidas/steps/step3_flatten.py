@@ -5,6 +5,9 @@ from __future__ import annotations
 import shutil
 import subprocess
 import re
+import queue
+import signal
+import time
 import urllib.request
 from datetime import datetime
 import concurrent.futures
@@ -29,6 +32,7 @@ from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
 )
 from aidas.utils.log_paths import app_log_dir
+from aidas.utils.r_script_library import discover_r_scripts, import_r_script, user_r_script_dir
 from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame, resource_path
 
 
@@ -1065,6 +1069,16 @@ class RBatchSelectionPanel(ttk.Frame):
         self.workers_spin.pack(side="left", padx=(6, 12))
         self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
         ttk.Label(run_box, textvariable=self.worker_limit_var, foreground="#555555").pack(side="left")
+        ttk.Label(run_box, text="Timeout/script (min):").pack(side="left", padx=(12, 0))
+        self.timeout_var = tk.IntVar(value=self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES)
+        self.timeout_spin = ttk.Spinbox(
+            run_box,
+            from_=1,
+            to=10080,
+            textvariable=self.timeout_var,
+            width=7,
+        )
+        self.timeout_spin.pack(side="left", padx=(6, 12))
         self.next_button = ttk.Button(run_box, text="Next >", command=self._run_selected)
         self.next_button.pack(side="right")
         self.next_button.state(["disabled"])
@@ -1187,14 +1201,33 @@ class RBatchSelectionPanel(ttk.Frame):
         if not folders:
             messagebox.showwarning("Batch Step 3", "Select at least one ready folder.", parent=self)
             return
+        main_script_path = self.step_frame._selected_r_script_path("main")
+        output_script_path = self.step_frame._selected_r_script_path("output")
+        if main_script_path is None or not main_script_path.is_file():
+            messagebox.showerror("Batch Step 3", "Select an available main processing R script.", parent=self)
+            return
+        if output_script_path is None or not output_script_path.is_file():
+            messagebox.showerror("Batch Step 3", "Select an available output R script.", parent=self)
+            return
         try:
             workers = max(1, int(self.workers_var.get()))
         except (TypeError, ValueError):
             workers = 1
+        try:
+            timeout_minutes = max(1, min(10080, int(self.timeout_var.get())))
+        except (TypeError, ValueError):
+            timeout_minutes = self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES
+        self.timeout_var.set(timeout_minutes)
         max_workers = self._max_worker_count(len(folders))
         workers = min(workers, max_workers)
         self.workers_var.set(workers)
-        self.step_frame._start_batch_r_runs(folders, workers)
+        self.step_frame._start_batch_r_runs(
+            folders,
+            workers,
+            main_script_path,
+            output_script_path,
+            timeout_minutes * 60,
+        )
 
     def _cancel(self):
         self.step_frame._close_r_batch_panel(render_previous=True)
@@ -1203,11 +1236,23 @@ class RBatchSelectionPanel(ttk.Frame):
 class RBatchRunPanel(ttk.Frame):
     """Embedded progress panel for concurrent folder-level R script runs."""
 
-    def __init__(self, step_frame, parent, folders, workers):
+    def __init__(
+        self,
+        step_frame,
+        parent,
+        folders,
+        workers,
+        main_script_path,
+        output_script_path,
+        timeout_seconds,
+    ):
         super().__init__(parent)
         self.step_frame = step_frame
         self.folders = [Path(folder) for folder in folders]
         self.workers = workers
+        self.main_script_path = Path(main_script_path)
+        self.output_script_path = Path(output_script_path)
+        self.timeout_seconds = max(1, int(timeout_seconds))
         self.row_by_folder = {}
         self.step_states_by_folder = {}
         self.current_step_by_folder = {}
@@ -1219,7 +1264,12 @@ class RBatchRunPanel(ttk.Frame):
         ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w")
         ttk.Label(
             wrapper,
-            text="AIDaS is running the selected Step 3 R script folders. Progress and logs update as each folder finishes.",
+            text=(
+                f"Main script: {self.main_script_path.name}\n"
+                f"Output script: {self.output_script_path.name}\n"
+                f"Timeout: {max(1, round(self.timeout_seconds / 60))} minute(s) per script\n"
+                "Progress and logs update as each folder finishes."
+            ),
             wraplength=760,
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
@@ -1249,9 +1299,13 @@ class RBatchRunPanel(ttk.Frame):
         self.summary_var = tk.StringVar(
             value=f"Running {len(self.folders)} folder(s) with up to {self.workers} parallel R process(es)."
         )
-        ttk.Label(wrapper, textvariable=self.summary_var, wraplength=760, justify="left").pack(
-            anchor="w", pady=(4, 10)
+        summary_row = ttk.Frame(wrapper)
+        summary_row.pack(fill="x", pady=(4, 10))
+        ttk.Label(summary_row, textvariable=self.summary_var, wraplength=680, justify="left").pack(
+            side="left", fill="x", expand=True
         )
+        self.cancel_button = ttk.Button(summary_row, text="Cancel Batch", command=self._cancel_batch)
+        self.cancel_button.pack(side="right", padx=(8, 0))
 
         step_frame = ttk.LabelFrame(wrapper, text="Step progress")
         step_frame.pack(fill="both", expand=False, pady=(10, 0))
@@ -1281,13 +1335,21 @@ class RBatchRunPanel(ttk.Frame):
             if status == "Completed":
                 self._finish_current_step(folder, "Done")
                 self._append_step(folder, "Completed", "Done")
-            elif status == "Failed":
-                self._finish_current_step(folder, "Failed")
+            elif status in {"Failed", "Cancelled", "Timed out"}:
+                self._finish_current_step(folder, status)
             else:
                 self._start_step(folder, status)
 
     def set_summary(self, text):
         self.summary_var.set(text)
+
+    def finish(self):
+        self.cancel_button.configure(state="disabled")
+
+    def _cancel_batch(self):
+        self.cancel_button.configure(state="disabled")
+        self.summary_var.set("Cancelling active R processes and queued folders...")
+        self.step_frame._cancel_batch_r_runs()
 
     def _append_step(self, folder, label, state):
         key = str(folder)
@@ -1366,6 +1428,8 @@ class Step3Frame(SidebarStepFrame):
         ("LIGHT", ("LIGHT", "Light"), "LIGHT.hdr/.img", 16),
     )
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
+    R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
+    DEFAULT_R_SCRIPT_TIMEOUT_MINUTES = 240
     R_DOWNLOAD_PAGE = "https://cloud.r-project.org/bin/windows/base/"
     R_REQUIRED_PACKAGES = ("AnalyzeFMRI", "RNiftyReg")
     R_WORKSPACE_FILES = (
@@ -1416,13 +1480,22 @@ class Step3Frame(SidebarStepFrame):
         self._active_batch_result_tab = None
         self.r_setup_button = None
         self.r_batch_button = None
+        self.r_script_combos = {}
+        self.add_r_script_buttons = {}
+        self.r_script_choices = {"main": [], "output": []}
+        self.r_script_by_label = {"main": {}, "output": {}}
         self._busy = False
+        self._r_cancel_event = threading.Event()
+        self._r_process_lock = threading.Lock()
+        self._active_r_processes = set()
         self.r_package_library_path = None if self.preferences is None else self.preferences.get("r_package_library_path")
 
         self.view_var = tk.StringVar(value="DARK_MARKED_find_vertex")
         self.status_var = tk.StringVar(value="Ready - use batch Step 3 R processing.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
+        self.r_script_vars = {"main": tk.StringVar(), "output": tk.StringVar()}
+        self.r_script_active_vars = {"main": tk.StringVar(), "output": tk.StringVar()}
 
         self._build_ui()
         self._refresh_input_status()
@@ -1430,8 +1503,6 @@ class Step3Frame(SidebarStepFrame):
     def _build_ui(self):
         self.build_standard_layout(
             sidebar_width=self.SIDEBAR_WIDTH,
-            sidebar_pack={"padx": (2, 6), "pady": 6},
-            content_pack={"padx": 6, "pady": 6},
             status_var=self.status_var,
         )
         process_section = self.add_sidebar_section("Process", pady=(0, 5))
@@ -1444,6 +1515,22 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_button.pack(fill="x", pady=2)
 
         ttk.Button(process, text="Load R Results...", command=self._browse_r_results_folder).pack(fill="x", pady=2)
+
+        script_section = self.add_sidebar_section("R Scripts", pady=(0, 5))
+        script_controls = script_section.body
+        self._build_r_script_selector(
+            script_controls,
+            "Process Raw OCT (Step 1)",
+            "main",
+            "Add Step 1 R Script...",
+        )
+        ttk.Separator(script_controls, orient="horizontal").pack(fill="x", pady=(7, 5))
+        self._build_r_script_selector(
+            script_controls,
+            "More Process (Step 2)",
+            "output",
+            "Add Step 2 R Script...",
+        )
 
         ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(6, 4))
 
@@ -1478,11 +1565,113 @@ class Step3Frame(SidebarStepFrame):
             self.r_setup_button.configure(state=state)
         if self.r_batch_button is not None:
             self.r_batch_button.configure(state=state)
+        for combo in self.r_script_combos.values():
+            combo.configure(state="disabled" if state == "disabled" else "readonly")
+        for button in self.add_r_script_buttons.values():
+            button.configure(state=state)
 
     @staticmethod
-    def _script_path():
-        """Return the Step 3 script from source or PyInstaller's bundle."""
-        return Path(resource_path(Step3Frame.R_SCRIPT_NAME))
+    def _script_path(role="main"):
+        """Return a Step 3 script from source or PyInstaller's bundle."""
+        script_name = Step3Frame.R_SCRIPT_NAME if role == "main" else Step3Frame.R_OUTPUT_SCRIPT_NAME
+        return Path(resource_path(script_name))
+
+    @staticmethod
+    def _user_r_script_dir(role="main"):
+        return user_r_script_dir(role)
+
+    def _available_r_scripts(self, role="main"):
+        prefixes = ("RAW_OCT_PROCESSING_",) if role == "main" else ("more_outputs_afterRAW_OCT_PROCESSING_",)
+        return discover_r_scripts(
+            self._script_path(role),
+            self._user_r_script_dir(role),
+            bundled_prefixes=prefixes,
+        )
+
+    def _import_user_r_script(self, source_path, role="main"):
+        return import_r_script(Path(source_path), self._user_r_script_dir(role))
+
+    def _build_r_script_selector(self, controls, title, role, add_button_text):
+        ttk.Label(controls, text=title, font=("", 9, "bold")).pack(anchor="w", pady=(0, 2))
+        combo = ttk.Combobox(
+            controls,
+            textvariable=self.r_script_vars[role],
+            state="readonly",
+        )
+        combo.pack(fill="x", pady=2)
+        combo.bind("<<ComboboxSelected>>", lambda _event, selected_role=role: self._on_r_script_selected(selected_role))
+        self.r_script_combos[role] = combo
+
+        button = ttk.Button(
+            controls,
+            text=add_button_text,
+            command=lambda selected_role=role: self._add_r_script(selected_role),
+        )
+        button.pack(fill="x", pady=2)
+        self.add_r_script_buttons[role] = button
+        ttk.Label(
+            controls,
+            textvariable=self.r_script_active_vars[role],
+            wraplength=self.SIDEBAR_TEXT_WRAP,
+            foreground="#1b6e3c",
+            justify="left",
+        ).pack(fill="x", anchor="w", pady=(3, 0))
+        self._refresh_r_script_choices(role)
+
+    def _refresh_r_script_choices(self, role, select_path=None):
+        choices = self._available_r_scripts(role)
+        self.r_script_choices[role] = choices
+        self.r_script_by_label[role] = {choice.label: choice for choice in choices}
+        labels = [choice.label for choice in choices]
+        combo = self.r_script_combos.get(role)
+        if combo is not None:
+            combo.configure(values=labels)
+
+        selected = None
+        if select_path is not None:
+            selected_key = os.path.normcase(str(Path(select_path).resolve()))
+            selected = next(
+                (
+                    choice
+                    for choice in choices
+                    if os.path.normcase(str(choice.path.resolve())) == selected_key
+                ),
+                None,
+            )
+        if selected is None and choices:
+            selected = choices[0]
+        self.r_script_vars[role].set(selected.label if selected is not None else "No R scripts found")
+        self._on_r_script_selected(role)
+
+    def _on_r_script_selected(self, role):
+        choice = self.r_script_by_label[role].get(self.r_script_vars[role].get())
+        if choice is None:
+            self.r_script_active_vars[role].set("Active: no runnable script")
+            return
+        self.r_script_active_vars[role].set(f"Active: {choice.label}")
+        role_name = "main processing" if role == "main" else "output"
+        self.status_var.set(f"Selected active {role_name} R script: {choice.path.name}")
+
+    def _selected_r_script_path(self, role="main"):
+        choice = self.r_script_by_label[role].get(self.r_script_vars[role].get())
+        return None if choice is None else choice.path
+
+    def _add_r_script(self, role="main"):
+        role_name = "main processing" if role == "main" else "output"
+        selected = filedialog.askopenfilename(
+            parent=self,
+            title=f"Add a Step 3 {role_name} R script",
+            filetypes=(("R scripts", "*.R"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        try:
+            imported_path = self._import_user_r_script(Path(selected), role)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Add R Script", f"Could not add the R script.\n{exc}", parent=self)
+            return
+        self._refresh_r_script_choices(role, select_path=imported_path)
+        self.status_var.set(f"Added and activated {role_name} R script: {imported_path.name}")
 
     def _resolve_rscript_executable(self):
         configured = None if self.preferences is None else self.preferences.get("rscript_path")
@@ -2199,35 +2388,230 @@ class Step3Frame(SidebarStepFrame):
             "pixel_width": str(self.PIXEL_WIDTH_UM),
         }
 
-    def _start_batch_r_runs(self, folders, workers):
+    def _register_r_process(self, process):
+        with self._r_process_lock:
+            self._active_r_processes.add(process)
+
+    def _unregister_r_process(self, process):
+        with self._r_process_lock:
+            self._active_r_processes.discard(process)
+
+    @staticmethod
+    def _process_is_running(process):
+        try:
+            return process.poll() is None
+        except Exception:
+            return True
+
+    def _terminate_r_process(self, process, *, force=False):
+        if not self._process_is_running(process):
+            return
+        pid = getattr(process, "pid", None)
+        try:
+            if os.name == "nt" and pid:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=10,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    check=False,
+                )
+            elif pid:
+                os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
+            elif force and hasattr(process, "kill"):
+                process.kill()
+            else:
+                process.terminate()
+        except Exception:
+            try:
+                process.kill() if force and hasattr(process, "kill") else process.terminate()
+            except Exception:
+                pass
+
+    def _terminate_active_r_processes(self):
+        with self._r_process_lock:
+            processes = list(self._active_r_processes)
+        for process in processes:
+            self._terminate_r_process(process)
+
+    def _cancel_batch_r_runs(self):
+        if not self._busy:
+            return
+        self._r_cancel_event.set()
+        self.status_var.set("Cancelling Step 3 R processing...")
+        if self.r_batch_run_panel is not None:
+            self.r_batch_run_panel.log("Cancellation requested by user.")
+        threading.Thread(target=self._terminate_active_r_processes, daemon=True).start()
+
+    def _run_supervised_r_command(self, command, cwd, env, timeout_seconds, on_line):
+        popen_options = {
+            "cwd": cwd,
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.STDOUT,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "env": env,
+        }
+        if os.name == "nt":
+            popen_options["creationflags"] = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        else:
+            popen_options["start_new_session"] = True
+
+        try:
+            process = subprocess.Popen(command, **popen_options)
+        except Exception as exc:
+            return 1, str(exc), "failed"
+
+        self._register_r_process(process)
+        line_queue = queue.Queue()
+        sentinel = object()
+
+        def read_output():
+            try:
+                if process.stdout is not None:
+                    for line in process.stdout:
+                        line_queue.put(line)
+            except Exception as exc:
+                line_queue.put(f"ERROR while reading R output: {exc}\n")
+            finally:
+                line_queue.put(sentinel)
+
+        reader = threading.Thread(target=read_output, daemon=True)
+        reader.start()
+        timeout_seconds = max(1, int(timeout_seconds))
+        deadline = time.monotonic() + timeout_seconds
+        stop_reason = None
+        output_complete = False
+
+        try:
+            while True:
+                if self._r_cancel_event.is_set():
+                    stop_reason = "cancelled"
+                    break
+                if time.monotonic() >= deadline:
+                    stop_reason = "timed_out"
+                    break
+                if output_complete:
+                    if not self._process_is_running(process):
+                        break
+                    time.sleep(0.05)
+                    continue
+                try:
+                    item = line_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if item is sentinel:
+                    output_complete = True
+                    continue
+                on_line(item)
+
+            if stop_reason is not None:
+                self._terminate_r_process(process)
+                try:
+                    process.wait(timeout=10)
+                except Exception:
+                    self._terminate_r_process(process, force=True)
+                    try:
+                        process.wait(timeout=5)
+                    except Exception:
+                        pass
+                reader.join(timeout=1)
+                while True:
+                    try:
+                        item = line_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is not sentinel:
+                        on_line(item)
+                if stop_reason == "cancelled":
+                    return 130, "Cancelled by user.", stop_reason
+                return 124, f"R script exceeded the {timeout_seconds}-second timeout.", stop_reason
+
+            try:
+                returncode = process.wait()
+                return returncode, "", "completed" if returncode == 0 else "failed"
+            except Exception as exc:
+                return 1, str(exc), "failed"
+        finally:
+            self._unregister_r_process(process)
+
+    def _start_batch_r_runs(
+        self,
+        folders,
+        workers,
+        main_script_path=None,
+        output_script_path=None,
+        timeout_seconds=None,
+    ):
         folders = [Path(folder) for folder in folders]
         if not folders:
             messagebox.showwarning("Batch Step 3", "Select at least one folder to process.")
             return
         if self._busy:
             return
-        script_path = self._script_path()
-        if not script_path.is_file():
-            messagebox.showerror("Batch Step 3", f"Could not find the R script:\n{script_path}")
+        timeout_seconds = max(
+            1,
+            int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
+        )
+        main_script_path = Path(main_script_path) if main_script_path is not None else self._script_path("main")
+        output_script_path = (
+            Path(output_script_path) if output_script_path is not None else self._script_path("output")
+        )
+        if not main_script_path.is_file():
+            messagebox.showerror("Batch Step 3", f"Could not find the main R script:\n{main_script_path}")
+            return
+        if not output_script_path.is_file():
+            messagebox.showerror("Batch Step 3", f"Could not find the output R script:\n{output_script_path}")
             return
         rscript = self._ensure_r_ready_with_wizard()
         if rscript is None:
             self._open_r_setup_wizard(
-                on_finish=lambda result: self._start_batch_r_runs(folders, workers) if result else None
+                on_finish=lambda result: self._start_batch_r_runs(
+                    folders,
+                    workers,
+                    main_script_path,
+                    output_script_path,
+                    timeout_seconds,
+                ) if result else None
             )
             return
 
         workers = max(1, min(int(workers), len(folders), self._cpu_worker_limit()))
         self._clear_plot_holder()
-        self.r_batch_run_panel = RBatchRunPanel(self, self.plot_holder, folders, workers)
+        self.r_batch_run_panel = RBatchRunPanel(
+            self,
+            self.plot_holder,
+            folders,
+            workers,
+            main_script_path,
+            output_script_path,
+            timeout_seconds,
+        )
         self.r_batch_run_panel.pack(fill="both", expand=True)
+        self._r_cancel_event.clear()
         self._busy = True
         self._set_process_buttons("disabled")
         self.progress_text_var.set("Batch running")
-        self.status_var.set(f"Running Step 3 R script for {len(folders)} folder(s).")
+        self.status_var.set(
+            f"Running {main_script_path.name}, then {output_script_path.name}, for {len(folders)} folder(s)."
+        )
         threading.Thread(
             target=self._batch_r_worker,
-            args=(Path(rscript), script_path, folders, workers),
+            args=(
+                Path(rscript),
+                main_script_path,
+                output_script_path,
+                folders,
+                workers,
+                timeout_seconds,
+            ),
             daemon=True,
         ).start()
 
@@ -2240,7 +2624,15 @@ class Step3Frame(SidebarStepFrame):
         if log:
             panel.log(log)
 
-    def _run_r_script_for_config(self, rscript_path, script_path, r_config, batch_folder=None):
+    def _run_r_script_for_config(
+        self,
+        rscript_path,
+        main_script_path,
+        output_script_path,
+        r_config,
+        batch_folder=None,
+        timeout_seconds=None,
+    ):
         folder = Path(batch_folder or r_config["input_dir"])
         script_args = [
             r_config["input_dir"],
@@ -2253,7 +2645,8 @@ class Step3Frame(SidebarStepFrame):
             r_config["image_index_dark"],
             r_config["pixel_width"],
         ]
-        cmd = self._build_r_run_command(rscript_path, script_path, script_args)
+        main_cmd = self._build_r_run_command(rscript_path, main_script_path, script_args)
+        commands = [main_cmd]
         env = self._r_env()
         env.update(
             {
@@ -2273,43 +2666,73 @@ class Step3Frame(SidebarStepFrame):
             0,
             lambda f=folder: self._batch_panel_update(
                 f,
-                status="Running R script",
+                status="Running main R script",
                 progress=1,
-                log=f"Starting R script: {f}",
+                log=f"Starting main R script {Path(main_script_path).name}: {f}",
             ),
         )
         output_lines = []
-        try:
-            process = subprocess.Popen(
-                cmd,
-                cwd=r_config["input_dir"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        timeout_seconds = max(
+            1,
+            int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
+        )
+
+        def run_command(command, cwd, *, track_main_progress):
+            def handle_line(line):
+                output_lines.append(line)
+                progress = self._progress_from_r_line(line) if track_main_progress else None
+                if progress is not None:
+                    percent, label = progress
+                    self.after(
+                        0,
+                        lambda f=folder, p=percent, s=label: self._batch_panel_update(
+                            f,
+                            status=s,
+                            progress=p,
+                        ),
+                    )
+
+            return self._run_supervised_r_command(
+                command,
+                cwd,
+                env,
+                timeout_seconds,
+                handle_line,
             )
-            if process.stdout is not None:
-                for line in process.stdout:
-                    output_lines.append(line)
-                    progress = self._progress_from_r_line(line)
-                    if progress is not None:
-                        percent, label = progress
-                        self.after(
-                            0,
-                            lambda f=folder, p=percent, s=label: self._batch_panel_update(
-                                f,
-                                status=s,
-                                progress=p,
-                            ),
-                        )
-            returncode = process.wait()
-        except Exception as exc:
-            stdout = "".join(output_lines)
-            log_path = self._write_r_run_log(r_config["output_dir"], 1, stdout, str(exc), cmd)
-            return {"folder": folder, "returncode": 1, "stdout": stdout, "stderr": str(exc), "cmd": cmd, "log": log_path}
+
+        returncode, stderr, outcome = run_command(
+            main_cmd,
+            r_config["input_dir"],
+            track_main_progress=True,
+        )
+
+        if returncode == 0:
+            output_dir = Path(r_config["output_dir"])
+            workspace_path = output_dir / self.R_WORKSPACE_FILES[1]
+            output_expression = (
+                f"setwd({self._r_string(output_dir.resolve())}); "
+                f"load({self._r_string(workspace_path.resolve())}); "
+                f"source({self._r_string(Path(output_script_path).resolve())}, chdir=FALSE, echo=FALSE)"
+            )
+            output_cmd = self._build_r_eval_command(rscript_path, output_expression)
+            commands.append(output_cmd)
+            output_lines.append(f"\n--- Output script: {Path(output_script_path).name} ---\n")
+            self.after(
+                0,
+                lambda f=folder, name=Path(output_script_path).name: self._batch_panel_update(
+                    f,
+                    status="Running output R script",
+                    progress=98,
+                    log=f"Starting output R script {name}: {f}",
+                ),
+            )
+            returncode, output_stderr, outcome = run_command(
+                output_cmd,
+                r_config["output_dir"],
+                track_main_progress=False,
+            )
+            if output_stderr:
+                stderr = output_stderr
 
         if returncode == 0:
             output_dir = Path(r_config["output_dir"])
@@ -2320,6 +2743,7 @@ class Step3Frame(SidebarStepFrame):
             missing_exports = [path.name for path in required_exports if not path.is_file()]
             if missing_exports:
                 returncode = 1
+                outcome = "failed"
                 output_lines.append(
                     "ERROR: R completed without required thickness export(s): "
                     + ", ".join(missing_exports)
@@ -2327,35 +2751,75 @@ class Step3Frame(SidebarStepFrame):
                 )
 
         stdout = "".join(output_lines)
-        log_path = self._write_r_run_log(r_config["output_dir"], returncode, stdout, "", cmd)
+        log_path = self._write_r_run_log(r_config["output_dir"], returncode, stdout, stderr, commands)
         if returncode == 0:
             self.after(0, lambda f=folder, lp=log_path: self._batch_panel_update(f, log=f"Finished: {f}\nLog: {lp}"))
         else:
             short_output = self._short_process_text(stdout)
+            outcome_label = "Cancelled" if outcome == "cancelled" else "Timed out" if outcome == "timed_out" else "Failed"
             self.after(
                 0,
-                lambda f=folder, lp=log_path, out=short_output: self._batch_panel_update(
+                lambda f=folder, lp=log_path, out=short_output, label=outcome_label: self._batch_panel_update(
                     f,
-                    log=f"Failed: {f}\nLog: {lp}\n{out}",
+                    log=f"{label}: {f}\nLog: {lp}\n{out}",
                 ),
             )
-        return {"folder": folder, "returncode": returncode, "stdout": stdout, "stderr": "", "cmd": cmd, "log": log_path}
+        return {
+            "folder": folder,
+            "returncode": returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "cmd": commands,
+            "log": log_path,
+            "outcome": "completed" if returncode == 0 else outcome,
+        }
 
-    def _batch_r_worker(self, rscript_path, script_path, folders, workers):
+    def _batch_r_worker(
+        self,
+        rscript_path,
+        main_script_path,
+        output_script_path,
+        folders,
+        workers,
+        timeout_seconds,
+    ):
         results = []
         completed = 0
         total = len(folders)
 
         def run_folder(folder):
             folder = Path(folder)
+            if self._r_cancel_event.is_set():
+                return {
+                    "folder": folder,
+                    "returncode": 130,
+                    "stdout": "",
+                    "stderr": "Cancelled before the folder started.",
+                    "cmd": [],
+                    "outcome": "cancelled",
+                }
             self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
             try:
                 if self._folder_has_r_data(folder):
                     raise RuntimeError("Skipped because this folder contains RData.")
                 r_config = self._r_script_config_for_folder(folder)
             except Exception as exc:
-                return {"folder": folder, "returncode": 1, "stdout": "", "stderr": str(exc), "cmd": []}
-            return self._run_r_script_for_config(rscript_path, script_path, r_config, batch_folder=folder)
+                return {
+                    "folder": folder,
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": str(exc),
+                    "cmd": [],
+                    "outcome": "failed",
+                }
+            return self._run_r_script_for_config(
+                rscript_path,
+                main_script_path,
+                output_script_path,
+                r_config,
+                batch_folder=folder,
+                timeout_seconds=timeout_seconds,
+            )
 
         workers = max(1, min(int(workers), len(folders), self._cpu_worker_limit()))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
@@ -2365,13 +2829,30 @@ class Step3Frame(SidebarStepFrame):
                 try:
                     result = future.result()
                 except Exception as exc:
-                    result = {"folder": folder, "returncode": 1, "stdout": "", "stderr": str(exc), "cmd": []}
+                    result = {
+                        "folder": folder,
+                        "returncode": 1,
+                        "stdout": "",
+                        "stderr": str(exc),
+                        "cmd": [],
+                        "outcome": "failed",
+                    }
                 results.append(result)
                 completed += 1
-                status = "Completed" if result["returncode"] == 0 else "Failed"
+                outcome = result.get("outcome", "completed" if result["returncode"] == 0 else "failed")
+                status = {
+                    "completed": "Completed",
+                    "cancelled": "Cancelled",
+                    "timed_out": "Timed out",
+                    "failed": "Failed",
+                }.get(outcome, "Failed")
                 self.after(
                     0,
-                    lambda f=folder, s=status: self._batch_panel_update(f, status=s, progress=100),
+                    lambda f=folder, s=status: self._batch_panel_update(
+                        f,
+                        status=s,
+                        progress=100 if s == "Completed" else None,
+                    ),
                 )
 
         self.after(0, lambda: self._on_batch_r_done(results))
@@ -2379,17 +2860,29 @@ class Step3Frame(SidebarStepFrame):
     def _on_batch_r_done(self, results):
         self._busy = False
         self._set_process_buttons("normal")
-        success = sum(1 for result in results if result["returncode"] == 0)
-        failed = len(results) - success
+        outcomes = [
+            result.get("outcome", "completed" if result["returncode"] == 0 else "failed")
+            for result in results
+        ]
+        success = outcomes.count("completed")
+        cancelled = outcomes.count("cancelled")
+        timed_out = outcomes.count("timed_out")
+        failed = outcomes.count("failed")
         self.progress_text_var.set("Batch completed")
-        self.status_var.set(f"Batch Step 3 complete: {success} succeeded, {failed} failed.")
+        summary = (
+            f"Batch complete: {success} succeeded, {failed} failed, "
+            f"{timed_out} timed out, {cancelled} cancelled."
+        )
+        self.status_var.set(summary)
         if self.r_batch_run_panel is not None:
-            self.r_batch_run_panel.set_summary(f"Batch complete: {success} succeeded, {failed} failed.")
-            self.r_batch_run_panel.log(f"Batch complete: {success} succeeded, {failed} failed.")
+            self.r_batch_run_panel.set_summary(summary)
+            self.r_batch_run_panel.finish()
+            self.r_batch_run_panel.log(summary)
         self.info_var.set(
             "Batch Step 3 R results:\n"
             + "\n".join(
-                f"{'OK' if result['returncode'] == 0 else 'FAILED'}: {result['folder']}"
+                f"{result.get('outcome', 'completed' if result['returncode'] == 0 else 'failed').upper()}: "
+                f"{result['folder']}"
                 for result in results
             )
         )
@@ -2400,9 +2893,14 @@ class Step3Frame(SidebarStepFrame):
 
     def _write_r_run_log(self, output_dir, returncode, stdout, stderr, cmd):
         log_path = app_log_dir() / f"step3_rscript_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log"
+        commands = cmd if cmd and isinstance(cmd[0], (list, tuple)) else [cmd]
+        command_text = "\n".join(
+            f"{index}. " + " ".join(str(part) for part in command)
+            for index, command in enumerate(commands, start=1)
+        )
         log_path.write_text(
-            "Command:\n"
-            + " ".join(str(part) for part in cmd)
+            "Commands:\n"
+            + command_text
             + f"\n\nOutput directory:\n{output_dir}"
             + f"\n\nReturn code: {returncode}\n\nSTDOUT:\n{stdout or ''}\n\nSTDERR:\n{stderr or ''}\n",
             encoding="utf-8",

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from aidas.core.display import centered_position, fit_size_to_bounds
+from aidas.core.display import centered_decorated_position, centered_position, fit_size_to_bounds
 
 
 class DisplayPositionTests(unittest.TestCase):
@@ -17,6 +17,18 @@ class DisplayPositionTests(unittest.TestCase):
 
     def test_keeps_oversized_window_at_work_area_origin(self):
         self.assertEqual(centered_position((1920, 40, 2420, 740), 572, 816), (1920, 40))
+
+    def test_centers_the_complete_windows_frame_not_only_its_client_area(self):
+        self.assertEqual(
+            centered_decorated_position(
+                (0, 0, 1920, 1040),
+                1280,
+                820,
+                frame_left=8,
+                frame_top=51,
+            ),
+            (312, 80),
+        )
 
 
 class DisplaySizingTests(unittest.TestCase):

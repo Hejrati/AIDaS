@@ -82,19 +82,13 @@ class Step1Frame(SidebarStepFrame):
         right = self.content
 
         # Right — image canvas + status
-        # UX Improvement: Removed the hard "solid" border. Added generous padding to let it breathe.
-        info_frame = ttk.Frame(right)
-        info_frame.pack(fill="x", padx=12, pady=(12, 6))
         self.image_info_var = tk.StringVar(value="No image loaded")
-        
-        # UX Improvement: Muted the font weight slightly, relying on size and space for hierarchy
-        info_label = ttk.Label(info_frame, textvariable=self.image_info_var, font=("", 11), padding=0, anchor="w")
-        info_label.pack(fill="x")
+        self.image_info_frame = self.add_content_header(self.image_info_var, parent=right)
 
         self.image_canvas = ImageCanvas(right,
                                         on_roi_change=self._on_roi_changed,
                                         on_mouse_move=self._on_mouse_moved)
-        self.image_canvas.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        self.image_canvas.pack(fill="both", expand=True)
 
         self.status_var = tk.StringVar(
             value="Ready — open an SDB raw OCT file to begin (left-drag ROI, right-drag pan)"

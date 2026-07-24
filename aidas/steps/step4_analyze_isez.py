@@ -1202,8 +1202,6 @@ class Step4Frame(SidebarStepFrame):
     def _build_ui(self) -> None:
         self.build_standard_layout(
             sidebar_width=self.SIDEBAR_WIDTH,
-            sidebar_pack={"padx": (2, 6), "pady": 6},
-            content_pack={"padx": 6, "pady": 6},
             status_var=self.status_var,
         )
 

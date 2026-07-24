@@ -652,18 +652,8 @@ class Step2Frame(SidebarStepFrame):
         self.build_standard_layout()
         right = self.content
 
-        info_frame = ttk.Frame(right, relief="solid", borderwidth=1)
-        info_frame.pack(fill="x", padx=2, pady=2)
-        self.image_info_frame = info_frame
         self.image_info_var = tk.StringVar(value="No image loaded")
-        info_label = ttk.Label(
-            info_frame,
-            textvariable=self.image_info_var,
-            font=("", 10, "bold"),
-            padding=8,
-            anchor="w",
-        )
-        info_label.pack(fill="x")
+        self.image_info_frame = self.add_content_header(self.image_info_var, parent=right)
 
         self.canvas_area = ttk.Frame(right)
         self.canvas_area.pack(fill="both", expand=True)
@@ -944,7 +934,7 @@ class Step2Frame(SidebarStepFrame):
             info_frame = getattr(self, "image_info_frame", None)
             if info_frame is not None and info_frame.winfo_manager() != "pack":
                 try:
-                    info_frame.pack(fill="x", padx=2, pady=2, before=self.canvas_area)
+                    info_frame.pack(fill="x", pady=(0, 8), before=self.canvas_area)
                 except tk.TclError:
                     pass
             notebook = getattr(self, "batch_results_notebook", None)

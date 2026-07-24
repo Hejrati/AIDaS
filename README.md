@@ -339,7 +339,18 @@ separate conda environment.
 
 Step 3 still requires the R interpreter and its required R packages. The app's
 **Setup R and Packages** wizard detects or installs those runtime dependencies;
-the workflow `.R` files are bundled with the application automatically.
+the workflow `.R` files are bundled with the application automatically. In the
+The Step 3 sidebar groups both selectors in one **R Scripts** frame:
+**Process Raw OCT (Step 1)** and **More Process (Step 2)**. Each selector shows
+its active version, uses its corresponding embedded script by default, and has
+a separate button for adding user versions. Added scripts are copied to the
+user's persistent AIDaS script library for reuse in later sessions.
+
+Batch Step 3 runs each R process without interactive standard input. The batch
+selection panel provides a configurable per-script timeout (240 minutes by
+default), and the progress panel provides **Cancel Batch**. Timed-out and
+cancelled R process trees are stopped, reported separately from script failures,
+and retained in the Step 3 logs.
 
 Do not use a minimal PyInstaller command for release builds; it does not include
 the model/data files or the reliable one-directory layout defined in

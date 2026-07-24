@@ -6,11 +6,86 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 
+from aidas.utils.ui_layout import COLORS, LAYOUT, workspace_sidebar_width
+
 
 ASSET_DIR_NAME = "assets"
 ICON_FOLDER = "glyphs-poly--folder.png"
 ICON_HOME = "streamline-flex-color--home-2-flat.png"
 ICON_REFRESH = "material-symbols-light--refresh-rounded.png"
+
+
+def configure_aidas_styles(style):
+    """Apply the common AIDaS visual language to the active ttk theme."""
+
+    default_font = ("Segoe UI", 9)
+    style.configure(".", font=default_font)
+    style.configure("TFrame", background=COLORS.surface)
+    style.configure("TLabel", background=COLORS.surface, foreground=COLORS.text)
+    style.configure("TCheckbutton", background=COLORS.surface, foreground=COLORS.text)
+    style.configure("TRadiobutton", background=COLORS.surface, foreground=COLORS.text)
+    style.configure("TLabelframe", background=COLORS.surface, bordercolor=COLORS.border, relief="solid")
+    style.configure(
+        "TLabelframe.Label",
+        background=COLORS.surface,
+        foreground=COLORS.text,
+        font=("Segoe UI", 9, "bold"),
+    )
+    style.configure("TButton", padding=(9, 5))
+    style.configure("TEntry", padding=(5, 4))
+    style.configure("TCombobox", padding=(5, 3))
+    style.configure("Treeview", rowheight=24, background=COLORS.surface, fieldbackground=COLORS.surface)
+    style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), padding=(7, 5))
+
+    style.configure("AIDaS.App.TFrame", background=COLORS.application)
+    style.configure("AIDaS.Workspace.TFrame", background=COLORS.application)
+    style.configure("AIDaS.Sidebar.TFrame", background=COLORS.surface)
+    style.configure("AIDaS.Content.TFrame", background=COLORS.surface)
+    style.configure("AIDaS.Section.TFrame", background=COLORS.surface)
+    style.configure("AIDaS.ContentHeader.TFrame", background=COLORS.surface_subtle)
+    style.configure(
+        "AIDaS.ContentHeader.TLabel",
+        background=COLORS.surface_subtle,
+        foreground=COLORS.text,
+        font=("Segoe UI", 10, "bold"),
+    )
+    style.configure(
+        "AIDaS.Status.TLabel",
+        background=COLORS.surface_subtle,
+        foreground=COLORS.muted_text,
+        padding=(10, 5),
+        relief="flat",
+    )
+    style.configure(
+        "AIDaS.TNotebook",
+        background=COLORS.application,
+        borderwidth=0,
+        tabmargins=(8, 8, 8, 0),
+    )
+    style.configure(
+        "AIDaS.TNotebook.Tab",
+        background=COLORS.surface_subtle,
+        foreground=COLORS.muted_text,
+        font=("Segoe UI", 9, "bold"),
+        padding=(14, 8),
+    )
+    style.map(
+        "AIDaS.TNotebook.Tab",
+        background=[("selected", COLORS.surface), ("active", COLORS.accent_soft)],
+        foreground=[("selected", COLORS.accent), ("active", COLORS.text)],
+    )
+    style.configure(
+        "Accent.TButton",
+        background=COLORS.accent,
+        foreground="#ffffff",
+        font=("Segoe UI", 9, "bold"),
+        padding=(10, 6),
+    )
+    style.map(
+        "Accent.TButton",
+        background=[("pressed", COLORS.accent_hover), ("active", COLORS.accent_hover)],
+        foreground=[("disabled", "#d7dee5"), ("!disabled", "#ffffff")],
+    )
 
 
 def resource_path(relative_path):
@@ -56,6 +131,8 @@ def icon_button(parent, owner, icon_filename, command, *, tooltip=None, **button
         "relief": "flat",
         "highlightthickness": 0,
         "cursor": "hand2",
+        "bg": COLORS.surface,
+        "activebackground": COLORS.accent_soft,
     }
     options.update(button_options)
     button = tk.Button(parent, **options)
@@ -383,15 +460,19 @@ class ScrollableSidebar(ttk.Frame):
     """A vertical sidebar whose content can be scrolled with the mouse."""
 
     def __init__(self, parent, *, width=None):
-        super().__init__(parent)
+        super().__init__(parent, style="AIDaS.Sidebar.TFrame")
 
-        canvas_options = {"highlightthickness": 0, "bd": 0}
+        canvas_options = {
+            "highlightthickness": 0,
+            "bd": 0,
+            "background": COLORS.surface,
+        }
         if width is not None:
             canvas_options["width"] = width
 
         self.canvas = tk.Canvas(self, **canvas_options)
         self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.content = ttk.Frame(self.canvas)
+        self.content = ttk.Frame(self.canvas, style="AIDaS.Sidebar.TFrame")
         self._content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self._middle_drag_active = False
         self._middle_drag_target = self.canvas
@@ -608,20 +689,19 @@ class ScrollableSidebar(ttk.Frame):
 class CollapsibleSection(ttk.Frame):
     """A titled section that can hide or show its child controls."""
 
-    HEADER_FONT = ("TkDefaultFont", 9, "bold")
-    INDICATOR_FONT = ("TkDefaultFont", 12, "bold")
-    HEADER_HEIGHT = 26
+    HEADER_FONT = ("Segoe UI", 9, "bold")
+    INDICATOR_FONT = ("Segoe UI", 12, "bold")
+    HEADER_HEIGHT = 32
 
     def __init__(self, parent, title, *, padding=3, expanded=True):
-        super().__init__(parent)
+        super().__init__(parent, style="AIDaS.Section.TFrame")
         self.title = title
         self.expanded = bool(expanded)
-
-        style = ttk.Style(self)
-        self._header_bg = style.lookup("TFrame", "background") or "#f0f0f0"
-        self._header_fill = style.lookup("TButton", "background") or "#f3f4f6"
-        self._header_outline = style.lookup("TButton", "bordercolor") or "#9ca3af"
-        self._header_text = style.lookup("TLabel", "foreground") or "#111111"
+        self._header_hovered = False
+        self._header_bg = COLORS.surface
+        self._header_fill = COLORS.surface_subtle
+        self._header_outline = COLORS.border
+        self._header_text = COLORS.text
 
         self.header = tk.Canvas(
             self,
@@ -634,12 +714,28 @@ class CollapsibleSection(ttk.Frame):
         self.header.pack(fill="x")
         self.header.bind("<Button-1>", self._on_header_click, add="+")
         self.header.bind("<Configure>", lambda _event: self._draw_header(), add="+")
+        self.header.bind("<Enter>", self._on_header_enter, add="+")
+        self.header.bind("<Leave>", self._on_header_leave, add="+")
 
-        self._body_container = ttk.Frame(self, relief="sunken", borderwidth=1, padding=2)
+        self._body_container = ttk.Frame(
+            self,
+            style="AIDaS.Section.TFrame",
+            relief="solid",
+            borderwidth=1,
+            padding=2,
+        )
         self._body_container.pack(fill="both", expand=True, padx=(4, 0), pady=(0, 7))
-        self.body = ttk.Frame(self._body_container, padding=padding)
+        self.body = ttk.Frame(self._body_container, style="AIDaS.Section.TFrame", padding=padding)
         self.body.pack(fill="both", expand=True)
         self._sync_header()
+
+    def _on_header_enter(self, _event):
+        self._header_hovered = True
+        self._draw_header()
+
+    def _on_header_leave(self, _event):
+        self._header_hovered = False
+        self._draw_header()
 
     def _on_header_click(self, _event):
         self.toggle()
@@ -667,7 +763,7 @@ class CollapsibleSection(ttk.Frame):
             1,
             width - 1,
             height - 1,
-            fill=self._header_fill,
+            fill=COLORS.accent_soft if self._header_hovered else self._header_fill,
             outline=self._header_outline,
         )
         marker = "\u25be" if self.expanded else "\u25b8"
@@ -701,9 +797,12 @@ class SidebarStepFrame(ttk.Frame):
     """Standard left-sidebar/right-content layout for AIDaS step pages."""
 
     SIDEBAR_WIDTH = 380
-    SIDEBAR_TEXT_WRAP = 350
+    SIDEBAR_TEXT_WRAP = 344
+    SIDEBAR_RATIO = LAYOUT.sidebar_ratio
+    SIDEBAR_MINIMUM = LAYOUT.sidebar_minimum
+    CONTENT_MINIMUM = LAYOUT.content_minimum
     SECTION_PADDING = 8
-    SECTION_PACK = {"fill": "x", "padx": (6, 8), "pady": 2}
+    SECTION_PACK = {"fill": "x", "padx": (0, 0), "pady": (0, 8)}
 
     def build_standard_layout(
         self,
@@ -712,34 +811,124 @@ class SidebarStepFrame(ttk.Frame):
         sidebar_pack=None,
         content_pack=None,
         status_var=None,
+        sidebar_ratio=None,
     ):
         """Create a shared step layout with `self.ctrl` and `self.content`.
 
         `self.ctrl` is the scrollable sidebar content frame. `self.content` is
         the main right-side work area.
         """
-        self.main = ttk.Frame(self)
+        self.main = ttk.Frame(self, style="AIDaS.Workspace.TFrame")
         self.main.pack(fill="both", expand=True)
 
         if sidebar_width is None:
             sidebar_width = self.SIDEBAR_WIDTH
-        self.sidebar = ScrollableSidebar(self.main, width=sidebar_width)
-        sidebar_options = {"side": "left", "fill": "y"}
-        if sidebar_pack:
-            sidebar_options.update(sidebar_pack)
-        self.sidebar.pack(**sidebar_options)
+        self._sidebar_ratio = self.SIDEBAR_RATIO if sidebar_ratio is None else float(sidebar_ratio)
+        self._last_workspace_width = None
+
+        self.workspace = tk.PanedWindow(
+            self.main,
+            orient=tk.HORIZONTAL,
+            background=COLORS.border,
+            borderwidth=0,
+            opaqueresize=True,
+            sashwidth=LAYOUT.divider_width,
+            sashrelief="flat",
+            showhandle=False,
+        )
+        self.workspace.pack(fill="both", expand=True)
+
+        sidebar_padding = self._pane_padding(
+            sidebar_pack,
+            default=(LAYOUT.space_sm, LAYOUT.space_sm, LAYOUT.space_xs, LAYOUT.space_sm),
+        )
+        content_padding = self._pane_padding(
+            content_pack,
+            default=(LAYOUT.space_sm, LAYOUT.space_sm, LAYOUT.space_sm, LAYOUT.space_sm),
+        )
+        self.sidebar_shell = ttk.Frame(
+            self.workspace,
+            style="AIDaS.Sidebar.TFrame",
+            padding=sidebar_padding,
+        )
+        self.sidebar = ScrollableSidebar(self.sidebar_shell, width=sidebar_width)
+        self.sidebar.pack(fill="both", expand=True)
         self.ctrl = self.sidebar.content
 
-        self.content = ttk.Frame(self.main)
-        content_options = {"side": "left", "fill": "both", "expand": True}
-        if content_pack:
-            content_options.update(content_pack)
-        self.content.pack(**content_options)
-
+        self.content_shell = ttk.Frame(
+            self.workspace,
+            style="AIDaS.Content.TFrame",
+            padding=content_padding,
+        )
         if status_var is not None:
-            self.add_status_bar(status_var)
+            self.add_status_bar(status_var, parent=self.content_shell)
+        self.content = ttk.Frame(self.content_shell, style="AIDaS.Content.TFrame")
+        self.content.pack(fill="both", expand=True)
+
+        self.workspace.add(
+            self.sidebar_shell,
+            minsize=self.SIDEBAR_MINIMUM,
+            stretch="always",
+        )
+        self.workspace.add(
+            self.content_shell,
+            minsize=self.CONTENT_MINIMUM,
+            stretch="always",
+        )
+        self._pane_minima = (self.SIDEBAR_MINIMUM, self.CONTENT_MINIMUM)
+        self.workspace.bind("<Configure>", self._on_workspace_configure, add="+")
+        self.after_idle(self._apply_workspace_ratio)
 
         return self.ctrl, self.content
+
+    @staticmethod
+    def _pane_padding(options, *, default):
+        """Translate legacy pack padding into ttk four-sided frame padding."""
+
+        if not options:
+            return default
+        padx = options.get("padx", (default[0], default[2]))
+        pady = options.get("pady", (default[1], default[3]))
+        left, right = padx if isinstance(padx, (tuple, list)) else (padx, padx)
+        top, bottom = pady if isinstance(pady, (tuple, list)) else (pady, pady)
+        return left, top, right, bottom
+
+    def _on_workspace_configure(self, event):
+        if event.width == self._last_workspace_width:
+            return
+        self._last_workspace_width = event.width
+        self.after_idle(self._apply_workspace_ratio)
+
+    def _apply_workspace_ratio(self):
+        """Keep the standard pane ratio while respecting both usability minima."""
+
+        try:
+            width = self.workspace.winfo_width()
+            if width <= 1 or len(self.workspace.panes()) < 2:
+                return
+            sidebar_width = workspace_sidebar_width(
+                width,
+                ratio=self._sidebar_ratio,
+                sidebar_minimum=self.SIDEBAR_MINIMUM,
+                content_minimum=self.CONTENT_MINIMUM,
+            )
+            available = max(2, width - LAYOUT.divider_width)
+            if available >= self.SIDEBAR_MINIMUM + self.CONTENT_MINIMUM:
+                sidebar_floor = self.SIDEBAR_MINIMUM
+                content_floor = self.CONTENT_MINIMUM
+            else:
+                sidebar_floor = max(1, sidebar_width)
+                content_floor = max(1, available - sidebar_width)
+            pane_minima = (sidebar_floor, content_floor)
+            if pane_minima != self._pane_minima:
+                self.workspace.paneconfigure(self.sidebar_shell, minsize=sidebar_floor)
+                self.workspace.paneconfigure(self.content_shell, minsize=content_floor)
+                self._pane_minima = pane_minima
+                self.after_idle(self._apply_workspace_ratio)
+                return
+            self.workspace.sash_place(0, sidebar_width, 0)
+        except tk.TclError:
+            return
 
     def add_sidebar_section(self, title, *, padding=None, **pack_options):
         """Add a collapsible section to the standard sidebar."""
@@ -751,15 +940,33 @@ class SidebarStepFrame(ttk.Frame):
         section.pack(**options)
         return section
 
+    def add_content_header(self, textvariable, *, parent=None):
+        """Add the standard contextual header above a step's main canvas."""
+
+        container = parent if parent is not None else self.content
+        frame = ttk.Frame(
+            container,
+            style="AIDaS.ContentHeader.TFrame",
+            padding=(LAYOUT.space_md, LAYOUT.space_sm),
+        )
+        frame.pack(fill="x", pady=(0, LAYOUT.space_sm))
+        label = ttk.Label(
+            frame,
+            textvariable=textvariable,
+            style="AIDaS.ContentHeader.TLabel",
+            anchor="w",
+        )
+        label.pack(fill="x")
+        return frame
+
     def add_status_bar(self, status_var, *, parent=None):
         """Add a standard sunken status label."""
         container = parent if parent is not None else self
         label = ttk.Label(
             container,
             textvariable=status_var,
-            relief="sunken",
+            style="AIDaS.Status.TLabel",
             anchor="w",
-            padding=3,
         )
         label.pack(side="bottom", fill="x")
         return label
