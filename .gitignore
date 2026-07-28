@@ -16,6 +16,7 @@ aidas\steps\__pycache__/*
 run_aidas.spec
 Examples/
 logs/
+R-packages/
 debug_outputs/
 flip human/
 sdb_images/
