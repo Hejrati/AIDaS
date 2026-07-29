@@ -7,7 +7,7 @@ import threading
 import unittest
 from unittest import mock
 
-from aidas.steps.step3_flatten import Step3Frame
+from aidas.steps.step3_flatten import RBatchRunPanel, RBatchSelectionPanel, Step3Frame
 
 
 class _FakeProcess:
@@ -191,6 +191,60 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertEqual(outcome, "failed")
         self.assertEqual(error, "")
         self.assertEqual(lines, ["R error\n"])
+
+    def test_stop_requires_confirmation_before_cancelling_batch(self):
+        panel = RBatchRunPanel.__new__(RBatchRunPanel)
+        panel.stop_requested = False
+        panel.stop_button = mock.Mock()
+        panel.restart_button = mock.Mock()
+        panel.summary_var = mock.Mock()
+        panel.step_frame = mock.Mock()
+
+        with mock.patch("aidas.steps.step3_flatten.messagebox.askyesno", return_value=False):
+            panel._cancel_batch()
+        panel.step_frame._cancel_batch_r_runs.assert_not_called()
+
+        with mock.patch("aidas.steps.step3_flatten.messagebox.askyesno", return_value=True):
+            panel._cancel_batch()
+        panel.step_frame._cancel_batch_r_runs.assert_called_once_with()
+        self.assertTrue(panel.stop_requested)
+
+    def test_restart_waits_for_active_batch_to_stop(self):
+        frame = Step3Frame.__new__(Step3Frame)
+        frame._busy = True
+        frame._pending_batch_restart = None
+        frame.status_var = mock.Mock()
+        frame._cancel_batch_r_runs = mock.Mock()
+
+        frame._restart_batch_r_runs(
+            [Path("folder-a")],
+            2,
+            Path("main.R"),
+            Path("output.R"),
+            60,
+        )
+
+        frame._cancel_batch_r_runs.assert_called_once_with()
+        self.assertIsNotNone(frame._pending_batch_restart)
+        self.assertEqual(frame._pending_batch_restart[0], [Path("folder-a")])
+
+    def test_cpu_worker_limit_uses_processors_available_to_the_process(self):
+        with mock.patch(
+            "aidas.steps.step3_flatten.os.process_cpu_count",
+            create=True,
+            return_value=12,
+        ):
+            self.assertEqual(Step3Frame._cpu_worker_limit(), 12)
+
+    def test_batch_can_use_every_available_logical_processor(self):
+        panel = RBatchSelectionPanel.__new__(RBatchSelectionPanel)
+        panel.step_frame = mock.Mock()
+        panel.step_frame._cpu_worker_limit.return_value = 8
+
+        self.assertEqual(panel._max_worker_count(), 8)
+        self.assertEqual(panel._max_worker_count(20), 8)
+        self.assertEqual(panel._max_worker_count(3), 3)
+        self.assertEqual(panel._worker_limit_text(8), "Max available: 8")
 
 
 if __name__ == "__main__":

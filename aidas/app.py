@@ -455,6 +455,7 @@ class AIDaSApp(tk.Tk):
             self.notebook,
             preferences=self.preferences,
             on_processed_image=self._on_step1_processed_image,
+            on_batch_segment_folders=self._on_step1_batch_segment_folders,
         )
         self.notebook.add(self.step1, text="  Step 1 — Load, Resize & Crop  ")
 
@@ -592,15 +593,13 @@ class AIDaSApp(tk.Tk):
 
     def _menu_browse_sdb(self) -> None:
         self.notebook.select(0)
-        file_path = filedialog.askopenfilename(
-            title="Select SDB file (directory will be used)",
+        directory = filedialog.askdirectory(
+            title="Select parent folder containing SDB subfolders",
             initialdir=self.step1.sdb_dir_var.get() or None,
-            filetypes=[("SDB files", "*.sdb"), ("All files", "*.*")],
         )
-        if file_path:
-            directory = os.path.dirname(file_path)
+        if directory:
             self.step1.set_sdb_directory(directory)
-            self.step1.refresh_sdb_list()
+            self.step1.refresh_sdb_list(preview_first=True)
 
     def _set_theme(self, theme_name: str) -> None:
         """Change the application theme and save the preference."""
@@ -615,6 +614,15 @@ class AIDaSApp(tk.Tk):
         """Receive a cropped Step 1 image and load it into Step 2."""
         if getattr(self, "step2", None) is not None:
             self.step2.load_external_image(image, source_path=source_path)
+
+    def _on_step1_batch_segment_folders(self, folders) -> None:
+        """Open Step 2 and batch-segment completed Step 1 folders."""
+        step2 = getattr(self, "step2", None)
+        if step2 is None:
+            return
+        self.notebook.select(step2)
+        self.update_idletasks()
+        step2.start_batch_segmentation_for_folders(folders)
 
     def _on_step2_output_folder_changed(self, folder) -> None:
         """Keep Step 3 pointed at Step 2's MARKED output folder."""

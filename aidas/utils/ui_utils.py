@@ -208,7 +208,7 @@ def build_app_menu(
     menubar = tk.Menu(root)
 
     file_menu = tk.Menu(menubar, tearoff=0)
-    file_menu.add_command(label="Browse SDB Directory", command=browse_sdb_command)
+    file_menu.add_command(label="Browse SDB Parent Directory", command=browse_sdb_command)
     file_menu.add_separator()
     file_menu.add_command(label="Exit", command=root.destroy, accelerator="Alt+F4")
     menubar.add_cascade(label="File", menu=file_menu)

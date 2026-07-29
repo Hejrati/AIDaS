@@ -14,14 +14,14 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 
 from aidas.canvas.image_canvas import ImageCanvas
-from aidas.utils.filesystem import skipped_directories_warning
+from aidas.utils.filesystem import find_sdb_directories, skipped_directories_warning
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
+from aidas.utils.ui_layout import COLORS, LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     NativeNumericSpinbox,
     SidebarStepFrame,
     directory_row,
-    icon_button,
     load_ui_icon,
 )
 
@@ -31,13 +31,16 @@ DEFAULT_RAW_WIDTH = 768
 DEFAULT_RAW_HEIGHT = 1200
 DEFAULT_RAW_OFFSET = 1050
 DEFAULT_RAW_BIT_DEPTH = 16
-DEFAULT_OUTPUT_DIR = SDB_DEFAULT_DIR
 CROP_SCALE_X = 3
 CROP_SCALE_Y = 1
 DEFAULT_ROI_X = 170
 DEFAULT_ROI_Y = 585
 DEFAULT_ROI_WIDTH = 491
 DEFAULT_ROI_HEIGHT = 128
+COMPLETED_ROW_BACKGROUND = "#dff3e4"
+COMPLETED_ROW_FOREGROUND = "#1f6b35"
+COMPLETED_ROW_SELECTED_BACKGROUND = "#2f7d4a"
+SAVED_OUTPUT_FILENAMES = frozenset(("light.tif", "light.hdr", "light.img"))
 
 
 class Step1Frame(SidebarStepFrame):
@@ -51,7 +54,13 @@ class Step1Frame(SidebarStepFrame):
     - image interaction (zoom/pan/inspection).
     """
 
-    def __init__(self, parent, preferences=None, on_processed_image=None):
+    def __init__(
+        self,
+        parent,
+        preferences=None,
+        on_processed_image=None,
+        on_batch_segment_folders=None,
+    ):
         """Initialize the Step 1 panel and construct all widgets.
 
         Args:
@@ -59,21 +68,34 @@ class Step1Frame(SidebarStepFrame):
             preferences: Optional preferences object implementing `get` and `set`.
             on_processed_image: Optional callback receiving (image, source_path)
                 whenever crop/scale produces a new processed image.
+            on_batch_segment_folders: Optional callback receiving folders whose
+                saved Light outputs should be batch-segmented in Step 2.
         """
         super().__init__(parent)
 
         self.preferences = preferences
         self._on_processed_image = on_processed_image
+        self._on_batch_segment_folders = on_batch_segment_folders
 
         # ----- state -----
         self.raw_image = None          # original loaded image (H, W)  uint16
         self._source_raw_image = None  # original imported image before width adjustments
         self.processed_image = None    # after crop + scale           int16 (.img-like preview)
         self.current_file = None       # path of opened raw file
+        self._source_roi = None        # ROI coordinates in the source image
         self.raw_import_params = None  # validated import parameters
         self._updating_roi_entries = False
         self._updating_target_size_entries = False
         self._target_size_edit_active = False
+        self._syncing_view_roi = False
+        self._sdb_directory_files = {}
+        self._sdb_directories = []
+        self._sdb_directory_labels = []
+        self._sdb_files = []
+        self._active_sdb_directory = None
+        self._cropped_sdb_files = set()
+        self._saved_output_directories = set()
+        self._sdb_directory_selection_locked = False
 
         # ----- layout -----
         self.build_standard_layout()
@@ -81,19 +103,36 @@ class Step1Frame(SidebarStepFrame):
         # Left — scrollable control panel (content-driven width)
         right = self.content
 
-        # Right — image canvas + status
-        self.image_info_var = tk.StringVar(value="No image loaded")
-        self.image_info_frame = self.add_content_header(self.image_info_var, parent=right)
-
-        self.image_canvas = ImageCanvas(right,
-                                        on_roi_change=self._on_roi_changed,
-                                        on_mouse_move=self._on_mouse_moved)
-        self.image_canvas.pack(fill="both", expand=True)
+        # Right — processing toolbar + image canvas + ROI toolbar + status
+        self.canvas_toolbar = ttk.Frame(
+            right,
+            style="AIDaS.ContentHeader.TFrame",
+            padding=(LAYOUT.space_md, LAYOUT.space_sm),
+        )
+        self.canvas_toolbar.pack(fill="x", pady=(0, LAYOUT.space_sm))
 
         self.status_var = tk.StringVar(
             value="Ready — open an SDB raw OCT file to begin (left-drag ROI, right-drag pan)"
         )
         self.add_status_bar(self.status_var, parent=right)
+
+        self.canvas_roi_toolbar = ttk.Frame(
+            right,
+            style="AIDaS.ContentHeader.TFrame",
+            padding=(LAYOUT.space_md, LAYOUT.space_sm),
+        )
+        self.canvas_roi_toolbar.pack(
+            side="bottom",
+            fill="x",
+            pady=(LAYOUT.space_sm, 0),
+        )
+
+        self.image_canvas = ImageCanvas(
+            right,
+            on_roi_change=self._on_roi_changed,
+            on_mouse_move=self._on_mouse_moved,
+        )
+        self.image_canvas.pack(fill="both", expand=True)
 
         # Build control widgets
         self._build_controls()
@@ -145,10 +184,10 @@ class Step1Frame(SidebarStepFrame):
         self.endian_checkbox.grid(row=3, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self._endian_tooltip = HoverToolTip(self.endian_checkbox, "Can affect visualization for some offsets")
 
-        # ── SDB Files ──
-        sdb_section = self.add_sidebar_section("SDB Files", pady=(5, 5))
+        # ── SDB Work Queue ──
+        sdb_section = self.add_sidebar_section("SDB Work Queue", pady=(5, 5))
         sdb = sdb_section.body
-        ttk.Label(sdb, text="Input dir:").pack(anchor="w", pady=(0, 2))
+        ttk.Label(sdb, text="Parent dir:").pack(anchor="w", pady=(0, 2))
         self.sdb_dir_var = tk.StringVar(value=self._initial_sdb_dir())
         
         dir_frame, _dir_entry, dir_buttons = directory_row(
@@ -157,22 +196,28 @@ class Step1Frame(SidebarStepFrame):
             self.sdb_dir_var,
             self._browse_sdb_dir,
             home_command=self._reset_sdb_dir_to_default,
-            refresh_command=self.refresh_sdb_list,
-            browse_tooltip="Browse SDB folder",
+            refresh_command=lambda: self.refresh_sdb_list(preview_first=True),
+            browse_tooltip="Choose parent folder to scan",
             home_tooltip="Reset to Desktop",
-            refresh_tooltip="Refresh SDB files",
+            refresh_tooltip="Rescan subfolders",
         )
         dir_frame.pack(fill="x", pady=(0, 8))
         self.search_btn = dir_buttons["browse"]
         self.home_btn = dir_buttons["home"]
         self.refresh_btn = dir_buttons["refresh"]
 
-        filt_frame = ttk.Frame(sdb)
-        filt_frame.pack(fill="x", pady=(0, 4))
-        ttk.Label(filt_frame, text="Search:").pack(side="left")
-        self.sdb_filter_var = tk.StringVar(value="")
-        self.sdb_filter_var.trace_add("write", lambda *_: self.refresh_sdb_list())
-        ttk.Entry(filt_frame, textvariable=self.sdb_filter_var).pack(side="left", fill="x", expand=True, padx=(6, 0))
+        # Search controls intentionally removed from the Step 1 UI.
+        # filt_frame = ttk.Frame(sdb)
+        # filt_frame.pack(fill="x", pady=(0, 4))
+        # ttk.Label(filt_frame, text="Search:").pack(side="left")
+        # self.sdb_filter_var = tk.StringVar(value="")
+        # self.sdb_search_entry = ttk.Entry(
+        #     filt_frame,
+        #     textvariable=self.sdb_filter_var,
+        # )
+        # self.sdb_search_entry.pack(
+        #     side="left", fill="x", expand=True, padx=(6, 0)
+        # )
 
         self.sdb_scan_more_label = ttk.Label(
             sdb,
@@ -183,9 +228,79 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_scan_more_label.pack(anchor="w", pady=(0, 4))
         self.sdb_scan_tooltip = HoverToolTip(self.sdb_scan_more_label, "")
 
+        self.exclude_saved_outputs_var = tk.BooleanVar(value=False)
+        self.exclude_saved_outputs_checkbox = ttk.Checkbutton(
+            sdb,
+            text="Exclude saved cropped folders",
+            variable=self.exclude_saved_outputs_var,
+            command=self._render_sdb_directories,
+        )
+        self.exclude_saved_outputs_checkbox.pack(anchor="w", pady=(0, 4))
+        HoverToolTip(
+            self.exclude_saved_outputs_checkbox,
+            "Hide SDB folders containing light.tif, light.hdr, and light.img",
+        )
+
+        folder_header = ttk.Frame(sdb)
+        folder_header.pack(fill="x", pady=(2, 2))
+        ttk.Label(folder_header, text="Folders containing SDB images:").pack(side="left")
+        folder_counts = ttk.Frame(folder_header)
+        folder_counts.pack(side="right")
+        self.cropped_folder_count_var = tk.StringVar(value="Cropped 0")
+        self.uncropped_folder_count_var = tk.StringVar(value="Uncropped 0")
+        ttk.Label(
+            folder_counts,
+            textvariable=self.cropped_folder_count_var,
+            foreground=COMPLETED_ROW_FOREGROUND,
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+        ttk.Label(
+            folder_counts,
+            textvariable=self.uncropped_folder_count_var,
+            foreground=COLORS.muted_text,
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=(8, 0))
+        directory_list_frame = ttk.Frame(sdb)
+        directory_list_frame.pack(fill="both", expand=True, pady=(0, 5))
+        self.sdb_directory_listbox = tk.Listbox(
+            directory_list_frame,
+            height=6,
+            selectmode="browse",
+            relief="flat",
+            highlightthickness=1,
+        )
+        directory_scroll = ttk.Scrollbar(
+            directory_list_frame,
+            orient="vertical",
+            command=self.sdb_directory_listbox.yview,
+        )
+        self.sdb_directory_listbox.configure(yscrollcommand=directory_scroll.set)
+        self.sdb_directory_listbox.pack(side="left", fill="both", expand=True)
+        directory_scroll.pack(side="right", fill="y")
+        self.sdb_directory_listbox.bind("<<ListboxSelect>>", self._on_sdb_directory_select)
+
+        image_header = ttk.Frame(sdb)
+        image_header.pack(fill="x", pady=(2, 2))
+        ttk.Label(image_header, text="Images in selected folder:").pack(side="left")
+        image_counts = ttk.Frame(image_header)
+        image_counts.pack(side="right")
+        self.cropped_image_count_var = tk.StringVar(value="Cropped 0")
+        self.uncropped_image_count_var = tk.StringVar(value="Uncropped 0")
+        ttk.Label(
+            image_counts,
+            textvariable=self.cropped_image_count_var,
+            foreground=COMPLETED_ROW_FOREGROUND,
+            font=("Segoe UI", 8),
+        ).pack(side="left")
+        ttk.Label(
+            image_counts,
+            textvariable=self.uncropped_image_count_var,
+            foreground=COLORS.muted_text,
+            font=("Segoe UI", 8),
+        ).pack(side="left", padx=(8, 0))
         lb_frame = ttk.Frame(sdb)
-        lb_frame.pack(fill="both", expand=True, pady=(4, 6))
-        self.sdb_listbox = tk.Listbox(lb_frame, height=8, selectmode="browse", relief="flat", highlightthickness=1)
+        lb_frame.pack(fill="both", expand=True, pady=(0, 6))
+        self.sdb_listbox = tk.Listbox(lb_frame, height=5, selectmode="browse", relief="flat", highlightthickness=1)
         lb_scroll = ttk.Scrollbar(lb_frame, orient="vertical", command=self.sdb_listbox.yview)
         self.sdb_listbox.configure(yscrollcommand=lb_scroll.set)
         self.sdb_listbox.pack(side="left", fill="both", expand=True)
@@ -193,20 +308,32 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_listbox.bind("<Double-1>", lambda e: self._open_selected_sdb())
         self.sdb_listbox.bind("<<ListboxSelect>>", self._on_sdb_list_select)
 
-        nav_frame = ttk.Frame(sdb)
-        nav_frame.pack(fill="x")
-        ttk.Button(nav_frame, text="◀ Prev", command=self._prev_sdb).pack(side="left", expand=True, fill="x", padx=(0, 4))
-        ttk.Button(nav_frame, text="Next ▶", command=self._next_sdb).pack(side="right", expand=True, fill="x", padx=(4, 0))
+        # Previous/Next navigation buttons intentionally removed. Images are
+        # selected directly from the list above.
+        # nav_frame = ttk.Frame(sdb)
+        # nav_frame.pack(fill="x")
+        # ttk.Button(nav_frame, text="◀ Prev", command=self._prev_sdb).pack(
+        #     side="left", expand=True, fill="x", padx=(0, 4)
+        # )
+        # ttk.Button(nav_frame, text="Next ▶", command=self._next_sdb).pack(
+        #     side="right", expand=True, fill="x", padx=(4, 0)
+        # )
+        ttk.Separator(self.ctrl, orient="horizontal").pack(fill="x", pady=(10, 6))
+        self.batch_segment_cropped_btn = ttk.Button(
+            self.ctrl,
+            text="Go to Step 2 >>",
+            command=self._send_cropped_folders_to_step2,
+            state="disabled",
+        )
+        self.batch_segment_cropped_btn.pack(fill="x", padx=2, pady=(0, 8))
+        HoverToolTip(
+            self.batch_segment_cropped_btn,
+            "Open folders with saved Light outputs in Step 2 batch segmentation",
+        )
 
-        self._sdb_files = []
         self.refresh_sdb_list()
 
-        # ── ROI Selection ──
-        roi_section = self.add_sidebar_section("ROI Selection (crop and save)", pady=(5, 10))
-        roi = roi_section.body
-        for col in range(4):
-            roi.grid_columnconfigure(col, weight=1)
-
+        # ── ROI controls below the image canvas ──
         self.roi_x_var = tk.StringVar(value="0")
         self.roi_y_var = tk.StringVar(value="0")
         self.roi_w_var = tk.StringVar(value="100")
@@ -220,111 +347,181 @@ class Step1Frame(SidebarStepFrame):
         self.target_w_var.trace_add("write", self._on_target_size_entry_changed)
         self.target_h_var.trace_add("write", self._on_target_size_entry_changed)
 
-        ttk.Label(roi, text="Output dir:").grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 2))
-        save_dir_row = ttk.Frame(roi)
-        save_dir_row.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
-        self.outdir_var = tk.StringVar(value=DEFAULT_OUTPUT_DIR)
-        ttk.Entry(save_dir_row, textvariable=self.outdir_var).pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.out_search_btn = icon_button(
-            save_dir_row,
-            self,
-            "glyphs-poly--folder.png",
-            self._browse_outdir,
-            tooltip="Browse output folder",
+        roi_toolbar = self.canvas_roi_toolbar
+        roi_fields = (
+            ("X (Left)", self.roi_x_var, 1, 0, 10000),
+            ("Y (Top)", self.roi_y_var, 1, 0, 10000),
+            ("Width", self.roi_w_var, 1, 1, 30000),
+            ("Height", self.roi_h_var, 1, 1, 30000),
         )
-        self.out_search_btn.pack(side="right")
-
-       
-        self.roi_entries = []
-        # UX Improvement: Removed the bright #DA0404 red. Using default text color for a cleaner look.
-        for i, (lbl, var) in enumerate([
-            ("X (Left):", self.roi_x_var),
-            ("Y (Top):", self.roi_y_var),
-            ("Source W:", self.roi_w_var),
-            ("Source H:", self.roi_h_var),
-        ]):
-            r, c = divmod(i, 2)
-            ttk.Label(roi, text=lbl).grid(row=r + 2, column=c * 2, sticky="w", pady=4)
+        roi_steppers = []
+        for index, (label, var, step, minimum, maximum) in enumerate(roi_fields):
+            field = ttk.Frame(roi_toolbar, style="AIDaS.ContentHeader.TFrame")
+            field.pack(side="left", padx=(0, 12))
+            ttk.Label(
+                field,
+                text=label,
+                style="AIDaS.ContentHeader.TLabel",
+            ).pack(anchor="w", pady=(0, 2))
             stepper = self._numeric_stepper(
-                roi,
+                field,
                 var,
                 width=5,
-                step=1,
-                minimum=0,
-                maximum=10000,
+                step=step,
+                minimum=minimum,
+                maximum=maximum,
                 validatecommand=numeric_vcmd,
             )
-            stepper.grid(row=r + 2, column=c * 2 + 1, sticky="e", padx=(0, 8), pady=4)
-            self.roi_entries.append(stepper)
+            stepper.pack(fill="x")
+            roi_steppers.append(stepper)
 
-        ttk.Label(roi, text="Target W:").grid(row=4, column=0, sticky="w", pady=(8, 4))
-        self.target_w_entry = self._numeric_stepper(
-            roi,
-            self.target_w_var,
-            width=5,
-            step=CROP_SCALE_X,
-            minimum=1,
-            maximum=30000,
-            validatecommand=numeric_vcmd,
-        )
-        self.target_w_entry.grid(row=4, column=1, sticky="e", padx=(0, 8), pady=(8, 4))
-        
-        ttk.Label(roi, text="Target H:").grid(row=4, column=2, sticky="w", pady=(8, 4))
-        self.target_h_entry = self._numeric_stepper(
-            roi,
-            self.target_h_var,
-            width=5,
-            step=1,
-            minimum=1,
-            maximum=30000,
-            validatecommand=numeric_vcmd,
-        )
-        self.target_h_entry.grid(row=4, column=3, sticky="e", padx=(0, 8), pady=(8, 4))
-        self.target_size_entries = [self.target_w_entry, self.target_h_entry]
+        self.roi_entries = roi_steppers
+        self.target_size_entries = []
 
+        ttk.Separator(roi_toolbar, orient="vertical").pack(
+            side="left", fill="y", padx=(0, 12), pady=2
+        )
+        view_group = ttk.Frame(
+            roi_toolbar,
+            style="AIDaS.ContentHeader.TFrame",
+        )
+        view_group.pack(side="left")
         ttk.Label(
-            roi,
-            text=f"Scale: target width is source width x{CROP_SCALE_X}; height unchanged.",
-            foreground="gray",
-            wraplength=280
-        ).grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 8))
+            view_group,
+            text="View",
+            style="AIDaS.ContentHeader.TLabel",
+        ).pack(anchor="w", pady=(0, 2))
+        view_choices = ttk.Frame(
+            view_group,
+            style="AIDaS.ContentHeader.TFrame",
+        )
+        view_choices.pack(anchor="w")
+        self.view_mode_var = tk.StringVar(value="source")
+        self.source_view_radio = ttk.Radiobutton(
+            view_choices,
+            text="Source",
+            value="source",
+            variable=self.view_mode_var,
+            command=self._on_view_mode_changed,
+        )
+        self.source_view_radio.pack(side="left", padx=(0, 8))
+        self.target_view_radio = ttk.Radiobutton(
+            view_choices,
+            text="Target",
+            value="target",
+            variable=self.view_mode_var,
+            command=self._on_view_mode_changed,
+            state="disabled",
+        )
+        self.target_view_radio.pack(side="left")
 
-        roi_presets = ttk.Frame(roi)
-        roi_presets.grid(row=6, column=0, columnspan=4, sticky="w", pady=(4, 10))
-        self.default_roi_btn = ttk.Button(roi_presets, text="Default Region", command=self._set_default_roi)
-        self.default_roi_btn.pack(side="left", padx=(0, 6))
-        self.entire_roi_btn = ttk.Button(roi_presets, text="Entire Image", command=self._select_all_roi)
-        self.entire_roi_btn.pack(side="left", padx=(0, 6))
-        ttk.Button(roi_presets, text="Auto Select", command=self._set_default_roi, state="disabled").pack(side="left")
-
-        roi_actions = ttk.Frame(roi)
-        roi_actions.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-
+        # Top canvas toolbar: ROI presets, processing actions, and save.
+        toolbar = self.canvas_toolbar
         action_icon_size = 16
-        action_spacing = 6
+        self.crop_split_frame = tk.Frame(
+            toolbar,
+            background="#a7adb3",
+            borderwidth=1,
+            relief="solid",
+        )
+        self.crop_split_frame.pack(side="left", padx=(0, 6))
         self.crop_btn_icon = load_ui_icon(
             self, "material-symbols-light--crop.png", size=action_icon_size
         )
-        self.crop_btn = ttk.Button(
-            roi_actions,
+        paint_button_options = {
+            "background": "#f7f8fa",
+            "activebackground": "#e5f3fb",
+            "foreground": COLORS.text,
+            "activeforeground": COLORS.text,
+            "disabledforeground": "#8b9298",
+            "font": ("Segoe UI", 9),
+            "relief": "flat",
+            "borderwidth": 0,
+            "highlightthickness": 0,
+            "cursor": "hand2",
+            "pady": 8,
+        }
+        self.crop_btn = tk.Button(
+            self.crop_split_frame,
             text="Crop & Scale",
             command=self._crop_and_scale,
             image=self.crop_btn_icon,
             compound="left",
+            padx=9,
+            **paint_button_options,
         )
-        self.crop_btn.pack(fill="x", pady=(0, action_spacing))
-        
+        self.crop_btn.pack(side="left", fill="y")
+
+        self.crop_split_divider = tk.Frame(
+            self.crop_split_frame,
+            width=1,
+            background="#a7adb3",
+        )
+        self.crop_split_divider.pack(side="left", fill="y")
+
+        self.crop_options_icon = tk.PhotoImage(master=self, width=16, height=16)
+        self.crop_options_btn = tk.Button(
+            self.crop_split_frame,
+            text="▼",
+            image=self.crop_options_icon,
+            compound="center",
+            state="disabled",
+            command=self._show_crop_options_menu,
+            padx=5,
+            **paint_button_options,
+        )
+        self.crop_options_menu = tk.Menu(self.crop_options_btn, tearoff=False)
+        self.crop_options_menu.add_command(
+            label="Default Region",
+            command=self._set_default_roi,
+        )
+        self.crop_options_menu.add_command(
+            label="Entire Image",
+            command=self._select_all_roi,
+        )
+        self.crop_options_btn.pack(side="left")
+        HoverToolTip(self.crop_options_btn, "Choose a crop region preset")
+
         self.undo_crop_btn_icon = load_ui_icon(
             self, "grommet-icons--revert.png", size=action_icon_size
         )
-        self.undo_crop_btn = ttk.Button(roi_actions, text="Undo", command=self._reset, state="disabled", image=self.undo_crop_btn_icon, compound="left")
-        self.undo_crop_btn.pack(fill="x", pady=(0, action_spacing))
-        
+        self.undo_crop_btn = ttk.Button(
+            toolbar,
+            text="Undo",
+            command=self._reset,
+            state="disabled",
+            image=self.undo_crop_btn_icon,
+            compound="left",
+        )
+        self.undo_crop_btn.pack(side="left")
+        ttk.Separator(toolbar, orient="vertical").pack(
+            side="left", fill="y", padx=10, pady=2
+        )
+
         self.save_all_btn_icon = load_ui_icon(
             self, "ic--baseline-save.png", size=action_icon_size
         )
-        self.save_all_btn = ttk.Button(roi_actions, text="Save All (TIFF, IMG, HDR)", command=self._save_all_formats, state="disabled", image=self.save_all_btn_icon, compound="left")
-        self.save_all_btn.pack(fill="x", pady=(0, action_spacing))
+        self.save_all_btn = ttk.Button(
+            toolbar,
+            text="Save",
+            command=self._save_all_formats,
+            state="disabled",
+            image=self.save_all_btn_icon,
+            compound="left",
+        )
+        self.save_all_btn.pack(side="left")
+        HoverToolTip(self.save_all_btn, "Save TIFF, IMG, and HDR beside the source SDB image")
+
+        self.save_as_btn = ttk.Button(
+            toolbar,
+            text="Save As...",
+            command=self._save_as,
+            state="disabled",
+            image=self.save_all_btn_icon,
+            compound="left",
+        )
+        self.save_as_btn.pack(side="left", padx=(6, 0))
+        HoverToolTip(self.save_as_btn, "Save the cropped image to a location you choose")
 
         # # ── View ──
         # view_section = self.add_sidebar_section("View", padding=3, pady=(2, 6))
@@ -350,6 +547,17 @@ class Step1Frame(SidebarStepFrame):
             maximum=maximum,
             validatecommand=validatecommand,
         )
+
+    def _show_crop_options_menu(self):
+        """Open the crop preset menu directly below the split-button arrow."""
+        button = self.crop_options_btn
+        try:
+            self.crop_options_menu.tk_popup(
+                button.winfo_rootx(),
+                button.winfo_rooty() + button.winfo_height(),
+            )
+        finally:
+            self.crop_options_menu.grab_release()
 
     def _param_stepper_row(self, parent, row, label, var, default_value, *, step=1, minimum=0, maximum=10_000_000, validatecommand=None):
         """Creates a modern, unified stepper with embedded +/- buttons and a reset icon."""
@@ -387,14 +595,13 @@ class Step1Frame(SidebarStepFrame):
 
 
     def _save_all_formats(self):
-        """Save the current cropped image as TIFF, HDR, and IMG in one click."""
+        """Save TIFF, HDR, and IMG beside the current source SDB image."""
         img = self.processed_image
         if img is None:
             messagebox.showwarning("Nothing to save", "Run 'Crop & Scale' first.")
             return
-        outdir = self.outdir_var.get()
-        if not os.path.isdir(outdir):
-            messagebox.showerror("Invalid output folder", f"Folder does not exist: {outdir}")
+        outdir = self._source_output_directory()
+        if outdir is None:
             return
         base_name = self._build_output_name("light")
         base = os.path.join(outdir, base_name)
@@ -418,16 +625,85 @@ class Step1Frame(SidebarStepFrame):
         )
         self.status_var.set(f"Saved → {tiff_path}, {hdr_path}, {img_path}")
 
+        self._saved_output_directories.add(self._path_key(outdir))
+        self._render_sdb_directories()
+        self._update_batch_handoff_button_state()
+
+    def _save_as(self):
+        """Save the cropped image to a user-selected TIFF or Analyze path."""
+        img = self.processed_image
+        if img is None:
+            messagebox.showwarning("Nothing to save", "Run 'Crop & Scale' first.")
+            return
+
+        initial_dir = self._source_output_directory()
+        if initial_dir is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Save cropped image as",
+            initialdir=initial_dir,
+            initialfile="light.tif",
+            defaultextension=".tif",
+            filetypes=(
+                ("TIFF image", "*.tif"),
+                ("Analyze 7.5 image", "*.img"),
+                ("All files", "*.*"),
+            ),
+        )
+        if not path:
+            return
+
+        root, extension = os.path.splitext(path)
+        try:
+            if extension.lower() == ".img":
+                stack = np.stack([img, img], axis=0)
+                hdr_path, img_path = write_analyze(root, stack)
+                saved_paths = (hdr_path, img_path)
+            else:
+                if extension.lower() not in {".tif", ".tiff"}:
+                    path = root + ".tif"
+                save_tiff(path, img)
+                saved_paths = (path,)
+        except (OSError, ValueError, RuntimeError) as exc:
+            messagebox.showerror("Save As error", str(exc))
+            return
+
+        messagebox.showinfo(
+            "Saved As",
+            "Saved cropped image successfully:\n  " + "\n  ".join(saved_paths),
+        )
+        self.status_var.set("Saved as: " + ", ".join(saved_paths))
+        saved_directory = os.path.dirname(os.path.abspath(saved_paths[0]))
+        if self._folder_has_all_saved_outputs(saved_directory):
+            self._saved_output_directories.add(self._path_key(saved_directory))
+            self._render_sdb_directories()
+
     def _update_save_button_state(self):
         """Sync Save/Undo button states with processed image availability."""
         if getattr(self, "save_all_btn", None) is None:
             return
         has_processed = self.processed_image is not None
         self.save_all_btn.configure(state="normal" if has_processed else "disabled")
+        if getattr(self, "save_as_btn", None) is not None:
+            self.save_as_btn.configure(state="normal" if has_processed else "disabled")
         if getattr(self, "undo_crop_btn", None) is not None:
             self.undo_crop_btn.configure(state="normal" if has_processed else "disabled")
         if getattr(self, "crop_btn", None) is not None:
             self.crop_btn.configure(state="disabled" if has_processed else "normal")
+        if getattr(self, "crop_options_btn", None) is not None:
+            options_enabled = self.raw_image is not None and not has_processed
+            self.crop_options_btn.configure(
+                state="normal" if options_enabled else "disabled"
+            )
+        if getattr(self, "target_view_radio", None) is not None:
+            self.target_view_radio.configure(
+                state="normal" if self.raw_image is not None else "disabled"
+            )
+        if getattr(self, "source_view_radio", None) is not None:
+            source_enabled = self.raw_image is not None and not has_processed
+            self.source_view_radio.configure(
+                state="normal" if source_enabled else "disabled"
+            )
 
     @staticmethod
     def _to_uint8_preview(data):
@@ -489,21 +765,8 @@ class Step1Frame(SidebarStepFrame):
             directory: Directory path selected by user.
         """
         self.sdb_dir_var.set(directory)
-        self._sync_output_dir_with_source(directory)
         if self.preferences is not None:
             self.preferences.set(SDB_PREF_KEY, directory)
-
-    def _sync_output_dir_with_source(self, source_path):
-        """Mirror output folder to the selected source location.
-
-        Args:
-            source_path: Source file path or directory path.
-        """
-        if not source_path:
-            return
-        target_dir = source_path if os.path.isdir(source_path) else os.path.dirname(source_path)
-        if target_dir:
-            self.outdir_var.set(target_dir)
 
     @staticmethod
     def _step_numeric_var(var, delta, minimum, maximum):
@@ -577,16 +840,13 @@ class Step1Frame(SidebarStepFrame):
 
         self.raw_image = adjusted
         self.processed_image = None
+        self.view_mode_var.set("source")
         self.image_canvas.set_image(adjusted)
         self.image_canvas.enable_roi(True)
         self._set_default_roi()
         self._update_zoom_label()
+        self._update_save_button_state()
         self.status_var.set(note)
-
-        filename = os.path.basename(self.current_file)
-        self.image_info_var.set(
-            f"{filename} |  Dir: {os.path.dirname(self.current_file)}   "
-        )
 
     @staticmethod
     def _offset_noise_score(img):
@@ -747,13 +1007,9 @@ class Step1Frame(SidebarStepFrame):
         self.raw_image = np.array(img, copy=True)
         self.processed_image = None
         self.current_file = path
+        self.view_mode_var.set("source")
 
         filename = os.path.basename(path)
-
-        # Update the top info display
-        self.image_info_var.set(
-            f"{filename} |  Dir: {os.path.dirname(path)}   "
-        )
 
         self.image_canvas.set_image(img)
         self.image_canvas.enable_roi(True)
@@ -798,8 +1054,6 @@ class Step1Frame(SidebarStepFrame):
         if not self._apply_import_params(skip_reload=True):
             return
 
-        self._sync_output_dir_with_source(path)
-
         try:
             img = read_raw_oct(path, **self.raw_import_params)
         except (OSError, ValueError, RuntimeError) as exc:
@@ -809,63 +1063,294 @@ class Step1Frame(SidebarStepFrame):
         self._load_image(img, path)
 
     def _browse_sdb_dir(self):
-        """Prompt for SDB folder and refresh the browser list."""
-        file_path = filedialog.askopenfilename(
-            title="Select SDB file (directory will be used)",
+        """Prompt for a parent folder and recursively discover SDB folders."""
+        directory = filedialog.askdirectory(
+            title="Select parent folder containing SDB subfolders",
             initialdir=self.sdb_dir_var.get() or None,
-            filetypes=[("SDB files", "*.sdb"), ("All files", "*.*")],
         )
-        if file_path:
-            import os
-            directory = os.path.dirname(file_path)
+        if directory:
             self.set_sdb_directory(directory)
-            self.refresh_sdb_list()
+            self.refresh_sdb_list(preview_first=True)
 
     def _reset_sdb_dir_to_default(self):
         """Reset SDB directory to default (Desktop) and refresh list."""
         target_dir = SDB_DEFAULT_DIR
         self.set_sdb_directory(target_dir)
-        self.refresh_sdb_list()
+        self.refresh_sdb_list(preview_first=True)
         self.status_var.set(f"SDB directory reset to default: {target_dir}")
 
-    def refresh_sdb_list(self):
-        """Scan selected folder and repopulate `.sdb` files list.
-
-        The current search text is applied as a case-insensitive substring filter.
-        """
-        self.sdb_listbox.delete(0, "end")
-        self._sdb_files.clear()
+    def refresh_sdb_list(self, preview_first=False):
+        """Recursively scan the selected parent and rebuild the work queue."""
+        previous_directory = self._active_sdb_directory
+        self._active_sdb_directory = None
+        self._sdb_directory_files.clear()
+        self._saved_output_directories.clear()
         self.sdb_scan_more_label.configure(text="")
         self.sdb_scan_tooltip.text = ""
-        d = self.sdb_dir_var.get()
-        if not d or not os.path.isdir(d):
+        root = self.sdb_dir_var.get()
+        if not root or not os.path.isdir(root):
+            self._render_sdb_directories()
             return
 
-        filt = self.sdb_filter_var.get().lower().strip()
         try:
-            files = [f for f in os.listdir(d) if f.lower().endswith(".sdb")]
+            directory_files, errors = find_sdb_directories(root)
         except OSError as exc:
-            self.status_var.set(f"Could not open SDB directory: {d}")
+            self.status_var.set(f"Could not scan SDB parent directory: {root}")
             self.sdb_scan_more_label.configure(text="More")
-            self.sdb_scan_tooltip.text = skipped_directories_warning([(d, str(exc))])
+            self.sdb_scan_tooltip.text = skipped_directories_warning([(root, str(exc))])
+            self._render_sdb_directories()
             return
-        files.sort(key=str.lower)
 
-        for f in files:
-            if filt and filt not in f.lower():
+        self._sdb_directory_files = {
+            os.path.abspath(str(directory)): [os.path.abspath(str(path)) for path in files]
+            for directory, files in directory_files.items()
+        }
+        self._saved_output_directories = {
+            self._path_key(directory)
+            for directory in self._sdb_directory_files
+            if self._folder_has_all_saved_outputs(directory)
+        }
+        if errors:
+            self.sdb_scan_more_label.configure(text="Some folders skipped — More")
+            self.sdb_scan_tooltip.text = skipped_directories_warning(errors)
+        if previous_directory in self._sdb_directory_files:
+            self._active_sdb_directory = previous_directory
+
+        self._render_sdb_directories()
+        self.status_var.set(
+            f"Found {len(self._sdb_directory_files)} folder(s) containing SDB images below {root}"
+        )
+        if preview_first:
+            self._preview_selected_sdb()
+
+    def _render_sdb_directories(self):
+        """Render the filtered directory list while preserving its selection."""
+        if not hasattr(self, "sdb_directory_listbox"):
+            return
+
+        root = os.path.abspath(self.sdb_dir_var.get() or os.curdir)
+        directories = []
+        for directory, files in self._sdb_directory_files.items():
+            if (
+                getattr(self, "exclude_saved_outputs_var", None) is not None
+                and self.exclude_saved_outputs_var.get()
+                and self._directory_has_saved_outputs(directory)
+            ):
                 continue
-            self._sdb_files.append(f)
-            self.sdb_listbox.insert("end", f)
+            relative = os.path.relpath(directory, root)
+            label = "(selected folder)" if relative == os.curdir else relative
+            directories.append((directory, label))
 
-        self.status_var.set(f"SDB directory: {d}  |  {len(self._sdb_files)} file(s)")
+        directories.sort(key=lambda item: item[1].lower())
+        self._sdb_directories = [directory for directory, _label in directories]
+        self._sdb_directory_labels = [label for _directory, label in directories]
+        self._update_sdb_folder_count_summary()
+
+        if not self._sdb_directories:
+            self._active_sdb_directory = None
+            self.sdb_directory_listbox.delete(0, "end")
+            self._populate_sdb_files(None)
+            self._update_batch_handoff_button_state()
+            return
+
+        if self._active_sdb_directory not in self._sdb_directories:
+            self._active_sdb_directory = self._sdb_directories[0]
+        self._refresh_sdb_directory_rows()
+        self._populate_sdb_files(self._active_sdb_directory)
+        self._update_batch_handoff_button_state()
+
+    def _refresh_sdb_directory_rows(self):
+        """Draw the active-folder symbol and completion colors."""
+        self._sdb_directory_selection_locked = True
+        self.sdb_directory_listbox.delete(0, "end")
+        for index, (directory, label) in enumerate(
+            zip(self._sdb_directories, self._sdb_directory_labels)
+        ):
+            marker = "▶" if directory == self._active_sdb_directory else " "
+            self.sdb_directory_listbox.insert(
+                "end",
+                f"{marker} {label}",
+            )
+            if self._directory_is_complete(directory):
+                self._style_completed_row(self.sdb_directory_listbox, index)
+
+        if self._active_sdb_directory in self._sdb_directories:
+            selected_index = self._sdb_directories.index(self._active_sdb_directory)
+            self.sdb_directory_listbox.selection_set(selected_index)
+            self.sdb_directory_listbox.see(selected_index)
+        self.after_idle(self._unlock_sdb_directory_selection)
+
+    def _unlock_sdb_directory_selection(self):
+        self._sdb_directory_selection_locked = False
+
+    def _on_sdb_directory_select(self, _event=None):
+        """Show SDB images belonging to the selected work-queue folder."""
+        if self._sdb_directory_selection_locked:
+            return
+        selection = self.sdb_directory_listbox.curselection()
+        if not selection:
+            return
+        self._active_sdb_directory = self._sdb_directories[selection[0]]
+        self._refresh_sdb_directory_rows()
+        self._populate_sdb_files(self._active_sdb_directory, select_first=True)
+        self._preview_selected_sdb()
+
+    def _populate_sdb_files(self, directory, select_first=False):
+        """Populate the image list for one selected directory."""
+        self.sdb_listbox.delete(0, "end")
+        self._sdb_files = list(self._sdb_directory_files.get(directory, []))
+        folder_saved = self._directory_has_saved_outputs(directory)
+        for index, path in enumerate(self._sdb_files):
+            self.sdb_listbox.insert("end", os.path.basename(path))
+            if folder_saved or self._path_key(path) in self._cropped_sdb_files:
+                self._style_completed_row(self.sdb_listbox, index)
+        if self._sdb_files and (select_first or self.current_file not in self._sdb_files):
+            self.sdb_listbox.selection_set(0)
+            self.sdb_listbox.see(0)
+        elif self.current_file in self._sdb_files:
+            index = self._sdb_files.index(self.current_file)
+            self.sdb_listbox.selection_set(index)
+            self.sdb_listbox.see(index)
+        self._update_sdb_image_count_summary()
+
+    def _update_sdb_folder_count_summary(self):
+        """Update completed/remaining counts for all discovered SDB folders."""
+        if not hasattr(self, "cropped_folder_count_var"):
+            return
+        total = len(self._sdb_directory_files)
+        cropped = sum(
+            self._directory_is_complete(directory)
+            for directory in self._sdb_directory_files
+        )
+        self.cropped_folder_count_var.set(f"Cropped {cropped}")
+        self.uncropped_folder_count_var.set(f"Uncropped {total - cropped}")
+
+    def _update_sdb_image_count_summary(self):
+        """Update cropped/uncropped counts for the selected SDB folder."""
+        if not hasattr(self, "cropped_image_count_var"):
+            return
+        total = len(self._sdb_files)
+        if self._directory_has_saved_outputs(self._active_sdb_directory):
+            cropped = total
+        else:
+            cropped = sum(
+                self._path_key(path) in self._cropped_sdb_files
+                for path in self._sdb_files
+            )
+        self.cropped_image_count_var.set(f"Cropped {cropped}")
+        self.uncropped_image_count_var.set(f"Uncropped {total - cropped}")
+
+    def _preview_selected_sdb(self):
+        """Open the selected folder's first/selected SDB image in the canvas."""
+        selection = self.sdb_listbox.curselection()
+        if not selection:
+            return False
+        path = self._sdb_files[selection[0]]
+        if self.current_file and self._path_key(path) == self._path_key(self.current_file):
+            return True
+        self._open_raw(path=path)
+        return bool(
+            self.current_file
+            and self._path_key(path) == self._path_key(self.current_file)
+        )
+
+    @staticmethod
+    def _path_key(path):
+        """Return a stable, case-insensitive key for progress tracking."""
+        return os.path.normcase(os.path.abspath(path))
+
+    def _directory_is_complete(self, directory):
+        files = self._sdb_directory_files.get(directory, [])
+        return self._directory_has_saved_outputs(directory) or (
+            bool(files)
+            and all(self._path_key(path) in self._cropped_sdb_files for path in files)
+        )
+
+    @staticmethod
+    def _folder_has_all_saved_outputs(directory):
+        """Return whether a folder contains the complete Step 1 Light output set."""
+        try:
+            with os.scandir(directory) as entries:
+                filenames = {
+                    entry.name.lower()
+                    for entry in entries
+                    if entry.is_file()
+                }
+        except OSError:
+            return False
+        return SAVED_OUTPUT_FILENAMES.issubset(filenames)
+
+    def _completed_output_folders(self):
+        return [
+            directory
+            for directory in self._sdb_directory_files
+            if self._directory_has_saved_outputs(directory)
+        ]
+
+    def _directory_has_saved_outputs(self, directory):
+        if not directory:
+            return False
+        return self._path_key(directory) in getattr(
+            self, "_saved_output_directories", set()
+        )
+
+    def _update_batch_handoff_button_state(self):
+        button = getattr(self, "batch_segment_cropped_btn", None)
+        if button is None:
+            return
+        enabled = callable(self._on_batch_segment_folders) and bool(
+            self._completed_output_folders()
+        )
+        button.configure(state="normal" if enabled else "disabled")
+
+    def _send_cropped_folders_to_step2(self):
+        """Start Step 2 batch segmentation for all completed Step 1 folders."""
+        folders = self._completed_output_folders()
+        if not folders:
+            messagebox.showwarning(
+                "No cropped folders",
+                "No SDB folder contains light.tif, light.hdr, and light.img yet.",
+            )
+            return
+        if not callable(self._on_batch_segment_folders):
+            messagebox.showerror("Step 2 unavailable", "Step 2 batch segmentation is unavailable.")
+            return
+        self._on_batch_segment_folders(folders)
+
+    @staticmethod
+    def _style_completed_row(listbox, index):
+        listbox.itemconfigure(
+            index,
+            background=COMPLETED_ROW_BACKGROUND,
+            foreground=COMPLETED_ROW_FOREGROUND,
+            selectbackground=COMPLETED_ROW_SELECTED_BACKGROUND,
+            selectforeground="#ffffff",
+        )
+
+    def _refresh_sdb_progress_colors(self):
+        """Repaint image and folder rows after crop progress changes."""
+        for index, path in enumerate(self._sdb_files):
+            if self._path_key(path) in self._cropped_sdb_files:
+                self._style_completed_row(self.sdb_listbox, index)
+        if (
+            self._active_sdb_directory in self._sdb_directories
+            and self._directory_is_complete(self._active_sdb_directory)
+        ):
+            index = self._sdb_directories.index(self._active_sdb_directory)
+            self._style_completed_row(self.sdb_directory_listbox, index)
+        self._update_sdb_folder_count_summary()
+        self._update_sdb_image_count_summary()
 
     def _on_sdb_list_select(self, _event):
         """Update status text when the SDB list selection changes."""
         sel = self.sdb_listbox.curselection()
         if not sel:
             return
-        fname = self._sdb_files[sel[0]]
-        self.status_var.set(f"Selected SDB: {fname}  (double-click or Open Selected)")
+        path = self._sdb_files[sel[0]]
+        state = "cropped" if self._path_key(path) in self._cropped_sdb_files else "not cropped"
+        self.status_var.set(
+            f"Selected SDB: {os.path.basename(path)}  ({state}; double-click to open)"
+        )
 
     def _open_selected_sdb(self):
         """Open the currently selected SDB file from the list."""
@@ -873,9 +1358,7 @@ class Step1Frame(SidebarStepFrame):
         if not sel:
             messagebox.showinfo("No selection", "Select an SDB file from the list first.")
             return
-        fname = self._sdb_files[sel[0]]
-        full = os.path.join(self.sdb_dir_var.get(), fname)
-        self._open_raw(path=full)
+        self._open_raw(path=self._sdb_files[sel[0]])
 
     def _prev_sdb(self):
         """Select and open the previous SDB file in the filtered list."""
@@ -931,7 +1414,8 @@ class Step1Frame(SidebarStepFrame):
         except ValueError:
             messagebox.showerror("Error", "ROI values must be integers.")
             return
-        self.image_canvas.set_roi((x, y, w, h))
+        roi = self._view_to_source_roi((x, y, w, h))
+        self._set_roi_and_entries(*roi)
 
     def _on_roi_entry_changed(self, *_):
         """Apply ROI immediately when entry values become valid integers."""
@@ -946,8 +1430,14 @@ class Step1Frame(SidebarStepFrame):
             return
         if w <= 0 or h <= 0:
             return
-        self._update_target_size_entries(w, h)
-        self.image_canvas.set_roi((x, y, w, h))
+        roi = self._clamp_source_roi(
+            *self._view_to_source_roi((x, y, w, h))
+        )
+        if roi is None:
+            return
+        self._source_roi = roi
+        self._update_roi_entries(*roi)
+        self._set_canvas_roi_from_source()
 
     def _on_target_size_entry_changed(self, *_):
         """Update source ROI size when the user edits final target dimensions."""
@@ -988,16 +1478,68 @@ class Step1Frame(SidebarStepFrame):
             w: Width in pixels.
             h: Height in pixels.
         """
-        self._update_roi_entries(x, y, w, h)
-        self.image_canvas.set_roi((x, y, w, h))
+        roi = self._clamp_source_roi(x, y, w, h)
+        if roi is None:
+            return
+        self._source_roi = roi
+        self._update_roi_entries(*roi)
+        self._set_canvas_roi_from_source()
+
+    def _source_to_view_roi(self, roi):
+        """Convert source ROI coordinates to the active view coordinates."""
+        x, y, w, h = roi
+        if self.view_mode_var.get() == "target":
+            return (
+                x * CROP_SCALE_X,
+                y * CROP_SCALE_Y,
+                w * CROP_SCALE_X,
+                h * CROP_SCALE_Y,
+            )
+        return x, y, w, h
+
+    def _view_to_source_roi(self, roi):
+        """Convert active-view ROI coordinates back to source coordinates."""
+        x, y, w, h = roi
+        if self.view_mode_var.get() == "target":
+            return (
+                int(round(x / CROP_SCALE_X)),
+                int(round(y / CROP_SCALE_Y)),
+                max(1, int(round(w / CROP_SCALE_X))),
+                max(1, int(round(h / CROP_SCALE_Y))),
+            )
+        return int(x), int(y), int(w), int(h)
+
+    def _set_canvas_roi_from_source(self):
+        """Show the shared source ROI using the active view's coordinates."""
+        if self._source_roi is None or self.processed_image is not None:
+            return
+        self._syncing_view_roi = True
+        try:
+            self.image_canvas.set_roi(self._source_to_view_roi(self._source_roi))
+        finally:
+            self._syncing_view_roi = False
+
+    def _clamp_source_roi(self, x, y, w, h):
+        """Clamp ROI coordinates against the source image dimensions."""
+        if self.raw_image is None:
+            return None
+        image_height, image_width = self.raw_image.shape[:2]
+        x = max(0, min(int(x), max(0, image_width - 1)))
+        y = max(0, min(int(y), max(0, image_height - 1)))
+        w = max(1, min(int(w), image_width - x))
+        h = max(1, min(int(h), image_height - y))
+        return x, y, w, h
 
     def _update_roi_entries(self, x, y, w, h, update_target=True):
         """Write ROI values into UI entry variables."""
+        display_x, display_y, display_w, display_h = self._source_to_view_roi(
+            (x, y, w, h)
+        )
         self._updating_roi_entries = True
-        self.roi_x_var.set(str(x))
-        self.roi_y_var.set(str(y))
-        self.roi_w_var.set(str(w))
-        self.roi_h_var.set(str(h))
+        self.roi_x_var.set(str(display_x))
+        self.roi_y_var.set(str(display_y))
+        self.roi_w_var.set(str(display_w))
+        self.roi_h_var.set(str(display_h))
         self._updating_roi_entries = False
         if update_target:
             self._update_target_size_entries(w, h)
@@ -1029,7 +1571,14 @@ class Step1Frame(SidebarStepFrame):
         Args:
             roi: Tuple `(x, y, w, h)` in image coordinates.
         """
-        x, y, w, h = roi
+        if self._syncing_view_roi:
+            return
+        self._source_roi = self._clamp_source_roi(
+            *self._view_to_source_roi(tuple(roi))
+        )
+        if self._source_roi is None:
+            return
+        x, y, w, h = self._source_roi
         self._update_roi_entries(
             x,
             y,
@@ -1037,6 +1586,60 @@ class Step1Frame(SidebarStepFrame):
             h,
             update_target=not self._target_size_edit_active,
         )
+
+    def _build_target_view_image(self):
+        """Build the full scaled target work view before cropping."""
+        if self.raw_image is None:
+            return None
+        return np.ascontiguousarray(
+            scale_image(self.raw_image, sx=CROP_SCALE_X, sy=CROP_SCALE_Y)
+        )
+
+    def _build_processed_target_image(self):
+        """Build the final cropped/scaled target from the shared source ROI."""
+        if self.raw_image is None or self._source_roi is None:
+            return None
+        x, y, w, h = self._source_roi
+        cropped = self.raw_image[y:y + h, x:x + w].copy()
+        target = scale_image(cropped, sx=CROP_SCALE_X, sy=CROP_SCALE_Y)
+        if target.dtype != np.int16:
+            target = target.astype(np.int16, copy=False)
+        return np.ascontiguousarray(target)
+
+    def _on_view_mode_changed(self):
+        """Switch editable source/target work views or show the final target."""
+        mode = self.view_mode_var.get()
+        if self.processed_image is not None and mode != "target":
+            self.view_mode_var.set("target")
+            mode = "target"
+        if mode == "target":
+            image = (
+                self.processed_image
+                if self.processed_image is not None
+                else self._build_target_view_image()
+            )
+            if image is None:
+                self.view_mode_var.set("source")
+                return
+            self.image_canvas.set_image(image)
+            self.image_canvas.enable_roi(self.processed_image is None)
+            if self.processed_image is None:
+                self._set_canvas_roi_from_source()
+            label = "Target result" if self.processed_image is not None else "Target work"
+        else:
+            if self.raw_image is None:
+                return
+            self.image_canvas.set_image(self.raw_image)
+            self.image_canvas.enable_roi(self.processed_image is None)
+            self._set_canvas_roi_from_source()
+            image = self.raw_image
+            label = "Source"
+
+        if self._source_roi is not None:
+            self._update_roi_entries(*self._source_roi)
+        self._update_zoom_label()
+        height, width = image.shape[:2]
+        self.status_var.set(f"{label} view — {width}×{height} {image.dtype}")
 
     def _on_mouse_moved(self, ix, iy, val):
         """Update status with cursor position/value for current image.
@@ -1046,7 +1649,7 @@ class Step1Frame(SidebarStepFrame):
             iy: Y coordinate in image space.
             val: Pixel value at `(ix, iy)`.
         """
-        img = self.processed_image if self.processed_image is not None else self.raw_image
+        img = self.image_canvas.get_image()
         if img is None:
             return
         ih, iw = img.shape[:2]
@@ -1068,26 +1671,17 @@ class Step1Frame(SidebarStepFrame):
             messagebox.showwarning("No image", "Open a raw file first.")
             return False
 
-        roi = self.image_canvas.get_roi()
+        roi = self._source_roi
         if roi is None:
             messagebox.showwarning("No ROI", "Select a crop region first.")
             return False
 
         x, y, w, h = roi
-        sx, sy = CROP_SCALE_X, CROP_SCALE_Y
-
-        # Crop
-        cropped = self.raw_image[y:y + h, x:x + w].copy()
-
-        # Scale (pixel replication)
-        scaled = scale_image(cropped, sx=sx, sy=sy)
-
-        # Match the legacy ImageJ/Analyze path used by the reference outputs:
-        # cropped 16-bit OCT samples are stored/displayed as signed int16.
-        if scaled.dtype != np.int16:
-            scaled = scaled.astype(np.int16, copy=False)
-
-        self.processed_image = np.ascontiguousarray(scaled)
+        self.processed_image = self._build_processed_target_image()
+        if self.processed_image is None:
+            messagebox.showwarning("No ROI", "Select a crop region first.")
+            return False
+        self.view_mode_var.set("target")
         # Show the true 16-bit processed image. ImageCanvas creates its own
         # display-only 8-bit view without changing the stored annotation data.
         self.image_canvas.enable_roi(False)
@@ -1103,27 +1697,20 @@ class Step1Frame(SidebarStepFrame):
                 pass
 
         ih, iw = self.processed_image.shape
-        filename = os.path.basename(self.current_file) if self.current_file else "Processed"
-
-        # Update the top info display
-        self.image_info_var.set(
-            f"✓ Processed: {filename}  |  Size: {iw} × {ih} px  |  "
-            f"Type: {self.processed_image.dtype}  |  Range: [{self.processed_image.min()} – {self.processed_image.max()}]  |  "
-            f"Cropped {w}×{h} from ({x},{y}), scaled ×{sx}/×{sy}"
-        )
         self.status_var.set(
             f"Processed: {w}×{h} → {iw}×{ih}.  "
             f"Save as Light/Dark or Reset to adjust."
         )
+        if self.current_file:
+            self._cropped_sdb_files.add(self._path_key(self.current_file))
+            self._refresh_sdb_progress_colors()
         self._update_save_button_state()
-        self.default_roi_btn.configure(state="disabled")
-        self.entire_roi_btn.configure(state="disabled")
         for entry in self.roi_entries + self.target_size_entries:
             entry.configure(state="disabled")
         return True
 
     def _crop_scale_and_save_tiff(self):
-        """Run crop+scale, then immediately prompt to save TIFF."""
+        """Run crop+scale, then save TIFF beside the source SDB image."""
         if self._crop_and_scale():
             self._save_tiff()
 
@@ -1132,45 +1719,31 @@ class Step1Frame(SidebarStepFrame):
         if self.raw_image is None:
             return
         self.processed_image = None
+        self.view_mode_var.set("source")
         self.image_canvas.set_image(self.raw_image)
         self.image_canvas.enable_roi(True)
         self._set_default_roi()
         self._update_zoom_label()
         self._update_save_button_state()
         self._set_sdb_parameters_enabled(True)
-        self.default_roi_btn.configure(state="normal")
-        self.entire_roi_btn.configure(state="normal")
         for entry in self.roi_entries + self.target_size_entries:
             entry.configure(state="normal")
         self.status_var.set("Reset — adjust ROI and process again.")
 
-        # Restore the top info display to original image
-        img = self.raw_image
-        filename = os.path.basename(self.current_file) if self.current_file else "Image"
-        self.image_info_var.set(
-            f"{filename}  |  Size: {img.shape[1]} × {img.shape[0]} px  |  "
-            f"Type: {img.dtype}  |  Range: [{img.min()} – {img.max()}]"
-        )
-
     # ── Save ──
-    def _browse_outdir(self):
-        """Prompt for output directory used by Analyze saves."""
-        d = filedialog.askdirectory(title="Select output folder")
-        if d:
-            self.outdir_var.set(d)
-
-    def _reset_outdir_to_default(self):
-        """Reset output directory to default Desktop location."""
-        self.outdir_var.set(DEFAULT_OUTPUT_DIR)
-        self.status_var.set(f"Output directory reset to default: {DEFAULT_OUTPUT_DIR}")
-
-    def _refresh_outdir_from_source(self):
-        """Refresh output directory from the current source image path."""
-        if self.current_file:
-            self._sync_output_dir_with_source(self.current_file)
-            self.status_var.set(f"Output directory synced to source: {self.outdir_var.get()}")
-            return
-        self.status_var.set("No source file loaded yet to sync output directory.")
+    def _source_output_directory(self):
+        """Return the current SDB image's folder for automatic saves."""
+        if not self.current_file:
+            messagebox.showwarning("No source image", "Open an SDB image first.")
+            return None
+        directory = os.path.dirname(os.path.abspath(self.current_file))
+        if not os.path.isdir(directory):
+            messagebox.showerror(
+                "Invalid source folder",
+                f"The source image folder does not exist:\n{directory}",
+            )
+            return None
+        return directory
 
     def _save_analyze(self, name):
         """Save processed image as Analyze 7.5 two-slice stack.
@@ -1184,9 +1757,8 @@ class Step1Frame(SidebarStepFrame):
                                    "Run 'Crop & Scale' first.")
             return
 
-        outdir = self.outdir_var.get()
-        if not os.path.isdir(outdir):
-            messagebox.showerror("Error", f"Output folder does not exist:\n{outdir}")
+        outdir = self._source_output_directory()
+        if outdir is None:
             return
 
         base_name = self._build_output_name(name.lower())
@@ -1207,20 +1779,19 @@ class Step1Frame(SidebarStepFrame):
         self.status_var.set(f"Saved → {hdr_path}")
 
     def _save_tiff(self):
-        """Save the current processed image (or raw fallback) as TIFF."""
-        img = self.processed_image if self.processed_image is not None else self.raw_image
+        """Save the current image as TIFF beside its source SDB image."""
+        show_target = (
+            self.view_mode_var.get() == "target"
+            and self.processed_image is not None
+        )
+        img = self.processed_image if show_target else self.raw_image
         if img is None:
             messagebox.showwarning("Nothing to save", "Open a file first.")
             return
-        default_name = f"{self._build_output_name('light')}.tif"
-        path = filedialog.asksaveasfilename(
-            title="Save as TIFF",
-            defaultextension=".tif",
-            initialfile=default_name,
-            filetypes=[("TIFF", "*.tif *.tiff")],
-        )
-        if not path:
+        outdir = self._source_output_directory()
+        if outdir is None:
             return
+        path = os.path.join(outdir, f"{self._build_output_name('light')}.tif")
         try:
             save_tiff(path, img)
         except (OSError, ValueError, RuntimeError) as exc:

@@ -9,6 +9,37 @@ from pathlib import Path
 DirectoryScanError = tuple[Path, str]
 
 
+def find_sdb_directories(
+    root: str | os.PathLike,
+) -> tuple[dict[Path, list[Path]], list[DirectoryScanError]]:
+    """Return folders below *root* that directly contain ``.sdb`` files.
+
+    The selected root is included when it contains SDB files itself. File and
+    directory ordering is deterministic and case-insensitive so the result can
+    be used directly by the Step 1 work-queue browser.
+    """
+
+    root = Path(root)
+    matches: dict[Path, list[Path]] = {}
+    errors: list[DirectoryScanError] = []
+
+    def record_error(exc: OSError) -> None:
+        path = Path(exc.filename) if exc.filename else root
+        errors.append((path, str(exc)))
+
+    for folder, dirnames, filenames in os.walk(root, topdown=True, onerror=record_error):
+        dirnames.sort(key=str.lower)
+        sdb_names = sorted(
+            (name for name in filenames if name.lower().endswith(".sdb")),
+            key=str.lower,
+        )
+        if sdb_names:
+            directory = Path(folder)
+            matches[directory] = [directory / name for name in sdb_names]
+
+    return matches, errors
+
+
 def walk_accessible_directories(root: str | os.PathLike) -> tuple[list[Path], list[DirectoryScanError]]:
     """Return readable directories below *root* while recording skipped branches.
 

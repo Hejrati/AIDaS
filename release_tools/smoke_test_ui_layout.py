@@ -117,28 +117,59 @@ def main() -> int:
                     step.sidebar.canvas.yview_moveto(0.0)
                 if step_number == 1:
                     action_heights = {
-                        step.crop_btn.winfo_reqheight(),
+                        step.crop_split_frame.winfo_reqheight(),
                         step.undo_crop_btn.winfo_reqheight(),
                         step.save_all_btn.winfo_reqheight(),
+                        step.save_as_btn.winfo_reqheight(),
                     }
                     assert len(action_heights) == 1, (
                         "Step 1 Crop, Undo, and Save buttons do not have a "
                         "consistent requested height."
                     )
+                    assert step.crop_btn.winfo_reqheight() == step.crop_options_btn.winfo_reqheight(), (
+                        "Step 1 Crop split-button segments have different heights."
+                    )
                     action_buttons = (
                         step.crop_btn,
+                        step.crop_options_btn,
                         step.undo_crop_btn,
                         step.save_all_btn,
+                        step.save_as_btn,
                     )
-                    action_gaps = {
-                        later.winfo_rooty()
-                        - (earlier.winfo_rooty() + earlier.winfo_height())
-                        for earlier, later in zip(action_buttons, action_buttons[1:])
-                    }
-                    assert len(action_gaps) == 1, (
-                        "Step 1 Crop, Undo, and Save buttons do not have "
-                        "consistent vertical spacing."
+                    assert step.crop_split_frame.master is step.canvas_toolbar
+                    assert step.crop_btn.master is step.crop_split_frame
+                    assert step.crop_options_btn.master is step.crop_split_frame
+                    assert all(
+                        button.master is step.canvas_toolbar
+                        for button in action_buttons[2:]
+                    ), "Step 1 processing actions are not in the top canvas toolbar."
+                    aligned_controls = (
+                        step.crop_split_frame,
+                        step.undo_crop_btn,
+                        step.save_all_btn,
+                        step.save_as_btn,
                     )
+                    assert len({control.winfo_rooty() for control in aligned_controls}) == 1, (
+                        "Step 1 processing buttons are not aligned in one row."
+                    )
+                    roi_controls = tuple(
+                        step.roi_entries + step.target_size_entries
+                    )
+                    assert all(
+                        control.master.master is step.canvas_roi_toolbar
+                        for control in roi_controls
+                    ), "Step 1 ROI controls are not in the bottom canvas toolbar."
+                    assert len({control.winfo_rooty() for control in roi_controls}) == 1, (
+                        "Step 1 ROI controls are not aligned in one row."
+                    )
+                    view_buttons = (
+                        step.source_view_radio,
+                        step.target_view_radio,
+                    )
+                    assert all(
+                        button.master.master.master is step.canvas_roi_toolbar
+                        for button in view_buttons
+                    ), "Step 1 view choices are not in the bottom canvas toolbar."
                 results.append(
                     (
                         width,

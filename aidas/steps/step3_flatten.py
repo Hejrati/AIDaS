@@ -1694,7 +1694,7 @@ class RBatchSelectionPanel(ttk.Frame):
             width=7,
         )
         self.timeout_spin.pack(side="left", padx=(6, 12))
-        self.next_button = ttk.Button(run_box, text="Next >", command=self._run_selected)
+        self.next_button = ttk.Button(run_box, text="Start", command=self._run_selected)
         self.next_button.pack(side="right")
         self.next_button.state(["disabled"])
         self.workers_spin.configure(state="disabled")
@@ -1706,8 +1706,7 @@ class RBatchSelectionPanel(ttk.Frame):
         return max(1, min(int(ready_count) or 1, cpu_limit))
 
     def _worker_limit_text(self, max_workers):
-        cpu_limit = self.step_frame._cpu_worker_limit()
-        return f"Limit: {max_workers} (CPU cores: {cpu_limit})"
+        return f"Max available: {max_workers}"
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -1871,6 +1870,8 @@ class RBatchRunPanel(ttk.Frame):
         self.row_by_folder = {}
         self.step_states_by_folder = {}
         self.current_step_by_folder = {}
+        self.stop_requested = False
+        self.close_when_finished = False
         self._build_ui()
 
     def _build_ui(self):
@@ -1919,8 +1920,15 @@ class RBatchRunPanel(ttk.Frame):
         ttk.Label(summary_row, textvariable=self.summary_var, wraplength=680, justify="left").pack(
             side="left", fill="x", expand=True
         )
-        self.cancel_button = ttk.Button(summary_row, text="Cancel Batch", command=self._cancel_batch)
-        self.cancel_button.pack(side="right", padx=(8, 0))
+        action_box = ttk.Frame(summary_row)
+        action_box.pack(side="right", padx=(8, 0))
+        self.restart_button = ttk.Button(action_box, text="Restart", command=self._restart_batch)
+        self.restart_button.pack(side="left")
+        self.stop_button = ttk.Button(action_box, text="Stop", command=self._cancel_batch)
+        self.stop_button.pack(side="left", padx=(6, 0))
+        self.close_button = ttk.Button(action_box, text="Close", command=self._close)
+        self.close_button.pack(side="left", padx=(6, 0))
+        self.cancel_button = self.stop_button
 
         step_frame = ttk.LabelFrame(wrapper, text="Step progress")
         step_frame.pack(fill="both", expand=False, pady=(10, 0))
@@ -1959,12 +1967,66 @@ class RBatchRunPanel(ttk.Frame):
         self.summary_var.set(text)
 
     def finish(self):
-        self.cancel_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
+        self.restart_button.configure(state="normal")
+        self.close_button.configure(state="normal")
 
     def _cancel_batch(self):
-        self.cancel_button.configure(state="disabled")
-        self.summary_var.set("Cancelling active R processes and queued folders...")
+        if self.stop_requested:
+            return
+        confirmed = messagebox.askyesno(
+            "Stop Batch Step 3",
+            "Stop the batch run?\n\nActive R processes will be terminated and queued folders will be cancelled.",
+            parent=self,
+        )
+        if not confirmed:
+            return
+        self._request_stop("Stopping active R processes and cancelling queued folders...")
+
+    def _request_stop(self, summary):
+        self.stop_requested = True
+        self.stop_button.configure(state="disabled")
+        self.restart_button.configure(state="disabled")
+        self.summary_var.set(summary)
         self.step_frame._cancel_batch_r_runs()
+
+    def _restart_batch(self):
+        running = bool(self.step_frame._busy)
+        message = (
+            "Restart the batch run?\n\nThe active R processes will be stopped first. "
+            "A clean run will start after they exit."
+            if running
+            else "Restart the batch run from the beginning?"
+        )
+        if not messagebox.askyesno("Restart Batch Step 3", message, parent=self):
+            return
+        self.restart_button.configure(state="disabled")
+        self.stop_button.configure(state="disabled")
+        self.close_button.configure(state="disabled")
+        self.summary_var.set("Preparing a clean batch restart...")
+        self.step_frame._restart_batch_r_runs(
+            self.folders,
+            self.workers,
+            self.main_script_path,
+            self.output_script_path,
+            self.timeout_seconds,
+        )
+
+    def _close(self):
+        if self.step_frame._busy:
+            confirmed = messagebox.askyesno(
+                "Close Batch Step 3",
+                "The batch is still running. Stop it and close this panel after all R processes exit?",
+                parent=self,
+            )
+            if not confirmed:
+                return
+            self.close_when_finished = True
+            self.close_button.configure(state="disabled")
+            if not self.stop_requested:
+                self._request_stop("Stopping the batch before closing...")
+            return
+        self.step_frame._close_r_batch_run_panel(render_previous=True)
 
     def _append_step(self, folder, label, state):
         key = str(folder)
@@ -2133,6 +2195,7 @@ class Step3Frame(SidebarStepFrame):
         self._r_cancel_event = threading.Event()
         self._r_process_lock = threading.Lock()
         self._active_r_processes = set()
+        self._pending_batch_restart = None
         self.r_package_library_path = None if self.preferences is None else self.preferences.get("r_package_library_path")
 
         self.view_var = tk.StringVar(value="DARK_MARKED_find_vertex")
@@ -2530,7 +2593,22 @@ class Step3Frame(SidebarStepFrame):
 
     @staticmethod
     def _cpu_worker_limit():
-        return max(1, os.cpu_count() or 1)
+        process_cpu_count = getattr(os, "process_cpu_count", None)
+        if callable(process_cpu_count):
+            try:
+                count = process_cpu_count()
+                if count:
+                    return max(1, int(count))
+            except (OSError, TypeError, ValueError):
+                pass
+        if hasattr(os, "sched_getaffinity"):
+            try:
+                count = len(os.sched_getaffinity(0))
+                if count:
+                    return max(1, int(count))
+            except (OSError, TypeError, ValueError):
+                pass
+        return max(1, int(os.cpu_count() or 1))
 
     def _default_r_package_library(self):
         if self.r_package_library_path:
@@ -3135,6 +3213,20 @@ class Step3Frame(SidebarStepFrame):
         if render_previous:
             self._render()
 
+    def _close_r_batch_run_panel(self, *, render_previous):
+        if self._busy:
+            return
+        panel = self.r_batch_run_panel
+        self.r_batch_run_panel = None
+        if panel is not None:
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        self.progress_text_var.set("Idle")
+        if render_previous:
+            self._render()
+
     def _folder_has_r_data(self, folder):
         folder = Path(folder)
         if any((folder / name).is_file() for name in self.R_WORKSPACE_FILES):
@@ -3224,6 +3316,29 @@ class Step3Frame(SidebarStepFrame):
         if self.r_batch_run_panel is not None:
             self.r_batch_run_panel.log("Cancellation requested by user.")
         threading.Thread(target=self._terminate_active_r_processes, daemon=True).start()
+
+    def _restart_batch_r_runs(
+        self,
+        folders,
+        workers,
+        main_script_path,
+        output_script_path,
+        timeout_seconds,
+    ):
+        restart = (
+            [Path(folder) for folder in folders],
+            int(workers),
+            Path(main_script_path),
+            Path(output_script_path),
+            int(timeout_seconds),
+        )
+        if self._busy:
+            self._pending_batch_restart = restart
+            self.status_var.set("Stopping the current batch before restarting...")
+            self._cancel_batch_r_runs()
+            return
+        self._pending_batch_restart = None
+        self._start_batch_r_runs(*restart, allow_existing_rdata=True)
 
     def _run_supervised_r_command(self, command, cwd, env, timeout_seconds, on_line):
         popen_options = {
@@ -3329,6 +3444,7 @@ class Step3Frame(SidebarStepFrame):
         main_script_path=None,
         output_script_path=None,
         timeout_seconds=None,
+        allow_existing_rdata=False,
     ):
         folders = [Path(folder) for folder in folders]
         if not folders:
@@ -3359,6 +3475,7 @@ class Step3Frame(SidebarStepFrame):
                     main_script_path,
                     output_script_path,
                     timeout_seconds,
+                    allow_existing_rdata=allow_existing_rdata,
                 ) if result else None
             )
             return
@@ -3391,6 +3508,7 @@ class Step3Frame(SidebarStepFrame):
                 folders,
                 workers,
                 timeout_seconds,
+                bool(allow_existing_rdata),
             ),
             daemon=True,
         ).start()
@@ -3562,6 +3680,7 @@ class Step3Frame(SidebarStepFrame):
         folders,
         workers,
         timeout_seconds,
+        allow_existing_rdata=False,
     ):
         results = []
         completed = 0
@@ -3580,7 +3699,7 @@ class Step3Frame(SidebarStepFrame):
                 }
             self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
             try:
-                if self._folder_has_r_data(folder):
+                if not allow_existing_rdata and self._folder_has_r_data(folder):
                     raise RuntimeError("Skipped because this folder contains RData.")
                 r_config = self._r_script_config_for_folder(folder)
             except Exception as exc:
@@ -3640,6 +3759,8 @@ class Step3Frame(SidebarStepFrame):
     def _on_batch_r_done(self, results):
         self._busy = False
         self._set_process_buttons("normal")
+        panel = self.r_batch_run_panel
+        close_when_finished = bool(panel is not None and panel.close_when_finished)
         outcomes = [
             result.get("outcome", "completed" if result["returncode"] == 0 else "failed")
             for result in results
@@ -3654,10 +3775,10 @@ class Step3Frame(SidebarStepFrame):
             f"{timed_out} timed out, {cancelled} cancelled."
         )
         self.status_var.set(summary)
-        if self.r_batch_run_panel is not None:
-            self.r_batch_run_panel.set_summary(summary)
-            self.r_batch_run_panel.finish()
-            self.r_batch_run_panel.log(summary)
+        if panel is not None:
+            panel.set_summary(summary)
+            panel.finish()
+            panel.log(summary)
         self.info_var.set(
             "Batch Step 3 R results:\n"
             + "\n".join(
@@ -3666,6 +3787,27 @@ class Step3Frame(SidebarStepFrame):
                 for result in results
             )
         )
+
+        pending_restart = self._pending_batch_restart
+        self._pending_batch_restart = None
+        if pending_restart is not None:
+            self.progress_text_var.set("Restarting batch")
+            self.status_var.set("Starting a clean Batch Step 3 run...")
+            if panel is not None:
+                panel.set_summary("Starting a clean batch run...")
+                panel.log("The previous run stopped. Starting a clean batch run.")
+            self.after(
+                0,
+                lambda restart=pending_restart: self._start_batch_r_runs(
+                    *restart,
+                    allow_existing_rdata=True,
+                ),
+            )
+            return
+
+        if close_when_finished:
+            self._close_r_batch_run_panel(render_previous=True)
+            return
 
         successful_folders = [Path(result["folder"]) for result in results if result["returncode"] == 0]
         if successful_folders:

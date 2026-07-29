@@ -79,6 +79,11 @@ MARKED_BOUNDARY_WIDTHS = {
 }
 LIGHT_MARKED_BASENAME = "Light_MARKED"
 LIGHT_SOURCE_BASENAME = "Light"
+# The first option preserves the existing Step 2 save behavior: the current
+# image is written to the nasal output and its left/right mirror to temporal.
+SAVE_ORIENTATION_TEMPORAL_TO_NASAL = "temporal_to_nasal"
+SAVE_ORIENTATION_NASAL_TO_TEMPORAL = "nasal_to_temporal"
+DEFAULT_SAVE_ORIENTATION = SAVE_ORIENTATION_TEMPORAL_TO_NASAL
 IMG_DEFAULT_DIR = os.path.expanduser("~/Desktop")
 SUPPORTED_IMAGE_FILETYPES = [
     ("Analyze image", "*.img"),
@@ -664,6 +669,7 @@ class Step2Frame(SidebarStepFrame):
         self._batch_result_states = {}
         self._active_batch_result_tab = None
         self._single_editor_state = None
+        self.save_orientation_var = tk.StringVar(value=DEFAULT_SAVE_ORIENTATION)
 
         self.image_canvas = ImageCanvas(
             self.canvas_area,
@@ -812,6 +818,21 @@ class Step2Frame(SidebarStepFrame):
         fovea_action_row.pack(fill="x", pady=(2, 0))
 
         self._set_fovea_controls_enabled(False)
+
+        orientation = ttk.LabelFrame(segmentation, text="Image Orientation for Saving", padding=3)
+        orientation.pack(fill="x", pady=(6, 0))
+        ttk.Radiobutton(
+            orientation,
+            text="Current image: Temporal -> Nasal",
+            variable=self.save_orientation_var,
+            value=SAVE_ORIENTATION_TEMPORAL_TO_NASAL,
+        ).pack(anchor="w")
+        ttk.Radiobutton(
+            orientation,
+            text="Current image: Nasal -> Temporal",
+            variable=self.save_orientation_var,
+            value=SAVE_ORIENTATION_NASAL_TO_TEMPORAL,
+        ).pack(anchor="w")
 
         saved_buttons = ttk.Frame(segmentation)
         saved_buttons.pack(fill="x", pady=(6, 0))
@@ -1046,6 +1067,72 @@ class Step2Frame(SidebarStepFrame):
             image_paths=image_paths,
             manual_fovea_by_path=manual_fovea_by_path,
         )
+
+    def start_batch_segmentation_for_folders(self, folders):
+        """Run the existing Step 2 batch workflow for explicit Step 1 folders."""
+        if self._segmenter_running:
+            messagebox.showinfo("Please wait", "Segmentation is already running.")
+            return
+        if not os.path.isfile(self.aidas_model_path):
+            messagebox.showerror(
+                "Missing model",
+                f"AI_ForAIDAS boundary model not found:\n{self.aidas_model_path}",
+            )
+            return
+
+        rows = []
+        seen = set()
+        normalized_folders = []
+        for folder in folders or ():
+            folder = os.path.abspath(str(folder))
+            key = os.path.normcase(folder)
+            if key in seen or not os.path.isdir(folder):
+                continue
+            seen.add(key)
+            normalized_folders.append(folder)
+            try:
+                with os.scandir(folder) as entries:
+                    lower_files = {
+                        entry.name.lower(): entry.name
+                        for entry in entries
+                        if entry.is_file()
+                    }
+            except OSError:
+                continue
+
+            source_name = lower_files.get("light.img")
+            if source_name is None:
+                continue
+            source_path = self._preferred_analyze_pair_path(
+                os.path.join(folder, source_name)
+            )
+            rows.append(
+                {
+                    "folder": folder,
+                    "include": True,
+                    "locked": False,
+                    "status": "Ready: Light",
+                    "image_paths": [source_path],
+                    "pending": ["Light"],
+                    "completed": [],
+                }
+            )
+
+        if not rows:
+            messagebox.showwarning(
+                "Batch Step 2",
+                "No folders are ready for segmentation. No Light.img files were found.",
+            )
+            return
+
+        try:
+            root_dir = os.path.commonpath(normalized_folders)
+        except ValueError:
+            root_dir = os.path.dirname(rows[0]["folder"])
+        self.status_var.set(
+            f"Received {len(rows)} cropped folder(s) from Step 1 for batch segmentation."
+        )
+        self._start_step2_batch_segmentation_from_rows(rows, root_dir)
 
     def _collect_folder_fovea_lines(self, image_paths):
         """Prompt for a fovea center line for each image before folder segmentation in the main canvas."""
@@ -2231,6 +2318,40 @@ class Step2Frame(SidebarStepFrame):
     def _source_output_basepaths(self):
         return [self._source_output_basepath(LIGHT_SOURCE_BASENAME)]
 
+    def _selected_save_orientation(self):
+        """Return the selected save orientation, falling back to the default."""
+        orientation = self.save_orientation_var.get()
+        if orientation in {
+            SAVE_ORIENTATION_TEMPORAL_TO_NASAL,
+            SAVE_ORIENTATION_NASAL_TO_TEMPORAL,
+        }:
+            return orientation
+        return DEFAULT_SAVE_ORIENTATION
+
+    def _save_orientation_label(self):
+        if self._selected_save_orientation() == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+            return "Nasal -> Temporal"
+        return "Temporal -> Nasal"
+
+    def _orient_volume_for_single_save(self, volume):
+        """Apply the selected orientation to a single saved Analyze volume."""
+        if self._selected_save_orientation() == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+            return np.ascontiguousarray(np.flip(volume, axis=-1))
+        return volume
+
+    def _orient_volumes_for_pair_save(self, volume, source_volume):
+        """Return ``(nasal, temporal)`` volumes for the selected orientation.
+
+        The default assignment is intentionally the existing behavior. Selecting
+        the opposite direction swaps the unchanged and horizontally mirrored
+        volumes while keeping the output folder names stable.
+        """
+        mirrored_volume = np.ascontiguousarray(np.flip(volume, axis=-1))
+        mirrored_source = np.ascontiguousarray(np.flip(source_volume, axis=-1))
+        if self._selected_save_orientation() == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+            return mirrored_volume, volume, mirrored_source, source_volume
+        return volume, mirrored_volume, source_volume, mirrored_source
+
     def _reference_marked_volume_spec(self):
         """Get the target dimensions and dtype for MARKED output volumes.
 
@@ -2425,6 +2546,7 @@ class Step2Frame(SidebarStepFrame):
         else:
             stack = _resize_to_standard_format(stack)
 
+        stack = self._orient_volume_for_single_save(stack)
         saved_paths = []
         for base_path in self._source_output_basepaths():
             write_analyze(base_path, stack)
@@ -2465,7 +2587,7 @@ class Step2Frame(SidebarStepFrame):
         saved_paths = []
 
         light_base_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME)
-        write_analyze(light_base_path, light_marked)
+        write_analyze(light_base_path, self._orient_volume_for_single_save(light_marked))
         saved_paths.append(light_base_path)
 
         saved_paths.extend(self._save_light_image(reference_shape=light_marked.shape))
@@ -2521,7 +2643,8 @@ class Step2Frame(SidebarStepFrame):
                 return None
 
         out_base = self._current_marked_output_basepath()
-        write_analyze(out_base, self._build_current_marked_volume())
+        marked_volume = self._build_current_marked_volume()
+        write_analyze(out_base, self._orient_volume_for_single_save(marked_volume))
         self.status_var.set(f"Saved current MARKED image -> {out_base}.img")
         return out_base
 
@@ -2578,7 +2701,7 @@ class Step2Frame(SidebarStepFrame):
                     self.boundary_completion_vars[name].set(value)
 
     def _save_current_marked_orientation_pair(self):
-        """Save original and MARKED Light volumes for nasal and temporal orientations."""
+        """Save original and MARKED Light volumes using the selected orientation."""
         if self.image_data is None or not self.boundary_traces:
             return None
         if not self.current_file or self.current_file == "Step 1 output":
@@ -2597,11 +2720,14 @@ class Step2Frame(SidebarStepFrame):
         source_image = self._image_int16_for_original_save(self.image_data)
         source_volume = np.stack([source_image, source_image], axis=0)
         source_volume = _resize_volume_to_shape(source_volume, volume.shape)
-        write_analyze(nasal_base, volume)
-        write_analyze(nasal_light_base, source_volume)
-        # Analyze volumes are (slice, row, column); reversing columns mirrors left/right.
-        write_analyze(temporal_base, np.ascontiguousarray(np.flip(volume, axis=2)))
-        write_analyze(temporal_light_base, np.ascontiguousarray(np.flip(source_volume, axis=2)))
+        nasal_volume, temporal_volume, nasal_source, temporal_source = self._orient_volumes_for_pair_save(
+            volume,
+            source_volume,
+        )
+        write_analyze(nasal_base, nasal_volume)
+        write_analyze(nasal_light_base, nasal_source)
+        write_analyze(temporal_base, temporal_volume)
+        write_analyze(temporal_light_base, temporal_source)
         return nasal_base, temporal_base
 
     def _save_all_batch_result_tabs(self):
@@ -3548,7 +3674,7 @@ class Step2Frame(SidebarStepFrame):
         for index, item in enumerate(viewable_results, start=1):
             frame = ttk.Frame(notebook)
             input_path = item["input"]
-            input_name = os.path.splitext(os.path.basename(input_path))[0]
+            input_name = self._batch_result_input_title(input_path)
             tab_text = self._batch_result_tab_text(input_name or f"Result {index}")
             notebook.add(frame, text=tab_text)
 
@@ -3626,6 +3752,14 @@ class Step2Frame(SidebarStepFrame):
     @staticmethod
     def _batch_result_tab_text(title):
         return f"{str(title)[:24]}\tx"
+
+    @staticmethod
+    def _batch_result_input_title(input_path):
+        """Use the parent folder for the repeated Light.img batch filename."""
+        input_name = os.path.splitext(os.path.basename(input_path))[0]
+        if input_name.lower() == LIGHT_SOURCE_BASENAME.lower():
+            return os.path.basename(os.path.dirname(input_path)) or input_name
+        return input_name
 
     def _sync_active_batch_result_state(self):
         tab_key = getattr(self, "_active_batch_result_tab", None)

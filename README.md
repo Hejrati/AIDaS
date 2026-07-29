@@ -54,7 +54,16 @@ conda activate aidas
 
 ## 5. Input Data Requirements
 Step 1 currently expects:
-- A directory containing `.sdb` files
+- A parent directory containing one or more nested folders with `.sdb` files
+
+Step 1 lists those folders as a work queue. Select a folder, then select and
+crop each SDB image inside it; the first image is selected and previewed when a
+folder opens. Images cropped during the current session are shown in green, and
+folders with the complete `light.tif`/`light.hdr`/`light.img` output set can be
+hidden with the **Exclude saved outputs** filter. **Save All** writes beside the
+source SDB, while **Save As** writes the cropped image to a chosen location.
+The bottom Step 1 action sends every completed folder to Step 2 batch
+segmentation, where results open in tabs named for their source folders.
 
 Optional sidecar files (if available):
 - `.hdr` files with matching names

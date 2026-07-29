@@ -28,6 +28,7 @@ class ImageCanvas(ttk.Frame):
     """Zoomable image canvas with rectangle ROI, line tracing, and vertical marker."""
 
     RESIZE_REDRAW_DEBOUNCE_MS = 100
+    ZOOM_REDRAW_DEBOUNCE_MS = 16
 
     # ------------------------------------------------------------------ init
     def __init__(
@@ -50,6 +51,7 @@ class ImageCanvas(ttk.Frame):
         # Image state
         self._data = None          # numpy (H, W) original
         self._display_data = None  # uint8 display-normalized cache
+        self._display_pil = None   # cached PIL wrapper for viewport rendering
         self._photo = None         # current PhotoImage
         self._img_id = None        # canvas item id
         self._img_offset_x = 0.0   # displayed image left on canvas coordinates
@@ -60,6 +62,9 @@ class ImageCanvas(ttk.Frame):
 
         # Zoom
         self._zoom = 1.0
+        self._pending_zoom = None
+        self._pending_zoom_focus = None
+        self._zoom_redraw_after_id = None
 
         # ROI — image-coordinate ints (x, y, w, h) or None
         self._roi = None
@@ -99,8 +104,8 @@ class ImageCanvas(ttk.Frame):
     # ------------------------------------------------------------- widgets
     def _build_widgets(self):
         self.canvas = tk.Canvas(self, bg="#1e1e1e", highlightthickness=0)
-        self._vsb = ttk.Scrollbar(self, orient="vertical",   command=self.canvas.yview)
-        self._hsb = ttk.Scrollbar(self, orient="horizontal", command=self.canvas.xview)
+        self._vsb = ttk.Scrollbar(self, orient="vertical", command=self._scroll_y)
+        self._hsb = ttk.Scrollbar(self, orient="horizontal", command=self._scroll_x)
         self.canvas.configure(xscrollcommand=self._hsb.set,
                               yscrollcommand=self._vsb.set)
         self.canvas.grid(row=0, column=0, sticky="nsew")
@@ -122,12 +127,24 @@ class ImageCanvas(ttk.Frame):
         self.canvas.bind("<ButtonRelease-3>", self._on_pan_end)
         self.canvas.bind("<Motion>",          self._on_hover)
 
+    def _scroll_x(self, *args):
+        """Scroll horizontally and refresh only the visible image tile."""
+        self.canvas.xview(*args)
+        self._render_visible_image()
+
+    def _scroll_y(self, *args):
+        """Scroll vertically and refresh only the visible image tile."""
+        self.canvas.yview(*args)
+        self._render_visible_image()
+
     # ---------------------------------------------------------- public API
     def set_image(self, data: np.ndarray | None):
         """Set an image (H, W) numpy array (any dtype)."""
+        self._cancel_pending_zoom()
         if data is None:
             self._data = None
             self._display_data = None
+            self._display_pil = None
         else:
             arr = np.asarray(data)
             if arr.ndim != 2:
@@ -137,6 +154,7 @@ class ImageCanvas(ttk.Frame):
                 arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
             self._data = np.ascontiguousarray(arr)
             self._display_data = np.ascontiguousarray(self._to_display(self._data))
+            self._display_pil = Image.fromarray(self._display_data, "L")
         self._active_line.clear()
         self._line_overlays.clear()
         self._line_preview = None
@@ -292,12 +310,90 @@ class ImageCanvas(ttk.Frame):
         return self._zoom
 
     def set_zoom(self, z):
-        self._zoom = max(0.02, min(30.0, z))
-        self._redraw()
+        self._cancel_pending_zoom()
+        self._zoom_around_visible_center(z)
 
     def fit_to_window(self):
+        self._cancel_pending_zoom()
         self._auto_zoom()
         self._redraw()
+
+    def _zoom_around_visible_center(self, zoom):
+        """Apply zoom around the image point currently at viewport center."""
+        if self._data is None:
+            return
+        viewport_center_x = self.canvas.canvasx(self.canvas.winfo_width() / 2)
+        viewport_center_y = self.canvas.canvasy(self.canvas.winfo_height() / 2)
+        focus_x, focus_y = self._c2i(viewport_center_x, viewport_center_y)
+        image_height, image_width = self._data.shape[:2]
+        focus_x = max(0.0, min(float(image_width), focus_x))
+        focus_y = max(0.0, min(float(image_height), focus_y))
+
+        self._zoom = max(0.02, min(30.0, float(zoom)))
+        self._redraw()
+        self._center_view_on_image_point(focus_x, focus_y)
+
+    def _queue_zoom(self, zoom):
+        """Coalesce rapid wheel events into one viewport-sized redraw."""
+        if self._data is None:
+            return
+        if self._pending_zoom_focus is None:
+            viewport_center_x = self.canvas.canvasx(self.canvas.winfo_width() / 2)
+            viewport_center_y = self.canvas.canvasy(self.canvas.winfo_height() / 2)
+            self._pending_zoom_focus = self._c2i(
+                viewport_center_x,
+                viewport_center_y,
+            )
+        self._pending_zoom = max(0.02, min(30.0, float(zoom)))
+        if self._zoom_redraw_after_id is None:
+            self._zoom_redraw_after_id = self.after(
+                self.ZOOM_REDRAW_DEBOUNCE_MS,
+                self._apply_pending_zoom,
+            )
+
+    def _apply_pending_zoom(self):
+        """Render the newest queued zoom level and restore its view focus."""
+        self._zoom_redraw_after_id = None
+        zoom = self._pending_zoom
+        focus = self._pending_zoom_focus
+        self._pending_zoom = None
+        self._pending_zoom_focus = None
+        if self._data is None or zoom is None or focus is None:
+            return
+        image_height, image_width = self._data.shape[:2]
+        focus_x = max(0.0, min(float(image_width), focus[0]))
+        focus_y = max(0.0, min(float(image_height), focus[1]))
+        self._zoom = zoom
+        self._redraw()
+        self._center_view_on_image_point(focus_x, focus_y)
+
+    def _cancel_pending_zoom(self):
+        """Cancel a queued wheel redraw when image/zoom state changes directly."""
+        if self._zoom_redraw_after_id is not None:
+            try:
+                self.after_cancel(self._zoom_redraw_after_id)
+            except tk.TclError:
+                pass
+        self._zoom_redraw_after_id = None
+        self._pending_zoom = None
+        self._pending_zoom_focus = None
+
+    def _center_view_on_image_point(self, image_x, image_y):
+        """Scroll so one image-space point is centered whenever possible."""
+        if self._draw_region is None:
+            return
+        _left, _top, draw_width, draw_height = self._draw_region
+        viewport_width = max(1, self.canvas.winfo_width())
+        viewport_height = max(1, self.canvas.winfo_height())
+        canvas_x, canvas_y = self._i2c(image_x, image_y)
+
+        max_left = max(0.0, draw_width - viewport_width)
+        max_top = max(0.0, draw_height - viewport_height)
+        desired_left = max(0.0, min(max_left, canvas_x - viewport_width / 2))
+        desired_top = max(0.0, min(max_top, canvas_y - viewport_height / 2))
+        self.canvas.xview_moveto(desired_left / max(1.0, draw_width))
+        self.canvas.yview_moveto(desired_top / max(1.0, draw_height))
+        self._render_visible_image()
 
     # ---------------------------------------------------------- internals
     def _auto_zoom(self):
@@ -339,21 +435,85 @@ class ImageCanvas(ttk.Frame):
         if disp is None:
             disp = np.ascontiguousarray(self._to_display(self._data))
             self._display_data = disp
+            self._display_pil = Image.fromarray(disp, "L")
         zw, zh, draw_w, draw_h, offset_x, offset_y = self._display_geometry(disp)
         self._img_offset_x = offset_x
         self._img_offset_y = offset_y
-        pil = Image.fromarray(disp, "L").resize((zw, zh), RESAMPLE_NEAREST)
-        self._photo = ImageTk.PhotoImage(pil)
-        self._img_id = self.canvas.create_image(
-            self._img_offset_x,
-            self._img_offset_y,
-            anchor="nw",
-            image=self._photo,
-        )
         self.canvas.configure(scrollregion=(0, 0, draw_w, draw_h))
         self._draw_region = (0, 0, draw_w, draw_h)
         self._base_size = (id(self._data), self._zoom, self.canvas.winfo_width(), self.canvas.winfo_height())
+        self._render_visible_image()
         self._redraw_overlays()
+
+    def _render_visible_image(self):
+        """Render only source pixels intersecting the current canvas viewport."""
+        if self._data is None or self._display_pil is None:
+            return
+
+        image_height, image_width = self._data.shape[:2]
+        viewport_width = max(1, self.canvas.winfo_width())
+        viewport_height = max(1, self.canvas.winfo_height())
+        view_left = self.canvas.canvasx(0)
+        view_top = self.canvas.canvasy(0)
+        view_right = view_left + viewport_width
+        view_bottom = view_top + viewport_height
+
+        image_left = self._img_offset_x
+        image_top = self._img_offset_y
+        image_right = image_left + image_width * self._zoom
+        image_bottom = image_top + image_height * self._zoom
+        if (
+            view_right <= image_left
+            or view_left >= image_right
+            or view_bottom <= image_top
+            or view_top >= image_bottom
+        ):
+            if self._img_id is not None:
+                self.canvas.delete(self._img_id)
+                self._img_id = None
+            self._photo = None
+            return
+
+        # Floor/ceil cover the intersecting source pixels without allocating
+        # off-screen margins, keeping the Tk image close to viewport size.
+        source_x0 = max(
+            0,
+            int(np.floor((max(view_left, image_left) - image_left) / self._zoom)),
+        )
+        source_y0 = max(
+            0,
+            int(np.floor((max(view_top, image_top) - image_top) / self._zoom)),
+        )
+        source_x1 = min(
+            image_width,
+            int(np.ceil((min(view_right, image_right) - image_left) / self._zoom)),
+        )
+        source_y1 = min(
+            image_height,
+            int(np.ceil((min(view_bottom, image_bottom) - image_top) / self._zoom)),
+        )
+        if source_x1 <= source_x0 or source_y1 <= source_y0:
+            return
+
+        tile_width = max(1, int(round((source_x1 - source_x0) * self._zoom)))
+        tile_height = max(1, int(round((source_y1 - source_y0) * self._zoom)))
+        tile = self._display_pil.crop(
+            (source_x0, source_y0, source_x1, source_y1)
+        ).resize((tile_width, tile_height), RESAMPLE_NEAREST)
+        self._photo = ImageTk.PhotoImage(tile)
+        tile_x = image_left + source_x0 * self._zoom
+        tile_y = image_top + source_y0 * self._zoom
+        if self._img_id is None:
+            self._img_id = self.canvas.create_image(
+                tile_x,
+                tile_y,
+                anchor="nw",
+                image=self._photo,
+            )
+        else:
+            self.canvas.coords(self._img_id, tile_x, tile_y)
+            self.canvas.itemconfigure(self._img_id, image=self._photo)
+        self.canvas.tag_lower(self._img_id)
 
     def _display_geometry(self, disp=None):
         if disp is None:
@@ -384,10 +544,10 @@ class ImageCanvas(ttk.Frame):
         )
         self._img_offset_x = offset_x
         self._img_offset_y = offset_y
-        self.canvas.coords(self._img_id, offset_x, offset_y)
         self.canvas.configure(scrollregion=draw_region)
         self._draw_region = draw_region
         self._base_size = (id(self._data), self._zoom, self.canvas.winfo_width(), self.canvas.winfo_height())
+        self._render_visible_image()
         if changed:
             self._redraw_overlays()
 
@@ -430,15 +590,82 @@ class ImageCanvas(ttk.Frame):
         r = self.canvas.create_rectangle(cx1, cy1, cx2, cy2,
                                          outline="#FFD700", width=2, dash=(6, 3), tags=("overlay",))
         self._roi_items.append(r)
-        origin_lbl = self.canvas.create_text(
-            cx1 + 8,
-            cy1 + 8,
-            anchor="nw",
+
+        def add_roi_label(
+            position,
+            *,
+            text,
+            anchor="center",
+            angle=0,
+            fill="#FFD700",
+            tags=(),
+        ):
+            """Create a fixed ROI label with a soft contrast backing."""
+            label = self.canvas.create_text(
+                *position,
+                anchor=anchor,
+                text=text,
+                angle=angle,
+                fill=fill,
+                font=("Segoe UI", 9, "bold"),
+                tags=("overlay", "roi-measurement", *tags),
+            )
+            bbox = self.canvas.bbox(label)
+            if bbox is not None:
+                pad_x, pad_y = 4, 3
+                outer_shadow = self.canvas.create_rectangle(
+                    bbox[0] - pad_x - 2,
+                    bbox[1] - pad_y - 2,
+                    bbox[2] + pad_x + 2,
+                    bbox[3] + pad_y + 2,
+                    fill="#303030",
+                    outline="",
+                    tags=("overlay", "roi-label-shadow"),
+                )
+                inner_shadow = self.canvas.create_rectangle(
+                    bbox[0] - pad_x - 1,
+                    bbox[1] - pad_y - 1,
+                    bbox[2] + pad_x + 1,
+                    bbox[3] + pad_y + 1,
+                    fill="#181818",
+                    outline="",
+                    tags=("overlay", "roi-label-shadow"),
+                )
+                background = self.canvas.create_rectangle(
+                    bbox[0] - pad_x,
+                    bbox[1] - pad_y,
+                    bbox[2] + pad_x,
+                    bbox[3] + pad_y,
+                    fill="#000000",
+                    outline="",
+                    tags=("overlay", "roi-label-background"),
+                )
+                self.canvas.tag_lower(outer_shadow, label)
+                self.canvas.tag_lower(inner_shadow, label)
+                self.canvas.tag_lower(background, label)
+                self._roi_items.extend((outer_shadow, inner_shadow))
+                self._roi_items.append(background)
+            self._roi_items.append(label)
+
+        add_roi_label(
+            (cx1 - 7, cy1 - 7),
+            anchor="se",
             text=f"({x}, {y})",
-            fill="#DA0404",
-            tags=("overlay",),
+            fill="#ffffff",
+            tags=("roi-origin",),
         )
-        self._roi_items.append(origin_lbl)
+        add_roi_label(
+            ((cx1 + cx2) / 2, cy1 - 7),
+            anchor="s",
+            text=f"W: {w}",
+            tags=("roi-dimensions", "roi-width"),
+        )
+        add_roi_label(
+            (cx2 + 9, (cy1 + cy2) / 2),
+            text=f"H: {h}",
+            angle=90,
+            tags=("roi-dimensions", "roi-height"),
+        )
         # Dim outside ROI
         # (skipped for performance — could add later)
         # Corner handles (all same default color)
@@ -685,8 +912,9 @@ class ImageCanvas(ttk.Frame):
             factor = 1.25
         else:
             factor = 1 / 1.25
-        self._zoom = max(0.02, min(30.0, self._zoom * factor))
-        self._redraw()
+        base_zoom = self._pending_zoom if self._pending_zoom is not None else self._zoom
+        self._queue_zoom(base_zoom * factor)
+        return "break"
 
     def _on_canvas_resize(self, event):
         # Keep image centered whenever the viewport size changes.
@@ -839,6 +1067,7 @@ class ImageCanvas(ttk.Frame):
         if not self._is_panning:
             return
         self.canvas.scan_dragto(event.x, event.y, gain=1)
+        self._render_visible_image()
 
     def _on_pan_end(self, _event):
         self._is_panning = False
