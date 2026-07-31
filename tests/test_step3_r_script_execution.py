@@ -128,6 +128,46 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             self.assertIn(output_script.resolve().as_posix(), commands[1][3])
             self.assertIn(Step3Frame.R_WORKSPACE_FILES[1], commands[1][3])
 
+    def test_step3_requires_only_the_app_light_inputs(self):
+        self.assertEqual(
+            tuple(label for label, *_rest in Step3Frame.REQUIRED_INPUTS),
+            ("Light_MARKED", "LIGHT"),
+        )
+
+    def test_r_config_maps_light_into_the_legacy_dark_slots(self):
+        frame = self._make_frame()
+        input_paths = {
+            "Light_MARKED": r"C:\input\subject_Light_MARKED",
+            "LIGHT": r"C:\input\subject_LIGHT",
+        }
+        input_info = {
+            "Light_MARKED": {"shape": (3, 128, 1473), "bits": 8},
+            "LIGHT": {"shape": (3, 128, 1473), "bits": 16},
+        }
+        frame._find_input_paths = lambda _folder: input_paths
+        frame._read_input_stack_info = lambda _paths: input_info
+
+        config = frame._r_script_config_for_folder(Path("subject"))
+
+        self.assertEqual(config["reference_dark"], "DARK_MARKED")
+        self.assertEqual(config["reference_light"], "subject_Light_MARKED")
+        self.assertEqual(config["to_process_dark"], "DARK")
+        self.assertEqual(config["to_process_light"], "subject_LIGHT")
+        self.assertEqual(config["image_index_dark"], "1,2,3")
+        self.assertEqual(config["image_index_light"], "1,2,3")
+
+    def test_shape_validation_requires_matching_light_and_marked_stacks(self):
+        valid = {
+            "Light_MARKED": {"shape": (3, 128, 1473)},
+            "LIGHT": {"shape": (3, 128, 1473)},
+        }
+        self.assertEqual(Step3Frame._validate_input_stack_shapes(valid)["LIGHT"], (3, 128, 1473))
+
+        invalid = dict(valid)
+        invalid["LIGHT"] = {"shape": (2, 128, 1473)}
+        with self.assertRaisesRegex(ValueError, "Step 3 inputs must all have the same"):
+            Step3Frame._validate_input_stack_shapes(invalid)
+
     def test_silent_process_is_stopped_when_timeout_expires(self):
         frame = self._make_frame()
         process = _BlockingProcess()

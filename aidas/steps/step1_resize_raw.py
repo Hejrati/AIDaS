@@ -4,7 +4,7 @@ Replicates the ImageJ macro "Step 1 resize raw.txt":
     1.  Open a SDB file (16-bit unsigned, configurable params)
     2.  Display and let user select a crop ROI
     3.  Crop (pixel replication) 
-    4.  Save as "Light" (.hdr/.img/.tiff) in the same folder as source 
+    4.  Save as "Light" (.hdr/.img) in the same folder as source
 """
 
 import os
@@ -15,7 +15,7 @@ import numpy as np
 
 from aidas.canvas.image_canvas import ImageCanvas
 from aidas.utils.filesystem import find_sdb_directories, skipped_directories_warning
-from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze, save_tiff
+from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze
 from aidas.utils.ui_layout import COLORS, LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
@@ -33,14 +33,12 @@ DEFAULT_RAW_OFFSET = 1050
 DEFAULT_RAW_BIT_DEPTH = 16
 CROP_SCALE_X = 3
 CROP_SCALE_Y = 1
-DEFAULT_ROI_X = 170
 DEFAULT_ROI_Y = 585
-DEFAULT_ROI_WIDTH = 491
 DEFAULT_ROI_HEIGHT = 128
 COMPLETED_ROW_BACKGROUND = "#dff3e4"
 COMPLETED_ROW_FOREGROUND = "#1f6b35"
 COMPLETED_ROW_SELECTED_BACKGROUND = "#2f7d4a"
-SAVED_OUTPUT_FILENAMES = frozenset(("light.tif", "light.hdr", "light.img"))
+SAVED_OUTPUT_FILENAMES = frozenset(("light.hdr", "light.img"))
 
 
 class Step1Frame(SidebarStepFrame):
@@ -50,7 +48,7 @@ class Step1Frame(SidebarStepFrame):
     - import parameters for reading `.sdb` data,
     - file discovery/navigation,
     - ROI definition and processing,
-    - output saving (Analyze + TIFF),
+    - output saving (Analyze HDR/IMG pairs),
     - image interaction (zoom/pan/inspection).
     """
 
@@ -112,7 +110,7 @@ class Step1Frame(SidebarStepFrame):
         self.canvas_toolbar.pack(fill="x", pady=(0, LAYOUT.space_sm))
 
         self.status_var = tk.StringVar(
-            value="Ready — open an SDB raw OCT file to begin (left-drag ROI, right-drag pan)"
+            value="No image loaded"
         )
         self.add_status_bar(self.status_var, parent=right)
 
@@ -238,7 +236,7 @@ class Step1Frame(SidebarStepFrame):
         self.exclude_saved_outputs_checkbox.pack(anchor="w", pady=(0, 4))
         HoverToolTip(
             self.exclude_saved_outputs_checkbox,
-            "Hide SDB folders containing light.tif, light.hdr, and light.img",
+            "Hide SDB folders containing light.hdr and light.img",
         )
 
         folder_header = ttk.Frame(sdb)
@@ -318,14 +316,42 @@ class Step1Frame(SidebarStepFrame):
         # ttk.Button(nav_frame, text="Next ▶", command=self._next_sdb).pack(
         #     side="right", expand=True, fill="x", padx=(4, 0)
         # )
+
         ttk.Separator(self.ctrl, orient="horizontal").pack(fill="x", pady=(10, 6))
+        self.step_actions_frame = ttk.Frame(self.ctrl)
+        self.step_actions_frame.pack(fill="x", padx=2, pady=(0, 8))
+        action_icon_size = 16
+        self.save_all_btn_icon = load_ui_icon(
+            self, "ic--baseline-save.png", size=action_icon_size
+        )
+        self.save_all_btn = ttk.Button(
+            self.step_actions_frame,
+            text="Save",
+            command=self._save_analyze_and_advance,
+            state="disabled",
+            image=self.save_all_btn_icon,
+            compound="left",
+        )
+        self.save_all_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
+        HoverToolTip(
+            self.save_all_btn,
+            "Save IMG and HDR beside the source SDB image, then open the next SDB",
+        )
+
+        self.batch_segment_cropped_btn_icon = load_ui_icon(
+            self, "lets-icons--flag-finish.png", size=action_icon_size
+        )
         self.batch_segment_cropped_btn = ttk.Button(
-            self.ctrl,
+            self.step_actions_frame,
             text="Go to Step 2 >>",
             command=self._send_cropped_folders_to_step2,
             state="disabled",
+            image=self.batch_segment_cropped_btn_icon,
+            compound="left",
         )
-        self.batch_segment_cropped_btn.pack(fill="x", padx=2, pady=(0, 8))
+        self.batch_segment_cropped_btn.pack(
+            side="left", fill="x", expand=True, padx=(3, 0)
+        )
         HoverToolTip(
             self.batch_segment_cropped_btn,
             "Open folders with saved Light outputs in Step 2 batch segmentation",
@@ -415,9 +441,8 @@ class Step1Frame(SidebarStepFrame):
         )
         self.target_view_radio.pack(side="left")
 
-        # Top canvas toolbar: ROI presets, processing actions, and save.
+        # Top canvas toolbar: ROI presets and processing actions.
         toolbar = self.canvas_toolbar
-        action_icon_size = 16
         self.crop_split_frame = tk.Frame(
             toolbar,
             background="#a7adb3",
@@ -494,34 +519,6 @@ class Step1Frame(SidebarStepFrame):
             compound="left",
         )
         self.undo_crop_btn.pack(side="left")
-        ttk.Separator(toolbar, orient="vertical").pack(
-            side="left", fill="y", padx=10, pady=2
-        )
-
-        self.save_all_btn_icon = load_ui_icon(
-            self, "ic--baseline-save.png", size=action_icon_size
-        )
-        self.save_all_btn = ttk.Button(
-            toolbar,
-            text="Save",
-            command=self._save_all_formats,
-            state="disabled",
-            image=self.save_all_btn_icon,
-            compound="left",
-        )
-        self.save_all_btn.pack(side="left")
-        HoverToolTip(self.save_all_btn, "Save TIFF, IMG, and HDR beside the source SDB image")
-
-        self.save_as_btn = ttk.Button(
-            toolbar,
-            text="Save As...",
-            command=self._save_as,
-            state="disabled",
-            image=self.save_all_btn_icon,
-            compound="left",
-        )
-        self.save_as_btn.pack(side="left", padx=(6, 0))
-        HoverToolTip(self.save_as_btn, "Save the cropped image to a location you choose")
 
         # # ── View ──
         # view_section = self.add_sidebar_section("View", padding=3, pady=(2, 6))
@@ -594,89 +591,41 @@ class Step1Frame(SidebarStepFrame):
         return stepper, reset_btn
 
 
-    def _save_all_formats(self):
-        """Save TIFF, HDR, and IMG beside the current source SDB image."""
+    def _save_analyze_and_advance(self):
+        """Save an HDR/IMG pair and continue with the next queued SDB image."""
         img = self.processed_image
         if img is None:
             messagebox.showwarning("Nothing to save", "Run 'Crop & Scale' first.")
-            return
+            return False
         outdir = self._source_output_directory()
         if outdir is None:
-            return
+            return False
+        source_file = self.current_file
+        next_item = self._next_sdb_queue_item(source_file)
         base_name = self._build_output_name("light")
         base = os.path.join(outdir, base_name)
-        # Save TIFF
-        tiff_path = base + ".tif"
-        try:
-            save_tiff(tiff_path, img)
-        except Exception as exc:
-            messagebox.showerror("Save error (TIFF)", str(exc))
-            return
-        # Save Analyze 7.5 (HDR + IMG)
         stack = np.stack([img, img], axis=0)  # shape (2, H, W)
         try:
-            hdr_path, img_path = write_analyze(base, stack)
-        except Exception as exc:
+            write_analyze(base, stack)
+        except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Save error (Analyze)", str(exc))
-            return
-        messagebox.showinfo(
-            "Saved",
-            f"Saved all formats successfully:\n  {tiff_path}\n  {hdr_path}\n  {img_path}\n\nStack: 2 slices of {img.shape[1]}×{img.shape[0]}  {img.dtype}"
-        )
-        self.status_var.set(f"Saved → {tiff_path}, {hdr_path}, {img_path}")
+            return False
 
-        self._saved_output_directories.add(self._path_key(outdir))
-        self._render_sdb_directories()
+        if source_file:
+            self._cropped_sdb_files.add(self._path_key(source_file))
+        if self._directory_is_complete(outdir):
+            self._saved_output_directories.add(self._path_key(outdir))
+
+        self._refresh_sdb_progress_colors()
         self._update_batch_handoff_button_state()
 
-    def _save_as(self):
-        """Save the cropped image to a user-selected TIFF or Analyze path."""
-        img = self.processed_image
-        if img is None:
-            messagebox.showwarning("Nothing to save", "Run 'Crop & Scale' first.")
-            return
-
-        initial_dir = self._source_output_directory()
-        if initial_dir is None:
-            return
-        path = filedialog.asksaveasfilename(
-            title="Save cropped image as",
-            initialdir=initial_dir,
-            initialfile="light.tif",
-            defaultextension=".tif",
-            filetypes=(
-                ("TIFF image", "*.tif"),
-                ("Analyze 7.5 image", "*.img"),
-                ("All files", "*.*"),
-            ),
-        )
-        if not path:
-            return
-
-        root, extension = os.path.splitext(path)
-        try:
-            if extension.lower() == ".img":
-                stack = np.stack([img, img], axis=0)
-                hdr_path, img_path = write_analyze(root, stack)
-                saved_paths = (hdr_path, img_path)
-            else:
-                if extension.lower() not in {".tif", ".tiff"}:
-                    path = root + ".tif"
-                save_tiff(path, img)
-                saved_paths = (path,)
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("Save As error", str(exc))
-            return
-
-        messagebox.showinfo(
-            "Saved As",
-            "Saved cropped image successfully:\n  " + "\n  ".join(saved_paths),
-        )
-        self.status_var.set("Saved as: " + ", ".join(saved_paths))
-        saved_directory = os.path.dirname(os.path.abspath(saved_paths[0]))
-        if self._folder_has_all_saved_outputs(saved_directory):
-            self._saved_output_directories.add(self._path_key(saved_directory))
+        if next_item is not None:
+            next_directory, next_index, next_path = next_item
+            self._open_queued_sdb(next_directory, next_index, next_path)
+        else:
             self._render_sdb_directories()
+            self._update_image_status()
+        return True
 
     def _update_save_button_state(self):
         """Sync Save/Undo button states with processed image availability."""
@@ -684,8 +633,6 @@ class Step1Frame(SidebarStepFrame):
             return
         has_processed = self.processed_image is not None
         self.save_all_btn.configure(state="normal" if has_processed else "disabled")
-        if getattr(self, "save_as_btn", None) is not None:
-            self.save_as_btn.configure(state="normal" if has_processed else "disabled")
         if getattr(self, "undo_crop_btn", None) is not None:
             self.undo_crop_btn.configure(state="normal" if has_processed else "disabled")
         if getattr(self, "crop_btn", None) is not None:
@@ -824,19 +771,16 @@ class Step1Frame(SidebarStepFrame):
         source_width = int(source.shape[1])
         if requested_width == source_width:
             adjusted = np.array(source, copy=True)
-            note = f"Width matches source ({source_width}); no crop/pad applied."
         elif requested_width < source_width:
             crop = source_width - requested_width
             left = crop // 2
             right = left + requested_width
             adjusted = np.array(source[:, left:right], copy=True)
-            note = f"Warning: width smaller than source; cropped {crop} px from the image."
         else:
             pad = requested_width - source_width
             left = pad // 2
             right = pad - left
             adjusted = np.pad(source, ((0, 0), (left, right)), mode="constant", constant_values=0)
-            note = f"Width larger than source; padded {pad} px with zeros."
 
         self.raw_image = adjusted
         self.processed_image = None
@@ -846,7 +790,7 @@ class Step1Frame(SidebarStepFrame):
         self._set_default_roi()
         self._update_zoom_label()
         self._update_save_button_state()
-        self.status_var.set(note)
+        self._update_image_status()
 
     @staticmethod
     def _offset_noise_score(img):
@@ -882,7 +826,6 @@ class Step1Frame(SidebarStepFrame):
         if not coarse_candidates:
             coarse_candidates = [max(0, base)]
 
-        self.status_var.set("Scanning nearby offsets...")
         self.update_idletasks()
 
         best_off = None
@@ -929,7 +872,6 @@ class Step1Frame(SidebarStepFrame):
                 best_off = cand
 
         self.offset_var.set(str(best_off))
-        self.status_var.set(f"Auto offset selected: {best_off}")
 
     def _apply_import_params(self, show_errors=True, skip_reload=False):
         """Validate and store raw import parameters from the form.
@@ -948,15 +890,11 @@ class Step1Frame(SidebarStepFrame):
         except ValueError:
             if show_errors:
                 messagebox.showerror("Error", "Invalid import parameter (must be integers).")
-            else:
-                self.status_var.set("Waiting for valid import parameters...")
             return False
 
         if w <= 0 or h <= 0 or off < 0:
             if show_errors:
                 messagebox.showerror("Error", "Width/Height must be > 0 and Offset must be >= 0.")
-            else:
-                self.status_var.set("Waiting for valid import parameters...")
             return False
 
         self.raw_import_params = {
@@ -979,21 +917,11 @@ class Step1Frame(SidebarStepFrame):
                 )
                 return False
             self._load_image(img, self.current_file)
-            self.status_var.set(
-                f"Parameters applied and reloaded: {os.path.basename(self.current_file)}"
-            )
             return True
 
         if self.current_file and skip_reload:
-            self.status_var.set(
-                f"Width stored for display adjustment: {w}px"
-            )
             return True
 
-        self.status_var.set(
-            f"Import params applied: {w}x{h}, offset {off}, {DEFAULT_RAW_BIT_DEPTH}-bit, "
-            f"{'little' if le else 'big'}-endian"
-        )
         return True
 
     def _load_image(self, img, path):
@@ -1009,16 +937,13 @@ class Step1Frame(SidebarStepFrame):
         self.current_file = path
         self.view_mode_var.set("source")
 
-        filename = os.path.basename(path)
-
         self.image_canvas.set_image(img)
         self.image_canvas.enable_roi(True)
         self._set_default_roi()
         self._update_zoom_label()
         self._update_save_button_state()
         self._set_sdb_parameters_enabled(True)
-        self.status_var.set(
-            f"Loaded {filename} — left-drag ROI, right-drag pan, then Crop & Scale")
+        self._update_image_status()
 
     # ── Open Raw ──
     def _open_raw(self, path=None):
@@ -1077,7 +1002,6 @@ class Step1Frame(SidebarStepFrame):
         target_dir = SDB_DEFAULT_DIR
         self.set_sdb_directory(target_dir)
         self.refresh_sdb_list(preview_first=True)
-        self.status_var.set(f"SDB directory reset to default: {target_dir}")
 
     def refresh_sdb_list(self, preview_first=False):
         """Recursively scan the selected parent and rebuild the work queue."""
@@ -1095,7 +1019,6 @@ class Step1Frame(SidebarStepFrame):
         try:
             directory_files, errors = find_sdb_directories(root)
         except OSError as exc:
-            self.status_var.set(f"Could not scan SDB parent directory: {root}")
             self.sdb_scan_more_label.configure(text="More")
             self.sdb_scan_tooltip.text = skipped_directories_warning([(root, str(exc))])
             self._render_sdb_directories()
@@ -1117,9 +1040,6 @@ class Step1Frame(SidebarStepFrame):
             self._active_sdb_directory = previous_directory
 
         self._render_sdb_directories()
-        self.status_var.set(
-            f"Found {len(self._sdb_directory_files)} folder(s) containing SDB images below {root}"
-        )
         if preview_first:
             self._preview_selected_sdb()
 
@@ -1254,6 +1174,43 @@ class Step1Frame(SidebarStepFrame):
             and self._path_key(path) == self._path_key(self.current_file)
         )
 
+    def _next_sdb_queue_item(self, current_path):
+        """Return the directory, index, and path after the current queue item."""
+        if not current_path:
+            return None
+
+        directories = list(self._sdb_directories)
+        known = {self._path_key(directory) for directory in directories}
+        directories.extend(
+            directory
+            for directory in self._sdb_directory_files
+            if self._path_key(directory) not in known
+        )
+        queue = [
+            (directory, index, path)
+            for directory in directories
+            for index, path in enumerate(self._sdb_directory_files.get(directory, ()))
+        ]
+        current_key = self._path_key(current_path)
+        for position, (_directory, _index, path) in enumerate(queue):
+            if self._path_key(path) == current_key:
+                return queue[position + 1] if position + 1 < len(queue) else None
+        return None
+
+    def _open_queued_sdb(self, directory, index, path):
+        """Select and open a queue item without a discard prompt after saving."""
+        self.processed_image = None
+        self._active_sdb_directory = directory
+        self._render_sdb_directories()
+        self.sdb_listbox.selection_clear(0, "end")
+        self.sdb_listbox.selection_set(index)
+        self.sdb_listbox.see(index)
+        self._open_raw(path=path)
+        return bool(
+            self.current_file
+            and self._path_key(self.current_file) == self._path_key(path)
+        )
+
     @staticmethod
     def _path_key(path):
         """Return a stable, case-insensitive key for progress tracking."""
@@ -1309,7 +1266,7 @@ class Step1Frame(SidebarStepFrame):
         if not folders:
             messagebox.showwarning(
                 "No cropped folders",
-                "No SDB folder contains light.tif, light.hdr, and light.img yet.",
+                "No SDB folder contains both light.hdr and light.img yet.",
             )
             return
         if not callable(self._on_batch_segment_folders):
@@ -1346,11 +1303,7 @@ class Step1Frame(SidebarStepFrame):
         sel = self.sdb_listbox.curselection()
         if not sel:
             return
-        path = self._sdb_files[sel[0]]
-        state = "cropped" if self._path_key(path) in self._cropped_sdb_files else "not cropped"
-        self.status_var.set(
-            f"Selected SDB: {os.path.basename(path)}  ({state}; double-click to open)"
-        )
+        self._update_image_status()
 
     def _open_selected_sdb(self):
         """Open the currently selected SDB file from the list."""
@@ -1384,16 +1337,17 @@ class Step1Frame(SidebarStepFrame):
 
     # ── ROI ──
     def _set_default_roi(self):
-        """Set ROI to a centered band on the opened image.
+        """Set ROI to a full-width horizontal band on the opened image.
 
-        Default behavior: a fixed source crop region using the legacy offset.
+        The legacy vertical offset and height are retained while the rectangle
+        always spans from the image's left edge to its right edge.
         """
         if self.raw_image is None:
             return
         ih, iw = self.raw_image.shape
-        x = min(DEFAULT_ROI_X, max(0, iw - 1))
+        x = 0
         y = min(DEFAULT_ROI_Y, max(0, ih - 1))
-        w = min(DEFAULT_ROI_WIDTH, iw - x)
+        w = iw
         h = min(DEFAULT_ROI_HEIGHT, ih - y)
         self._set_roi_and_entries(x, y, w, h)
 
@@ -1625,7 +1579,6 @@ class Step1Frame(SidebarStepFrame):
             self.image_canvas.enable_roi(self.processed_image is None)
             if self.processed_image is None:
                 self._set_canvas_roi_from_source()
-            label = "Target result" if self.processed_image is not None else "Target work"
         else:
             if self.raw_image is None:
                 return
@@ -1633,13 +1586,23 @@ class Step1Frame(SidebarStepFrame):
             self.image_canvas.enable_roi(self.processed_image is None)
             self._set_canvas_roi_from_source()
             image = self.raw_image
-            label = "Source"
 
         if self._source_roi is not None:
             self._update_roi_entries(*self._source_roi)
         self._update_zoom_label()
-        height, width = image.shape[:2]
-        self.status_var.set(f"{label} view — {width}×{height} {image.dtype}")
+        self._update_image_status()
+
+    def _update_image_status(self):
+        """Show image properties only; workflow progress belongs in the UI itself."""
+        img = self.image_canvas.get_image()
+        if img is None:
+            self.status_var.set("No image loaded")
+            return
+        height, width = img.shape[:2]
+        zoom = self.image_canvas.get_zoom()
+        self.status_var.set(
+            f"Image: {width}×{height} {img.dtype}  |  Zoom: {zoom * 100:.0f}%"
+        )
 
     def _on_mouse_moved(self, ix, iy, val):
         """Update status with cursor position/value for current image.
@@ -1676,7 +1639,6 @@ class Step1Frame(SidebarStepFrame):
             messagebox.showwarning("No ROI", "Select a crop region first.")
             return False
 
-        x, y, w, h = roi
         self.processed_image = self._build_processed_target_image()
         if self.processed_image is None:
             messagebox.showwarning("No ROI", "Select a crop region first.")
@@ -1696,23 +1658,11 @@ class Step1Frame(SidebarStepFrame):
                 # Step 1 must remain usable even if Step 2 sync fails.
                 pass
 
-        ih, iw = self.processed_image.shape
-        self.status_var.set(
-            f"Processed: {w}×{h} → {iw}×{ih}.  "
-            f"Save as Light/Dark or Reset to adjust."
-        )
-        if self.current_file:
-            self._cropped_sdb_files.add(self._path_key(self.current_file))
-            self._refresh_sdb_progress_colors()
+        self._update_image_status()
         self._update_save_button_state()
         for entry in self.roi_entries + self.target_size_entries:
             entry.configure(state="disabled")
         return True
-
-    def _crop_scale_and_save_tiff(self):
-        """Run crop+scale, then save TIFF beside the source SDB image."""
-        if self._crop_and_scale():
-            self._save_tiff()
 
     def _reset(self):
         """Restore the loaded raw image view and re-enable ROI editing."""
@@ -1728,7 +1678,7 @@ class Step1Frame(SidebarStepFrame):
         self._set_sdb_parameters_enabled(True)
         for entry in self.roi_entries + self.target_size_entries:
             entry.configure(state="normal")
-        self.status_var.set("Reset — adjust ROI and process again.")
+        self._update_image_status()
 
     # ── Save ──
     def _source_output_directory(self):
@@ -1744,60 +1694,6 @@ class Step1Frame(SidebarStepFrame):
             )
             return None
         return directory
-
-    def _save_analyze(self, name):
-        """Save processed image as Analyze 7.5 two-slice stack.
-
-        Args:
-            name: Output role label (for example, `"Light"` or `"Dark"`).
-        """
-        img = self.processed_image
-        if img is None:
-            messagebox.showwarning("Nothing to save",
-                                   "Run 'Crop & Scale' first.")
-            return
-
-        outdir = self._source_output_directory()
-        if outdir is None:
-            return
-
-        base_name = self._build_output_name(name.lower())
-        base = os.path.join(outdir, base_name)
-
-        # Create a 2-slice stack (both slices identical) — matches ImageJ workflow
-        stack = np.stack([img, img], axis=0)  # shape (2, H, W)
-
-        try:
-            hdr_path, img_path = write_analyze(base, stack)
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("Save error", str(exc))
-            return
-
-        messagebox.showinfo("Saved",
-                            f"Saved {name} successfully:\n  {hdr_path}\n  {img_path}\n\n"
-                            f"Stack: 2 slices of {img.shape[1]}×{img.shape[0]}  {img.dtype}")
-        self.status_var.set(f"Saved → {hdr_path}")
-
-    def _save_tiff(self):
-        """Save the current image as TIFF beside its source SDB image."""
-        show_target = (
-            self.view_mode_var.get() == "target"
-            and self.processed_image is not None
-        )
-        img = self.processed_image if show_target else self.raw_image
-        if img is None:
-            messagebox.showwarning("Nothing to save", "Open a file first.")
-            return
-        outdir = self._source_output_directory()
-        if outdir is None:
-            return
-        path = os.path.join(outdir, f"{self._build_output_name('light')}.tif")
-        try:
-            save_tiff(path, img)
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("Save error", str(exc))
-            return
-        self.status_var.set(f"TIFF saved → {path}")
 
     def _build_output_name(self, suffix):
         """Build output filename from source stem and user-provided suffix.
@@ -1816,16 +1712,19 @@ class Step1Frame(SidebarStepFrame):
         """Increase canvas zoom by a fixed multiplier."""
         self.image_canvas.set_zoom(self.image_canvas.get_zoom() * 1.25)
         self._update_zoom_label()
+        self._update_image_status()
 
     def _zoom_out(self):
         """Decrease canvas zoom by a fixed divisor."""
         self.image_canvas.set_zoom(self.image_canvas.get_zoom() / 1.25)
         self._update_zoom_label()
+        self._update_image_status()
 
     def _fit_zoom(self):
         """Fit the current image into the visible canvas viewport."""
         self.image_canvas.fit_to_window()
         self._update_zoom_label()
+        self._update_image_status()
 
     def _update_zoom_label(self):
         """Refresh the visible zoom percentage label."""

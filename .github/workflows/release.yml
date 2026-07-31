@@ -39,8 +39,77 @@ jobs:
             --tag "${{ github.ref_name }}" `
             --github-output "$env:GITHUB_OUTPUT"
 
+      - name: Install R 3.3.1 for integration tests
+        shell: pwsh
+        run: |
+          $installerName = "R-3.3.1-win.exe"
+          $archiveRoot = "https://cran-archive.r-project.org/bin/windows/base/old/3.3.1"
+          $installerPath = Join-Path $env:RUNNER_TEMP $installerName
+          $fingerprintPath = Join-Path $env:RUNNER_TEMP "R-3.3.1-md5sum.txt"
+          $installDirectory = Join-Path $env:RUNNER_TEMP "R-3.3.1"
+
+          Invoke-WebRequest "$archiveRoot/$installerName" -OutFile $installerPath
+          Invoke-WebRequest "$archiveRoot/md5sum.txt" -OutFile $fingerprintPath
+          $fingerprintLine = Get-Content -LiteralPath $fingerprintPath |
+            Where-Object { $_ -match [regex]::Escape($installerName) } |
+            Select-Object -First 1
+          if (-not $fingerprintLine -or $fingerprintLine -notmatch '^([0-9a-fA-F]{32})') {
+            throw "Could not read the official R 3.3.1 installer fingerprint."
+          }
+          $expectedMd5 = $Matches[1].ToLowerInvariant()
+          $actualMd5 = (Get-FileHash -LiteralPath $installerPath -Algorithm MD5).Hash.ToLowerInvariant()
+          if ($actualMd5 -ne $expectedMd5) {
+            throw "The downloaded R 3.3.1 installer failed its fingerprint check."
+          }
+
+          $installResult = Start-Process -FilePath $installerPath -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
+            "/VERYSILENT",
+            "/SUPPRESSMSGBOXES",
+            "/NORESTART",
+            "/DIR=$installDirectory"
+          )
+          if ($installResult.ExitCode -ne 0) {
+            throw "R 3.3.1 installation failed with exit code $($installResult.ExitCode)."
+          }
+
+          $rscriptPath = Join-Path $installDirectory "bin\x64\Rscript.exe"
+          if (-not (Test-Path -LiteralPath $rscriptPath)) {
+            throw "R 3.3.1 did not install Rscript.exe at $rscriptPath."
+          }
+          "AIDAS_R331_PATH=$rscriptPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $packageLibrary = Join-Path $env:RUNNER_TEMP "AIDaS-R-3.3.1-packages"
+          New-Item -ItemType Directory -Path $packageLibrary -Force | Out-Null
+          $packageOrder = @(
+            "R.methodsS3",
+            "R.oo",
+            "R.utils",
+            "R.matlab",
+            "fastICA",
+            "Rcpp",
+            "RcppEigen",
+            "RNifti",
+            "ore",
+            "xtable",
+            "AnalyzeFMRI",
+            "RNiftyReg"
+          )
+          foreach ($packageName in $packageOrder) {
+            $packagePath = (Resolve-Path (Join-Path "assets\r_packages" "$packageName.zip")).Path
+            $rLibrary = $packageLibrary.Replace("\", "/").Replace("'", "\'")
+            $rPackage = $packagePath.Replace("\", "/").Replace("'", "\'")
+            $expression = "install.packages('$rPackage',repos=NULL,dependencies=FALSE,type='win.binary',lib='$rLibrary')"
+            & $rscriptPath --vanilla -e $expression
+            if ($LASTEXITCODE -ne 0) {
+              throw "Installing bundled R package $packageName failed."
+            }
+          }
+          "R_LIBS_USER=$packageLibrary" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Run tests
         shell: pwsh
+        env:
+          AIDAS_REQUIRE_R331_INTEGRATION: "1"
         run: python -m unittest discover -s tests -v
 
       - name: Build the PyInstaller executable

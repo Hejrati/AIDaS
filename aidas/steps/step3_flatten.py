@@ -3247,10 +3247,8 @@ class Step3Frame(SidebarStepFrame):
         return {
             "input_dir": str(folder.resolve()),
             "output_dir": str(folder.resolve()),
-            # Keep the legacy paired-channel labels and indexes so the R array
-            # layout remains byte-for-byte compatible. The R script aliases
-            # both compatibility slots to the LIGHT data instead of reading
-            # DARK input files.
+            # The app produces one LIGHT acquisition. Preserve the original R
+            # script's paired array layout by reusing it for the DARK slots.
             "reference_dark": "DARK_MARKED",
             "reference_light": self._analyze_base_name(input_paths["Light_MARKED"]),
             "to_process_dark": "DARK",

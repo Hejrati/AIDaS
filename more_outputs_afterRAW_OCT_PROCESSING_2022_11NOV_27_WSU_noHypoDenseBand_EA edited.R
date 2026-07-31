@@ -3,9 +3,8 @@
 ## or after opening the file saved by "RAW_OCT_PROCESSING".R (which should have the prefix "_done_"
 
 
-### LIGHT is the only required channel. Keep the legacy DARK-named output slots
-### as in-memory aliases so existing filenames and downstream indexing remain
-### unchanged without requiring any DARK objects in the loaded workspace.
+### LIGHT is the app's acquisition channel. Recreate the legacy DARK slots when
+### loading a LIGHT-only workspace so the original output formulas still run.
 if(!exists("TO.PROCESS.DARK")) TO.PROCESS.DARK="DARK"
 if(!exists("FLATTENED.DARK.RETINA.RRC")) FLATTENED.DARK.RETINA.RRC=FLATTENED.LIGHT.RETINA.RRC
 if(!exists("R.RPE.POSITION.DARK")) R.RPE.POSITION.DARK=R.RPE.POSITION.LIGHT
@@ -15,52 +14,49 @@ if(!exists("R.INL.IPL.POSITION.DARK")) R.INL.IPL.POSITION.DARK=R.INL.IPL.POSITIO
 if(!exists("R.RNFL.GCL.POSITION.DARK")) R.RNFL.GCL.POSITION.DARK=R.RNFL.GCL.POSITION.LIGHT
 if(!exists("R.VITREOUS.RETINA.POSITION.DARK")) R.VITREOUS.RETINA.POSITION.DARK=R.VITREOUS.RETINA.POSITION.LIGHT
 
-### The first member of the LIGHT stack is used for the compatibility plots.
+### The first member of each stack is used for the plots.
+### Use an explicit PNG device because AIDaS runs this script through
+### non-interactive Rscript, where dev.new()/savePlot() selects a PDF device.
+save.tissue.border.output <- function(filename, flattened, rpe, olm, onl.opl, inl.ipl, rnfl.gcl, vitreous.retina) {
+  x.axis=seq(-100,2750,1)
+  y.axis=seq(-30,430,1)
+  target=file.path(getwd(),filename)
 
+  png(filename=target,width=1600,height=520)
+  on.exit(dev.off())
+  image(as.vector(x.axis),as.vector(y.axis),
+        as.matrix(flattened[,dim(flattened)[2]:1,1]),
+        xlab="Distance from Fovea (microns)",
+        ylab="Distance from RPE (microns)",col=gray.colors(254))
+  matlines(x.axis,431-rpe[1:2851,1],col="red")
+  matlines(x.axis,431-olm[1:2851,1],col="blue")
+  matlines(x.axis,431-onl.opl[1:2851,1],col="red")
+  matlines(x.axis,431-inl.ipl[1:2851,1],col="blue")
+  matlines(x.axis,431-rnfl.gcl[1:2851,1],col="red")
+  matlines(x.axis,431-vitreous.retina[1:2851,1],col="blue")
+  invisible(target)
+}
 
-dev.new(width=12,height=4)
-# to use the pdf style, cut out the preding line, and comment out the save.image line at the end
-# but uncomment pdf() and dev.off() lines
-#pdf(paste("_tissueBorders__",TO.PROCESS.DARK,".pdf",sep=""),width=12.8,height=3.7)
-image(as.vector(seq(-100,2750,1)),as.vector(seq(-30,430,1)),
-      as.matrix(FLATTENED.DARK.RETINA.RRC[,dim(FLATTENED.DARK.RETINA.RRC)[2]:1,1]),
-      xlab="Distance from Fovea (microns)",
-      ylab="Distance from RPE (microns)", col = gray.colors(254))
-
-matlines(seq(-100,2750,1),431-R.RPE.POSITION.DARK[1:2851,1],col="red")
-matlines(seq(-100,2750,1),431-R.OLM.POSITION.DARK[1:2851,1],col="blue")
-matlines(seq(-100,2750,1),431-R.ONL.OPL.POSITION.DARK[1:2851,1],col="red")
-matlines(seq(-100,2750,1),431-R.INL.IPL.POSITION.DARK[1:2851,1],col="blue")
-matlines(seq(-100,2750,1),431-R.RNFL.GCL.POSITION.DARK[1:2851,1],col="red")
-matlines(seq(-100,2750,1),431-R.VITREOUS.RETINA.POSITION.DARK[1:2851,1],col="blue")
-#matlines(seq(-100,50,1),431-R.RPE.POSITION.DARK.FOVEA[1:151,1],col="red")
-#matlines(seq(-100,50,1),431-R.OLM.POSITION.DARK.FOVEA[1:151,1],col="blue")
-#<end>
-#dev.off()
-savePlot(filename=paste("_tissueBorders__",TO.PROCESS.DARK,".png",sep=""),type="png")
-
-
-
-dev.new(width=12,height=4)
-# to use the pdf style, cut out the preding line, and comment out the save.image line at the end
-# but uncomment pdf() and dev.off() lines
-#pdf(paste("_tissueBorders__",TO.PROCESS.LIGHT,".pdf",sep=""),width=12.8,height=3.7)
-image(as.vector(seq(-100,2750,1)),as.vector(seq(-30,430,1)),
-      as.matrix(FLATTENED.LIGHT.RETINA.RRC[,dim(FLATTENED.LIGHT.RETINA.RRC)[2]:1,1]),
-      xlab="Distance from Fovea (microns)",
-      ylab="Distance from RPE (microns)", col = gray.colors(254))
-
-matlines(seq(-100,2750,1),431-R.RPE.POSITION.LIGHT[1:2851,1],col="red")
-matlines(seq(-100,2750,1),431-R.OLM.POSITION.LIGHT[1:2851,1],col="blue")
-matlines(seq(-100,2750,1),431-R.ONL.OPL.POSITION.LIGHT[1:2851,1],col="red")
-matlines(seq(-100,2750,1),431-R.INL.IPL.POSITION.LIGHT[1:2851,1],col="blue")
-matlines(seq(-100,2750,1),431-R.RNFL.GCL.POSITION.LIGHT[1:2851,1],col="red")
-matlines(seq(-100,2750,1),431-R.VITREOUS.RETINA.POSITION.LIGHT[1:2851,1],col="blue")
-#matlines(seq(-100,50,1),431-R.RPE.POSITION.LIGHT.FOVEA[1:151,1],col="red")
-#matlines(seq(-100,50,1),431-R.OLM.POSITION.LIGHT.FOVEA[1:151,1],col="blue")
-#<end>
-#dev.off()
-savePlot(filename=paste("_tissueBorders__",TO.PROCESS.LIGHT,".png",sep=""),type="png")
+save.tissue.border.output(
+  paste("_tissueBorders__",TO.PROCESS.DARK,".png",sep=""),
+  FLATTENED.DARK.RETINA.RRC,
+  R.RPE.POSITION.DARK,
+  R.OLM.POSITION.DARK,
+  R.ONL.OPL.POSITION.DARK,
+  R.INL.IPL.POSITION.DARK,
+  R.RNFL.GCL.POSITION.DARK,
+  R.VITREOUS.RETINA.POSITION.DARK
+)
+save.tissue.border.output(
+  paste("_tissueBorders__",TO.PROCESS.LIGHT,".png",sep=""),
+  FLATTENED.LIGHT.RETINA.RRC,
+  R.RPE.POSITION.LIGHT,
+  R.OLM.POSITION.LIGHT,
+  R.ONL.OPL.POSITION.LIGHT,
+  R.INL.IPL.POSITION.LIGHT,
+  R.RNFL.GCL.POSITION.LIGHT,
+  R.VITREOUS.RETINA.POSITION.LIGHT
+)
 
 
 ## now, to export thicknesses

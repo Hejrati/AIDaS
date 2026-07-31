@@ -119,11 +119,17 @@ def main() -> int:
                     action_heights = {
                         step.crop_split_frame.winfo_reqheight(),
                         step.undo_crop_btn.winfo_reqheight(),
-                        step.save_all_btn.winfo_reqheight(),
-                        step.save_as_btn.winfo_reqheight(),
                     }
                     assert len(action_heights) == 1, (
-                        "Step 1 Crop, Undo, and Save buttons do not have a "
+                        "Step 1 Crop and Undo buttons do not have a "
+                        "consistent requested height."
+                    )
+                    sidebar_action_heights = {
+                        step.save_all_btn.winfo_reqheight(),
+                        step.batch_segment_cropped_btn.winfo_reqheight(),
+                    }
+                    assert len(sidebar_action_heights) == 1, (
+                        "Step 1 Save and Go to Step 2 buttons do not have a "
                         "consistent requested height."
                     )
                     assert step.crop_btn.winfo_reqheight() == step.crop_options_btn.winfo_reqheight(), (
@@ -133,8 +139,6 @@ def main() -> int:
                         step.crop_btn,
                         step.crop_options_btn,
                         step.undo_crop_btn,
-                        step.save_all_btn,
-                        step.save_as_btn,
                     )
                     assert step.crop_split_frame.master is step.canvas_toolbar
                     assert step.crop_btn.master is step.crop_split_frame
@@ -143,14 +147,22 @@ def main() -> int:
                         button.master is step.canvas_toolbar
                         for button in action_buttons[2:]
                     ), "Step 1 processing actions are not in the top canvas toolbar."
+                    assert step.step_actions_frame.master is step.ctrl
+                    assert step.save_all_btn.master is step.step_actions_frame
+                    assert step.batch_segment_cropped_btn.master is step.step_actions_frame
                     aligned_controls = (
                         step.crop_split_frame,
                         step.undo_crop_btn,
-                        step.save_all_btn,
-                        step.save_as_btn,
                     )
                     assert len({control.winfo_rooty() for control in aligned_controls}) == 1, (
                         "Step 1 processing buttons are not aligned in one row."
+                    )
+                    sidebar_actions = (
+                        step.save_all_btn,
+                        step.batch_segment_cropped_btn,
+                    )
+                    assert len({control.winfo_rooty() for control in sidebar_actions}) == 1, (
+                        "Step 1 sidebar actions are not aligned in one row."
                     )
                     roi_controls = tuple(
                         step.roi_entries + step.target_size_entries

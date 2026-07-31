@@ -67,19 +67,23 @@ class AIWorkerClient:
             str(host),
             "--connect-port",
             str(port),
-            "--connect-token",
-            self._connect_token,
+            # Keep the option and value in one argv item. This is safe even if
+            # a token contains a leading '-' and avoids platform/parser-specific
+            # interpretation of the token as another command-line option.
+            f"--connect-token={self._connect_token}",
         ]
 
     @property
     def command_line(self):
         command = self.worker_command
         redacted = list(command)
-        try:
-            token_index = redacted.index("--connect-token") + 1
-            redacted[token_index] = "<redacted>"
-        except (ValueError, IndexError):
-            pass
+        for index, part in enumerate(redacted):
+            if part.startswith("--connect-token="):
+                redacted[index] = "--connect-token=<redacted>"
+                break
+            if part == "--connect-token" and index + 1 < len(redacted):
+                redacted[index + 1] = "<redacted>"
+                break
         return subprocess.list2cmdline(redacted)
 
     def _open_listener(self):
@@ -90,7 +94,9 @@ class AIWorkerClient:
         listener.listen(1)
         listener.settimeout(0.25)
         self._listener = listener
-        self._connect_token = secrets.token_urlsafe(32)
+        # The fixed alphabetic prefix is a second layer of protection for any
+        # future launcher that might pass the token as a separate argv item.
+        self._connect_token = f"aidas_{secrets.token_urlsafe(32)}"
 
     def start(self):
         if self.process is not None:

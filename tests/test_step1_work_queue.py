@@ -3,6 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
 
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2Frame
@@ -26,6 +29,9 @@ class _ListboxStub:
 
     def selection_set(self, index):
         self.selection = (index,)
+
+    def selection_clear(self, _first, _last):
+        self.selection = ()
 
     def see(self, _index):
         pass
@@ -52,10 +58,9 @@ class _ButtonStub:
 
 
 class Step1WorkQueueTests(unittest.TestCase):
-    def test_saved_output_detection_requires_all_formats_case_insensitively(self):
+    def test_saved_output_detection_requires_hdr_and_img_case_insensitively(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             folder = Path(temporary_directory)
-            (folder / "Light.TIF").touch()
             (folder / "LIGHT.HDR").touch()
 
             self.assertFalse(Step1Frame._folder_has_all_saved_outputs(folder))
@@ -93,6 +98,60 @@ class Step1WorkQueueTests(unittest.TestCase):
 
         self.assertTrue(frame._preview_selected_sdb())
         self.assertEqual(opened, ["folder/first.sdb"])
+
+    def test_next_queue_item_continues_with_next_folder(self):
+        frame = Step1Frame.__new__(Step1Frame)
+        frame._sdb_directories = ["folder-a", "folder-b"]
+        frame._sdb_directory_files = {
+            "folder-a": ["folder-a/first.sdb", "folder-a/second.sdb"],
+            "folder-b": ["folder-b/third.sdb"],
+        }
+
+        self.assertEqual(
+            frame._next_sdb_queue_item("folder-a/second.sdb"),
+            ("folder-b", 0, "folder-b/third.sdb"),
+        )
+
+    def test_save_writes_analyze_pair_and_opens_next_sdb(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            folder = Path(temporary_directory)
+            first = str(folder / "first.sdb")
+            second = str(folder / "second.sdb")
+            frame = Step1Frame.__new__(Step1Frame)
+            frame.processed_image = np.zeros((4, 5), dtype=np.int16)
+            frame.current_file = first
+            frame._sdb_directories = [str(folder)]
+            frame._sdb_directory_files = {str(folder): [first, second]}
+            frame._cropped_sdb_files = set()
+            frame._saved_output_directories = set()
+            frame.status_var = _StringVarStub()
+            frame._source_output_directory = lambda: str(folder)
+            frame._refresh_sdb_progress_colors = lambda: None
+            frame._update_batch_handoff_button_state = lambda: None
+            opened = []
+            frame._open_queued_sdb = lambda directory, index, path: opened.append(
+                (directory, index, path)
+            )
+
+            with patch(
+                "aidas.steps.step1_resize_raw.write_analyze",
+                return_value=(str(folder / "light.hdr"), str(folder / "light.img")),
+            ) as write:
+                self.assertTrue(frame._save_analyze_and_advance())
+
+            write.assert_called_once()
+            self.assertEqual(opened, [(str(folder), 1, second)])
+            self.assertIn(frame._path_key(first), frame._cropped_sdb_files)
+
+    def test_default_roi_spans_the_full_image_width(self):
+        frame = Step1Frame.__new__(Step1Frame)
+        frame.raw_image = np.zeros((1200, 768), dtype=np.uint16)
+        captured = []
+        frame._set_roi_and_entries = lambda *roi: captured.append(roi)
+
+        frame._set_default_roi()
+
+        self.assertEqual(captured, [(0, 585, 768, 128)])
 
     def test_crop_progress_repaint_does_not_rebuild_or_preview_the_queue(self):
         frame = Step1Frame.__new__(Step1Frame)
@@ -160,7 +219,6 @@ class Step1WorkQueueTests(unittest.TestCase):
         frame.raw_image = object()
         frame.processed_image = object()
         frame.save_all_btn = _ButtonStub()
-        frame.save_as_btn = _ButtonStub()
         frame.undo_crop_btn = _ButtonStub()
         frame.crop_btn = _ButtonStub()
         frame.crop_options_btn = _ButtonStub()

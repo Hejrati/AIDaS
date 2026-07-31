@@ -13,9 +13,9 @@
 #  Omit the ".hdr"/".img" extension.
 # You should have two ANALYZE images:
 #
-#  LIGHT and LIGHT_MARKED. The historical DARK channel was a duplicate of
-#  LIGHT; this script keeps paired-channel compatibility arrays internally so
-#  downstream indexing and thickness calculations remain unchanged.
+#  LIGHT and LIGHT_MARKED. The app has one acquisition channel and mirrors it
+#  into the legacy DARK slots so the original paired calculations retain their
+#  dimensions and indexing.
 #  Each _MARKED image (each slice of each image) should:
 #     (1) be 8-bit, and max set to 230, other than:
 #     (2) have the RPE marked as 255
@@ -27,11 +27,8 @@
 #      250 is the RNFL/GCL border
 #      249 is the RNFL/vitreous border
 #
-# IMAGE.INDEX.LIGHT should list the order of images. The compatibility DARK
-# index is copied from it so removing DARK cannot shift paired array indexes.
-# For example, if five images were taken with no omissions, use
-# IMAGE.INDEX.LIGHT=c(1,2,3,4,5). If images 1 and 4 were removed, use
-# IMAGE.INDEX.LIGHT=c(2,3,5).
+# IMAGE.INDEX.LIGHT should list the order of images. The legacy DARK index is
+# copied from it so paired array indexes remain aligned.
 # the number of items in this list has to match the number of slices in the
 # respective ANALYZE file.
 # 
@@ -39,15 +36,17 @@
 ############
 
 .DEBUG.STEP <- "startup"
+.DIAGNOSTICS.ENABLED <- tolower(Sys.getenv("AIDAS_STEP3_DIAGNOSTICS", unset="")) %in% c("1", "true", "yes", "on")
+
 dbg <- function(step, ...) {
   .DEBUG.STEP <<- step
   cat(paste0("DEBUG [", step, "] ", paste(..., collapse=" "), "\n"))
   flush.console()
 }
 
-stop.at.boundary <- function(step, ...) {
-  dbg(step, ...)
-  stop("Execution stopped at current translated boundary.", call.=FALSE)
+diagnostic.dbg <- function(...) {
+  if(!.DIAGNOSTICS.ENABLED) return(invisible(NULL))
+  dbg(...)
 }
 
 format.number <- function(x) {
@@ -55,10 +54,12 @@ format.number <- function(x) {
 }
 
 show.scalar.stats <- function(name, value) {
+  if(!.DIAGNOSTICS.ENABLED) return(invisible(NULL))
   cat(paste0("STAT ", name, ": type=", class(value)[1], " value=", paste(value, collapse=","), "\n"))
 }
 
 show.vector.stats <- function(name, values) {
+  if(!.DIAGNOSTICS.ENABLED) return(invisible(NULL))
   cat(paste0(
     "STAT ", name, ": type=int_vector length=", length(values),
     " values=", paste(values, collapse=","),
@@ -71,6 +72,7 @@ show.vector.stats <- function(name, values) {
 }
 
 show.array.stats <- function(name, value) {
+  if(!.DIAGNOSTICS.ENABLED) return(invisible(NULL))
   vals <- as.numeric(value)
   cat(paste0(
     "STAT ", name, ": type=array class=", class(value)[1],
@@ -84,11 +86,13 @@ show.array.stats <- function(name, value) {
   ))
 }
 
-options(error = function() {
-  cat(paste0("ERROR: failure at step '", .DEBUG.STEP, "'\n"))
-  traceback(3)
-  stop("Execution stopped after debug traceback.")
-})
+if(.DIAGNOSTICS.ENABLED) {
+  options(error = function() {
+    cat(paste0("ERROR: failure at step '", .DEBUG.STEP, "'\n"))
+    traceback(3)
+    q(save="no", status=1, runLast=FALSE)
+  })
+}
 
 dbg("startup", "Script started")
 
@@ -125,8 +129,6 @@ setwd(INPUTDIR)
 REFERENCE.LIGHT=strip.analyze.extension(arg.or.env(4, "AIDAS_REFERENCE_LIGHT", "LIGHT_MARKED"))
 TO.PROCESS.LIGHT=strip.analyze.extension(arg.or.env(6, "AIDAS_TO_PROCESS_LIGHT", "LIGHT"))
 IMAGE.INDEX.LIGHT=parse.index(arg.or.env(7, "AIDAS_IMAGE_INDEX_LIGHT", ""))
-# These names are retained only for legacy output filenames and R object names.
-# No DARK Analyze input is read.
 REFERENCE.DARK="DARK_MARKED"
 TO.PROCESS.DARK="DARK"
 IMAGE.INDEX.DARK=IMAGE.INDEX.LIGHT
@@ -270,9 +272,6 @@ REF.LIGHT<-f.read.analyze.volume(paste(REFERENCE.LIGHT,".hdr",sep=""))
 LIGHT<-f.read.analyze.volume(paste(TO.PROCESS.LIGHT,".hdr",sep=""))
 if(length(dim(REF.LIGHT))==4) REF.LIGHT=REF.LIGHT[,,,1]
 if(length(dim(LIGHT))==4) LIGHT=LIGHT[,,,1]
-# Preserve the legacy paired-channel dimensions and loop structure exactly.
-# The former DARK inputs in every ground-truth fixture are pixel-identical to
-# their LIGHT counterparts, so these aliases reproduce the original values.
 REF.DARK=REF.LIGHT
 DARK=LIGHT
 dbg("load-images", "REF.DARK dim:", paste(dim(REF.DARK), collapse="x"), "REF.LIGHT dim:", paste(dim(REF.LIGHT), collapse="x"))
@@ -285,7 +284,7 @@ if(length(IMAGE.INDEX.LIGHT) != dim(LIGHT)[3]) {
 if(length(IMAGE.INDEX.DARK) != dim(DARK)[3]) {
   stop(paste0("IMAGE.INDEX.DARK length ", length(IMAGE.INDEX.DARK), " does not match DARK slices ", dim(DARK)[3], "."))
 }
-dbg("variable-stats", "Printing summary statistics for current variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for current variables")
 show.scalar.stats("REFERENCE.DARK", REFERENCE.DARK)
 show.scalar.stats("REFERENCE.LIGHT", REFERENCE.LIGHT)
 show.scalar.stats("TO.PROCESS.DARK", TO.PROCESS.DARK)
@@ -346,7 +345,7 @@ fovea.line=fovea.line[order(fovea.line[,1]),]
 ## just in case it's a perfectly vertical line....
 if(length(unique(fovea.line[,1]))==1) fovea.line[1,1]=fovea.line[1,1]+0.1
 dbg("fovea-center", "Translating the first R block for fovea center detection")
-dbg("variable-stats", "Printing summary statistics for translated fovea variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated fovea variables")
 show.array.stats("R", R)
 show.array.stats("Xs", Xs)
 show.array.stats("Ys", Ys)
@@ -366,7 +365,7 @@ Ycoords=Ys*R
 RPE.line=cbind(Xcoords[which(!(is.na(Xcoords)))],Ycoords[which(!(is.na(Xcoords)))])
 RPE.line=RPE.line[order(RPE.line[,1]),]
 dbg("rpe-line", "Translating the next R block for RPE.line detection")
-dbg("variable-stats", "Printing summary statistics for translated RPE variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated RPE variables")
 show.array.stats("R", R)
 show.array.stats("Xcoords", Xcoords)
 show.array.stats("Ycoords", Ycoords)
@@ -415,7 +414,7 @@ matlines(RPE.info.2[,1],RPE.info.2[,2])
 RPE.info.2[,3]<-( (-1) / RPE.info.2[,3] )
 colnames(RPE.info.2)<-c("x_pix","y_pix","perpendicular_slope_pix","dist.on.spline.microns")
 dbg("rpe-spline", "Translating the spline/center/RPE.info block through line 305")
-dbg("variable-stats", "Printing summary statistics for translated spline variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated spline variables")
 show.array.stats("RPE.spline.compare", RPE.spline.compare)
 show.array.stats("RPE.spline", RPE.spline)
 show.array.stats("fovea.curve", fovea.curve)
@@ -442,7 +441,7 @@ SLOPEY=summary(lm(APPARENT.ANGLE[,2] ~ APPARENT.ANGLE[,1]))$coef[2,1]
 SLOPEY.neg100.to.100=SLOPEY
 APPARENT.ANGLE.neg100.to.100=APPARENT.ANGLE
 dbg("apparent-angle", "Translating the APPARENT.ANGLE block through line 331")
-dbg("variable-stats", "Printing summary statistics for translated APPARENT.ANGLE variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated APPARENT.ANGLE variables")
 show.array.stats("APPARENT.ANGLE.500.to.2750", APPARENT.ANGLE.500.to.2750)
 show.scalar.stats("SLOPEY.500.to.2750", SLOPEY.500.to.2750)
 show.array.stats("APPARENT.ANGLE.neg100.to.100", APPARENT.ANGLE.neg100.to.100)
@@ -496,7 +495,7 @@ Retina.Points[,5:6]=ADD+Retina.Points[,2:3]
 Retina.Points[,7:8]=SUB+Retina.Points[,2:3]
 colnames(Retina.Points)<-c("dist.on.spline.microns","x_pix","y_pix","perpendicular_slope_pix","end.x","end.y","start.x","start.y")
 dbg("perpendiculars", "Translating the perpendicular-setup block through line 386")
-dbg("variable-stats", "Printing summary statistics for translated perpendicular variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated perpendicular variables")
 show.array.stats("INTERCEPTS", INTERCEPTS)
 show.array.stats("DELTAS", DELTAS)
 show.scalar.stats("pixel.move", pixel.move)
@@ -547,7 +546,7 @@ for(x in 1:nrow(Retina.Points))
  LINE=floor(LINE); ## because the matrix starts at 1,1, all coordinates calculated to-date would use anything between 1 and 1.999 to refer to 1.
  F=as.vector(tapply(LINE[,c(2,1)],as.factor(cbind(seq(1,(500+1),1),seq(1,(500+1),1))),GETrecon));
  FLATTENED.MARKERS[x,1:ncol(FLATTENED.MARKERS)]=F[2:length(F)]}
-dbg("variable-stats", "Printing summary statistics for translated flattened-marker variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated flattened-marker variables")
 show.scalar.stats("UpperX", UpperX)
 show.scalar.stats("UpperY", UpperY)
 show.array.stats("unwrapped.recon", unwrapped.recon)
@@ -580,7 +579,7 @@ colnames(APPARENT.ANGLES.FOR.DARK)<-c("image","fovea_neg100_to_100","500_to_2750
 # dark
 FLATTENED.DARK.RETINA=array(data=NA, dim=c(nrow(Retina.Points),500,dim(DARK)[3]))
 for(z in 1:length(IMAGE.INDEX.DARK))
- {dbg("dark-loop", "Processing z=", z, "of", length(IMAGE.INDEX.DARK), "REF.DARK slice dim:", paste(dim(REF.DARK[,,z]), collapse="x"))
+ {dbg("dark-loop", "Processing z=", z, "of", length(IMAGE.INDEX.DARK), "REF.DARK slice dim:", paste(dim(REF.DARK)[1:2], collapse="x"))
   R=REF.DARK[,,z];
   R[which(R<243)]=NA;
   R[which(R>243)]=NA;
@@ -718,7 +717,7 @@ dbg("dark-loop", "Translating the dark-image loop through line 599")
 # light
 FLATTENED.LIGHT.RETINA=array(data=NA, dim=c(nrow(Retina.Points),500,dim(LIGHT)[3]))
 for(z in 1:length(IMAGE.INDEX.LIGHT))
- {dbg("light-loop", "Processing z=", z, "of", length(IMAGE.INDEX.LIGHT), "REF.LIGHT slice dim:", paste(dim(REF.LIGHT[,,z]), collapse="x"))
+ {dbg("light-loop", "Processing z=", z, "of", length(IMAGE.INDEX.LIGHT), "REF.LIGHT slice dim:", paste(dim(REF.LIGHT)[1:2], collapse="x"))
   R=REF.LIGHT[,,z];
   R[which(R<243)]=NA;
   R[which(R>243)]=NA;
@@ -865,7 +864,7 @@ rm(R)
 
 
 dbg("light-loop", "Translating the light-image loop through line 755")
-dbg("variable-stats", "Printing summary statistics for translated dark/light loop variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated dark/light loop variables")
 show.array.stats("APPARENT.ANGLES.FOR.LIGHT", APPARENT.ANGLES.FOR.LIGHT)
 show.array.stats("APPARENT.ANGLES.FOR.DARK", APPARENT.ANGLES.FOR.DARK)
 show.array.stats("FLATTENED.DARK.RETINA", FLATTENED.DARK.RETINA)
@@ -909,12 +908,11 @@ FLATTENED.LIGHT.RETINA[which(FLATTENED.LIGHT.RETINA<0)]=0
 ## </new for 2022-JUN-19> 
 FLATTENED.LIGHT.RETINA.RAW=2^(FLATTENED.LIGHT.RETINA/5000)
 dbg("post-log-convert", "Converted DARK and LIGHT flattened arrays back to raw scale")
-dbg("variable-stats", "Printing summary statistics for translated post-log conversion variables")
+diagnostic.dbg("variable-stats", "Printing summary statistics for translated post-log conversion variables")
 show.array.stats("FLATTENED.DARK.RETINA", FLATTENED.DARK.RETINA)
 show.array.stats("FLATTENED.DARK.RETINA.RAW", FLATTENED.DARK.RETINA.RAW)
 show.array.stats("FLATTENED.LIGHT.RETINA", FLATTENED.LIGHT.RETINA)
 show.array.stats("FLATTENED.LIGHT.RETINA.RAW", FLATTENED.LIGHT.RETINA.RAW)
-stop.at.boundary("exit-after-post-log-convert", "Reached current translated boundary after post-log conversion; stopping here.")
 
 
 #################################################
@@ -1259,10 +1257,10 @@ FLATTENED.LIGHT.RETINA.RRC=FLATTENED.LIGHT.RETINA.RRC[,(vertex-430):(vertex+30),
 
 EXPORT=FLATTENED.DARK.RETINA.RRC
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat_",TO.PROCESS.DARK,sep=""),size="float",path.out=OUTDIR)
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat_",TO.PROCESS.DARK,sep="")),size="float")
 EXPORT=FLATTENED.LIGHT.RETINA.RRC
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat_",TO.PROCESS.LIGHT,sep=""),size="float",path.out=OUTDIR)
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat_",TO.PROCESS.LIGHT,sep="")),size="float")
 
 ## !!here
 
@@ -3403,7 +3401,7 @@ FLATTENED.DARK.RETINA.RRC.N[50:152,,]=FLATTENED.DARK.RETINA.RRC.N.fovea[50:152,,
 ## the pixel dimensions of this are 1 micron in the x, and 1.25% of the retinal thickness in the y
 EXPORT=FLATTENED.DARK.RETINA.RRC.N
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat-normed_",TO.PROCESS.DARK,sep=""),size="float",path.out=OUTDIR)
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat-normed_",TO.PROCESS.DARK,sep="")),size="float")
 
 
 ######################################################################################################################################################################################################################################
@@ -3538,7 +3536,7 @@ FLATTENED.LIGHT.RETINA.RRC.N[50:152,,]=FLATTENED.LIGHT.RETINA.RRC.N.fovea[50:152
 ## the pixel dimensions of this are 1 micron in the x, and 1.25% of the retinal thickness in the y
 EXPORT=FLATTENED.LIGHT.RETINA.RRC.N
 EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],paste("_flat-normed_",TO.PROCESS.LIGHT,sep=""),size="float",path.out=OUTDIR)
+f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat-normed_",TO.PROCESS.LIGHT,sep="")),size="float")
 
 
 
