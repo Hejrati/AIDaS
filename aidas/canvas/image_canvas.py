@@ -39,6 +39,8 @@ class ImageCanvas(ttk.Frame):
         on_mouse_move=None,
         on_line_change=None,
         on_vertical_line_change=None,
+        on_zoom_change=None,
+        auto_fit_on_resize=False,
     ):
         super().__init__(parent)
 
@@ -47,6 +49,8 @@ class ImageCanvas(ttk.Frame):
         self._cb_mouse = on_mouse_move    # (ix, iy, value)
         self._cb_line = on_line_change    # (points)
         self._cb_vertical_line = on_vertical_line_change  # (x or None)
+        self._cb_zoom = on_zoom_change    # (zoom)
+        self._auto_fit_on_resize = bool(auto_fit_on_resize)
 
         # Image state
         self._data = None          # numpy (H, W) original
@@ -164,6 +168,8 @@ class ImageCanvas(ttk.Frame):
             self._auto_zoom()
         self._redraw()
         self._refresh_cursor_for_mode()
+        if data is not None:
+            self._emit_zoom_change()
 
     def get_image(self):
         return self._data
@@ -317,6 +323,7 @@ class ImageCanvas(ttk.Frame):
         self._cancel_pending_zoom()
         self._auto_zoom()
         self._redraw()
+        self._emit_zoom_change()
 
     def _zoom_around_visible_center(self, zoom):
         """Apply zoom around the image point currently at viewport center."""
@@ -332,6 +339,7 @@ class ImageCanvas(ttk.Frame):
         self._zoom = max(0.02, min(30.0, float(zoom)))
         self._redraw()
         self._center_view_on_image_point(focus_x, focus_y)
+        self._emit_zoom_change()
 
     def _queue_zoom(self, zoom):
         """Coalesce rapid wheel events into one viewport-sized redraw."""
@@ -366,6 +374,12 @@ class ImageCanvas(ttk.Frame):
         self._zoom = zoom
         self._redraw()
         self._center_view_on_image_point(focus_x, focus_y)
+        self._emit_zoom_change()
+
+    def _emit_zoom_change(self):
+        """Notify the owning view after a zoom operation has rendered."""
+        if self._cb_zoom is not None:
+            self._cb_zoom(self._zoom)
 
     def _cancel_pending_zoom(self):
         """Cancel a queued wheel redraw when image/zoom state changes directly."""
@@ -957,7 +971,14 @@ class ImageCanvas(ttk.Frame):
         self._resize_redraw_after_id = None
         if self._data is None or not self._canvas_size_changed():
             return
-        self._refresh_viewport_geometry()
+        if self._auto_fit_on_resize:
+            # Recompute the fit after the resize settles so responsive image
+            # previews use the newly available viewport space.
+            self._auto_zoom()
+            self._redraw()
+            self._emit_zoom_change()
+        else:
+            self._refresh_viewport_geometry()
 
     def _on_press(self, event):
         if self._vertical_line_on:

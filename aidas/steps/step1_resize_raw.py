@@ -129,6 +129,8 @@ class Step1Frame(SidebarStepFrame):
             right,
             on_roi_change=self._on_roi_changed,
             on_mouse_move=self._on_mouse_moved,
+            on_zoom_change=self._on_canvas_zoom_changed,
+            auto_fit_on_resize=True,
         )
         self.image_canvas.pack(fill="both", expand=True)
 
@@ -1603,6 +1605,11 @@ class Step1Frame(SidebarStepFrame):
         self.status_var.set(
             f"Image: {width}×{height} {img.dtype}  |  Zoom: {zoom * 100:.0f}%"
         )
+
+    def _on_canvas_zoom_changed(self, _zoom):
+        """Refresh Step 1 status as soon as the canvas zoom changes."""
+        self._update_zoom_label()
+        self._update_image_status()
 
     def _on_mouse_moved(self, ix, iy, val):
         """Update status with cursor position/value for current image.
