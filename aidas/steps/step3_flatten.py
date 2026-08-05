@@ -1621,10 +1621,11 @@ class RBatchSelectionTable(ttk.Frame):
 class RBatchSelectionPanel(ttk.Frame):
     """Embedded panel for selecting subfolders to run through the Step 3 R script."""
 
-    def __init__(self, step_frame, parent, root_dir):
+    def __init__(self, step_frame, parent, root_dir, folders=None):
         super().__init__(parent)
         self.step_frame = step_frame
         self.root_dir = Path(root_dir)
+        self.input_folders = None if folders is None else tuple(Path(folder) for folder in folders)
         self.rows = []
         self.table = None
 
@@ -1636,12 +1637,19 @@ class RBatchSelectionPanel(ttk.Frame):
         wrapper.pack(fill="both", expand=True)
 
         ttk.Label(wrapper, text="Batch R Script Processing", font=("", 12, "bold")).pack(anchor="w")
-        ttk.Label(
-            wrapper,
-            text=(
+        if self.input_folders is None:
+            instructions = (
                 "AIDaS will search the selected folder and subfolders for Light.img and Light_MARKED.img. "
                 "Folders containing existing RData are shown as skipped and will not be processed."
-            ),
+            )
+        else:
+            instructions = (
+                "Review the nasal and temporal folders saved in Step 2, select the folders to process, "
+                "and press Start to run the selected R scripts. Folders containing existing RData are skipped."
+            )
+        ttk.Label(
+            wrapper,
+            text=instructions,
             wraplength=760,
             justify="left",
         ).pack(anchor="w", pady=(4, 10))
@@ -1717,7 +1725,11 @@ class RBatchSelectionPanel(ttk.Frame):
         scanned = 0
         missing = 0
         try:
-            folders, access_errors = walk_accessible_directories(self.root_dir)
+            if self.input_folders is None:
+                folders, access_errors = walk_accessible_directories(self.root_dir)
+            else:
+                folders = list(self.input_folders)
+                access_errors = []
             for folder in folders:
                 try:
                     scanned += 1
@@ -3196,8 +3208,48 @@ class Step3Frame(SidebarStepFrame):
         )
         if not root_dir:
             return
+        self._show_r_batch_scanner(root_dir)
+
+    @staticmethod
+    def _normalize_batch_input_folders(folders):
+        """Return unique existing folders in stable handoff order."""
+        normalized = []
+        seen = set()
+        for folder in folders or ():
+            path = Path(folder).resolve()
+            key = os.path.normcase(str(path))
+            if key in seen or not path.is_dir():
+                continue
+            seen.add(key)
+            normalized.append(path)
+        return normalized
+
+    def open_batch_folders(self, folders):
+        """Open Step 3's selector with the exact folders saved by Step 2."""
+        if self._busy:
+            return False
+        folders = self._normalize_batch_input_folders(folders)
+        if not folders:
+            messagebox.showwarning("Batch Step 3", "No saved Step 3 input folders were found.")
+            return False
+        try:
+            root_dir = Path(os.path.commonpath([str(folder) for folder in folders]))
+        except ValueError:
+            root_dir = folders[0].parent
+        self.current_sdb_dir = str(root_dir)
+        self.output_sdb_dir = str(root_dir)
+        self._show_r_batch_scanner(root_dir, folders=folders)
+        return True
+
+    def _show_r_batch_scanner(self, root_dir, folders=None):
+        """Render the Step 3 folder selector, optionally using an exact folder list."""
         self._clear_plot_holder()
-        self.r_batch_panel = RBatchSelectionPanel(self, self.plot_holder, Path(root_dir))
+        self.r_batch_panel = RBatchSelectionPanel(
+            self,
+            self.plot_holder,
+            Path(root_dir),
+            folders=folders,
+        )
         self.r_batch_panel.pack(fill="both", expand=True)
         self.progress_text_var.set("Batch scan")
         self.status_var.set(f"Scanning batch root: {root_dir}")

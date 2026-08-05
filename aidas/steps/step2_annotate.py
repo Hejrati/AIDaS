@@ -603,18 +603,27 @@ class Step2Frame(SidebarStepFrame):
       - image_data: current numpy array being annotated
     """
 
-    def __init__(self, parent, preferences=None, source_step=None, on_output_folder_changed=None):
+    def __init__(
+        self,
+        parent,
+        preferences=None,
+        source_step=None,
+        on_output_folder_changed=None,
+        on_continue_to_step3=None,
+    ):
         """Initialize the Step 2 annotation panel.
 
         Args:
             parent: Tkinter parent widget.
             preferences: User preferences dict (optional).
             source_step: Reference to Step 1 panel for linked image loading (optional).
+            on_continue_to_step3: Callback receiving saved Step 3 input folders.
         """
         super().__init__(parent)
         self.preferences = preferences
         self.source_step = source_step
         self.on_output_folder_changed = on_output_folder_changed
+        self.on_continue_to_step3 = on_continue_to_step3
 
         # ─ Image data state ─
         self.current_file = None  # Path to currently loaded image
@@ -823,13 +832,13 @@ class Step2Frame(SidebarStepFrame):
         orientation.pack(fill="x", pady=(6, 0))
         ttk.Radiobutton(
             orientation,
-            text="Current image: Temporal -> Nasal",
+            text="Current image: Left side: Temporal -> Right side: Nasal",
             variable=self.save_orientation_var,
             value=SAVE_ORIENTATION_TEMPORAL_TO_NASAL,
         ).pack(anchor="w")
         ttk.Radiobutton(
             orientation,
-            text="Current image: Nasal -> Temporal",
+            text="Current image: Left side: Nasal -> Right side: Temporal",
             variable=self.save_orientation_var,
             value=SAVE_ORIENTATION_NASAL_TO_TEMPORAL,
         ).pack(anchor="w")
@@ -858,6 +867,24 @@ class Step2Frame(SidebarStepFrame):
             compound="left",
         )
         self.save_all_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        action_icon_size = 16
+        self.continue_to_step3_button_icon = load_ui_icon(
+            self, "lets-icons--flag-finish.png", size=action_icon_size
+        )
+        self.continue_to_step3_button = ttk.Button(
+            saved_buttons,
+            text="Go to Step 3 >>",
+            command=self._save_all_and_continue_to_step3_button,
+            image=self.continue_to_step3_button_icon,
+            compound="left",
+        )
+        self.continue_to_step3_button.grid(
+            row=1,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            pady=(4, 0),
+        )
 
         # help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
         # help_box = help_section.body
@@ -876,6 +903,7 @@ class Step2Frame(SidebarStepFrame):
         self._refresh_boundary_lists(auto_select=False)
         self._set_segmentation_frame_enabled(False)
         self._update_batch_ai_button_state()
+        self._update_continue_to_step3_button_state()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Image loading
@@ -1669,6 +1697,19 @@ class Step2Frame(SidebarStepFrame):
             else:
                 self.saved_button.state(["disabled"])  # Disable otherwise
 
+        self._update_continue_to_step3_button_state()
+
+    def _update_continue_to_step3_button_state(self):
+        """Enable the handoff only while segmented batch images are available."""
+        button = getattr(self, "continue_to_step3_button", None)
+        if button is None:
+            return
+        has_segmented_images = bool(getattr(self, "_batch_result_states", {}))
+        if has_segmented_images and not self._segmenter_running:
+            button.state(["!disabled"])
+        else:
+            button.state(["disabled"])
+
     def _boundary_color(self, name):
         if name in BOUNDARY_COLORS:
             return BOUNDARY_COLORS[name]
@@ -2104,6 +2145,7 @@ class Step2Frame(SidebarStepFrame):
         if hasattr(self, "segmentation_frame"):
             set_state(self.segmentation_frame, state)
         self._update_batch_ai_button_state()
+        self._update_continue_to_step3_button_state()
 
 
     def _on_fovea_x_entry_changed(self, *_):
@@ -2829,6 +2871,42 @@ class Step2Frame(SidebarStepFrame):
                 "Temporal images were mirrored left to right.",
             )
 
+    @staticmethod
+    def _step3_folders_from_saved_pairs(saved_pairs):
+        """Return unique folders containing the saved nasal/temporal outputs."""
+        folders = []
+        seen = set()
+        for output_pair in saved_pairs or ():
+            for base_path in output_pair or ():
+                folder = os.path.dirname(os.path.abspath(str(base_path)))
+                key = os.path.normcase(folder)
+                if not folder or key in seen:
+                    continue
+                seen.add(key)
+                folders.append(folder)
+        return folders
+
+    def _save_all_and_continue_to_step3_button(self):
+        """Save every segmented batch image and open those folders in Step 3."""
+        if not getattr(self, "_batch_result_states", None):
+            messagebox.showinfo("No segmented images", "There are no segmented images to send to Step 3.")
+            self._update_continue_to_step3_button_state()
+            return
+
+        saved = self._save_all_batch_result_tabs()
+        if not saved or getattr(self, "_batch_result_states", None):
+            return
+
+        folders = self._step3_folders_from_saved_pairs(saved)
+        callback = self.on_continue_to_step3
+        if callback is None:
+            messagebox.showinfo(
+                "Saved All",
+                f"Saved {len(saved)} image(s) for Step 3 in {len(folders)} folder(s).",
+            )
+            return
+        callback(folders)
+
     def _save_current_marked_image_button(self):
         if self.image_data is None:
             messagebox.showwarning("No image", "Load or select an image before saving a MARKED output.")
@@ -3314,6 +3392,8 @@ class Step2Frame(SidebarStepFrame):
                             pass
                         enable_widget(child)
                 enable_widget(self.saved_buttons_frame)
+
+        self._update_continue_to_step3_button_state()
         
         if running:
             if hasattr(self, "segmenter_progress"):

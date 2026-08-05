@@ -23,7 +23,7 @@ ImageJ reference source used for the measurement port:
 
 Important limitation: the macro pauses after each ``doWand`` call with
 ``waitForUser("Pause","Do Wand")``. If the user manually edits the wand ROI in
-ImageJ during that pause, the saved Results.xlsx can contain values that cannot
+ImageJ during that pause, the saved rr_MCPAR.xlsx can contain values that cannot
 be reproduced from the plot image alone because that manual ROI state is not
 stored in ``ROI_to_move_stck.tif``.
 """
@@ -50,6 +50,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
+from aidas.core.display import centered_position, work_area_bounds
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame, load_ui_icon
@@ -77,10 +78,11 @@ IMAGEJ_PLOT_BOX_ASPECT = (IMAGEJ_PLOT_BOX[3] - IMAGEJ_PLOT_BOX[1]) / (IMAGEJ_PLO
 # Column order and text match the ImageJ Results table produced by the macro's
 # "fit shape" measurement options and 3-decimal precision.
 RESULTS_HEADERS = [" ", "Major", "Minor", "Angle", "Circ.", "AR", "Round", "Solidity"]
+STEP4_RESULTS_FILENAME = "rr_MCPAR.xlsx"
 STEP4_OUTPUT_GROUPS = (
     ("MAX_Stack.tif",),
     ("ROI_to_move_stck.tif", "ROI_to_move_stck.tiff"),
-    ("Results.xlsx", "Results_org.xlsx"),
+    (STEP4_RESULTS_FILENAME, "Results.xlsx", "Results_org.xlsx"),
 )
 
 
@@ -231,6 +233,114 @@ def max_stack_projection_image(image: np.ndarray, rois: list[ISezROI]) -> np.nda
 
 def _clamp_profile_index(value: float | int, n_points: int) -> int:
     return max(1, min(int(round(float(value))), n_points))
+
+
+def _focused_profile_limits(
+    n_points: int,
+    start: float | int,
+    end: float | int,
+    *,
+    margin_ratio: float = 0.25,
+    minimum_margin: int = 5,
+) -> tuple[int, int]:
+    """Return a compact 1-based profile window around two selected bounds."""
+
+    if n_points < 1:
+        raise ValueError("A profile must contain at least one value.")
+    first = _clamp_profile_index(start, n_points)
+    last = _clamp_profile_index(end, n_points)
+    if first > last:
+        first, last = last, first
+    selected_width = max(1, last - first)
+    margin = max(int(minimum_margin), int(math.ceil(selected_width * float(margin_ratio))))
+    return max(1, first - margin), min(n_points, last + margin)
+
+
+def _nearest_profile_sample(profile: np.ndarray, x_value: float | int) -> tuple[int, float]:
+    """Return the nearest 1-based sample index and its exact profile value."""
+
+    values = np.asarray(profile, dtype=np.float64).reshape(-1)
+    if values.size < 1:
+        raise ValueError("A profile must contain at least one value.")
+    sample = _clamp_profile_index(x_value, values.size)
+    return sample, float(values[sample - 1])
+
+
+def _profile_selection_boundary(
+    profile: np.ndarray,
+    start: float | int,
+    end: float | int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return the selected curve and its straight closing baseline."""
+
+    values = np.asarray(profile, dtype=np.float64).reshape(-1)
+    if values.size < 2:
+        raise ValueError("A profile must contain at least two values.")
+    first = _clamp_profile_index(start, values.size)
+    last = _clamp_profile_index(end, values.size)
+    if first > last:
+        first, last = last, first
+    if first == last:
+        last = min(values.size, first + 1)
+        if first == last:
+            first = max(1, last - 1)
+
+    x_values = np.arange(first, last + 1, dtype=np.float64)
+    curve_values = values[first - 1:last]
+    baseline_values = np.linspace(curve_values[0], curve_values[-1], curve_values.size)
+    return x_values, curve_values, baseline_values
+
+
+def _updated_profile_bounds(
+    start: float | int,
+    end: float | int,
+    *,
+    boundary: str,
+    sample: float | int,
+    n_points: int,
+) -> tuple[int, int]:
+    """Move one boundary while preserving an ordered, non-empty selection."""
+
+    if n_points < 2:
+        raise ValueError("A profile must contain at least two values.")
+    first = _clamp_profile_index(start, n_points)
+    last = _clamp_profile_index(end, n_points)
+    if first > last:
+        first, last = last, first
+    if first == last:
+        last = min(n_points, first + 1)
+        if first == last:
+            first = max(1, last - 1)
+
+    target = _clamp_profile_index(sample, n_points)
+    if boundary == "start":
+        first = min(target, last - 1)
+    elif boundary == "end":
+        last = max(target, first + 1)
+    else:
+        raise ValueError(f"Unknown profile boundary: {boundary}")
+    return first, last
+
+
+def _profile_zoom_window_geometry(
+    bounds: tuple[int, int, int, int],
+    dpi_scale: float = 1.0,
+) -> tuple[int, int, int, int]:
+    """Return a responsive popup size and its centered monitor position."""
+
+    left, top, right, bottom = (int(value) for value in bounds)
+    available_width = max(1, right - left)
+    available_height = max(1, bottom - top)
+    scale = max(0.75, min(float(dpi_scale), 2.5))
+
+    maximum_width = max(1, round(available_width * 0.90))
+    maximum_height = max(1, round(available_height * 0.90))
+    desired_width = max(round(720 * scale), round(available_width * 0.72))
+    desired_height = max(round(600 * scale), round(available_height * 0.78))
+    width = min(maximum_width, round(1100 * scale), desired_width)
+    height = min(maximum_height, round(820 * scale), desired_height)
+    x, y = centered_position(bounds, width, height)
+    return width, height, x, y
 
 
 def adjust_isez_bounds(
@@ -526,7 +636,7 @@ def _xlsx_cell_xml(row: int, col: int, value) -> str:
 
 
 def write_imagej_results_xlsx(rows: list[dict[str, float]], path: str | os.PathLike) -> None:
-    """Write the ImageJ-style Step 4 Results.xlsx workbook.
+    """Write the ImageJ-style Step 4 results workbook.
 
     ImageJ's Results table is tabular text internally; the old workflow saved
     it as an Excel workbook. ``openpyxl`` is not a project dependency here, so
@@ -1144,6 +1254,400 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         self.step_frame._close_batch_roi_panel(restore_previous=True)
 
 
+class Step4ProfileZoomDialog(tk.Toplevel):
+    """Focused profile editor opened from a completed ROI preview cell."""
+
+    START_COLOR = "#2563eb"
+    END_COLOR = "#dc2626"
+    CROSSHAIR_COLOR = "#7c3aed"
+
+    def __init__(
+        self,
+        owner,
+        *,
+        roi_index: int,
+        roi_suffix: str,
+        profile: np.ndarray,
+        start: float | int,
+        end: float | int,
+        on_preview,
+        on_apply,
+        on_close,
+    ):
+        super().__init__(owner)
+        self.withdraw()
+        self.roi_index = int(roi_index)
+        self.profile = np.asarray(profile, dtype=np.float64).reshape(-1)
+        if self.profile.size < 2:
+            self.destroy()
+            raise ValueError("The selected ROI profile is too short to revise.")
+
+        self._on_preview_callback = on_preview
+        self._on_apply_callback = on_apply
+        self._on_close_callback = on_close
+        self._closing = False
+        self._saving_text = None
+        self._start, self._end = _updated_profile_bounds(
+            start,
+            end,
+            boundary="end",
+            sample=max(float(start), float(end)),
+            n_points=self.profile.size,
+        )
+        self._view_left, self._view_right = _focused_profile_limits(
+            self.profile.size,
+            self._start,
+            self._end,
+        )
+
+        self.title(f"Revise ROI {roi_suffix} profile")
+        try:
+            self.transient(owner.winfo_toplevel())
+        except tk.TclError:
+            pass
+        self.protocol("WM_DELETE_WINDOW", self.close)
+        self.bind("<Escape>", lambda _event: self.close())
+
+        self.boundary_var = tk.StringVar(value="start")
+        self.selection_var = tk.StringVar()
+        self.cursor_var = tk.StringVar(value="Move over the curve to inspect an exact value.")
+        self.apply_status_var = tk.StringVar(value="")
+        self.measurement_vars = {
+            name: tk.StringVar(value="--") for name in RESULTS_HEADERS[1:]
+        }
+        self.measurement_status_var = tk.StringVar(value="Live values for the current Start and End")
+
+        instructions = ttk.Frame(self, padding=(10, 9, 10, 5))
+        instructions.pack(fill="x")
+        ttk.Label(
+            instructions,
+            text=(
+                "Hover for an exact sample and intensity. Choose Start or End, then click the curve "
+                "to move that boundary."
+            ),
+            justify="left",
+            wraplength=860,
+        ).pack(side="left", fill="x", expand=True)
+
+        editor = ttk.Frame(self, padding=(10, 0, 10, 5))
+        editor.pack(fill="x")
+        ttk.Label(editor, text="Boundary to revise:").pack(side="left", padx=(0, 6))
+        ttk.Radiobutton(editor, text="Start", value="start", variable=self.boundary_var).pack(side="left")
+        ttk.Radiobutton(editor, text="End", value="end", variable=self.boundary_var).pack(side="left", padx=(6, 14))
+        ttk.Label(editor, textvariable=self.selection_var).pack(side="left")
+
+        measurements = ttk.LabelFrame(self, text="Live shape measurements", padding=(8, 4, 8, 7))
+        measurements.pack(fill="x", padx=10, pady=(0, 5))
+        for column, name in enumerate(RESULTS_HEADERS[1:]):
+            measurements.columnconfigure(column, weight=1, uniform="step4_measurement")
+            ttk.Label(measurements, text=name, anchor="center").grid(
+                row=0,
+                column=column,
+                sticky="ew",
+                padx=3,
+            )
+            ttk.Label(
+                measurements,
+                textvariable=self.measurement_vars[name],
+                anchor="center",
+            ).grid(row=1, column=column, sticky="ew", padx=3, pady=(2, 0))
+        ttk.Label(
+            measurements,
+            textvariable=self.measurement_status_var,
+            anchor="w",
+            foreground="#4b5563",
+        ).grid(row=2, column=0, columnspan=len(RESULTS_HEADERS) - 1, sticky="ew", padx=3, pady=(4, 0))
+
+        footer = ttk.Frame(self, padding=(10, 5, 10, 10))
+        footer.pack(side="bottom", fill="x")
+        ttk.Label(footer, textvariable=self.cursor_var).pack(side="left")
+        ttk.Label(footer, textvariable=self.apply_status_var, foreground="#047857").pack(
+            side="left", padx=(16, 0)
+        )
+        ttk.Button(footer, text="Close", command=self.close).pack(side="right")
+        self.apply_button = ttk.Button(footer, text="Apply changes", command=self._apply)
+        self.apply_button.pack(side="right", padx=(0, 6))
+
+        chart_frame = ttk.Frame(self)
+        chart_frame.pack(fill="both", expand=True, padx=10)
+        self.figure = Figure(figsize=(8.8, 5.0), dpi=100)
+        self.ax = self.figure.add_subplot(111)
+        self.figure.subplots_adjust(left=0.09, right=0.97, bottom=0.12, top=0.95)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=chart_frame)
+        self.canvas.get_tk_widget().pack(side="top", fill="both", expand=True)
+
+        self._draw_profile()
+        self._refresh_measurements()
+        self._motion_cid = self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self._leave_cid = self.canvas.mpl_connect("axes_leave_event", self._on_axes_leave)
+        self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
+
+        self._size_and_center_on_active_screen()
+        self.after_idle(self._focus_window)
+
+    def _size_and_center_on_active_screen(self) -> None:
+        bounds = work_area_bounds(self)
+        dpi_scale = max(0.75, float(self.winfo_fpixels("1i")) / 96.0)
+        width, height, x, y = _profile_zoom_window_geometry(bounds, dpi_scale)
+        self.minsize(
+            min(width, round(680 * dpi_scale)),
+            min(height, round(500 * dpi_scale)),
+        )
+        self.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        self.deiconify()
+
+    def _focus_window(self) -> None:
+        try:
+            self.lift()
+            self.focus_force()
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _format_intensity(value: float) -> str:
+        return "nan" if not np.isfinite(value) else f"{value:.4f}"
+
+    def _draw_profile(self) -> None:
+        self.ax.clear()
+        visible_x = np.arange(self._view_left, self._view_right + 1, dtype=np.float64)
+        visible_y = self.profile[self._view_left - 1:self._view_right]
+        self.ax.plot(
+            visible_x,
+            visible_y,
+            color="#111827",
+            linewidth=1.35,
+            marker="o",
+            markersize=3.2,
+            markerfacecolor="white",
+            markeredgewidth=0.8,
+            zorder=3,
+        )
+        boundary_x, boundary_curve, boundary_baseline = _profile_selection_boundary(
+            self.profile,
+            self._start,
+            self._end,
+        )
+        (self._boundary_curve,) = self.ax.plot(
+            boundary_x,
+            boundary_curve,
+            color="#ffd400",
+            linewidth=2.6,
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            zorder=4,
+        )
+        (self._baseline_line,) = self.ax.plot(
+            [boundary_x[0], boundary_x[-1]],
+            [boundary_baseline[0], boundary_baseline[-1]],
+            color="#ffd400",
+            linewidth=2.6,
+            solid_capstyle="round",
+            zorder=4,
+        )
+        self._start_line = self.ax.axvline(
+            self._start,
+            color=self.START_COLOR,
+            linewidth=1.8,
+            label="Start",
+            zorder=4,
+        )
+        self._end_line = self.ax.axvline(
+            self._end,
+            color=self.END_COLOR,
+            linewidth=1.8,
+            label="End",
+            zorder=4,
+        )
+        self._crosshair_x = self.ax.axvline(
+            self._view_left,
+            color=self.CROSSHAIR_COLOR,
+            linewidth=0.85,
+            linestyle="--",
+            visible=False,
+            zorder=5,
+        )
+        self._crosshair_y = self.ax.axhline(
+            0.0,
+            color=self.CROSSHAIR_COLOR,
+            linewidth=0.85,
+            linestyle="--",
+            visible=False,
+            zorder=5,
+        )
+        self._hover_annotation = self.ax.annotate(
+            "",
+            xy=(self._view_left, 0.0),
+            xytext=(12, 12),
+            textcoords="offset points",
+            fontsize=9,
+            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": self.CROSSHAIR_COLOR, "alpha": 0.94},
+            visible=False,
+            zorder=6,
+        )
+
+        finite_values = visible_y[np.isfinite(visible_y)]
+        if finite_values.size:
+            y_min = float(np.min(finite_values))
+            y_max = float(np.max(finite_values))
+            y_span = y_max - y_min
+            y_padding = max(0.5, y_span * 0.08)
+            self.ax.set_ylim(y_min - y_padding, y_max + y_padding)
+        self.ax.set_xlim(self._view_left - 0.35, self._view_right + 0.35)
+        self.ax.set_xlabel("Profile position (1-based sample)")
+        self.ax.set_ylabel("Intensity")
+        self.ax.grid(True, color="#d1d5db", linewidth=0.55, alpha=0.75)
+        self.ax.legend(loc="upper right")
+        self._update_selection_label()
+        self.canvas.draw()
+
+    def _update_selection_label(self) -> None:
+        start_value = float(self.profile[self._start - 1])
+        end_value = float(self.profile[self._end - 1])
+        self.selection_var.set(
+            f"Start {self._start} ({self._format_intensity(start_value)})    "
+            f"End {self._end} ({self._format_intensity(end_value)})"
+        )
+
+    def _update_closed_boundary(self) -> None:
+        boundary_x, boundary_curve, boundary_baseline = _profile_selection_boundary(
+            self.profile,
+            self._start,
+            self._end,
+        )
+        self._boundary_curve.set_data(boundary_x, boundary_curve)
+        self._baseline_line.set_data(
+            [boundary_x[0], boundary_x[-1]],
+            [boundary_baseline[0], boundary_baseline[-1]],
+        )
+
+    def _refresh_measurements(self) -> None:
+        try:
+            values = self._on_preview_callback(self.roi_index, self._start, self._end)
+            for name in RESULTS_HEADERS[1:]:
+                self.measurement_vars[name].set(f"{float(values[name]):.3f}")
+        except Exception:
+            for variable in self.measurement_vars.values():
+                variable.set("--")
+            self.measurement_status_var.set("Measurements are unavailable for this selection")
+            return
+        self.measurement_status_var.set("Updated for the current Start and End")
+
+    def _set_crosshair_visible(self, visible: bool) -> None:
+        self._crosshair_x.set_visible(visible)
+        self._crosshair_y.set_visible(visible)
+        self._hover_annotation.set_visible(visible)
+
+    def _on_motion(self, event) -> None:
+        if event.inaxes is not self.ax or event.xdata is None:
+            self._on_axes_leave(event)
+            return
+        sample, intensity = _nearest_profile_sample(self.profile, event.xdata)
+        if sample < self._view_left or sample > self._view_right:
+            self._on_axes_leave(event)
+            return
+
+        self._crosshair_x.set_xdata([sample, sample])
+        self._crosshair_y.set_ydata([intensity, intensity])
+        self._hover_annotation.xy = (sample, intensity)
+        self._hover_annotation.set_text(
+            f"Position: {sample}\nIntensity: {self._format_intensity(intensity)}"
+        )
+        midpoint = (self._view_left + self._view_right) / 2.0
+        self._hover_annotation.set_position((-12, 12) if sample > midpoint else (12, 12))
+        self._hover_annotation.set_horizontalalignment("right" if sample > midpoint else "left")
+        self._set_crosshair_visible(True)
+        self.cursor_var.set(f"Position {sample}    Intensity {self._format_intensity(intensity)}")
+        try:
+            self.canvas.get_tk_widget().configure(cursor="crosshair")
+        except tk.TclError:
+            pass
+        self.canvas.draw_idle()
+
+    def _on_axes_leave(self, _event) -> None:
+        self._set_crosshair_visible(False)
+        self.cursor_var.set("Move over the curve to inspect an exact value.")
+        try:
+            self.canvas.get_tk_widget().configure(cursor="")
+        except tk.TclError:
+            pass
+        self.canvas.draw_idle()
+
+    def _on_click(self, event) -> None:
+        if event.inaxes is not self.ax or event.xdata is None or event.button != 1:
+            return
+        sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
+        self._start, self._end = _updated_profile_bounds(
+            self._start,
+            self._end,
+            boundary=self.boundary_var.get(),
+            sample=sample,
+            n_points=self.profile.size,
+        )
+        self._start_line.set_xdata([self._start, self._start])
+        self._end_line.set_xdata([self._end, self._end])
+        self._update_closed_boundary()
+        self._update_selection_label()
+        self._refresh_measurements()
+        self.apply_status_var.set("Unsaved change")
+        self.canvas.draw_idle()
+
+    def _apply(self) -> None:
+        self._set_saving(True)
+        saved = False
+        try:
+            saved = bool(self._on_apply_callback(self.roi_index, self._start, self._end))
+        finally:
+            self._set_saving(False)
+        if saved:
+            self.apply_status_var.set("Changes applied")
+
+    def _set_saving(self, saving: bool) -> None:
+        if saving:
+            self.apply_button.state(["disabled"])
+            self.apply_status_var.set("Saving...")
+            self._saving_text = self.ax.text(
+                0.5,
+                0.5,
+                "Saving...",
+                ha="center",
+                va="center",
+                transform=self.ax.transAxes,
+                fontsize=16,
+                weight="bold",
+                color="#78350f",
+                bbox={
+                    "boxstyle": "round,pad=0.55",
+                    "facecolor": "#fef3c7",
+                    "edgecolor": "#d97706",
+                    "linewidth": 1.4,
+                    "alpha": 0.96,
+                },
+                zorder=20,
+            )
+            self.canvas.draw()
+            self.update_idletasks()
+            return
+
+        self.apply_button.state(["!disabled"])
+        if self._saving_text is not None:
+            try:
+                self._saving_text.remove()
+            except ValueError:
+                pass
+            self._saving_text = None
+        self.canvas.draw_idle()
+
+    def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        callback = self._on_close_callback
+        try:
+            self.destroy()
+        finally:
+            callback(self)
+
+
 class Step4Frame(SidebarStepFrame):
     """Step 4 tab UI for interactive ISez profile selection and output saving."""
 
@@ -1169,6 +1673,8 @@ class Step4Frame(SidebarStepFrame):
         self.ax_profile = None
         self.ax_roi_grid = None
         self._current_profile = None
+        self._plot_activity_text = None
+        self._profile_zoom_dialog = None
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
@@ -1611,6 +2117,7 @@ class Step4Frame(SidebarStepFrame):
         state["current_profile"] = self._current_profile
 
     def _activate_batch_roi_tab(self, tab) -> None:
+        self._close_profile_zoom()
         self._cancel_roi_update_animations(redraw=True)
         self._sync_active_batch_roi_state()
         tab_key = str(tab)
@@ -1840,6 +2347,7 @@ class Step4Frame(SidebarStepFrame):
         self._load_path(path)
 
     def _load_path(self, path: str | os.PathLike, *, restore_state: dict | None = None) -> None:
+        self._close_profile_zoom()
         self._cancel_roi_update_animations(redraw=False)
         try:
             volume = load_oct_volume(path)
@@ -1892,6 +2400,7 @@ class Step4Frame(SidebarStepFrame):
     def _set_slice_zero(self) -> None:
         if self.volume is None:
             return
+        self._close_profile_zoom()
         self.image = np.asarray(self.volume[0])
         self.profile_clicks.clear()
         self.roi_clicks.clear()
@@ -1916,12 +2425,14 @@ class Step4Frame(SidebarStepFrame):
             return
         if selected_idx == self.current_roi_idx:
             return
+        self._close_profile_zoom()
         self._remember_current_roi_clicks()
         self.current_roi_idx = selected_idx
         self._load_current_roi_clicks()
         self._render_current_roi()
 
     def _move_roi(self, delta: int) -> None:
+        self._close_profile_zoom()
         self._remember_current_roi_clicks()
         self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx + delta))
         self._load_current_roi_clicks()
@@ -1994,6 +2505,7 @@ class Step4Frame(SidebarStepFrame):
         self._update_build_stack_button_state()
 
     def _render_empty_canvas(self) -> None:
+        self._close_profile_zoom()
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
             self.canvas = None
@@ -2289,6 +2801,7 @@ class Step4Frame(SidebarStepFrame):
         if self.image is None:
             return
 
+        self._close_profile_zoom()
         click = float(event.xdata)
         if len(self.profile_clicks) >= 2:
             self.profile_clicks = [click]
@@ -2301,8 +2814,127 @@ class Step4Frame(SidebarStepFrame):
         if len(self.profile_clicks) >= 2:
             self.after_idle(self._auto_save_current_roi)
 
+    def _profile_zoom_closed(self, dialog) -> None:
+        if self._profile_zoom_dialog is dialog:
+            self._profile_zoom_dialog = None
+
+    def _close_profile_zoom(self) -> None:
+        dialog = getattr(self, "_profile_zoom_dialog", None)
+        if dialog is None:
+            return
+        self._profile_zoom_dialog = None
+        try:
+            dialog.close()
+        except tk.TclError:
+            pass
+
+    def _show_plot_activity(self, message: str = "Saving...") -> None:
+        self._hide_plot_activity(redraw=False)
+        if self.figure is None or self.canvas is None:
+            return
+        self._plot_activity_text = self.figure.text(
+            0.51,
+            0.22,
+            message,
+            ha="center",
+            va="center",
+            fontsize=14,
+            weight="bold",
+            color="#78350f",
+            bbox={
+                "boxstyle": "round,pad=0.55",
+                "facecolor": "#fef3c7",
+                "edgecolor": "#d97706",
+                "linewidth": 1.4,
+                "alpha": 0.96,
+            },
+            zorder=100,
+        )
+        self.canvas.draw()
+        try:
+            self.canvas.get_tk_widget().update_idletasks()
+        except tk.TclError:
+            pass
+
+    def _hide_plot_activity(self, *, redraw: bool = True) -> None:
+        activity_text = getattr(self, "_plot_activity_text", None)
+        self._plot_activity_text = None
+        if activity_text is not None:
+            try:
+                activity_text.remove()
+            except ValueError:
+                pass
+        if redraw and self.canvas is not None:
+            self.canvas.draw_idle()
+
+    def _open_profile_zoom(self, index: int) -> None:
+        if self.image is None or index != self.current_roi_idx:
+            return
+        existing = self._profile_zoom_dialog
+        if existing is not None:
+            try:
+                if existing.winfo_exists() and existing.roi_index == index:
+                    existing._focus_window()
+                    return
+            except tk.TclError:
+                pass
+            self._close_profile_zoom()
+
+        result = self._roi_overview_result(index)
+        if result is None:
+            return
+        self._show_plot_activity("Saving...")
+        error = None
+        try:
+            profile = intensity_profile(self.image, self.rois[index])
+            clicks = list(self.profile_clicks[:2])
+            if len(clicks) < 2:
+                clicks = [float(result.start), float(result.end)]
+            self._profile_zoom_dialog = Step4ProfileZoomDialog(
+                self,
+                roi_index=index,
+                roi_suffix=self.rois[index].suffix,
+                profile=profile,
+                start=clicks[0],
+                end=clicks[1],
+                on_preview=self._profile_zoom_measurements,
+                on_apply=self._apply_profile_zoom_clicks,
+                on_close=self._profile_zoom_closed,
+            )
+        except Exception as exc:
+            self._profile_zoom_dialog = None
+            error = exc
+        finally:
+            self._hide_plot_activity()
+        if error is not None:
+            messagebox.showerror("Profile Detail", f"Could not open the detailed profile.\n{error}", parent=self)
+
+    def _profile_zoom_measurements(self, index: int, start: int, end: int) -> dict[str, float]:
+        if self.image is None or index != self.current_roi_idx:
+            raise ValueError("The selected ROI is no longer active.")
+        result = analyze_and_save_roi(
+            self.image,
+            self.rois[index],
+            start_click=start,
+            end_click=end,
+        )
+        return imagej_shape_measurements_from_frame(make_isez_plot_image(result))
+
+    def _apply_profile_zoom_clicks(self, index: int, start: int, end: int) -> bool:
+        if self.image is None or index != self.current_roi_idx:
+            messagebox.showwarning(
+                "Profile Detail",
+                "This ROI is no longer active. Reopen its preview before applying changes.",
+                parent=self,
+            )
+            return False
+        self.profile_clicks = [float(start), float(end)]
+        self._sync_entry_vars_from_clicks()
+        self._remember_current_roi_clicks()
+        return self._save_current_roi(auto_advance=False)
+
     def _select_roi_from_grid_click(self, event) -> None:
-        """Select the ROI represented by a click anywhere in its grid cell."""
+        """Select a grid ROI and open completed previews in the detail editor."""
         if event.xdata is None or event.ydata is None:
             return
         x = float(event.xdata)
@@ -2316,12 +2948,19 @@ class Step4Frame(SidebarStepFrame):
         if not (0 <= index < len(self.rois)):
             return
 
+        has_drawn_preview = self._roi_overview_result(index) is not None
+        if self._profile_zoom_dialog is not None and (
+            not has_drawn_preview or self._profile_zoom_dialog.roi_index != index
+        ):
+            self._close_profile_zoom()
         if index != self.current_roi_idx:
             self._remember_current_roi_clicks()
             self.current_roi_idx = index
             self._load_current_roi_clicks()
         self._select_roi_in_list()
         self._render_current_roi()
+        if has_drawn_preview:
+            self._open_profile_zoom(index)
 
     def _current_profile_size(self) -> int:
         if self._current_profile is not None:
@@ -2357,7 +2996,16 @@ class Step4Frame(SidebarStepFrame):
             float(_clamp_profile_index(end, n_points)),
         ]
 
-    def _apply_entry_clicks(self, _event=None, *, show_errors: bool = True, auto_save: bool = True) -> str | None:
+    def _apply_entry_clicks(
+        self,
+        _event=None,
+        *,
+        show_errors: bool = True,
+        auto_save: bool = True,
+        close_profile_zoom: bool = True,
+    ) -> str | None:
+        if close_profile_zoom:
+            self._close_profile_zoom()
         clicks = self._entry_clicks_from_vars(show_errors=show_errors)
         if clicks is None:
             return None
@@ -2375,6 +3023,7 @@ class Step4Frame(SidebarStepFrame):
             self._apply_entry_clicks(show_errors=False)
 
     def _clear_clicks(self) -> None:
+        self._close_profile_zoom()
         suffix = self._current_roi_suffix()
         self._cancel_roi_update_animation(suffix, redraw=False)
         self.profile_clicks.clear()
@@ -2456,16 +3105,33 @@ class Step4Frame(SidebarStepFrame):
             f"scale min/max: {float(data['min_intensity']):.3f} / {float(data['max_intensity']):.3f}"
         )
 
-    def _save_current_roi(self, *, auto_advance: bool, build_after: bool = False) -> None:
+    def _save_current_roi(self, *, auto_advance: bool, build_after: bool = False) -> bool:
         if self.image is None:
             messagebox.showwarning("Step 4", "Load an OCT image first.")
-            return
-        self._apply_entry_clicks(show_errors=False, auto_save=False)
+            return False
+        self._apply_entry_clicks(show_errors=False, auto_save=False, close_profile_zoom=False)
         if len(self.profile_clicks) < 2:
             messagebox.showwarning("Step 4", "Click or enter both start and end profile positions.")
-            return
+            return False
 
         roi = self.rois[self.current_roi_idx]
+        self._show_plot_activity(f"Saving ROI {roi.suffix}...")
+        try:
+            return self._save_current_roi_data(
+                roi,
+                auto_advance=auto_advance,
+                build_after=build_after,
+            )
+        finally:
+            self._hide_plot_activity()
+
+    def _save_current_roi_data(
+        self,
+        roi: ISezROI,
+        *,
+        auto_advance: bool,
+        build_after: bool,
+    ) -> bool:
         replacing_completed_roi = roi.suffix in self.completed
         try:
             result = analyze_and_save_roi(
@@ -2478,7 +3144,7 @@ class Step4Frame(SidebarStepFrame):
             self.roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
         except Exception as exc:
             messagebox.showerror("Step 4", f"Could not save ROI {roi.suffix}.\n{exc}")
-            return
+            return False
 
         self._refresh_roi_list()
         action = "Updated" if replacing_completed_roi else "Confirmed"
@@ -2493,7 +3159,7 @@ class Step4Frame(SidebarStepFrame):
             self._select_roi_in_list()
             self._render_current_roi()
             self._build_stack_outputs()
-            return
+            return True
 
         if auto_advance and self.current_roi_idx < len(self.rois) - 1:
             self.current_roi_idx += 1
@@ -2506,6 +3172,7 @@ class Step4Frame(SidebarStepFrame):
             if self.canvas is not None:
                 self.canvas.draw()
             self._update_build_stack_button_state()
+        return True
 
     def _build_stack_outputs(self) -> None:
         if not self.completed:
@@ -2548,14 +3215,17 @@ class Step4Frame(SidebarStepFrame):
             # individual ROI confirmation.
             write_imagej_results_xlsx(
                 [imagej_shape_measurements_from_frame(image) for image in isez_images],
-                outdir / "Results.xlsx",
+                outdir / STEP4_RESULTS_FILENAME,
             )
         except Exception as exc:
             messagebox.showerror("Step 4", f"Could not build stack outputs.\n{exc}")
             return
 
         self.status_var.set(f"Built stack outputs in {outdir}.")
-        messagebox.showinfo("Step 4", "Built MAX_Stack.tif, Results.xlsx, and ROI_to_move_stck.tif.")
+        messagebox.showinfo(
+            "Step 4",
+            f"Built MAX_Stack.tif, {STEP4_RESULTS_FILENAME}, and ROI_to_move_stck.tif.",
+        )
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._mark_active_batch_roi_complete()
             if not self._select_next_incomplete_batch_roi_tab():

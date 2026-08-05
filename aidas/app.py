@@ -465,6 +465,7 @@ class AIDaSApp(tk.Tk):
             preferences=self.preferences,
             source_step=self.step1,
             on_output_folder_changed=self._on_step2_output_folder_changed,
+            on_continue_to_step3=self._on_step2_continue_to_step3,
         )
         self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
 
@@ -628,6 +629,15 @@ class AIDaSApp(tk.Tk):
         """Keep Step 3 pointed at Step 2's MARKED output folder."""
         if getattr(self, "step3", None) is not None:
             self.step3.set_input_folder(folder)
+
+    def _on_step2_continue_to_step3(self, folders) -> None:
+        """Open Step 3 with the exact nasal/temporal folders saved in Step 2."""
+        step3 = getattr(self, "step3", None)
+        if step3 is None or not folders:
+            return
+        self.notebook.select(step3)
+        self.update_idletasks()
+        step3.open_batch_folders(folders)
 
     def _show_about(self) -> None:
         """Open one modal About window, or focus the existing one."""
