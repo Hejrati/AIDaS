@@ -237,7 +237,10 @@ class WorkflowNavigationTests(unittest.TestCase):
         self.assertNotIn('text="Appearance"', source)
         self.assertIn("image=self.settings_image", source)
         self.assertIn("image=self.help_image", source)
-        self.assertEqual(source.count('anchor="center"'), 2)
+        settings_source = source[settings_index:help_index]
+        help_source = source[help_index:navigation_index]
+        self.assertEqual(settings_source.count('anchor="center"'), 1)
+        self.assertEqual(help_source.count('anchor="center"'), 1)
         self.assertIn("size=(24, 24)", source)
         self.assertIn('text_color=COLOR_PAIRS["primary"]', source)
         self.assertGreaterEqual(source.count("width=36"), 2)
