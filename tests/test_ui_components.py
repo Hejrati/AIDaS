@@ -10,12 +10,13 @@ from aidas.app import AboutDialog, SettingsDialog
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2BatchSegmentationSelectionPanel, Step2Frame
 from aidas.steps.step3_flatten import RBatchSelectionPanel, Step3Frame
-from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel
+from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel, Step4Frame
 from aidas.ui.components import AppButton, AppSplitButton, WorkflowHeader, WorkflowNavigation
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
 from aidas.utils.ui_utils import (
     ACTION_ICON_FILES,
     ACTION_ICON_SIZE,
+    SidebarStepFrame,
     action_button,
     apply_app_icon_to,
     icon_action_button,
@@ -199,7 +200,8 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
 
         self.assertEqual(source.count("= AppButton("), 3)
-        self.assertIn('variant="primary"', source)
+        self.assertIn('variant="success"', source)
+        self.assertIn('tint=COLOR_PAIRS["on_primary"]', source)
         self.assertEqual(source.count("load_ctk_image("), 3)
         self.assertNotIn("btn_cancel = action_button(", source)
         self.assertNotIn("btn_skip = action_button(", source)
@@ -220,8 +222,18 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
 
     def test_step2_reserves_status_space_through_the_shared_layout(self):
         source = inspect.getsource(Step2Frame.__init__)
-        self.assertIn("self.build_standard_layout(status_var=self.status_var)", source)
+        self.assertIn("status_var=self.status_var", source)
+        self.assertIn("status_bar_content_margin=True", source)
         self.assertLess(source.index("self.status_var ="), source.index("self.build_standard_layout("))
+
+    def test_step2_step3_and_step4_status_bars_align_to_their_content_margins(self):
+        for builder in (Step2Frame.__init__, Step3Frame._build_ui, Step4Frame._build_ui):
+            with self.subTest(builder=builder.__qualname__):
+                source = inspect.getsource(builder)
+                self.assertIn("status_bar_content_margin=True", source)
+
+        layout_source = inspect.getsource(SidebarStepFrame.build_standard_layout)
+        self.assertIn("(content_padding[0], content_padding[2])", layout_source)
 
 
 class WorkflowNavigationTests(unittest.TestCase):

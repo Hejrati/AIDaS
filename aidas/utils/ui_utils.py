@@ -171,23 +171,43 @@ def icon_action_button(
     )
 
 
-def load_ctk_image(owner, filename, *, size=CONTROLS.icon_size):
+def _dark_mode_icon(image):
+    """Lift neutral near-black glyphs while preserving saturated icon colors."""
+    rgb = image.convert("RGB")
+    luminance = ImageOps.grayscale(rgb)
+    saturation = rgb.convert("HSV").getchannel("S")
+    dark_mask = luminance.point(lambda value: 255 if value < 92 else 0)
+    neutral_mask = saturation.point(lambda value: 255 if value < 72 else 0)
+    glyph_mask = ImageChops.multiply(dark_mask, neutral_mask)
+    glyph_mask = ImageChops.multiply(glyph_mask, image.getchannel("A"))
+    light_glyph = Image.new("RGBA", image.size, "#DDE7F0")
+    return Image.composite(light_glyph, image, glyph_mask)
+
+
+def _tint_icon(image, color):
+    """Tint visible pixels while retaining the source icon's alpha edges."""
+    tinted = Image.new("RGBA", image.size, color)
+    tinted.putalpha(image.getchannel("A"))
+    return tinted
+
+
+def load_ctk_image(owner, filename, *, size=CONTROLS.icon_size, tint=None):
     """Load one DPI-aware image for modern CustomTkinter controls."""
 
     path = asset_path(filename)
     target_size = (size, size) if isinstance(size, int) else tuple(size)
     with Image.open(path) as source:
         image = source.convert("RGBA").copy()
-    # Preserve colored icons while lifting only near-black glyph pixels for
-    # dark mode. Transparent pixels stay transparent through the alpha mask.
-    luminance = ImageOps.grayscale(image.convert("RGB"))
-    dark_pixel_mask = luminance.point(lambda value: 255 if value < 92 else 0)
-    dark_pixel_mask = ImageChops.multiply(dark_pixel_mask, image.getchannel("A"))
-    light_glyph = Image.new("RGBA", image.size, "#DDE7F0")
-    dark_image = Image.composite(light_glyph, image, dark_pixel_mask)
+    if tint is None:
+        light_image = image
+        dark_image = _dark_mode_icon(image)
+    else:
+        light_color, dark_color = tint if isinstance(tint, (tuple, list)) else (tint, tint)
+        light_image = _tint_icon(image, light_color)
+        dark_image = _tint_icon(image, dark_color)
     return remember_image(
         owner,
-        ctk.CTkImage(light_image=image, dark_image=dark_image, size=target_size),
+        ctk.CTkImage(light_image=light_image, dark_image=dark_image, size=target_size),
     )
 
 
@@ -994,6 +1014,41 @@ class SidebarStepFrame(ctk.CTkFrame):
         kwargs.setdefault("corner_radius", 0)
         super().__init__(parent, *args, **kwargs)
 
+    @staticmethod
+    def _control_state(control):
+        """Read a CTk/ttk control state without triggering a redraw."""
+        if control is None:
+            return None
+        try:
+            return str(control.cget("state"))
+        except (AttributeError, KeyError, tk.TclError, TypeError, ValueError):
+            pass
+
+        state_api = getattr(control, "state", None)
+        if isinstance(state_api, str):
+            return state_api
+        if callable(state_api):
+            try:
+                tokens = tuple(state_api())
+            except (tk.TclError, TypeError):
+                return None
+            return "disabled" if "disabled" in tokens else "normal"
+        return None
+
+    @classmethod
+    def _set_control_enabled(cls, control, enabled):
+        """Change a semantic control only when its state actually differs."""
+        if control is None:
+            return False
+        desired = "normal" if enabled else "disabled"
+        if cls._control_state(control) == desired:
+            return False
+        try:
+            control.configure(state=desired)
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return False
+        return True
+
     def build_standard_layout(
         self,
         *,
@@ -1001,6 +1056,7 @@ class SidebarStepFrame(ctk.CTkFrame):
         sidebar_pack=None,
         content_pack=None,
         status_var=None,
+        status_bar_content_margin=False,
     ):
         """Create a shared step layout with `self.ctrl` and `self.content`.
 
@@ -1064,7 +1120,16 @@ class SidebarStepFrame(ctk.CTkFrame):
             border_width=0,
         )
         if status_var is not None:
-            self.add_status_bar(status_var, parent=self.content_shell)
+            status_padx = (
+                (content_padding[0], content_padding[2])
+                if status_bar_content_margin
+                else 0
+            )
+            self.add_status_bar(
+                status_var,
+                parent=self.content_shell,
+                padx=status_padx,
+            )
         self.content = ctk.CTkFrame(
             self.content_shell,
             fg_color="transparent",
@@ -1215,7 +1280,7 @@ class SidebarStepFrame(ctk.CTkFrame):
         label.pack(fill="x", padx=LAYOUT.space_md, pady=LAYOUT.space_sm)
         return frame
 
-    def add_status_bar(self, status_var, *, parent=None):
+    def add_status_bar(self, status_var, *, parent=None, padx=0):
         """Add a standard sunken status label."""
         container = parent if parent is not None else self
         label = ctk.CTkLabel(
@@ -1230,6 +1295,11 @@ class SidebarStepFrame(ctk.CTkFrame):
             text_color=COLOR_PAIRS["muted_text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
         )
-        label.pack(side="bottom", fill="x", pady=(0, LAYOUT.space_sm))
+        label.pack(
+            side="bottom",
+            fill="x",
+            padx=padx,
+            pady=(0, LAYOUT.space_sm),
+        )
         self.content_status_bar = label
         return label

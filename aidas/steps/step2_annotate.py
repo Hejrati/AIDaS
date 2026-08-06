@@ -40,6 +40,7 @@ from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.ui.components import AppButton
 from aidas.ui.tabs import ClosableTabView
+from aidas.ui.theme import COLOR_PAIRS
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
@@ -699,7 +700,10 @@ class Step2Frame(SidebarStepFrame):
         self.status_var = tk.StringVar(
             value="Ready - process an image in Step 1, then trace boundaries or run batch segmentation."
         )
-        self.build_standard_layout(status_var=self.status_var)
+        self.build_standard_layout(
+            status_var=self.status_var,
+            status_bar_content_margin=True,
+        )
         right = self.content
 
         self.image_info_var = tk.StringVar(value="No image loaded")
@@ -714,6 +718,7 @@ class Step2Frame(SidebarStepFrame):
         self._batch_result_states = {}
         self._active_batch_result_tab = None
         self._single_editor_state = None
+        self._last_status_mouse_sample = None
         self.save_orientation_var = tk.StringVar(value=DEFAULT_SAVE_ORIENTATION)
 
         self.image_canvas = ImageCanvas(
@@ -721,8 +726,10 @@ class Step2Frame(SidebarStepFrame):
             on_mouse_move=self._on_mouse_moved,
             on_line_change=self._on_active_line_changed,
             on_vertical_line_change=self._on_vertical_line_changed,
+            on_zoom_change=self._on_canvas_zoom_changed,
         )
         self.single_image_canvas = self.image_canvas
+        self._apply_side_labels_to_canvas(self.image_canvas)
         self.image_canvas.enable_line(False)
         self.image_canvas.enable_roi(False)
         self.image_canvas.enable_vertical_line(False)
@@ -885,20 +892,34 @@ class Step2Frame(SidebarStepFrame):
 
         self._set_fovea_controls_enabled(False)
 
-        orientation = ttk.LabelFrame(segmentation, text="Image Orientation for Saving", padding=3)
+        orientation = ttk.LabelFrame(segmentation, text="Image Sides and Saving", padding=3)
         orientation.pack(fill="x", pady=(6, 0))
         ttk.Radiobutton(
             orientation,
-            text="Current image: Left side: Temporal -> Right side: Nasal",
+            text="Left: Temporal  |  Right: Nasal",
             variable=self.save_orientation_var,
             value=SAVE_ORIENTATION_TEMPORAL_TO_NASAL,
+            command=self._on_save_orientation_changed,
         ).pack(anchor="w")
         ttk.Radiobutton(
             orientation,
-            text="Current image: Left side: Nasal -> Right side: Temporal",
+            text="Left: Nasal  |  Right: Temporal",
             variable=self.save_orientation_var,
             value=SAVE_ORIENTATION_NASAL_TO_TEMPORAL,
+            command=self._on_save_orientation_changed,
         ).pack(anchor="w")
+
+        self.flip_sides_button = AppButton(
+            orientation,
+            text="Swap left / right sides",
+            variant="primary",
+            command=self._flip_image_sides,
+        )
+        HoverToolTip(
+            self.flip_sides_button,
+            "Swap the left/right side labels and use that assignment when saving.",
+        )
+        self.flip_sides_button.pack(fill="x", pady=(5, 1))
 
         saved_buttons = ttk.Frame(segmentation)
         saved_buttons.pack(fill="x", pady=(6, 0))
@@ -1161,6 +1182,7 @@ class Step2Frame(SidebarStepFrame):
         self._run_aidas_batch_segmentation(
             image_paths=image_paths,
             manual_fovea_by_path=manual_fovea_by_path,
+            manual_orientation_by_path=getattr(self, "_collected_orientation_by_path", None),
         )
 
     def start_batch_segmentation_for_folders(self, folders):
@@ -1230,8 +1252,10 @@ class Step2Frame(SidebarStepFrame):
         self._start_step2_batch_segmentation_from_rows(rows, root_dir)
 
     def _collect_folder_fovea_lines(self, image_paths):
-        """Prompt for a fovea center line for each image before folder segmentation in the main canvas."""
+        """Prompt for each image's fovea line and anatomical side assignment."""
         fovea_by_path = {}
+        orientation_by_path = {}
+        self._collected_orientation_by_path = orientation_by_path
         total = len(image_paths)
 
         next_var = tk.StringVar(value="")
@@ -1280,18 +1304,23 @@ class Step2Frame(SidebarStepFrame):
         HoverToolTip(btn_skip, "Skip this image without setting a foveal center.")
         btn_skip.pack(side="right", padx=4, pady=4)
 
-        confirm_icon = load_ctk_image(self, "flat-color-icons--checkmark.png", size=20)
+        confirm_icon = load_ctk_image(
+            self,
+            "flat-color-icons--checkmark.png",
+            size=20,
+            tint=COLOR_PAIRS["on_primary"],
+        )
         btn_set = AppButton(
             temp_frame,
             text="Confirm",
-            variant="primary",
+            variant="success",
             command=on_set,
             image=confirm_icon,
             compound="left",
         )
         HoverToolTip(btn_set, "Confirm the foveal center for this image.")
         btn_set.pack(side="right", padx=4, pady=4)
-        
+
         # Save current editor state to restore later if canceled (optional, but good practice)
         saved_state = self._capture_current_editor_state()
 
@@ -1313,13 +1342,15 @@ class Step2Frame(SidebarStepFrame):
                     self._clear_image_display("Image skipped. No image is loaded.")
                     continue
 
-                self._show_image(image_data, path)
-                self.update_idletasks()
+                # The fovea picker is an intermediate batch view. Step 3 only
+                # needs to hear about folders after Step 2 saves its outputs.
+                self._show_image(image_data, path, notify_output_folder=False)
 
                 self.wait_variable(next_var)
                 
                 action = next_var.get()
                 if action == "cancel":
+                    orientation_by_path.clear()
                     self._clear_image_display("All Images skipped. No image is loaded.")
                     return None
                 elif action == "skip":
@@ -1333,6 +1364,7 @@ class Step2Frame(SidebarStepFrame):
                     except ValueError:
                         x_val = None
                     fovea_by_path[path] = x_val
+                    orientation_by_path[path] = self._selected_save_orientation()
                 
         finally:
             temp_frame.destroy()
@@ -1448,7 +1480,7 @@ class Step2Frame(SidebarStepFrame):
         if notebook is not None and notebook.winfo_manager() != "pack":
             notebook.pack(fill="both", expand=True)
 
-    def _show_image(self, image, path):
+    def _show_image(self, image, path, *, notify_output_folder=True):
         """Load a new image and reset the annotation UI.
 
         Displays the image on the canvas and clears all tracing state:
@@ -1462,6 +1494,8 @@ class Step2Frame(SidebarStepFrame):
             image: numpy array to display and annotate. Source bit depth is preserved;
                 the canvas normalizes a preview for display only.
             path: Path or description string for the image source.
+            notify_output_folder: Propagate direct image-folder changes to Step 3.
+                Batch picker previews disable this until Step 2 outputs are saved.
         """
         # Any explicitly rendered image supersedes a crop that was queued
         # while this page was hidden.
@@ -1469,12 +1503,14 @@ class Step2Frame(SidebarStepFrame):
         self._show_single_image_canvas()
         self.current_file = path
         self.image_data = image
+        self._last_status_mouse_sample = None
         self.active_boundary = None
         self.boundary_traces = {}
         self.boundary_order = []
         self.fovea_x = None
 
         self.image_canvas.set_image(image)
+        self._apply_side_labels_to_canvas(self.image_canvas)
         self.image_canvas.enable_roi(False)
 
         filename = os.path.basename(path) if path and path != "Step 1 output" else "Step 1 output"
@@ -1491,7 +1527,8 @@ class Step2Frame(SidebarStepFrame):
         self.status_var.set(
             "Image loaded. Drag the foveal center line or select an incomplete boundary to trace."
         )
-        self._notify_output_folder_changed()
+        if notify_output_folder:
+            self._notify_output_folder_changed()
 
     def _clear_image_display(self, status_message=None):
         """Clear the editor canvas and reset image-specific annotation state."""
@@ -1499,6 +1536,7 @@ class Step2Frame(SidebarStepFrame):
         self._show_single_image_canvas()
         self.current_file = None
         self.image_data = None
+        self._last_status_mouse_sample = None
         self.active_boundary = None
         self.boundary_traces = {}
         self.boundary_order = []
@@ -1606,6 +1644,7 @@ class Step2Frame(SidebarStepFrame):
             "fovea_x": self.fovea_x,
             "template": self._input_analyze_template,
             "source_was_8bit": getattr(self, "_source_was_8bit", False),
+            "save_orientation": self._selected_save_orientation(),
         }
 
     def _set_completion_from_traces(self):
@@ -1620,6 +1659,7 @@ class Step2Frame(SidebarStepFrame):
         self.image_canvas = canvas
         self.current_file = state.get("input")
         self.image_data = state.get("image")
+        self._last_status_mouse_sample = None
         self.boundary_traces = state.setdefault("traces", {})
         self.boundary_order = state.setdefault("order", [])
         self.fovea_x = state.get("fovea_x")
@@ -1630,6 +1670,10 @@ class Step2Frame(SidebarStepFrame):
                 state["fovea_x"] = self.fovea_x
         self._input_analyze_template = state.get("template")
         self._source_was_8bit = bool(state.get("source_was_8bit", False))
+        orientation = self._selected_save_orientation(state.get("save_orientation"))
+        state["save_orientation"] = orientation
+        self.save_orientation_var.set(orientation)
+        self._apply_side_labels_to_canvas(canvas, orientation)
         self.active_boundary = None
 
         self.image_canvas.enable_roi(False)
@@ -1811,18 +1855,19 @@ class Step2Frame(SidebarStepFrame):
         is_incomplete = active_name in self._incomplete_boundary_names()
         has_clearable_markers = self._has_clearable_boundary_markers()
 
-        if getattr(self, "finish_boundary_btn", None) is not None:
-            self.finish_boundary_btn.configure(state="normal" if is_incomplete else "disabled")
-        if getattr(self, "revert_boundary_btn", None) is not None:
-            self.revert_boundary_btn.configure(state="normal" if is_completed else "disabled")
-        if getattr(self, "clear_all_traces_btn", None) is not None:
-            self.clear_all_traces_btn.configure(state="normal" if has_clearable_markers else "disabled")
-
-        if getattr(self, "saved_button", None) is not None:
-            if self._all_required_boundaries_complete():
-                self.saved_button.state(["!disabled"]) # Enable if all 6 boundaries exist
-            else:
-                self.saved_button.state(["disabled"])  # Disable otherwise
+        self._set_control_enabled(
+            getattr(self, "finish_boundary_btn", None), is_incomplete
+        )
+        self._set_control_enabled(
+            getattr(self, "revert_boundary_btn", None), is_completed
+        )
+        self._set_control_enabled(
+            getattr(self, "clear_all_traces_btn", None), has_clearable_markers
+        )
+        self._set_control_enabled(
+            getattr(self, "saved_button", None),
+            self._all_required_boundaries_complete(),
+        )
 
         self._update_continue_to_step3_button_state()
 
@@ -1832,10 +1877,9 @@ class Step2Frame(SidebarStepFrame):
         if button is None:
             return
         has_segmented_images = bool(getattr(self, "_batch_result_states", {}))
-        if has_segmented_images and not self._segmenter_running:
-            button.state(["!disabled"])
-        else:
-            button.state(["disabled"])
+        self._set_control_enabled(
+            button, has_segmented_images and not self._segmenter_running
+        )
 
     def _boundary_color(self, name):
         if name in BOUNDARY_COLORS:
@@ -2243,34 +2287,38 @@ class Step2Frame(SidebarStepFrame):
 
     def _set_fovea_controls_enabled(self, enabled):
         """Enable/disable fovea-specific controls based on mode and lock state."""
-        state = "normal" if (enabled and not self._drawing_locked) else "disabled"
+        controls_enabled = enabled and not self._drawing_locked
         for widget in (
             self.fovea_stepper,
             self.fovea_reset_btn,
         ):
-            widget.configure(state=state)
+            self._set_control_enabled(widget, controls_enabled)
 
     def _set_segmentation_frame_enabled(self, enabled):
         """Enable/disable segmentation controls, keeping the batch AI button available."""
-        state = "normal" if enabled else "disabled"
+        enabled = bool(enabled)
+        controls_changed = (
+            getattr(self, "_segmentation_frame_controls_enabled", None) != enabled
+        )
         # Recursively disable/enable all children in the segmentation frame
-        def set_state(widget, s):
+        def set_state(widget):
             if widget in (
                 self.finish_boundary_btn,
                 self.revert_boundary_btn,
+                getattr(self, "clear_all_traces_btn", None),
                 getattr(self, "batch_ai_button", None),
                 getattr(self, "save_btn", None),
+                getattr(self, "saved_button", None),
+                getattr(self, "continue_to_step3_button", None),
             ):
                 return
-            try:
-                widget.configure(state=s)
-            except Exception:
-                pass
+            self._set_control_enabled(widget, enabled)
             for child in widget.winfo_children():
-                set_state(child, s)
+                set_state(child)
         
-        if hasattr(self, "segmentation_frame"):
-            set_state(self.segmentation_frame, state)
+        if controls_changed and hasattr(self, "segmentation_frame"):
+            set_state(self.segmentation_frame)
+            self._segmentation_frame_controls_enabled = enabled
         self._update_batch_ai_button_state()
         self._update_continue_to_step3_button_state()
 
@@ -2371,6 +2419,7 @@ class Step2Frame(SidebarStepFrame):
             if fovea_x_entry_var is not None:
                 fovea_x_entry_var.set("")
             self._updating_fovea_entry = False
+            self._refresh_live_image_status()
             return
         if self.image_data is not None and FOVEA_BOUNDARY_NAME in self.boundary_traces:
             self.boundary_traces[FOVEA_BOUNDARY_NAME] = self._vertical_line_trace(
@@ -2383,6 +2432,7 @@ class Step2Frame(SidebarStepFrame):
         if fovea_x_entry_var is not None:
             fovea_x_entry_var.set(str(x))
         self._updating_fovea_entry = False
+        self._refresh_live_image_status()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Live updates and selection handling
@@ -2402,16 +2452,31 @@ class Step2Frame(SidebarStepFrame):
         )
         self._update_boundary_action_buttons()
 
-    def _on_mouse_moved(self, ix, iy, val):
+    def _refresh_live_image_status(self, *, zoom=None):
+        """Refresh image, zoom, and fovea fields after any canvas action."""
         if self.image_data is None:
             return
         ih, iw = self.image_data.shape[:2]
-        z = self.image_canvas.get_zoom()
-        fovea_text = f"  |  Fovea x: {self.fovea_x}" if self.fovea_x is not None else ""
+        if zoom is None:
+            zoom = self.image_canvas.get_zoom()
+        fovea_value = self.fovea_x if self.fovea_x is not None else "not set"
+        sample = getattr(self, "_last_status_mouse_sample", None)
+        sample_text = ""
+        if sample is not None:
+            ix, iy, val = sample
+            sample_text = f"({ix}, {iy})  val={val}  |  "
         self.status_var.set(
-            f"({ix}, {iy})  val={val}  |  Image: {iw}×{ih} {self.image_data.dtype}  |  Zoom: {z * 100:.0f}%"
-            f"{fovea_text}"
+            f"{sample_text}Image: {iw}×{ih} {self.image_data.dtype}  |  "
+            f"Zoom: {float(zoom) * 100:.0f}%  |  Fovea x: {fovea_value}"
         )
+
+    def _on_canvas_zoom_changed(self, zoom):
+        """Refresh Step 2 status as soon as canvas zoom changes."""
+        self._refresh_live_image_status(zoom=zoom)
+
+    def _on_mouse_moved(self, ix, iy, val):
+        self._last_status_mouse_sample = (ix, iy, val)
+        self._refresh_live_image_status()
 
     def _refresh_trace_list(self):
         trace_listbox = getattr(self, "trace_listbox", None)
@@ -2487,9 +2552,8 @@ class Step2Frame(SidebarStepFrame):
     def _source_output_basepaths(self):
         return [self._source_output_basepath(LIGHT_SOURCE_BASENAME)]
 
-    def _selected_save_orientation(self):
-        """Return the selected save orientation, falling back to the default."""
-        orientation = self.save_orientation_var.get()
+    @staticmethod
+    def _normalized_save_orientation(orientation):
         if orientation in {
             SAVE_ORIENTATION_TEMPORAL_TO_NASAL,
             SAVE_ORIENTATION_NASAL_TO_TEMPORAL,
@@ -2497,18 +2561,56 @@ class Step2Frame(SidebarStepFrame):
             return orientation
         return DEFAULT_SAVE_ORIENTATION
 
-    def _save_orientation_label(self):
-        if self._selected_save_orientation() == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+    def _selected_save_orientation(self, orientation=None):
+        """Return the selected save orientation, falling back to the default."""
+        if orientation is None:
+            orientation = self.save_orientation_var.get()
+        return self._normalized_save_orientation(orientation)
+
+    def _side_labels_for_orientation(self, orientation=None):
+        orientation = self._selected_save_orientation(orientation)
+        if orientation == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+            return "Nasal", "Temporal"
+        return "Temporal", "Nasal"
+
+    def _apply_side_labels_to_canvas(self, canvas=None, orientation=None):
+        canvas = canvas or getattr(self, "image_canvas", None)
+        if canvas is not None:
+            canvas.set_side_labels(
+                *self._side_labels_for_orientation(orientation),
+                on_flip=self._flip_image_sides,
+            )
+
+    def _on_save_orientation_changed(self):
+        """Refresh labels and retain the side choice with the active image."""
+        orientation = self._selected_save_orientation()
+        self._apply_side_labels_to_canvas(orientation=orientation)
+        tab_key = getattr(self, "_active_batch_result_tab", None)
+        state = self._batch_result_states.get(tab_key) if tab_key else None
+        if state is not None:
+            state["save_orientation"] = orientation
+
+    def _flip_image_sides(self):
+        """Swap Temporal/Nasal labels and the corresponding save assignment."""
+        if self._selected_save_orientation() == SAVE_ORIENTATION_TEMPORAL_TO_NASAL:
+            orientation = SAVE_ORIENTATION_NASAL_TO_TEMPORAL
+        else:
+            orientation = SAVE_ORIENTATION_TEMPORAL_TO_NASAL
+        self.save_orientation_var.set(orientation)
+        self._on_save_orientation_changed()
+
+    def _save_orientation_label(self, orientation=None):
+        if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
             return "Nasal -> Temporal"
         return "Temporal -> Nasal"
 
-    def _orient_volume_for_single_save(self, volume):
+    def _orient_volume_for_single_save(self, volume, orientation=None):
         """Apply the selected orientation to a single saved Analyze volume."""
-        if self._selected_save_orientation() == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+        if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
             return np.ascontiguousarray(np.flip(volume, axis=-1))
         return volume
 
-    def _orient_volumes_for_pair_save(self, volume, source_volume):
+    def _orient_volumes_for_pair_save(self, volume, source_volume, orientation=None):
         """Return ``(nasal, temporal)`` volumes for the selected orientation.
 
         The default assignment is intentionally the existing behavior. Selecting
@@ -2517,7 +2619,7 @@ class Step2Frame(SidebarStepFrame):
         """
         mirrored_volume = np.ascontiguousarray(np.flip(volume, axis=-1))
         mirrored_source = np.ascontiguousarray(np.flip(source_volume, axis=-1))
-        if self._selected_save_orientation() == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+        if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
             return mirrored_volume, volume, mirrored_source, source_volume
         return volume, mirrored_volume, source_volume, mirrored_source
 
@@ -2796,7 +2898,12 @@ class Step2Frame(SidebarStepFrame):
         volume = np.stack([marked_slice] * nslices, axis=0).astype(np.uint8, copy=False)
         return _resize_to_standard_format(volume)
 
-    def _save_current_marked_image(self, prompt_on_incomplete=False, sync_active=True):
+    def _save_current_marked_image(
+        self,
+        prompt_on_incomplete=False,
+        sync_active=True,
+        orientation=None,
+    ):
         if self.image_data is None or not self.boundary_traces:
             return None
 
@@ -2813,7 +2920,10 @@ class Step2Frame(SidebarStepFrame):
 
         out_base = self._current_marked_output_basepath()
         marked_volume = self._build_current_marked_volume()
-        write_analyze(out_base, self._orient_volume_for_single_save(marked_volume))
+        write_analyze(
+            out_base,
+            self._orient_volume_for_single_save(marked_volume, orientation),
+        )
         self.status_var.set(f"Saved current MARKED image -> {out_base}.img")
         return out_base
 
@@ -2855,8 +2965,13 @@ class Step2Frame(SidebarStepFrame):
             self._source_was_8bit = bool(state.get("source_was_8bit", False))
             self._set_completion_from_traces()
             if save_orientation_pair:
-                return self._save_current_marked_orientation_pair()
-            return self._save_current_marked_image(sync_active=False)
+                return self._save_current_marked_orientation_pair(
+                    orientation=state.get("save_orientation")
+                )
+            return self._save_current_marked_image(
+                sync_active=False,
+                orientation=state.get("save_orientation"),
+            )
         finally:
             self.current_file = saved_context["current_file"]
             self.image_data = saved_context["image_data"]
@@ -2869,7 +2984,7 @@ class Step2Frame(SidebarStepFrame):
                 if name in self.boundary_completion_vars:
                     self.boundary_completion_vars[name].set(value)
 
-    def _save_current_marked_orientation_pair(self):
+    def _save_current_marked_orientation_pair(self, orientation=None):
         """Save original and MARKED Light volumes using the selected orientation."""
         if self.image_data is None or not self.boundary_traces:
             return None
@@ -2892,6 +3007,7 @@ class Step2Frame(SidebarStepFrame):
         nasal_volume, temporal_volume, nasal_source, temporal_source = self._orient_volumes_for_pair_save(
             volume,
             source_volume,
+            orientation,
         )
         write_analyze(nasal_base, nasal_volume)
         write_analyze(nasal_light_base, nasal_source)
@@ -3421,10 +3537,9 @@ class Step2Frame(SidebarStepFrame):
     def _update_batch_ai_button_state(self):
         if not hasattr(self, "batch_ai_button"):
             return
-        if self._batch_ai_button_enabled():
-            self.batch_ai_button.state(["!disabled"])
-        else:
-            self.batch_ai_button.state(["disabled"])
+        self._set_control_enabled(
+            self.batch_ai_button, self._batch_ai_button_enabled()
+        )
 
     def _update_ai_button_states(self):
         """Update AI-related button states."""
@@ -3586,7 +3701,12 @@ class Step2Frame(SidebarStepFrame):
 
         self._progress_animation_job = self.after(80, self._animate_progress_bar)
 
-    def _run_aidas_batch_segmentation(self, image_paths=None, manual_fovea_by_path=None):
+    def _run_aidas_batch_segmentation(
+        self,
+        image_paths=None,
+        manual_fovea_by_path=None,
+        manual_orientation_by_path=None,
+    ):
         """Run AI_ForAIDAS predictions for multiple images and preview them in tabs."""
         if self._segmenter_running:
             messagebox.showinfo("Please wait", "Segmentation is already running.")
@@ -3630,6 +3750,14 @@ class Step2Frame(SidebarStepFrame):
                 for path, x in manual_fovea_by_path.items()
             }
 
+        default_orientation = self._selected_save_orientation()
+        orientation_by_key = {
+            self._image_pair_key(path): self._selected_save_orientation(orientation)
+            for path, orientation in (manual_orientation_by_path or {}).items()
+        }
+        for path in image_paths:
+            orientation_by_key.setdefault(self._image_pair_key(path), default_orientation)
+
         provider_name = "auto"
         device_id = 0
         self._append_segmenter_log(
@@ -3645,7 +3773,14 @@ class Step2Frame(SidebarStepFrame):
 
         worker = threading.Thread(
             target=self._run_aidas_batch_segmenter_worker,
-            args=(image_paths, model_path, provider_name, device_id, manual_fovea_by_key),
+            args=(
+                image_paths,
+                model_path,
+                provider_name,
+                device_id,
+                manual_fovea_by_key,
+                orientation_by_key,
+            ),
             daemon=True,
         )
         worker.start()
@@ -3657,6 +3792,7 @@ class Step2Frame(SidebarStepFrame):
         provider_name,
         device_id,
         manual_fovea_by_key=None,
+        orientation_by_key=None,
     ):
         results = []
         failures = []
@@ -3664,6 +3800,7 @@ class Step2Frame(SidebarStepFrame):
             "AIDaS Step 2 AI_ForAIDAS Batch Segmentation",
             f"Boundary model: {model_path}",
             f"Manual fovea lines: {'yes' if manual_fovea_by_key is not None else 'no'}",
+            "Anatomical side assignments: per image",
             f"Requested provider: {provider_name}",
             f"DirectML adapter: {device_id}",
             f"Images: {len(image_paths)}",
@@ -3740,6 +3877,9 @@ class Step2Frame(SidebarStepFrame):
                             fovea_x = manual_fovea_by_key.get(self._image_pair_key(path))
                         if fovea_x is not None:
                             fovea_x = int(np.clip(int(fovea_x), 0, max(0, image.shape[1] - 1)))
+                        orientation = self._normalized_save_orientation(
+                            (orientation_by_key or {}).get(self._image_pair_key(path))
+                        )
                         boundaries = self._aidas_boundaries_from_model_to_display(
                             prediction["boundaries"],
                             image_for_ai.shape[0],
@@ -3755,6 +3895,7 @@ class Step2Frame(SidebarStepFrame):
                             "boundaries": np.asarray(boundaries, dtype=np.float32),
                             "traces": traces,
                             "fovea_x": fovea_x,
+                            "save_orientation": orientation,
                         })
                         log_lines.append(f"OK: {path}")
                         log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
@@ -3762,6 +3903,7 @@ class Step2Frame(SidebarStepFrame):
                             log_lines.append(f"  Fovea x (manual): {int(fovea_x)}")
                         elif manual_fovea:
                             log_lines.append("  Fovea x: skipped by user")
+                        log_lines.append(f"  Sides: {self._save_orientation_label(orientation)}")
                     except Exception as exc:
                         failures.append({"input": path, "error": str(exc)})
                         log_lines.append(f"FAILED: {path}")
@@ -3890,6 +4032,7 @@ class Step2Frame(SidebarStepFrame):
                 on_mouse_move=self._on_mouse_moved,
                 on_line_change=self._on_active_line_changed,
                 on_vertical_line_change=self._on_vertical_line_changed,
+                on_zoom_change=self._on_canvas_zoom_changed,
             )
             canvas.enable_roi(False)
             canvas.enable_line(False)
@@ -3900,6 +4043,8 @@ class Step2Frame(SidebarStepFrame):
 
             try:
                 data, _template, _source_was_8bit = self._read_image_for_annotation(input_path)
+                orientation = self._selected_save_orientation(item.get("save_orientation"))
+                self._apply_side_labels_to_canvas(canvas, orientation)
                 canvas.set_image(data)
                 traces = item.get("traces")
                 if traces is None:
@@ -3939,6 +4084,7 @@ class Step2Frame(SidebarStepFrame):
                     "fovea_x": None if fovea_x is None else int(fovea_x),
                     "template": _template,
                     "source_was_8bit": _source_was_8bit,
+                    "save_orientation": orientation,
                     "canvas": canvas,
                 }
                 canvas.fit_to_window()
@@ -3986,6 +4132,7 @@ class Step2Frame(SidebarStepFrame):
         state["traces"] = self.boundary_traces
         state["order"] = self.boundary_order
         state["fovea_x"] = self.fovea_x if FOVEA_BOUNDARY_NAME in self.boundary_traces else None
+        state["save_orientation"] = self._selected_save_orientation()
 
     def _activate_batch_result_tab(self, tab):
         if tab is None:

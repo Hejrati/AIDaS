@@ -12,8 +12,11 @@ Features:
 import tkinter as tk
 from tkinter import ttk
 
+import customtkinter as ctk
 import numpy as np
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
+
+from aidas.ui.components import AppButton
 
 # Backwards-compatible resampling constant: newer Pillow exposes
 # `Image.Resampling`, older versions use module-level constants like
@@ -87,6 +90,13 @@ class ImageCanvas(ttk.Frame):
         self._label_fill = "#ffffff"
         self._label_background = "#111827"
 
+        # Fixed viewport labels used by Step 2 to identify anatomical sides.
+        # They live in canvas coordinates (rather than image coordinates) so
+        # they stay readable while the image is zoomed or panned.
+        self._side_labels = None
+        self._side_flip_callback = None
+        self._side_flip_button_width = None
+
         # Vertical line marker state
         self._vertical_line_on = False
         self._vertical_line_x = None
@@ -103,6 +113,7 @@ class ImageCanvas(ttk.Frame):
         self._last_mouse_sample = None
 
         self._build_widgets()
+        self._build_side_flip_button()
         self._bind_events()
 
     # ------------------------------------------------------------- widgets
@@ -117,6 +128,42 @@ class ImageCanvas(ttk.Frame):
         self._hsb.grid(row=1, column=0, sticky="ew")
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
+
+    def _build_side_flip_button(self):
+        """Build a native, anti-aliased action layered over the image canvas."""
+        icon_size = 72
+        swap_icon = Image.new("RGBA", (icon_size, icon_size), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(swap_icon)
+        line_width = 7
+        arrow_color = (255, 255, 255, 255)
+        draw.line((13, 23, 56, 23), fill=arrow_color, width=line_width)
+        draw.polygon(((56, 12), (70, 23), (56, 34)), fill=arrow_color)
+        draw.line((59, 49, 16, 49), fill=arrow_color, width=line_width)
+        draw.polygon(((16, 38), (2, 49), (16, 60)), fill=arrow_color)
+        self._side_flip_icon = ctk.CTkImage(
+            light_image=swap_icon,
+            dark_image=swap_icon,
+            size=(22, 22),
+        )
+        self._side_flip_button = AppButton(
+            self.canvas,
+            text="Swap side",
+            variant="success",
+            command=self._on_side_flip_clicked,
+            image=self._side_flip_icon,
+            compound="left",
+            width=168,
+            height=40,
+            corner_radius=20,
+            border_width=1,
+            fg_color="#16865f",
+            hover_color="#1ca675",
+            border_color="#58ddb0",
+            text_color="#ffffff",
+            bg_color="#1e1e1e",
+            font=("Segoe UI", 11, "bold"),
+            cursor="hand2",
+        )
 
     def _bind_events(self):
         self.canvas.bind("<MouseWheel>",      self._on_wheel)
@@ -145,6 +192,7 @@ class ImageCanvas(ttk.Frame):
     def set_image(self, data: np.ndarray | None):
         """Set an image (H, W) numpy array (any dtype)."""
         self._cancel_pending_zoom()
+        self._last_mouse_sample = None
         if data is None:
             self._data = None
             self._display_data = None
@@ -174,16 +222,33 @@ class ImageCanvas(ttk.Frame):
     def get_image(self):
         return self._data
 
+    def set_side_labels(self, left=None, right=None, *, on_flip=None):
+        """Show anatomical sides and an optional viewport-pinned flip action."""
+        if left and right:
+            self._side_labels = (str(left), str(right))
+        else:
+            self._side_labels = None
+        self._side_flip_callback = on_flip
+        self._draw_side_labels()
+
     # ROI
     def enable_roi(self, enabled=True):
-        self._roi_on = bool(enabled)
+        enabled = bool(enabled)
+        if self._roi_on == enabled:
+            return
+        self._roi_on = enabled
         if not enabled:
             self._clear_roi()
         self._refresh_cursor_for_mode()
 
     # Line tracing
     def enable_line(self, enabled=True):
-        self._line_on = bool(enabled)
+        enabled = bool(enabled)
+        if self._line_on == enabled:
+            if not enabled and (self._active_line or self._line_preview is not None):
+                self.clear_active_line()
+            return
+        self._line_on = enabled
         if not self._line_on:
             self.clear_active_line()
         self._refresh_cursor_for_mode()
@@ -221,7 +286,13 @@ class ImageCanvas(ttk.Frame):
 
     # Vertical line marker
     def enable_vertical_line(self, enabled=True):
-        self._vertical_line_on = bool(enabled)
+        enabled = bool(enabled)
+        if self._vertical_line_on == enabled:
+            if self._drag_vertical_line:
+                self._drag_vertical_line = False
+                self._refresh_cursor_for_mode()
+            return
+        self._vertical_line_on = enabled
         self._drag_vertical_line = False
         self._update_vertical_line_overlay()
         self._refresh_cursor_for_mode()
@@ -423,6 +494,18 @@ class ImageCanvas(ttk.Frame):
         """Normalise to uint8 for display using ImageJ-like min/max scaling."""
         if data.dtype == np.uint8:
             return data
+        if np.issubdtype(data.dtype, np.integer):
+            # OCT inputs are normally signed/unsigned 16-bit. Integer arrays
+            # cannot contain NaN/Inf, so avoid allocating and scanning a full
+            # finite-value mask for every image shown in the Step 2 picker.
+            lo = float(np.min(data))
+            hi = float(np.max(data))
+            d = np.asarray(data, dtype=np.float64)
+            if hi > lo:
+                d -= lo
+                d *= 255.0 / (hi - lo)
+            np.clip(d, 0, 255, out=d)
+            return d.astype(np.uint8)
         d = np.asarray(data, dtype=np.float64)
         finite = np.isfinite(d)
         if not np.any(finite):
@@ -444,6 +527,9 @@ class ImageCanvas(ttk.Frame):
         self._roi_items.clear()
         self._img_id = None
         if self._data is None:
+            # The swap action is a real child widget rather than a canvas
+            # item, so clearing canvas items alone does not remove it.
+            self._draw_side_labels()
             return
         disp = self._display_data
         if disp is None:
@@ -463,6 +549,8 @@ class ImageCanvas(ttk.Frame):
         """Render only source pixels intersecting the current canvas viewport."""
         if self._data is None or self._display_pil is None:
             return
+
+        self._draw_side_labels()
 
         image_height, image_width = self._data.shape[:2]
         viewport_width = max(1, self.canvas.winfo_width())
@@ -528,6 +616,153 @@ class ImageCanvas(ttk.Frame):
             self.canvas.coords(self._img_id, tile_x, tile_y)
             self.canvas.itemconfigure(self._img_id, image=self._photo)
         self.canvas.tag_lower(self._img_id)
+
+    def _create_rounded_canvas_rect(
+        self,
+        x0,
+        y0,
+        x1,
+        y1,
+        *,
+        radius=12,
+        fill,
+        outline="",
+        width=1,
+        tags=(),
+    ):
+        """Create a smooth rounded rectangle without a raster icon asset."""
+        radius = max(0, min(float(radius), (x1 - x0) / 2, (y1 - y0) / 2))
+        # Repeated tangent points keep Tk's smoothing spline straight along
+        # each edge and eliminate the visible seam at the closing corner.
+        points = (
+            x0 + radius, y0, x0 + radius, y0,
+            x1 - radius, y0, x1 - radius, y0,
+            x1, y0, x1, y0 + radius, x1, y0 + radius,
+            x1, y1 - radius, x1, y1 - radius,
+            x1, y1, x1 - radius, y1, x1 - radius, y1,
+            x0 + radius, y1, x0 + radius, y1,
+            x0, y1, x0, y1 - radius, x0, y1 - radius,
+            x0, y0 + radius, x0, y0 + radius,
+            x0, y0,
+        )
+        return self.canvas.create_polygon(
+            points,
+            smooth=True,
+            splinesteps=24,
+            fill=fill,
+            outline=outline,
+            width=width,
+            tags=tags,
+        )
+
+    def _draw_side_labels(self):
+        """Draw modern anatomical-side cards and a centered swap control."""
+        self.canvas.delete("side_overlay")
+        flip_button = getattr(self, "_side_flip_button", None)
+        if self._data is None or not self._side_labels:
+            if flip_button is not None:
+                flip_button.place_forget()
+            return
+
+        viewport_width = max(1, self.canvas.winfo_width())
+        view_left = self.canvas.canvasx(0)
+        view_top = self.canvas.canvasy(0)
+        top = view_top + 14
+        height = 46
+        margin = 12
+        badge_width = max(124, min(184, (viewport_width - 250) / 2))
+        left_box = (view_left + margin, top, view_left + margin + badge_width, top + height)
+        right_box = (
+            view_left + viewport_width - margin - badge_width,
+            top,
+            view_left + viewport_width - margin,
+            top + height,
+        )
+
+        side_panels = (
+            (left_box, self._side_labels[0], "#f4b942", "#3a2e16", "left"),
+            (right_box, self._side_labels[1], "#42c8f5", "#123342", "right"),
+        )
+        for (x0, y0, x1, y1), label, accent, icon_fill, direction in side_panels:
+            self._create_rounded_canvas_rect(
+                x0 + 1,
+                y0 + 3,
+                x1 + 1,
+                y1 + 3,
+                radius=12,
+                fill="#080c13",
+                tags=("side_overlay",),
+            )
+            self._create_rounded_canvas_rect(
+                x0,
+                y0,
+                x1,
+                y1,
+                radius=12,
+                fill="#344158",
+                tags=("side_overlay",),
+            )
+            self._create_rounded_canvas_rect(
+                x0 + 1,
+                y0 + 1,
+                x1 - 1,
+                y1 - 1,
+                radius=11,
+                fill="#141c29",
+                tags=("side_overlay",),
+            )
+            if direction == "left":
+                icon_box = (x0 + 8, y0 + 8, x0 + 38, y1 - 8)
+                arrow_start, arrow_end = x0 + 31, x0 + 16
+                text_x = (x0 + x1 + 30) / 2
+            else:
+                icon_box = (x1 - 38, y0 + 8, x1 - 8, y1 - 8)
+                arrow_start, arrow_end = x1 - 31, x1 - 16
+                text_x = (x0 + x1 - 30) / 2
+            self._create_rounded_canvas_rect(
+                *icon_box,
+                radius=9,
+                fill=icon_fill,
+                tags=("side_overlay",),
+            )
+            self.canvas.create_line(
+                arrow_start,
+                (y0 + y1) / 2,
+                arrow_end,
+                (y0 + y1) / 2,
+                fill=accent,
+                width=2,
+                arrow="last",
+                arrowshape=(7, 8, 3),
+                tags=("side_overlay",),
+            )
+            self.canvas.create_text(
+                text_x,
+                (y0 + y1) / 2,
+                anchor="center",
+                text=label.upper(),
+                fill="#f7f9fc",
+                font=("Segoe UI Semibold", 10),
+                tags=("side_overlay",),
+            )
+
+        if getattr(self, "_side_flip_callback", None) is None or flip_button is None:
+            if flip_button is not None:
+                flip_button.place_forget()
+            return
+
+        button_width = int(min(176, max(156, viewport_width - 2 * (badge_width + margin + 18))))
+        if self._side_flip_button_width != button_width:
+            flip_button.configure(width=button_width, height=40)
+            self._side_flip_button_width = button_width
+        if flip_button.winfo_manager() != "place":
+            flip_button.place(relx=0.5, y=17, anchor="n")
+        flip_button.lift()
+
+    def _on_side_flip_clicked(self, _event=None):
+        if self._side_flip_callback is not None:
+            self._side_flip_callback()
+        return "break"
 
     def _display_geometry(self, disp=None):
         if disp is None:
@@ -1118,6 +1353,10 @@ class ImageCanvas(ttk.Frame):
     def _on_hover(self, event):
         if self._data is None:
             self._set_canvas_cursor("")
+            return
+        current_items = self.canvas.find_withtag("current")
+        if current_items and "side_flip" in self.canvas.gettags(current_items[0]):
+            self._set_canvas_cursor("hand2")
             return
         if self._drag_vertical_line:
             return

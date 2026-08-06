@@ -1825,6 +1825,7 @@ class Step4Frame(SidebarStepFrame):
         self.build_standard_layout(
             sidebar_width=self.SIDEBAR_WIDTH,
             status_var=self.status_var,
+            status_bar_content_margin=True,
         )
 
         source_section = self.add_sidebar_section("Input", pady=(0, 5))
@@ -2216,39 +2217,60 @@ class Step4Frame(SidebarStepFrame):
             return name[:limit]
         return f"{name[: limit - 3]}..."
 
-    def _batch_roi_tab_text(self, state: dict, done: int | None = None, *, active: bool = False) -> str:
+    def _batch_roi_tab_text(
+        self,
+        state: dict,
+        done: int | None = None,
+        *,
+        active: bool = False,
+        name_limit: int | None = None,
+    ) -> str:
         total = len(self.rois)
         if done is None:
             done = len(state.get("completed") or {})
         folder = state.get("folder")
         raw_label = state.get("base_label") or (folder.name if folder else "Folder")
+        if name_limit is None:
+            name_limit = self._batch_roi_tab_name_limit()
         if ". " in raw_label:
             prefix, name = raw_label.split(". ", 1)
-            tab_name = name if active else self._compact_batch_roi_name(name, self._batch_roi_tab_name_limit())
+            tab_name = name if active else self._compact_batch_roi_name(name, name_limit)
             label = f"{prefix}. {tab_name}"
         else:
-            label = raw_label if active else self._compact_batch_roi_name(raw_label, self._batch_roi_tab_name_limit())
+            label = raw_label if active else self._compact_batch_roi_name(raw_label, name_limit)
         done_prefix = "[Done] " if state.get("complete") or done >= total else ""
         return f"{done_prefix}{label} ({done}/{total})"
 
-    def _refresh_batch_roi_tab_labels(self) -> None:
+    def _refresh_batch_roi_tab_labels(self, tab_ids=None) -> None:
         notebook = self.batch_roi_notebook
         if notebook is None:
             return
-        for tab_id in notebook.tabs():
-            try:
-                tab_key = str(notebook.nametowidget(tab_id))
-            except tk.TclError:
-                continue
+        if tab_ids is None:
+            tab_ids = notebook.tabs()
+        name_limit = self._batch_roi_tab_name_limit()
+        for tab_id in tab_ids:
+            tab_key = str(tab_id)
             state = self.batch_roi_tab_states.get(tab_key)
             if state is None:
                 continue
             done = len(state.get("completed") or {})
             active = tab_key == self._active_batch_roi_tab
             try:
-                notebook.tab(tab_id, text=self._batch_roi_tab_text(state, done, active=active))
+                next_text = self._batch_roi_tab_text(
+                    state,
+                    done,
+                    active=active,
+                    name_limit=name_limit,
+                )
+                if notebook.tab(tab_id, "text") != next_text:
+                    notebook.tab(tab_id, text=next_text)
             except tk.TclError:
                 pass
+
+    @staticmethod
+    def _plot_theme_signature() -> tuple[str, ...]:
+        """Return the effective plot colors used to render cached tab canvases."""
+        return tuple(str(value) for value in _plot_palette().values())
 
     def _sync_active_batch_roi_state(self) -> None:
         tab_key = self._active_batch_roi_tab
@@ -2271,17 +2293,23 @@ class Step4Frame(SidebarStepFrame):
         state["ax_roi_grid"] = self.ax_roi_grid
         state["empty_placeholder"] = self.empty_placeholder
         state["current_profile"] = self._current_profile
+        state["plot_theme_signature"] = self._plot_theme_signature()
 
     def _activate_batch_roi_tab(self, tab) -> None:
         self._close_profile_zoom()
         self._cancel_roi_update_animations(redraw=True)
         self._sync_active_batch_roi_state()
+        previous_tab_key = self._active_batch_roi_tab
         tab_key = str(tab)
         state = self.batch_roi_tab_states.get(tab_key)
         if state is None:
             return
         self._active_batch_roi_tab = tab_key
-        self._refresh_batch_roi_tab_labels()
+        self._refresh_batch_roi_tab_labels(
+            tab_id
+            for tab_id in (previous_tab_key, tab_key)
+            if tab_id is not None
+        )
         self.plot_holder = tab
         self._set_batch_folder_label(state.get("folder"))
         if state.get("loaded") and self._restore_batch_roi_tab_from_cache(state):
@@ -2328,10 +2356,15 @@ class Step4Frame(SidebarStepFrame):
         self._sync_entry_vars_from_clicks()
         self._refresh_roi_list()
         self._select_roi_in_list()
-        # Cached batch tabs may have been drawn under the other appearance
-        # mode. Re-render on activation so their Matplotlib artists use the
-        # current theme as well.
-        self._render_current_roi()
+        if state.get("plot_theme_signature") != self._plot_theme_signature():
+            # Hidden tabs retain their Matplotlib artists. Redraw only if the
+            # application appearance changed while this tab was inactive.
+            self._render_current_roi()
+            state["plot_theme_signature"] = self._plot_theme_signature()
+        else:
+            if self._current_profile is not None:
+                self._update_profile_status(self._current_profile)
+            self._update_confirm_button_state()
         self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
         return True
 
@@ -2446,7 +2479,7 @@ class Step4Frame(SidebarStepFrame):
         self.roi_clicks.clear()
         self.current_roi_idx = 0
         self.profile_clicks.clear()
-        self._set_slice_zero()
+        self._set_slice_zero(render=restore_state is None)
         self._refresh_roi_list()
         self._select_roi_in_list()
         if restore_state is not None:
@@ -2476,7 +2509,7 @@ class Step4Frame(SidebarStepFrame):
             )
         self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
 
-    def _set_slice_zero(self) -> None:
+    def _set_slice_zero(self, *, render: bool = True) -> None:
         if self.volume is None:
             return
         self._close_profile_zoom()
@@ -2488,7 +2521,8 @@ class Step4Frame(SidebarStepFrame):
         self.completed.clear()
         self._load_current_roi_clicks()
         self._refresh_roi_list()
-        self._render_current_roi()
+        if render:
+            self._render_current_roi()
 
     def _on_roi_selected(self, _event=None) -> None:
         if self._updating_roi_selection:

@@ -2302,6 +2302,7 @@ class Step3Frame(SidebarStepFrame):
         self.build_standard_layout(
             sidebar_width=self.SIDEBAR_WIDTH,
             status_var=self.status_var,
+            status_bar_content_margin=True,
         )
         process_section = self.add_sidebar_section("Process", pady=(0, 5))
         process = process_section.body

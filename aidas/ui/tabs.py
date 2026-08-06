@@ -370,8 +370,10 @@ class ClosableTabView(ctk.CTkFrame):
         page = self._model.pages[page_id]
         page.grid(row=0, column=0, sticky="nsew")
         page.tkraise()
-        for candidate in self._model.order:
-            self._style_tab(candidate, active=candidate == page_id)
+        # Every non-selected tab is styled when it is added or when it stops
+        # being active in ``_select_id``. Repainting the full header here made
+        # selection cost grow linearly with the number of open result tabs.
+        self._style_tab(page_id, active=True)
 
     def _request_close(self, page_id: str) -> None:
         if page_id not in self._model.pages or self.close_command is None:
