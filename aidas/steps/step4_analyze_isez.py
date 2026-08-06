@@ -52,6 +52,7 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
 from aidas.core.display import centered_position, work_area_bounds
+from aidas.ui.components import AppButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
@@ -61,7 +62,9 @@ from aidas.utils.ui_utils import (
     HoverToolTip,
     SidebarStepFrame,
     action_button,
+    apply_app_icon_to,
     icon_action_button,
+    load_ctk_image,
 )
 
 
@@ -69,6 +72,43 @@ MATLAB_ROI_LOW = 300
 MATLAB_ROI_HIGH = 450
 MATLAB_ROI_TOP_LINE = 450
 MATLAB_A_LIMIT = 1.0
+
+
+def _plot_palette() -> dict[str, str]:
+    """Return theme-resolved colors for embedded Matplotlib figures."""
+
+    return {
+        "figure": COLORS.surface,
+        "axes": COLORS.surface_subtle,
+        "text": COLORS.text,
+        "muted": COLORS.muted_text,
+        "border": COLORS.border_strong,
+        "grid": COLORS.border,
+        "line": COLORS.text,
+        "primary": COLORS.primary,
+        "success": COLORS.success,
+        "warning": COLORS.warning,
+        "warning_soft": COLORS.warning_soft,
+        "danger": COLORS.danger,
+    }
+
+
+def _theme_matplotlib_figure(figure, *axes) -> dict[str, str]:
+    """Apply the active AIDaS palette to a figure and its axes."""
+
+    palette = _plot_palette()
+    figure.set_facecolor(palette["figure"])
+    for ax in axes:
+        if ax is None:
+            continue
+        ax.set_facecolor(palette["axes"])
+        ax.tick_params(colors=palette["text"])
+        ax.xaxis.label.set_color(palette["text"])
+        ax.yaxis.label.set_color(palette["text"])
+        ax.title.set_color(palette["text"])
+        for spine in ax.spines.values():
+            spine.set_color(palette["border"])
+    return palette
 
 # These are the Step 4 macro/MATLAB plot properties. The GT
 # ``ROI_to_move_stck.tif`` frames are 969 x 513 px, the macro applies
@@ -1274,8 +1314,6 @@ class Step4BatchROISelectionPanel(ttk.Frame):
 class Step4ProfileZoomDialog(ctk.CTkToplevel):
     """Focused profile editor opened from a completed ROI preview cell."""
 
-    START_COLOR = "#2563eb"
-    END_COLOR = "#dc2626"
     CROSSHAIR_COLOR = "#7c3aed"
 
     def __init__(
@@ -1293,6 +1331,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
     ):
         super().__init__(owner)
         self.withdraw()
+        apply_app_icon_to(self)
         self.configure(fg_color=COLOR_PAIRS["surface"])
         self.roi_index = int(roi_index)
         self.profile = np.asarray(profile, dtype=np.float64).reshape(-1)
@@ -1382,8 +1421,35 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         ttk.Label(footer, textvariable=self.apply_status_var, style="AIDaS.Success.TLabel").pack(
             side="left", padx=(16, 0)
         )
-        ttk.Button(footer, text="Close", command=self.close).pack(side="right")
-        self.apply_button = ttk.Button(footer, text="Apply changes", command=self._apply)
+        self.close_button_icon = load_ctk_image(
+            self,
+            "flat-color-icons--cancel.png",
+            size=20,
+        )
+        self.close_button = AppButton(
+            footer,
+            text="Close",
+            variant="secondary",
+            command=self.close,
+            image=self.close_button_icon,
+            compound="left",
+            width=104,
+        )
+        self.close_button.pack(side="right")
+        self.apply_button_icon = load_ctk_image(
+            self,
+            "flat-color-icons--checkmark.png",
+            size=20,
+        )
+        self.apply_button = AppButton(
+            footer,
+            text="Apply changes",
+            variant="primary",
+            command=self._apply,
+            image=self.apply_button_icon,
+            compound="left",
+            width=142,
+        )
         self.apply_button.pack(side="right", padx=(0, 6))
 
         chart_frame = ttk.Frame(self)
@@ -1436,16 +1502,18 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 
     def _draw_profile(self) -> None:
         self.ax.clear()
+        palette = _theme_matplotlib_figure(self.figure, self.ax)
         visible_x = np.arange(self._view_left, self._view_right + 1, dtype=np.float64)
         visible_y = self.profile[self._view_left - 1:self._view_right]
         self.ax.plot(
             visible_x,
             visible_y,
-            color="#111827",
+            color=palette["line"],
             linewidth=1.35,
             marker="o",
             markersize=3.2,
-            markerfacecolor="white",
+            markerfacecolor=palette["axes"],
+            markeredgecolor=palette["line"],
             markeredgewidth=0.8,
             zorder=3,
         )
@@ -1473,14 +1541,14 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         )
         self._start_line = self.ax.axvline(
             self._start,
-            color=self.START_COLOR,
+            color=palette["primary"],
             linewidth=1.8,
             label="Start",
             zorder=4,
         )
         self._end_line = self.ax.axvline(
             self._end,
-            color=self.END_COLOR,
+            color=palette["danger"],
             linewidth=1.8,
             label="End",
             zorder=4,
@@ -1507,7 +1575,13 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             xytext=(12, 12),
             textcoords="offset points",
             fontsize=9,
-            bbox={"boxstyle": "round,pad=0.3", "facecolor": "white", "edgecolor": self.CROSSHAIR_COLOR, "alpha": 0.94},
+            color=palette["text"],
+            bbox={
+                "boxstyle": "round,pad=0.3",
+                "facecolor": palette["axes"],
+                "edgecolor": self.CROSSHAIR_COLOR,
+                "alpha": 0.94,
+            },
             visible=False,
             zorder=6,
         )
@@ -1522,10 +1596,24 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.ax.set_xlim(self._view_left - 0.35, self._view_right + 0.35)
         self.ax.set_xlabel("Profile position (1-based sample)")
         self.ax.set_ylabel("Intensity")
-        self.ax.grid(True, color="#d1d5db", linewidth=0.55, alpha=0.75)
-        self.ax.legend(loc="upper right")
+        self.ax.grid(True, color=palette["grid"], linewidth=0.55, alpha=0.75)
+        legend = self.ax.legend(loc="upper right")
+        legend.get_frame().set_facecolor(palette["axes"])
+        legend.get_frame().set_edgecolor(palette["border"])
+        for label in legend.get_texts():
+            label.set_color(palette["text"])
         self._update_selection_label()
+        try:
+            self.canvas.get_tk_widget().configure(background=palette["figure"], highlightthickness=0)
+        except tk.TclError:
+            pass
         self.canvas.draw()
+
+    def _apply_aidas_theme(self) -> None:
+        """Redraw the profile editor when the application mode changes."""
+
+        if getattr(self, "figure", None) is not None:
+            self._draw_profile()
 
     def _update_selection_label(self) -> None:
         start_value = float(self.profile[self._start - 1])
@@ -1632,6 +1720,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         if saving:
             self.apply_button.state(["disabled"])
             self.apply_status_var.set("Saving...")
+            palette = _plot_palette()
             self._saving_text = self.ax.text(
                 0.5,
                 0.5,
@@ -1641,11 +1730,11 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
                 transform=self.ax.transAxes,
                 fontsize=16,
                 weight="bold",
-                color="#78350f",
+                color=palette["warning"],
                 bbox={
                     "boxstyle": "round,pad=0.55",
-                    "facecolor": "#fef3c7",
-                    "edgecolor": "#d97706",
+                    "facecolor": palette["warning_soft"],
+                    "edgecolor": palette["warning"],
                     "linewidth": 1.4,
                     "alpha": 0.96,
                 },
@@ -1875,6 +1964,30 @@ class Step4Frame(SidebarStepFrame):
             self.input_dir_var.set(folder)
         if folder and not self._output_dir_user_selected:
             self.output_dir_var.set(folder)
+
+    def _apply_aidas_theme(self) -> None:
+        """Keep the scientific plots synchronized with the application mode."""
+
+        super()._apply_aidas_theme()
+        if getattr(self, "figure", None) is None:
+            return
+        if getattr(self, "image", None) is not None and self.ax_profile is not None:
+            self._render_current_roi()
+            return
+        palette = _theme_matplotlib_figure(
+            self.figure,
+            getattr(self, "ax_roi_grid", None),
+            getattr(self, "ax_profile", None),
+        )
+        if self.canvas is not None:
+            try:
+                self.canvas.get_tk_widget().configure(
+                    background=palette["figure"],
+                    highlightthickness=0,
+                )
+            except tk.TclError:
+                pass
+            self.canvas.draw_idle()
 
     def _default_input_folder(self) -> str:
         if self.source_step is not None:
@@ -2215,8 +2328,10 @@ class Step4Frame(SidebarStepFrame):
         self._sync_entry_vars_from_clicks()
         self._refresh_roi_list()
         self._select_roi_in_list()
-        self._update_profile_status(self._current_profile)
-        self._update_confirm_button_state()
+        # Cached batch tabs may have been drawn under the other appearance
+        # mode. Re-render on activation so their Matplotlib artists use the
+        # current theme as well.
+        self._render_current_roi()
         self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
         return True
 
@@ -2496,7 +2611,8 @@ class Step4Frame(SidebarStepFrame):
         if self.canvas is not None and self.figure is not None:
             return
 
-        self.figure = Figure(figsize=(8.5, 5.2), dpi=100)
+        palette = _plot_palette()
+        self.figure = Figure(figsize=(8.5, 5.2), dpi=100, facecolor=palette["figure"])
         grid = self.figure.add_gridspec(2, 1, height_ratios=[1.35, 0.95])
         self.ax_roi_grid = self.figure.add_subplot(grid[0, 0])
         self.ax_profile = self.figure.add_subplot(grid[1, 0])
@@ -2505,6 +2621,10 @@ class Step4Frame(SidebarStepFrame):
         self.canvas.mpl_connect("button_press_event", self._on_profile_click)
         self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
         self.canvas.get_tk_widget().bind("<Configure>", self._on_plot_canvas_configure, add="+")
+        self.canvas.get_tk_widget().configure(
+            background=palette["figure"],
+            highlightthickness=0,
+        )
 
     def _on_plot_motion(self, event) -> None:
         if self.canvas is None:
@@ -2548,7 +2668,8 @@ class Step4Frame(SidebarStepFrame):
         xs = np.arange(1, profile.size + 1, dtype=np.float64)
         ymin = float(np.nanmin(profile))
         self.ax_profile.clear()
-        self.ax_profile.plot(xs, profile, color="black", linewidth=1.2)
+        palette = _theme_matplotlib_figure(self.figure, self.ax_roi_grid, self.ax_profile)
+        self.ax_profile.plot(xs, profile, color=palette["line"], linewidth=1.2)
         self.ax_profile.set_xlim(0, 140)
         self.ax_profile.set_ylim(ymin, ymin + 20)
         self.ax_profile.set_position([0.12, 0.085, 0.78, 0.30])
@@ -2560,10 +2681,16 @@ class Step4Frame(SidebarStepFrame):
             va="top",
             transform=self.ax_profile.transAxes,
             fontsize=9,
-            bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.72, "pad": 2},
+            color=palette["text"],
+            bbox={
+                "facecolor": palette["axes"],
+                "edgecolor": "none",
+                "alpha": 0.82,
+                "pad": 2,
+            },
         )
         for idx, click in enumerate(self.profile_clicks[:2]):
-            color = "#1f77b4" if idx == 0 else "#d62728"
+            color = palette["primary"] if idx == 0 else palette["danger"]
             self.ax_profile.axvline(click, color=color, linewidth=1.2)
 
         self.canvas.draw()
@@ -2626,19 +2753,31 @@ class Step4Frame(SidebarStepFrame):
             return
 
         ax.clear()
+        palette = _theme_matplotlib_figure(self.figure, ax)
         ax.set_xlim(0, 7)
         ax.set_ylim(0, 3)
         ax.set_axis_off()
-        ax.set_facecolor("#fbfbfb")
+        ax.set_facecolor(palette["axes"])
 
         for index in range(21):
             col = index % 7
             row = 2 - (index // 7)
             active = index == self.current_roi_idx
             updated = index < len(self.rois) and self.rois[index].suffix in self._flashing_updated_rois
-            edge = "#b45309" if updated else ("#111827" if active else "#d1d5db")
+            edge = palette["warning"] if updated else (
+                palette["text"] if active else palette["grid"]
+            )
             width = 2.0 if updated else (1.2 if active else 0.6)
-            ax.add_patch(Rectangle((col, row), 1, 1, facecolor="#fbfbfb", edgecolor=edge, linewidth=width))
+            ax.add_patch(
+                Rectangle(
+                    (col, row),
+                    1,
+                    1,
+                    facecolor=palette["axes"],
+                    edgecolor=edge,
+                    linewidth=width,
+                )
+            )
 
             if index >= len(self.rois):
                 continue
@@ -2652,7 +2791,7 @@ class Step4Frame(SidebarStepFrame):
                 ha="left",
                 va="top",
                 fontsize=7,
-                color="#b45309" if updated else "#111827",
+                color=palette["warning"] if updated else palette["text"],
                 weight="bold" if updated else "normal",
             )
             ax.text(
@@ -2662,7 +2801,9 @@ class Step4Frame(SidebarStepFrame):
                 ha="right",
                 va="top",
                 fontsize=7,
-                color="#b45309" if updated else ("#047857" if done else "#b91c1c"),
+                color=palette["warning"] if updated else (
+                    palette["success"] if done else palette["danger"]
+                ),
                 weight="bold",
             )
 
@@ -2692,10 +2833,10 @@ class Step4Frame(SidebarStepFrame):
 
             x_curve, y_curve = to_cell(result.normalized_x, result.normalized_y)
             if x_curve.size >= 2:
-                ax.plot(x_curve, y_curve, color="black", linewidth=0.75)
+                ax.plot(x_curve, y_curve, color=palette["line"], linewidth=0.75)
             x_base, y_base = to_cell(result.baseline_x, result.baseline_y)
             if x_base.size >= 2:
-                ax.plot(x_base, y_base, color="black", linewidth=0.55)
+                ax.plot(x_base, y_base, color=palette["muted"], linewidth=0.55)
 
     def _redraw_roi_update_flash(self) -> None:
         if self.ax_roi_grid is None:
@@ -2796,6 +2937,7 @@ class Step4Frame(SidebarStepFrame):
         self._hide_plot_activity(redraw=False)
         if self.figure is None or self.canvas is None:
             return
+        palette = _plot_palette()
         self._plot_activity_text = self.figure.text(
             0.51,
             0.22,
@@ -2804,11 +2946,11 @@ class Step4Frame(SidebarStepFrame):
             va="center",
             fontsize=14,
             weight="bold",
-            color="#78350f",
+            color=palette["warning"],
             bbox={
                 "boxstyle": "round,pad=0.55",
-                "facecolor": "#fef3c7",
-                "edgecolor": "#d97706",
+                "facecolor": palette["warning_soft"],
+                "edgecolor": palette["warning"],
                 "linewidth": 1.4,
                 "alpha": 0.96,
             },

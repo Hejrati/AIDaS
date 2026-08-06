@@ -19,7 +19,13 @@ class Config:
         # ttk theme preference.  Keeping both keys lets older preference files
         # load unchanged while the UI moves to System/Light/Dark modes.
         "appearance_mode": "System",
+        "sdb_raw_width": 768,
+        "sdb_raw_height": 1200,
+        "sdb_raw_offset": 1050,
+        "sdb_little_endian": True,
         "rscript_path": "",
+        "r_main_script_path": "",
+        "r_output_script_path": "",
         "check_for_updates": True,
         "last_successful_update_check": 0,
     }

@@ -1,17 +1,44 @@
+import inspect
 import unittest
 
+import customtkinter as ctk
 import numpy as np
 
 from aidas.steps.step4_analyze_isez import (
+    Step4ProfileZoomDialog,
     _focused_profile_limits,
     _nearest_profile_sample,
     _profile_selection_boundary,
     _profile_zoom_window_geometry,
+    _plot_palette,
     _updated_profile_bounds,
 )
+from aidas.ui.theme import COLOR_PAIRS
 
 
 class Step4ProfileZoomHelpersTests(unittest.TestCase):
+    def tearDown(self):
+        ctk.set_appearance_mode("System")
+
+    def test_plot_palette_tracks_dark_mode_without_losing_contrast(self):
+        ctk.set_appearance_mode("Dark")
+        palette = _plot_palette()
+
+        self.assertEqual(palette["figure"], COLOR_PAIRS["surface"][1])
+        self.assertEqual(palette["axes"], COLOR_PAIRS["surface_subtle"][1])
+        self.assertEqual(palette["line"], COLOR_PAIRS["text"][1])
+        self.assertNotEqual(palette["line"], palette["axes"])
+
+    def test_zoom_dialog_uses_app_icon_and_shared_rounded_buttons(self):
+        source = inspect.getsource(Step4ProfileZoomDialog.__init__)
+
+        self.assertIn("apply_app_icon_to(self)", source)
+        self.assertEqual(source.count("= AppButton("), 2)
+        self.assertIn('variant="primary"', source)
+        self.assertIn('variant="secondary"', source)
+        self.assertIn('"flat-color-icons--checkmark.png"', source)
+        self.assertIn('"flat-color-icons--cancel.png"', source)
+
     def test_focused_limits_add_margin_around_selection(self):
         self.assertEqual(_focused_profile_limits(100, 20, 40), (15, 45))
 

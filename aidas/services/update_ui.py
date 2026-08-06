@@ -88,8 +88,8 @@ class DownloadProgressDialog(ctk.CTkToplevel):
             corner_radius=SHAPES.corner_radius_md,
             border_width=SHAPES.border_width,
             border_color=COLOR_PAIRS["border_strong"],
-            fg_color="transparent",
-            hover_color=COLOR_PAIRS["surface_subtle"],
+            fg_color=COLOR_PAIRS["button"],
+            hover_color=COLOR_PAIRS["button_hover"],
             text_color=COLOR_PAIRS["text"],
             text_color_disabled=COLOR_PAIRS["disabled_text"],
             font=ctk.CTkFont(

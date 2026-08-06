@@ -4,13 +4,20 @@ import inspect
 from pathlib import Path
 import unittest
 
+from aidas.app import SettingsDialog
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2BatchSegmentationSelectionPanel, Step2Frame
-from aidas.steps.step3_flatten import RBatchSelectionPanel
+from aidas.steps.step3_flatten import RBatchSelectionPanel, Step3Frame
 from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel
 from aidas.ui.components import AppButton, AppSplitButton, WorkflowHeader, WorkflowNavigation
-from aidas.ui.theme import COLOR_PAIRS, CONTROLS
-from aidas.utils.ui_utils import ACTION_ICON_FILES, ACTION_ICON_SIZE, action_button, icon_action_button
+from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
+from aidas.utils.ui_utils import (
+    ACTION_ICON_FILES,
+    ACTION_ICON_SIZE,
+    action_button,
+    apply_app_icon_to,
+    icon_action_button,
+)
 
 
 PROJECT_ROOT = Path(__file__).parents[1]
@@ -57,6 +64,13 @@ class AppSplitButtonTests(unittest.TestCase):
 
 
 class ActionButtonConventionTests(unittest.TestCase):
+    def test_toplevel_icon_is_reapplied_after_ctk_initialization(self):
+        source = inspect.getsource(apply_app_icon_to)
+
+        self.assertIn('os.name == "nt"', source)
+        self.assertLess(source.index("window.iconbitmap(ico)"), source.index("window.iconphoto(True, img)"))
+        self.assertIn("window.after(250, apply_stored_icon)", source)
+
     def test_semantic_icons_share_one_color_icon_family(self):
         self.assertGreaterEqual(len(ACTION_ICON_FILES), 10)
         self.assertTrue(all(name.startswith("flat-color-icons--") for name in ACTION_ICON_FILES.values()))
@@ -76,8 +90,110 @@ class ActionButtonConventionTests(unittest.TestCase):
         source = inspect.getsource(AppButton.__init__)
         self.assertIn('kwargs.setdefault("compound", "left")', source)
 
+    def test_disabled_ctk_buttons_do_not_keep_actionable_semantic_colors(self):
+        constructor_source = inspect.getsource(AppButton.__init__)
+        configure_source = inspect.getsource(AppButton.configure)
+
+        self.assertIn('options.get("state") == "disabled"', constructor_source)
+        self.assertIn("_DISABLED_PALETTE", constructor_source)
+        self.assertIn('target_state == "disabled"', configure_source)
+        self.assertIn("self._enabled_palette", configure_source)
+        disabled_source = inspect.getsource(AppButton._disabled_palette)
+        self.assertIn('"background_corner_colors"', disabled_source)
+        self.assertIn("disabled_fill if corner == enabled_fill", disabled_source)
+        self.assertEqual(AppButton._DISABLED_PALETTE["border_width"], SHAPES.border_width)
+
 
 class ResponsiveWorkflowPanelTests(unittest.TestCase):
+    def test_settings_owns_sdb_r_setup_and_script_configuration(self):
+        source = inspect.getsource(SettingsDialog.__init__)
+
+        self.assertIn('"Default SDB image parameters"', source)
+        self.assertIn('"R environment"', source)
+        self.assertIn('"Step 3 R scripts"', source)
+        self.assertIn("self._open_r_setup", source)
+        self.assertIn("self._refresh_r_script_choices(role)", source)
+        self.assertIn('text="Apply"', source)
+        self.assertNotIn('text="Save SDB defaults"', source)
+        apply_source = inspect.getsource(SettingsDialog._apply_changes)
+        self.assertIn('self._preferences.set("sdb_raw_width"', apply_source)
+        self.assertIn("self._step3.select_r_script", apply_source)
+        self.assertIn("self._set_appearance_command", apply_source)
+
+    def test_settings_compacts_long_r_script_names(self):
+        filename = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_noHypoDenseBand_EA_edited.R"
+        compact = SettingsDialog._compact_script_name(filename)
+
+        self.assertLessEqual(len(compact), 48)
+        self.assertIn("…", compact)
+        self.assertTrue(compact.endswith("edited.R"))
+
+    def test_step3_sidebar_restores_r_setup_without_script_configuration(self):
+        source = inspect.getsource(Step3Frame._build_ui)
+
+        self.assertNotIn('add_sidebar_section("R Scripts"', source)
+        self.assertIn('"Set up R and packages…"', source)
+        self.assertIn("self._open_r_setup_wizard", source)
+        self.assertNotIn("_build_r_script_selector", source)
+        selection_source = inspect.getsource(Step3Frame._selected_r_script_path)
+        self.assertIn('"r_main_script_path"', selection_source)
+        self.assertIn('"r_output_script_path"', selection_source)
+
+    def test_step3_tutorial_has_light_and_dark_versions(self):
+        render_source = inspect.getsource(Step3Frame._render_tutorial)
+        conversion_source = inspect.getsource(Step3Frame._tutorial_image_for_appearance)
+        refresh_source = inspect.getsource(Step3Frame.refresh_appearance)
+
+        self.assertIn("_tutorial_image_for_appearance", render_source)
+        self.assertIn('COLOR_PAIRS["surface"]', render_source)
+        self.assertIn('resolve_color(COLOR_PAIRS["text"], "Dark")', conversion_source)
+        self.assertIn("neutral_result", conversion_source)
+        self.assertIn("pale_colored", conversion_source)
+        self.assertIn("self._render()", refresh_source)
+
+    def test_step3_view_changes_do_not_refresh_the_tutorial(self):
+        source = inspect.getsource(Step3Frame._on_view_selected)
+
+        self.assertIn("elif self.results is not None:", source)
+        self.assertNotIn("else:\n            self._render()", source)
+
+    def test_step1_reset_uses_configurable_sdb_defaults(self):
+        source = inspect.getsource(Step1Frame._set_default_import_params)
+
+        self.assertIn("self.default_raw_width", source)
+        self.assertIn("self.default_raw_height", source)
+        self.assertIn("self.default_raw_offset", source)
+
+    def test_step1_view_selectors_blend_into_the_toolbar(self):
+        source = inspect.getsource(Step1Frame._build_controls)
+        self.assertEqual(source.count('style="AIDaS.ContentHeader.TRadiobutton"'), 2)
+
+    def test_step1_undo_is_primary_when_enabled(self):
+        source = inspect.getsource(Step1Frame._build_controls)
+        undo_section = source[source.index("self.undo_crop_btn = AppButton(") :]
+        self.assertIn('variant="primary"', undo_section.split("self.undo_crop_btn.pack", 1)[0])
+
+    def test_workflow_handoff_buttons_share_the_success_variant(self):
+        step1_source = inspect.getsource(Step1Frame._build_controls)
+        step2_source = inspect.getsource(Step2Frame._build_controls)
+
+        step1_handoff = step1_source[step1_source.index("self.batch_segment_cropped_btn = AppButton(") :]
+        step2_handoff = step2_source[step2_source.index("self.continue_to_step3_button = AppButton(") :]
+        self.assertIn('variant="success"', step1_handoff.split(".pack(", 1)[0])
+        self.assertIn('variant="success"', step2_handoff.split(".grid(", 1)[0])
+        self.assertIn('"flat-color-icons--right.png"', step1_source)
+        self.assertIn('"flat-color-icons--right.png"', step2_source)
+
+    def test_fovea_prompt_uses_rounded_buttons_and_dpi_aware_icons(self):
+        source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
+
+        self.assertEqual(source.count("= AppButton("), 3)
+        self.assertIn('variant="primary"', source)
+        self.assertEqual(source.count("load_ctk_image("), 3)
+        self.assertNotIn("btn_cancel = action_button(", source)
+        self.assertNotIn("btn_skip = action_button(", source)
+        self.assertNotIn("btn_set = action_button(", source)
+
     def test_batch_panels_reserve_the_footer_before_the_flexible_table(self):
         panel_classes = (
             Step2BatchSegmentationSelectionPanel,
@@ -98,6 +214,23 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
 
 
 class WorkflowNavigationTests(unittest.TestCase):
+    def test_header_keeps_only_settings_and_help_shortcuts_at_top_right(self):
+        source = inspect.getsource(WorkflowHeader.__init__)
+
+        settings_index = source.index("self.settings_button = ctk.CTkButton")
+        help_index = source.index("self.help_button = ctk.CTkButton")
+        navigation_index = source.index("self.navigation = WorkflowNavigation")
+        self.assertLess(settings_index, help_index)
+        self.assertLess(help_index, navigation_index)
+        self.assertNotIn("self.appearance_menu", source)
+        self.assertNotIn('text="Appearance"', source)
+        self.assertIn('text="\\ue713"', source)
+        self.assertIn('text="\\ue897"', source)
+        self.assertGreaterEqual(source.count('family="Segoe Fluent Icons"'), 2)
+        self.assertIn('text_color=COLOR_PAIRS["primary"]', source)
+        self.assertGreaterEqual(source.count("width=36"), 2)
+        self.assertGreaterEqual(source.count("height=36"), 2)
+
     def test_header_uses_independent_navigation_buttons(self):
         source = inspect.getsource(WorkflowHeader.__init__)
 
@@ -121,7 +254,7 @@ class WorkflowNavigationTests(unittest.TestCase):
 
         self.assertEqual(selected.options["fg_color"], COLOR_PAIRS["primary"])
         self.assertEqual(selected.options["text_color"], COLOR_PAIRS["on_primary"])
-        self.assertEqual(inactive.options["fg_color"], COLOR_PAIRS["surface_subtle"])
+        self.assertEqual(inactive.options["fg_color"], COLOR_PAIRS["button"])
         self.assertEqual(inactive.options["border_color"], COLOR_PAIRS["border_strong"])
         self.assertNotEqual(selected.options["fg_color"], inactive.options["fg_color"])
 

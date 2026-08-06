@@ -37,6 +37,7 @@ from PIL import Image, ImageDraw, ImageTk
 
 from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
+from aidas.ui.components import AppButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
@@ -48,6 +49,7 @@ from aidas.utils.ui_utils import (
     action_button,
     apply_app_icon_to,
     icon_action_button,
+    load_ctk_image,
 )
 
 
@@ -926,14 +928,21 @@ class Step2Frame(SidebarStepFrame):
             tooltip="Save every completed batch result.",
         )
         self.save_all_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
-        self.continue_to_step3_button = action_button(
+        self.continue_to_step3_button_icon = load_ctk_image(
+            self, "flat-color-icons--right.png", size=20
+        )
+        self.continue_to_step3_button = AppButton(
             saved_buttons,
-            self,
-            "Go to Step 3",
-            self._save_all_and_continue_to_step3_button,
-            "next",
-            tooltip="Save all results and continue to flattening.",
-            style="AIDaS.PrimaryAction.TButton",
+            text="Go to Step 3",
+            variant="success",
+            command=self._save_all_and_continue_to_step3_button,
+            state="disabled",
+            image=self.continue_to_step3_button_icon,
+            compound="left",
+        )
+        HoverToolTip(
+            self.continue_to_step3_button,
+            "Save all results and continue to flattening.",
         )
         self.continue_to_step3_button.grid(
             row=1,
@@ -1246,35 +1255,40 @@ class Step2Frame(SidebarStepFrame):
         def on_cancel():
             next_var.set("cancel")
             
-        btn_cancel = action_button(
+        cancel_icon = load_ctk_image(self, "flat-color-icons--cancel.png", size=20)
+        btn_cancel = AppButton(
             temp_frame,
-            self,
-            "Exit",
-            on_cancel,
-            "cancel",
-            tooltip="Exit batch segmentation.",
+            text="Exit",
+            variant="secondary",
+            command=on_cancel,
+            image=cancel_icon,
+            compound="left",
         )
+        HoverToolTip(btn_cancel, "Exit batch segmentation.")
         btn_cancel.pack(side="right", padx=4, pady=4)
-        
-        btn_skip = action_button(
+
+        skip_icon = load_ctk_image(self, "flat-color-icons--right.png", size=20)
+        btn_skip = AppButton(
             temp_frame,
-            self,
-            "Skip",
-            on_skip,
-            "next",
-            tooltip="Skip this image without setting a foveal center.",
+            text="Skip",
+            variant="secondary",
+            command=on_skip,
+            image=skip_icon,
+            compound="left",
         )
+        HoverToolTip(btn_skip, "Skip this image without setting a foveal center.")
         btn_skip.pack(side="right", padx=4, pady=4)
 
-        btn_set = action_button(
+        confirm_icon = load_ctk_image(self, "flat-color-icons--checkmark.png", size=20)
+        btn_set = AppButton(
             temp_frame,
-            self,
-            "Confirm",
-            on_set,
-            "confirm",
-            tooltip="Confirm the foveal center for this image.",
-            style="AIDaS.PrimaryAction.TButton",
+            text="Confirm",
+            variant="primary",
+            command=on_set,
+            image=confirm_icon,
+            compound="left",
         )
+        HoverToolTip(btn_set, "Confirm the foveal center for this image.")
         btn_set.pack(side="right", padx=4, pady=4)
         
         # Save current editor state to restore later if canceled (optional, but good practice)

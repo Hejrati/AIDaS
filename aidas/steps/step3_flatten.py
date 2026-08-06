@@ -20,7 +20,7 @@ import os
 import sys
 import zipfile
 
-from PIL import Image, ImageOps, ImageTk
+from PIL import Image, ImageColor, ImageOps, ImageTk
 
 try:
     import pyreadr
@@ -34,7 +34,7 @@ from aidas.utils.step3_image_utils import (
 )
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.r_script_library import discover_r_scripts, import_r_script, user_r_script_dir
-from aidas.ui.theme import COLORS
+from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
 from aidas.ui.tabs import ClosableTabView
 from aidas.utils.ui_utils import (
     HoverToolTip,
@@ -76,10 +76,11 @@ class RSetupWizard(ttk.Frame):
 
     STEPS = ("Setup",)
 
-    def __init__(self, step_frame, parent, on_finish=None):
+    def __init__(self, step_frame, parent, on_finish=None, close_command=None):
         super().__init__(parent)
         self.step_frame = step_frame
         self.on_finish = on_finish
+        self.close_command = close_command
         self.result = None
         self.cancelled = True
         self.current_step = 0
@@ -101,6 +102,16 @@ class RSetupWizard(ttk.Frame):
         self._render_step()
         self.focus_set()
 
+    def _dismiss(self, *, render_previous=True):
+        if self.close_command is not None:
+            self.close_command()
+            return
+        close_panel = getattr(self.step_frame, "_close_r_setup_panel", None)
+        if callable(close_panel):
+            close_panel(render_previous=render_previous)
+        else:
+            self.destroy()
+
     def _build_styles(self):
         self.style = ttk.Style(self)
         self.style.configure("WizardTitle.TLabel", font=("Segoe UI", 16, "bold"))
@@ -116,7 +127,7 @@ class RSetupWizard(ttk.Frame):
 
         header = ttk.Frame(root)
         header.pack(fill="x", pady=(0, 10))
-        ttk.Label(header, text="Step 3 setup", style="WizardTitle.TLabel").pack(anchor="w")
+        ttk.Label(header, text="R environment setup", style="WizardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             header,
             text=f"Set up R {self.step_frame.R_REQUIRED_VERSION} and the two packages required by Step 3.",
@@ -339,7 +350,7 @@ class RSetupWizard(ttk.Frame):
             return
         self.cancelled = True
         self.result = None
-        self.step_frame._close_r_setup_panel(render_previous=True)
+        self._dismiss(render_previous=True)
 
     def _finish(self):
         self.cancelled = False
@@ -351,7 +362,7 @@ class RSetupWizard(ttk.Frame):
                 self.step_frame.preferences.set("r_package_library_path", str(self.package_library_path))
         callback = self.on_finish
         result = self.result
-        self.step_frame._close_r_setup_panel(render_previous=callback is None)
+        self._dismiss(render_previous=callback is None)
         if callback is not None:
             self.step_frame.after(0, lambda: callback(result))
 
@@ -487,7 +498,7 @@ class RSetupWizard(ttk.Frame):
             return
         self.cancelled = True
         self.result = None
-        self.step_frame._close_r_setup_panel(render_previous=True)
+        self._dismiss(render_previous=True)
 
     def _finish(self):
         self.cancelled = False
@@ -499,7 +510,7 @@ class RSetupWizard(ttk.Frame):
                 self.step_frame.preferences.set("r_package_library_path", str(self.package_library_path))
         callback = self.on_finish
         result = self.result
-        self.step_frame._close_r_setup_panel(render_previous=callback is None)
+        self._dismiss(render_previous=callback is None)
         if callback is not None:
             self.step_frame.after(0, lambda: callback(result))
 
@@ -907,7 +918,7 @@ class RSetupWizard(ttk.Frame):
         header.columnconfigure(0, weight=1)
         title_area = ttk.Frame(header)
         title_area.grid(row=0, column=0, sticky="ew")
-        ttk.Label(title_area, text="Step 3 setup", style="WizardTitle.TLabel").pack(anchor="w")
+        ttk.Label(title_area, text="R environment setup", style="WizardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             title_area,
             text=f"Check R {self.step_frame.R_REQUIRED_VERSION} and install all missing requirements automatically.",
@@ -1295,7 +1306,7 @@ class RSetupWizard(ttk.Frame):
             return
         self.cancelled = True
         self.result = None
-        self.step_frame._close_r_setup_panel(render_previous=True)
+        self._dismiss(render_previous=True)
 
     def _finish(self):
         self.cancelled = False
@@ -1307,7 +1318,7 @@ class RSetupWizard(ttk.Frame):
                 self.step_frame.preferences.set("r_package_library_path", str(self.package_library_path))
         callback = self.on_finish
         result = self.result
-        self.step_frame._close_r_setup_panel(render_previous=callback is None)
+        self._dismiss(render_previous=callback is None)
         if callback is not None:
             self.step_frame.after(0, lambda: callback(result))
 
@@ -1881,10 +1892,18 @@ class RBatchSelectionPanel(ttk.Frame):
         main_script_path = self.step_frame._selected_r_script_path("main")
         output_script_path = self.step_frame._selected_r_script_path("output")
         if main_script_path is None or not main_script_path.is_file():
-            messagebox.showerror("Batch Step 3", "Select an available main processing R script.", parent=self)
+            messagebox.showerror(
+                "Batch Step 3",
+                "Select an available main processing R script in Settings.",
+                parent=self,
+            )
             return
         if output_script_path is None or not output_script_path.is_file():
-            messagebox.showerror("Batch Step 3", "Select an available output R script.", parent=self)
+            messagebox.showerror(
+                "Batch Step 3",
+                "Select an available output R script in Settings.",
+                parent=self,
+            )
             return
         try:
             workers = max(1, int(self.workers_var.get()))
@@ -2264,10 +2283,6 @@ class Step3Frame(SidebarStepFrame):
         self.r_setup_button = None
         self.r_batch_button = None
         self.load_r_results_button = None
-        self.r_script_combos = {}
-        self.add_r_script_buttons = {}
-        self.r_script_choices = {"main": [], "output": []}
-        self.r_script_by_label = {"main": {}, "output": {}}
         self._busy = False
         self._r_cancel_event = threading.Event()
         self._r_process_lock = threading.Lock()
@@ -2279,8 +2294,6 @@ class Step3Frame(SidebarStepFrame):
         self.status_var = tk.StringVar(value="Ready - use batch Step 3 R processing.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
-        self.r_script_vars = {"main": tk.StringVar(), "output": tk.StringVar()}
-        self.r_script_active_vars = {"main": tk.StringVar(), "output": tk.StringVar()}
 
         self._build_ui()
         self._refresh_input_status()
@@ -2299,7 +2312,7 @@ class Step3Frame(SidebarStepFrame):
             "Set up R and packages…",
             self._open_r_setup_wizard,
             "settings",
-            tooltip="Check the R installation and manage the required packages.",
+            tooltip="Install or verify R and manage the packages required by Step 3.",
         )
         self.r_setup_button.pack(fill="x", pady=2)
 
@@ -2322,22 +2335,6 @@ class Step3Frame(SidebarStepFrame):
             tooltip="Open a folder containing completed Step 3 results.",
         )
         self.load_r_results_button.pack(fill="x", pady=2)
-
-        script_section = self.add_sidebar_section("R Scripts", pady=(0, 5))
-        script_controls = script_section.body
-        self._build_r_script_selector(
-            script_controls,
-            "Process Raw OCT (Step 1)",
-            "main",
-            "Add Step 1 R Script...",
-        )
-        ttk.Separator(script_controls, orient="horizontal").pack(fill="x", pady=(7, 5))
-        self._build_r_script_selector(
-            script_controls,
-            "More Process (Step 2)",
-            "output",
-            "Add Step 2 R Script...",
-        )
 
         ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(6, 4))
 
@@ -2374,10 +2371,27 @@ class Step3Frame(SidebarStepFrame):
             self.r_batch_button.configure(state=state)
         if self.load_r_results_button is not None:
             self.load_r_results_button.configure(state=state)
-        for combo in self.r_script_combos.values():
-            combo.configure(state="disabled" if state == "disabled" else "readonly")
-        for button in self.add_r_script_buttons.values():
-            button.configure(state=state)
+
+    def _open_r_setup_wizard(self, on_finish=None):
+        if self._busy:
+            return None
+        self._clear_plot_holder()
+        self.r_setup_panel = RSetupWizard(self, self.plot_holder, on_finish=on_finish)
+        self.r_setup_panel.pack(fill="both", expand=True)
+        self.status_var.set("Step 3 R setup is open in the preview area.")
+        self.progress_text_var.set("R setup")
+        return None
+
+    def _close_r_setup_panel(self, *, render_previous):
+        panel = self.r_setup_panel
+        self.r_setup_panel = None
+        if panel is not None:
+            try:
+                panel.destroy()
+            except Exception:
+                pass
+        if render_previous:
+            self._render()
 
     @staticmethod
     def _script_path(role="main"):
@@ -2400,89 +2414,36 @@ class Step3Frame(SidebarStepFrame):
     def _import_user_r_script(self, source_path, role="main"):
         return import_r_script(Path(source_path), self._user_r_script_dir(role))
 
-    def _build_r_script_selector(self, controls, title, role, add_button_text):
-        ttk.Label(controls, text=title, font=("", 9, "bold")).pack(anchor="w", pady=(0, 2))
-        combo = ttk.Combobox(
-            controls,
-            textvariable=self.r_script_vars[role],
-            state="readonly",
-        )
-        combo.pack(fill="x", pady=2)
-        combo.bind("<<ComboboxSelected>>", lambda _event, selected_role=role: self._on_r_script_selected(selected_role))
-        self.r_script_combos[role] = combo
+    def available_r_scripts(self, role="main"):
+        """Expose script choices to the centralized Settings window."""
 
-        button = action_button(
-            controls,
-            self,
-            add_button_text,
-            lambda selected_role=role: self._add_r_script(selected_role),
-            "opened_folder",
-        )
-        button.pack(fill="x", pady=2)
-        self.add_r_script_buttons[role] = button
-        ttk.Label(
-            controls,
-            textvariable=self.r_script_active_vars[role],
-            wraplength=self.SIDEBAR_TEXT_WRAP,
-            style="AIDaS.Success.TLabel",
-            justify="left",
-        ).pack(fill="x", anchor="w", pady=(3, 0))
-        self._refresh_r_script_choices(role)
+        return self._available_r_scripts(role)
 
-    def _refresh_r_script_choices(self, role, select_path=None):
-        choices = self._available_r_scripts(role)
-        self.r_script_choices[role] = choices
-        self.r_script_by_label[role] = {choice.label: choice for choice in choices}
-        labels = [choice.label for choice in choices]
-        combo = self.r_script_combos.get(role)
-        if combo is not None:
-            combo.configure(values=labels)
+    def import_r_script_for_role(self, source_path, role="main"):
+        """Import a user script selected from centralized Settings."""
 
-        selected = None
-        if select_path is not None:
-            selected_key = os.path.normcase(str(Path(select_path).resolve()))
-            selected = next(
-                (
-                    choice
-                    for choice in choices
-                    if os.path.normcase(str(choice.path.resolve())) == selected_key
-                ),
-                None,
-            )
-        if selected is None and choices:
-            selected = choices[0]
-        self.r_script_vars[role].set(selected.label if selected is not None else "No R scripts found")
-        self._on_r_script_selected(role)
-
-    def _on_r_script_selected(self, role):
-        choice = self.r_script_by_label[role].get(self.r_script_vars[role].get())
-        if choice is None:
-            self.r_script_active_vars[role].set("Active: no runnable script")
-            return
-        self.r_script_active_vars[role].set(f"Active: {choice.label}")
-        role_name = "main processing" if role == "main" else "output"
-        self.status_var.set(f"Selected active {role_name} R script: {choice.path.name}")
+        return self._import_user_r_script(source_path, role)
 
     def _selected_r_script_path(self, role="main"):
-        choice = self.r_script_by_label[role].get(self.r_script_vars[role].get())
-        return None if choice is None else choice.path
+        preference_key = "r_main_script_path" if role == "main" else "r_output_script_path"
+        configured = None if self.preferences is None else self.preferences.get(preference_key)
+        if configured:
+            configured_path = Path(configured)
+            if configured_path.is_file():
+                return configured_path
+        choices = self._available_r_scripts(role)
+        return choices[0].path if choices else None
 
-    def _add_r_script(self, role="main"):
-        role_name = "main processing" if role == "main" else "output"
-        selected = filedialog.askopenfilename(
-            parent=self,
-            title=f"Add a Step 3 {role_name} R script",
-            filetypes=(("R scripts", "*.R"), ("All files", "*.*")),
-        )
-        if not selected:
-            return
-        try:
-            imported_path = self._import_user_r_script(Path(selected), role)
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("Add R Script", f"Could not add the R script.\n{exc}", parent=self)
-            return
-        self._refresh_r_script_choices(role, select_path=imported_path)
-        self.status_var.set(f"Added and activated {role_name} R script: {imported_path.name}")
+    def select_r_script(self, role, path):
+        """Persist one Settings-selected R script for future Step 3 runs."""
+
+        selected = Path(path).resolve()
+        if not selected.is_file():
+            raise FileNotFoundError(selected)
+        preference_key = "r_main_script_path" if role == "main" else "r_output_script_path"
+        if self.preferences is not None:
+            self.preferences.set(preference_key, str(selected))
+        return selected
 
     def _resolve_rscript_executable(self):
         """Find an installed R executable, accepting only the Step 3 R version."""
@@ -2773,14 +2734,14 @@ class Step3Frame(SidebarStepFrame):
     def _ensure_r_ready_with_wizard(self):
         rscript = self._resolve_rscript_executable()
         if rscript is None:
-            self.status_var.set("Rscript was not found. Open the R setup wizard to continue.")
+            self.status_var.set("Rscript was not found. Open Settings > R environment to continue.")
             return None
         if self.preferences is not None:
             self.preferences.set("rscript_path", str(rscript))
         if self._r_packages_ready(rscript):
             self.status_var.set("R and required Step 3 packages are ready.")
             return rscript
-        self.status_var.set("Step 3 R packages are missing. Open the R setup wizard to install them.")
+        self.status_var.set("Step 3 R packages are missing. Open Settings > R environment to install them.")
         return None
 
     @staticmethod
@@ -3263,32 +3224,12 @@ class Step3Frame(SidebarStepFrame):
             child.destroy()
         self.figure = None
         self._preview_photo = None
-        self.r_setup_panel = None
         self.r_batch_panel = None
         self.r_batch_run_panel = None
         self.batch_results_notebook = None
         self.batch_result_folders = []
         self.batch_result_tab_states = {}
         self._active_batch_result_tab = None
-
-    def _open_r_setup_wizard(self, on_finish=None):
-        self._clear_plot_holder()
-        self.r_setup_panel = RSetupWizard(self, self.plot_holder, on_finish=on_finish)
-        self.r_setup_panel.pack(fill="both", expand=True)
-        self.status_var.set("Step 3 R setup is open in the preview area.")
-        self.progress_text_var.set("R setup")
-        return None
-
-    def _close_r_setup_panel(self, *, render_previous):
-        panel = self.r_setup_panel
-        self.r_setup_panel = None
-        if panel is not None:
-            try:
-                panel.destroy()
-            except Exception:
-                pass
-        if render_previous:
-            self._render()
 
     def _open_r_batch_scanner(self):
         if self._busy:
@@ -3597,27 +3538,24 @@ class Step3Frame(SidebarStepFrame):
             1,
             int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
         )
-        main_script_path = Path(main_script_path) if main_script_path is not None else self._script_path("main")
-        output_script_path = (
-            Path(output_script_path) if output_script_path is not None else self._script_path("output")
+        main_script_path = (
+            Path(main_script_path) if main_script_path is not None else self._selected_r_script_path("main")
         )
-        if not main_script_path.is_file():
+        output_script_path = (
+            Path(output_script_path) if output_script_path is not None else self._selected_r_script_path("output")
+        )
+        if main_script_path is None or not main_script_path.is_file():
             messagebox.showerror("Batch Step 3", f"Could not find the main R script:\n{main_script_path}")
             return
-        if not output_script_path.is_file():
+        if output_script_path is None or not output_script_path.is_file():
             messagebox.showerror("Batch Step 3", f"Could not find the output R script:\n{output_script_path}")
             return
         rscript = self._ensure_r_ready_with_wizard()
         if rscript is None:
-            self._open_r_setup_wizard(
-                on_finish=lambda result: self._start_batch_r_runs(
-                    folders,
-                    workers,
-                    main_script_path,
-                    output_script_path,
-                    timeout_seconds,
-                    allow_existing_rdata=allow_existing_rdata,
-                ) if result else None
+            messagebox.showerror(
+                "Step 3 R Setup",
+                "R or required packages are not ready. Open Settings > R environment to install or repair them.",
+                parent=self,
             )
             return
 
@@ -4157,7 +4095,7 @@ class Step3Frame(SidebarStepFrame):
     def _on_view_selected(self):
         if self.batch_result_folders:
             self._open_batch_r_result_tabs(self.batch_result_folders)
-        else:
+        elif self.results is not None:
             self._render()
 
     def _render_tutorial(self):
@@ -4175,7 +4113,67 @@ class Step3Frame(SidebarStepFrame):
         self.info_var.set("")
         if tutorial_path.is_file():
             self.status_var.set("Step 3 tutorial: using static asset image.")
-        self._display_preview_image(image)
+        image = self._tutorial_image_for_appearance(image)
+        self._display_preview_image(
+            image,
+            background=resolve_color(COLOR_PAIRS["surface"]),
+        )
+
+    @staticmethod
+    def _tutorial_image_for_appearance(image, appearance_mode=None):
+        """Return the tutorial in its exact light or contrast-safe dark form."""
+
+        surface_hex = resolve_color(COLOR_PAIRS["surface"], appearance_mode)
+        if surface_hex.lower() == COLOR_PAIRS["surface"][0].lower():
+            return image.convert("RGB")
+
+        source = np.asarray(image.convert("RGB"), dtype=np.float32)
+        result = source.copy()
+        maximum = source.max(axis=2)
+        minimum = source.min(axis=2)
+        chroma = maximum - minimum
+        luminance = (
+            source[:, :, 0] * 0.2126
+            + source[:, :, 1] * 0.7152
+            + source[:, :, 2] * 0.0722
+        )
+
+        surface = np.asarray(ImageColor.getrgb(surface_hex), dtype=np.float32)
+        text = np.asarray(
+            ImageColor.getrgb(resolve_color(COLOR_PAIRS["text"], "Dark")),
+            dtype=np.float32,
+        )
+
+        # Invert only neutral luminosity: white becomes the dark surface,
+        # black becomes light text, and antialiased edges remain smooth.
+        neutral = chroma <= 20
+        neutral_mix = luminance[:, :, None] / 255.0
+        neutral_result = text * (1.0 - neutral_mix) + surface * neutral_mix
+        result[neutral] = neutral_result[neutral]
+
+        # Tone down pale diagram regions and lift dark colored annotations so
+        # the blue, red, and gold meanings remain distinct on the dark canvas.
+        colored = ~neutral
+        pale_colored = colored & (luminance >= 175)
+        toned_color = surface + (source - surface) * 0.38
+        result[pale_colored] = toned_color[pale_colored]
+        dark_colored = colored & (luminance < 135)
+        lifted_color = source * 0.78 + text * 0.22
+        result[dark_colored] = lifted_color[dark_colored]
+
+        return Image.fromarray(np.clip(result, 0, 255).astype(np.uint8), mode="RGB")
+
+    def refresh_appearance(self):
+        """Redraw theme-dependent tutorial content without closing active work."""
+
+        panels = (
+            self.r_setup_panel,
+            self.r_batch_panel,
+            self.r_batch_run_panel,
+            self.batch_results_notebook,
+        )
+        if self.results is None and not self.batch_result_folders and not any(panels):
+            self._render()
 
     def _result_info_text(self):
         if self.results is None:

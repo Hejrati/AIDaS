@@ -50,8 +50,17 @@ class UIThemeTests(unittest.TestCase):
         self.assertGreater(SHAPES.corner_radius_md, SHAPES.corner_radius_sm)
         self.assertIn("primary", COLOR_PAIRS)
         self.assertIn("danger", COLOR_PAIRS)
+        self.assertIn("success_hover", COLOR_PAIRS)
+        self.assertIn("button", COLOR_PAIRS)
+        self.assertIn("button_hover", COLOR_PAIRS)
         self.assertNotEqual(COLOR_PAIRS["window_chrome"][0], "#FFFFFF")
         self.assertNotEqual(COLOR_PAIRS["window_chrome"][1], "#000000")
+
+    def test_neutral_buttons_are_visible_against_light_surfaces(self):
+        button = resolve_color(COLOR_PAIRS["button"], "Light")
+        self.assertNotEqual(button, resolve_color(COLOR_PAIRS["surface"], "Light"))
+        self.assertNotEqual(button, resolve_color(COLOR_PAIRS["sidebar"], "Light"))
+        self.assertNotEqual(button, resolve_color(COLOR_PAIRS["button_hover"], "Light"))
 
     def test_title_and_menu_bars_remain_distinct_in_each_mode(self):
         for appearance_mode in ("Light", "Dark"):

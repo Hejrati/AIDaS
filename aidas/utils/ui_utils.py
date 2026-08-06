@@ -203,10 +203,11 @@ def icon_button(parent, owner, icon_filename, command, *, tooltip=None, **button
         "width": CONTROLS.height_md,
         "height": CONTROLS.height_md,
         "corner_radius": SHAPES.corner_radius_sm,
-        "border_width": 0,
+        "border_width": SHAPES.border_width,
+        "border_color": COLOR_PAIRS["border_strong"],
         "bg_color": COLOR_PAIRS["surface"],
-        "fg_color": "transparent",
-        "hover_color": COLOR_PAIRS["primary_soft"],
+        "fg_color": COLOR_PAIRS["button"],
+        "hover_color": COLOR_PAIRS["button_hover"],
         "text_color": COLOR_PAIRS["text"],
     }
     options.update(button_options)
@@ -322,8 +323,8 @@ class NativeNumericSpinbox(ctk.CTkFrame):
             "height": CONTROLS.height_sm // 2,
             "corner_radius": 3,
             "border_width": 0,
-            "fg_color": "transparent",
-            "hover_color": COLOR_PAIRS["primary_soft"],
+            "fg_color": COLOR_PAIRS["button"],
+            "hover_color": COLOR_PAIRS["button_hover"],
             "text_color": COLOR_PAIRS["muted_text"],
             "font": ctk.CTkFont(family=TYPOGRAPHY.family, size=8, weight="bold"),
         }
@@ -397,20 +398,45 @@ def apply_app_icon_to(window):
         except Exception:
             return
 
-    img = getattr(root, "_icon_image_ref", None)
-    if img:
+    def apply_stored_icon():
         try:
-            window.iconphoto(True, img)
+            if not window.winfo_exists():
+                return
+        except Exception:
             return
-        except Exception:
-            pass
 
-    ico = getattr(root, "_icon_ico_path", None)
-    if ico:
-        try:
-            window.iconbitmap(ico)
-        except Exception:
-            pass
+        ico = getattr(root, "_icon_ico_path", None)
+        # Windows title bars render multi-resolution ICO resources most
+        # reliably. In particular, this avoids CTk's default blue icon being
+        # selected for a native Toplevel caption.
+        if os.name == "nt" and ico:
+            try:
+                window.iconbitmap(ico)
+                return
+            except Exception:
+                pass
+
+        img = getattr(root, "_icon_image_ref", None)
+        if img:
+            try:
+                window.iconphoto(True, img)
+                return
+            except Exception:
+                pass
+
+        if ico:
+            try:
+                window.iconbitmap(ico)
+            except Exception:
+                pass
+
+    apply_stored_icon()
+    try:
+        # CTkToplevel schedules its stock icon shortly after construction.
+        # Reapply the application icon afterward so it cannot overwrite AIDaS.
+        window.after(250, apply_stored_icon)
+    except Exception:
+        pass
 
 
 class HoverToolTip:

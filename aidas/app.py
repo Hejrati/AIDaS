@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import ctypes
 import os
+from pathlib import Path
 import sys
 import time
 import tkinter as tk
 import webbrowser
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 from PIL import Image
@@ -267,6 +268,500 @@ class AboutDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class SettingsDialog(ctk.CTkToplevel):
+    """Central application, SDB, and R configuration window."""
+
+    SCRIPT_ROLES = (
+        ("main", "Main processing script"),
+        ("output", "Output processing script"),
+    )
+
+    def __init__(
+        self,
+        parent,
+        *,
+        preferences,
+        appearance_mode,
+        set_appearance_command,
+        step1,
+        step3,
+    ):
+        super().__init__(parent)
+        self.withdraw()
+        self.title("AIDaS Settings")
+        self.configure(fg_color=COLOR_PAIRS["application"])
+        self.resizable(False, False)
+        self.transient(parent)
+        apply_app_icon_to(self)
+        self._parent = parent
+        self._preferences = preferences
+        self._set_appearance_command = set_appearance_command
+        self._step1 = step1
+        self._step3 = step3
+        self._r_setup_wizard = None
+        self._script_choices = {"main": [], "output": []}
+        self._script_by_label = {"main": {}, "output": {}}
+        self._script_vars = {
+            "main": tk.StringVar(master=self),
+            "output": tk.StringVar(master=self),
+        }
+        self._script_status_vars = {
+            "main": tk.StringVar(master=self),
+            "output": tk.StringVar(master=self),
+        }
+
+        self.settings_panel = ctk.CTkScrollableFrame(
+            self,
+            fg_color=COLOR_PAIRS["surface"],
+            corner_radius=SHAPES.corner_radius_lg,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
+            scrollbar_button_color=COLOR_PAIRS["border_strong"],
+            scrollbar_button_hover_color=COLOR_PAIRS["primary"],
+        )
+        self.settings_panel.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        self.settings_panel.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            self.settings_panel,
+            text="Settings",
+            anchor="w",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.heading_size,
+                weight=TYPOGRAPHY.bold_weight,
+            ),
+        ).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
+
+        general = self._settings_section("General", row=1)
+        self.appearance_menu = ctk.CTkOptionMenu(
+            general,
+            values=list(APPEARANCE_MODES),
+            command=self._mark_dirty,
+            width=140,
+            height=34,
+            corner_radius=SHAPES.corner_radius_sm,
+            fg_color=COLOR_PAIRS["button"],
+            button_color=COLOR_PAIRS["primary"],
+            button_hover_color=COLOR_PAIRS["primary_hover"],
+            text_color=COLOR_PAIRS["text"],
+            dropdown_fg_color=COLOR_PAIRS["surface_elevated"],
+            dropdown_hover_color=COLOR_PAIRS["primary_soft"],
+            dropdown_text_color=COLOR_PAIRS["text"],
+        )
+        self._labeled_control(general, 0, "Appearance", self.appearance_menu)
+        self.appearance_menu.set(appearance_mode)
+        self.update_checks_var = tk.BooleanVar(
+            master=self,
+            value=bool(preferences.get("check_for_updates", True)),
+        )
+        self.update_switch = ctk.CTkSwitch(
+            general,
+            text="Check automatically for application updates",
+            variable=self.update_checks_var,
+            command=self._mark_dirty,
+            onvalue=True,
+            offvalue=False,
+            progress_color=COLOR_PAIRS["primary"],
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+        )
+        self.update_switch.grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 12))
+
+        sdb = self._settings_section("Default SDB image parameters", row=2)
+        self.sdb_default_vars = {
+            "sdb_raw_width": tk.StringVar(value=str(preferences.get("sdb_raw_width", 768))),
+            "sdb_raw_height": tk.StringVar(value=str(preferences.get("sdb_raw_height", 1200))),
+            "sdb_raw_offset": tk.StringVar(value=str(preferences.get("sdb_raw_offset", 1050))),
+        }
+        for row, (key, label) in enumerate(
+            (
+                ("sdb_raw_width", "Width (px)"),
+                ("sdb_raw_height", "Height (px)"),
+                ("sdb_raw_offset", "Offset (bytes)"),
+            )
+        ):
+            entry = ctk.CTkEntry(
+                sdb,
+                textvariable=self.sdb_default_vars[key],
+                width=140,
+                height=32,
+                fg_color=COLOR_PAIRS["surface_elevated"],
+                border_color=COLOR_PAIRS["border_strong"],
+                text_color=COLOR_PAIRS["text"],
+            )
+            self._labeled_control(sdb, row, label, entry)
+        self.sdb_little_endian_var = tk.BooleanVar(
+            master=self,
+            value=bool(preferences.get("sdb_little_endian", True)),
+        )
+        ctk.CTkSwitch(
+            sdb,
+            text="Little-endian byte order",
+            variable=self.sdb_little_endian_var,
+            command=self._mark_dirty,
+            onvalue=True,
+            offvalue=False,
+            progress_color=COLOR_PAIRS["primary"],
+            text_color=COLOR_PAIRS["text"],
+        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 4))
+        sdb_actions = ctk.CTkFrame(sdb, fg_color="transparent", corner_radius=0)
+        sdb_actions.grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(8, 12))
+        ctk.CTkLabel(
+            sdb_actions,
+            text="Changes are saved with the Apply button below.",
+            text_color=COLOR_PAIRS["muted_text"],
+            anchor="w",
+        ).pack(side="left")
+
+        r_environment = self._settings_section("R environment", row=3)
+        ctk.CTkLabel(
+            r_environment,
+            text=f"Install or verify R {step3.R_REQUIRED_VERSION} and all required packages.",
+            anchor="w",
+            text_color=COLOR_PAIRS["muted_text"],
+        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(6, 8))
+        AppButton(
+            r_environment,
+            text="Install / set up R and packages",
+            variant="primary",
+            command=self._open_r_setup,
+            width=230,
+        ).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 12))
+
+        scripts = self._settings_section("Step 3 R scripts", row=4)
+        ctk.CTkLabel(
+            scripts,
+            text="Choose each active script from its list, then click Apply.",
+            anchor="w",
+            text_color=COLOR_PAIRS["muted_text"],
+        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(4, 8))
+        self.script_menus = {}
+        for row, (role, label) in enumerate(self.SCRIPT_ROLES):
+            role_frame = ctk.CTkFrame(scripts, fg_color="transparent", corner_radius=0)
+            role_frame.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(6, 10))
+            role_frame.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                role_frame,
+                text=label,
+                anchor="w",
+                text_color=COLOR_PAIRS["text"],
+                font=ctk.CTkFont(
+                    family=TYPOGRAPHY.family,
+                    size=TYPOGRAPHY.body_size,
+                    weight=TYPOGRAPHY.semibold_weight,
+                ),
+            ).grid(row=0, column=0, columnspan=2, sticky="ew")
+            menu = ctk.CTkOptionMenu(
+                role_frame,
+                variable=self._script_vars[role],
+                values=["No R scripts found"],
+                command=lambda _label, selected_role=role: self._select_r_script(selected_role),
+                height=34,
+                fg_color=COLOR_PAIRS["button"],
+                button_color=COLOR_PAIRS["primary"],
+                button_hover_color=COLOR_PAIRS["primary_hover"],
+                text_color=COLOR_PAIRS["text"],
+                dropdown_fg_color=COLOR_PAIRS["surface_elevated"],
+                dropdown_hover_color=COLOR_PAIRS["primary_soft"],
+                dropdown_text_color=COLOR_PAIRS["text"],
+            )
+            menu.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+            self.script_menus[role] = menu
+            AppButton(
+                role_frame,
+                text="Add R script...",
+                variant="secondary",
+                command=lambda selected_role=role: self._add_r_script(selected_role),
+                width=132,
+            ).grid(row=1, column=1, padx=(8, 0), pady=(4, 0))
+            ctk.CTkLabel(
+                role_frame,
+                textvariable=self._script_status_vars[role],
+                anchor="w",
+                text_color=COLOR_PAIRS["muted_text"],
+            ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+            self._refresh_r_script_choices(role)
+
+        self.footer = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        self.footer.pack(fill="x", padx=16, pady=(0, 14))
+        self.apply_status_var = tk.StringVar(master=self, value="")
+        for variable in self.sdb_default_vars.values():
+            variable.trace_add("write", self._mark_dirty)
+        ctk.CTkLabel(
+            self.footer,
+            textvariable=self.apply_status_var,
+            anchor="w",
+            text_color=COLOR_PAIRS["muted_text"],
+        ).pack(side="left")
+        AppButton(
+            self.footer,
+            text="Close",
+            variant="secondary",
+            command=self._close,
+            width=104,
+        ).pack(side="right")
+        AppButton(
+            self.footer,
+            text="Apply",
+            variant="primary",
+            command=self._apply_changes,
+            width=104,
+        ).pack(side="right", padx=(0, 8))
+
+        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.bind("<Escape>", lambda _event: self._close())
+        self.geometry(_center_geometry(self, 720, 720, parent=parent))
+        self.deiconify()
+        synchronize_window_chrome(
+            self,
+            background=COLOR_PAIRS["window_chrome"],
+            foreground=COLOR_PAIRS["text"],
+            border=COLOR_PAIRS["window_chrome"],
+        )
+        self.grab_set()
+        self.focus_force()
+
+    def _settings_section(self, title, *, row):
+        section = ctk.CTkFrame(
+            self.settings_panel,
+            fg_color=COLOR_PAIRS["surface_subtle"],
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
+        )
+        section.grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 10))
+        section.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            section,
+            text=title,
+            anchor="w",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.subtitle_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(10, 4))
+        body = ctk.CTkFrame(section, fg_color="transparent", corner_radius=0)
+        body.grid(row=1, column=0, columnspan=2, sticky="ew")
+        body.grid_columnconfigure(1, weight=1)
+        return body
+
+    @staticmethod
+    def _labeled_control(parent, row, label, control):
+        ctk.CTkLabel(
+            parent,
+            text=label,
+            anchor="w",
+            text_color=COLOR_PAIRS["text"],
+        ).grid(row=row, column=0, sticky="w", padx=(14, 18), pady=6)
+        control.grid(row=row, column=1, sticky="e", padx=(0, 14), pady=6)
+
+    def _mark_dirty(self, *_args) -> None:
+        self.apply_status_var.set("Unsaved changes")
+
+    def _validated_sdb_defaults(self):
+        try:
+            width = int(self.sdb_default_vars["sdb_raw_width"].get())
+            height = int(self.sdb_default_vars["sdb_raw_height"].get())
+            offset = int(self.sdb_default_vars["sdb_raw_offset"].get())
+            if width < 1 or height < 1 or offset < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showerror(
+                "SDB Defaults",
+                "Width and height must be positive integers; offset must be zero or greater.",
+                parent=self,
+            )
+            return None
+        return width, height, offset, bool(self.sdb_little_endian_var.get())
+
+    @staticmethod
+    def _compact_script_name(name, limit=48):
+        name = str(name)
+        if len(name) <= limit:
+            return name
+        tail = max(14, limit // 2 - 2)
+        head = max(12, limit - tail - 1)
+        return f"{name[:head]}…{name[-tail:]}"
+
+    @classmethod
+    def _script_display_label(cls, choice):
+        source = "Default" if choice.is_default else str(choice.source).title()
+        return f"{source} — {cls._compact_script_name(choice.path.name)}"
+
+    def _refresh_r_script_choices(self, role, *, select_path=None) -> None:
+        choices = self._step3.available_r_scripts(role)
+        self._script_choices[role] = choices
+        by_label = {}
+        labels = []
+        for choice in choices:
+            label = self._script_display_label(choice)
+            if label in by_label:
+                label = f"{label} ({len(labels) + 1})"
+            labels.append(label)
+            by_label[label] = choice
+        self._script_by_label[role] = by_label
+        labels = labels or ["No R scripts found"]
+        self.script_menus[role].configure(values=labels)
+        selected_path = Path(select_path).resolve() if select_path is not None else self._step3._selected_r_script_path(role)
+        selected = next(
+            (choice for choice in choices if selected_path is not None and choice.path.resolve() == selected_path.resolve()),
+            choices[0] if choices else None,
+        )
+        label = next(
+            (display for display, choice in by_label.items() if choice == selected),
+            labels[0],
+        )
+        self._script_vars[role].set(label)
+        if selected is not None:
+            state = "Pending" if select_path is not None else "Active"
+            self._script_status_vars[role].set(
+                f"{state}: {self._compact_script_name(selected.path.name)}"
+            )
+            if select_path is not None:
+                self._mark_dirty()
+        else:
+            self._script_status_vars[role].set("No runnable script is available")
+
+    def _select_r_script(self, role) -> None:
+        if self._step3._busy:
+            messagebox.showwarning(
+                "Step 3 is running",
+                "R script settings cannot be changed until the current Step 3 batch finishes.",
+                parent=self,
+            )
+            self._refresh_r_script_choices(role)
+            return
+        choice = self._script_by_label[role].get(self._script_vars[role].get())
+        if choice is None:
+            return
+        self._script_status_vars[role].set(
+            f"Pending: {self._compact_script_name(choice.path.name)} — click Apply"
+        )
+        self._mark_dirty()
+
+    def _add_r_script(self, role) -> None:
+        if self._step3._busy:
+            messagebox.showwarning(
+                "Step 3 is running",
+                "Wait for the current Step 3 batch to finish before adding an R script.",
+                parent=self,
+            )
+            return
+        selected = filedialog.askopenfilename(
+            parent=self,
+            title="Add main processing R script" if role == "main" else "Add output R script",
+            filetypes=(("R scripts", "*.R"), ("All files", "*.*")),
+        )
+        if not selected:
+            return
+        try:
+            imported = self._step3.import_r_script_for_role(Path(selected), role)
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("Add R Script", f"Could not add the R script.\n{exc}", parent=self)
+            return
+        self._refresh_r_script_choices(role, select_path=imported)
+
+    def _apply_changes(self) -> None:
+        sdb_defaults = self._validated_sdb_defaults()
+        if sdb_defaults is None:
+            return
+        selected_scripts = {}
+        for role, _label in self.SCRIPT_ROLES:
+            choice = self._script_by_label[role].get(self._script_vars[role].get())
+            if choice is None:
+                messagebox.showerror(
+                    "R Script Settings",
+                    f"Choose an available {role} R script before applying settings.",
+                    parent=self,
+                )
+                return
+            selected_scripts[role] = choice
+        if self._step3._busy:
+            script_changed = any(
+                self._step3._selected_r_script_path(role) is None
+                or self._step3._selected_r_script_path(role).resolve() != choice.path.resolve()
+                for role, choice in selected_scripts.items()
+            )
+            if script_changed:
+                messagebox.showwarning(
+                    "Step 3 is running",
+                    "R script changes cannot be applied until the current Step 3 batch finishes.",
+                    parent=self,
+                )
+                return
+
+        width, height, offset, little_endian = sdb_defaults
+        self._preferences.set("check_for_updates", bool(self.update_checks_var.get()))
+        self._preferences.set("sdb_raw_width", width)
+        self._preferences.set("sdb_raw_height", height)
+        self._preferences.set("sdb_raw_offset", offset)
+        self._preferences.set("sdb_little_endian", little_endian)
+        self._step1.set_sdb_parameter_defaults(
+            width=width,
+            height=height,
+            offset=offset,
+            little_endian=little_endian,
+        )
+        for role, choice in selected_scripts.items():
+            self._step3.select_r_script(role, choice.path)
+            self._script_status_vars[role].set(
+                f"Active: {self._compact_script_name(choice.path.name)}"
+            )
+        self._set_appearance_command(self.appearance_menu.get())
+        self.appearance_menu.set(normalize_appearance_mode(self.appearance_menu.get()))
+        self.apply_status_var.set("All settings applied")
+
+    def _open_r_setup(self) -> None:
+        if self._r_setup_wizard is not None:
+            return
+        if self._step3._busy:
+            messagebox.showwarning(
+                "Step 3 is running",
+                "Wait for the current Step 3 batch to finish before changing the R environment.",
+                parent=self,
+            )
+            return
+        from aidas.steps.step3_flatten import RSetupWizard
+
+        self.settings_panel.pack_forget()
+        self.footer.pack_forget()
+        self.resizable(True, True)
+        self._r_setup_wizard = RSetupWizard(
+            self._step3,
+            self,
+            on_finish=lambda _result: self._refresh_r_setup_state(),
+            close_command=self._close_r_setup,
+        )
+        self._r_setup_wizard.pack(fill="both", expand=True)
+        self.geometry(_center_geometry(self, 900, 650, parent=self._parent))
+
+    def _refresh_r_setup_state(self) -> None:
+        self._step3._refresh_input_status()
+
+    def _close_r_setup(self) -> None:
+        wizard = self._r_setup_wizard
+        self._r_setup_wizard = None
+        if wizard is not None:
+            wizard.destroy()
+        self.settings_panel.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+        self.footer.pack(fill="x", padx=16, pady=(0, 14))
+        self.resizable(False, False)
+        self.geometry(_center_geometry(self, 720, 720, parent=self._parent))
+
+    def _close(self) -> None:
+        if self._r_setup_wizard is not None and self._r_setup_wizard.busy:
+            return
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+
 class AIDaSApp(ctk.CTk):
     """Root application window."""
 
@@ -299,6 +794,7 @@ class AIDaSApp(ctk.CTk):
             min(LAYOUT.minimum_height, app_height),
         )
         self._about_dialog = None
+        self._settings_dialog = None
         self._set_app_icon()
 
         self._splash_started_at = time.monotonic()
@@ -395,10 +891,9 @@ class AIDaSApp(ctk.CTk):
         self.header = WorkflowHeader(
             self,
             version=__version__,
-            appearance_mode=self.appearance_mode,
-            appearance_modes=APPEARANCE_MODES,
             on_step_selected=self._select_workflow_step,
-            on_appearance_selected=self._set_theme,
+            on_settings_selected=self._show_settings,
+            on_help_selected=self._show_about,
             logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
         )
         self.header.pack(side="top", fill="x")
@@ -554,6 +1049,9 @@ class AIDaSApp(ctk.CTk):
         current = ctk.get_appearance_mode()
         if self.appearance_mode == "System" and current != self._last_effective_appearance:
             apply_appearance_mode("System", root=self, style=self.style)
+            step3 = getattr(self, "step3", None)
+            if step3 is not None:
+                self.after_idle(step3.refresh_appearance)
         self._last_effective_appearance = current
         self._appearance_watch_after_id = self.after(1500, self._watch_system_appearance)
 
@@ -642,14 +1140,14 @@ class AIDaSApp(ctk.CTk):
         )
         self.preferences.set("appearance_mode", self.appearance_mode)
         self._last_effective_appearance = ctk.get_appearance_mode()
-        header = getattr(self, "header", None)
-        if header is not None:
-            header.set_appearance(self.appearance_mode)
         self._build_menu()
         self.status.configure(
             text=f"AIDaS v{__version__} — appearance changed to {self.appearance_mode}"
         )
         self.after_idle(lambda: refresh_native_widgets(self))
+        step3 = getattr(self, "step3", None)
+        if step3 is not None:
+            self.after_idle(step3.refresh_appearance)
 
     def _on_step1_processed_image(self, image, source_path) -> None:
         """Receive a Step 1 crop without repainting a hidden Step 2 page."""
@@ -704,6 +1202,26 @@ class AIDaSApp(ctk.CTk):
         except tk.TclError:
             pass
         self._about_dialog = AboutDialog(self)
+
+    def _show_settings(self) -> None:
+        """Open one settings window, or focus the existing instance."""
+
+        dialog = self._settings_dialog
+        try:
+            if dialog is not None and dialog.winfo_exists():
+                dialog.lift()
+                dialog.focus_force()
+                return
+        except tk.TclError:
+            pass
+        self._settings_dialog = SettingsDialog(
+            self,
+            preferences=self.preferences,
+            appearance_mode=self.appearance_mode,
+            set_appearance_command=self._set_theme,
+            step1=self.step1,
+            step3=self.step3,
+        )
 
 
 def _show_native_notice(title: str, message: str, *, error: bool = False) -> None:

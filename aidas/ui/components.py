@@ -15,6 +15,20 @@ from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
 class AppButton(ctk.CTkButton):
     """A semantic CTk button with a small ttk-state compatibility shim."""
 
+    _PALETTE_OPTIONS = (
+        "fg_color",
+        "hover_color",
+        "border_color",
+        "border_width",
+        "background_corner_colors",
+    )
+    _DISABLED_PALETTE = {
+        "fg_color": COLOR_PAIRS["surface_subtle"],
+        "hover_color": COLOR_PAIRS["surface_subtle"],
+        "border_color": COLOR_PAIRS["border"],
+        "border_width": SHAPES.border_width,
+    }
+
     def __init__(self, master, *, variant: str = "secondary", **kwargs):
         legacy_style = str(kwargs.pop("style", ""))
         kwargs.pop("padding", None)
@@ -36,6 +50,12 @@ class AppButton(ctk.CTkButton):
                 "text_color": COLOR_PAIRS["on_primary"],
                 "border_color": COLOR_PAIRS["danger"],
             },
+            "success": {
+                "fg_color": COLOR_PAIRS["success"],
+                "hover_color": COLOR_PAIRS["success_hover"],
+                "text_color": COLOR_PAIRS["on_primary"],
+                "border_color": COLOR_PAIRS["success"],
+            },
             "ghost": {
                 "fg_color": "transparent",
                 "hover_color": COLOR_PAIRS["primary_soft"],
@@ -43,8 +63,8 @@ class AppButton(ctk.CTkButton):
                 "border_color": COLOR_PAIRS["border"],
             },
             "secondary": {
-                "fg_color": COLOR_PAIRS["surface_elevated"],
-                "hover_color": COLOR_PAIRS["primary_soft"],
+                "fg_color": COLOR_PAIRS["button"],
+                "hover_color": COLOR_PAIRS["button_hover"],
                 "text_color": COLOR_PAIRS["text"],
                 "border_color": COLOR_PAIRS["border_strong"],
             },
@@ -66,7 +86,51 @@ class AppButton(ctk.CTkButton):
             options["bg_color"] = COLOR_PAIRS["surface"]
         options.update(palettes.get(variant, palettes["secondary"]))
         options.update(kwargs)
+        self._enabled_palette = {
+            name: options[name]
+            for name in self._PALETTE_OPTIONS
+            if name in options
+        }
+        if options.get("state") == "disabled":
+            options.update(self._disabled_palette())
         super().__init__(master, **options)
+
+    def _disabled_palette(self):
+        """Return a neutral palette while preserving a composite's silhouette."""
+
+        disabled = dict(self._DISABLED_PALETTE)
+        enabled_corners = self._enabled_palette.get("background_corner_colors")
+        if enabled_corners is not None:
+            enabled_fill = self._enabled_palette.get("fg_color")
+            disabled_fill = self._DISABLED_PALETTE["fg_color"]
+            disabled["background_corner_colors"] = tuple(
+                disabled_fill if corner == enabled_fill else corner
+                for corner in enabled_corners
+            )
+        return disabled
+
+    def configure(self, require_redraw=False, **kwargs):
+        """Keep semantic colors reserved for enabled, actionable states."""
+
+        requested_state = kwargs.get("state")
+        current_state = getattr(self, "_state", "normal")
+        target_state = requested_state if requested_state is not None else current_state
+
+        # Explicit palette changes describe the enabled appearance. This lets
+        # callers restyle a disabled button without accidentally making it
+        # look actionable before its state changes.
+        for name in self._PALETTE_OPTIONS:
+            if name in kwargs:
+                self._enabled_palette[name] = kwargs[name]
+
+        if target_state == "disabled":
+            kwargs.update(self._disabled_palette())
+        elif current_state == "disabled" and target_state != "disabled":
+            kwargs.update(self._enabled_palette)
+
+        return super().configure(require_redraw, **kwargs)
+
+    config = configure
 
     def state(self, statespec=None):
         """Support the subset of ttk.Button.state used by workflow panels."""
@@ -242,8 +306,8 @@ class WorkflowNavigation(ctk.CTkFrame):
                 corner_radius=SHAPES.corner_radius_md,
                 border_width=SHAPES.border_width,
                 border_color=COLOR_PAIRS["border_strong"],
-                fg_color=COLOR_PAIRS["surface_subtle"],
-                hover_color=COLOR_PAIRS["primary_soft"],
+                fg_color=COLOR_PAIRS["button"],
+                hover_color=COLOR_PAIRS["button_hover"],
                 text_color=COLOR_PAIRS["text"],
                 font=ctk.CTkFont(
                     family=TYPOGRAPHY.family,
@@ -284,12 +348,12 @@ class WorkflowNavigation(ctk.CTkFrame):
             fg_color=(
                 COLOR_PAIRS["primary"]
                 if selected
-                else COLOR_PAIRS["surface_subtle"]
+                else COLOR_PAIRS["button"]
             ),
             hover_color=(
                 COLOR_PAIRS["primary_hover"]
                 if selected
-                else COLOR_PAIRS["primary_soft"]
+                else COLOR_PAIRS["button_hover"]
             ),
             border_color=(
                 COLOR_PAIRS["primary"]
@@ -319,10 +383,9 @@ class WorkflowHeader(ctk.CTkFrame):
         master,
         *,
         version: str,
-        appearance_mode: str,
         on_step_selected: Callable[[int], None],
-        on_appearance_selected: Callable[[str], None],
-        appearance_modes: Sequence[str],
+        on_settings_selected: Callable[[], None] | None = None,
+        on_help_selected: Callable[[], None] | None = None,
         logo_path: str | None = None,
         step_labels: Sequence[str] | None = None,
     ) -> None:
@@ -403,31 +466,44 @@ class WorkflowHeader(ctk.CTkFrame):
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
         ).grid(row=1, column=1, sticky="nw")
 
-        appearance = ctk.CTkFrame(top, fg_color="transparent", corner_radius=0)
-        appearance.grid(row=0, column=2, rowspan=2, sticky="e")
-        ctk.CTkLabel(
-            appearance,
-            text="Appearance",
-            text_color=COLOR_PAIRS["muted_text"],
-            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
-        ).pack(side="left", padx=(0, 7))
-        self.appearance_menu = ctk.CTkOptionMenu(
-            appearance,
-            values=list(appearance_modes),
-            command=on_appearance_selected,
-            width=108,
-            height=CONTROLS.height_sm,
-            corner_radius=SHAPES.corner_radius_sm,
-            fg_color=COLOR_PAIRS["surface_subtle"],
-            button_color=COLOR_PAIRS["primary"],
-            button_hover_color=COLOR_PAIRS["primary_hover"],
+        header_actions = ctk.CTkFrame(top, fg_color="transparent", corner_radius=0)
+        header_actions.grid(row=0, column=2, rowspan=2, sticky="e")
+
+        self.settings_button = ctk.CTkButton(
+            header_actions,
+            text="\ue713",
+            command=on_settings_selected,
+            state="normal" if on_settings_selected is not None else "disabled",
+            width=36,
+            height=36,
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border_strong"],
+            fg_color=COLOR_PAIRS["button"],
+            hover_color=COLOR_PAIRS["button_hover"],
             text_color=COLOR_PAIRS["text"],
-            dropdown_fg_color=COLOR_PAIRS["surface_elevated"],
-            dropdown_hover_color=COLOR_PAIRS["primary_soft"],
-            dropdown_text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family="Segoe Fluent Icons", size=21),
         )
-        self.appearance_menu.pack(side="left")
-        self.appearance_menu.set(appearance_mode)
+        self.settings_button.pack(side="left", padx=(0, 4))
+        self.help_button = ctk.CTkButton(
+            header_actions,
+            text="\ue897",
+            command=on_help_selected,
+            state="normal" if on_help_selected is not None else "disabled",
+            width=36,
+            height=36,
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["primary"],
+            fg_color=COLOR_PAIRS["button"],
+            hover_color=COLOR_PAIRS["primary_soft"],
+            text_color=COLOR_PAIRS["primary"],
+            font=ctk.CTkFont(
+                family="Segoe Fluent Icons",
+                size=21,
+            ),
+        )
+        self.help_button.pack(side="left")
 
         self.navigation = WorkflowNavigation(
             self,
@@ -448,10 +524,6 @@ class WorkflowHeader(ctk.CTkFrame):
     def select_step(self, index: int) -> None:
         if 0 <= int(index) < len(self._step_labels):
             self.navigation.set(self._step_labels[int(index)])
-
-    def set_appearance(self, mode: str) -> None:
-        self.appearance_menu.set(mode)
-
 
 class AppStatusBar(ctk.CTkFrame):
     """Compact application-wide status bar with an activity indicator."""

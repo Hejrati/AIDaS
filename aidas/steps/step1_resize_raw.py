@@ -73,6 +73,18 @@ class Step1Frame(SidebarStepFrame):
         super().__init__(parent)
 
         self.preferences = preferences
+        self.default_raw_width = self._configured_sdb_default(
+            "sdb_raw_width", DEFAULT_RAW_WIDTH, minimum=1
+        )
+        self.default_raw_height = self._configured_sdb_default(
+            "sdb_raw_height", DEFAULT_RAW_HEIGHT, minimum=1
+        )
+        self.default_raw_offset = self._configured_sdb_default(
+            "sdb_raw_offset", DEFAULT_RAW_OFFSET, minimum=0
+        )
+        self.default_little_endian = bool(
+            True if self.preferences is None else self.preferences.get("sdb_little_endian", True)
+        )
         self._on_processed_image = on_processed_image
         self._on_batch_segment_folders = on_batch_segment_folders
 
@@ -158,23 +170,23 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_params_frame = self.sdb_params_section.body
         self.sdb_params_frame.grid_columnconfigure(2, weight=1)
 
-        self.width_var = tk.StringVar(value=str(DEFAULT_RAW_WIDTH))
-        self.height_var = tk.StringVar(value=str(DEFAULT_RAW_HEIGHT))
-        self.offset_var = tk.StringVar(value=str(DEFAULT_RAW_OFFSET))
+        self.width_var = tk.StringVar(value=str(self.default_raw_width))
+        self.height_var = tk.StringVar(value=str(self.default_raw_height))
+        self.offset_var = tk.StringVar(value=str(self.default_raw_offset))
 
         # Update these assignments in _build_controls
         self.width_stepper, self.width_reset_btn = self._param_stepper_row(
-            self.sdb_params_frame, 0, "Width (px):", self.width_var, DEFAULT_RAW_WIDTH,
+            self.sdb_params_frame, 0, "Width (px):", self.width_var, lambda: self.default_raw_width,
             step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
         )
         
         self.height_stepper, self.height_reset_btn = self._param_stepper_row(
-            self.sdb_params_frame, 1, "Height (px):", self.height_var, DEFAULT_RAW_HEIGHT,
+            self.sdb_params_frame, 1, "Height (px):", self.height_var, lambda: self.default_raw_height,
             step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
         )
         
         self.offset_stepper, self.offset_reset_btn = self._param_stepper_row(
-            self.sdb_params_frame, 2, "Offset (bytes):", self.offset_var, DEFAULT_RAW_OFFSET,
+            self.sdb_params_frame, 2, "Offset (bytes):", self.offset_var, lambda: self.default_raw_offset,
             step=2, minimum=0, maximum=10_000_000, validatecommand=numeric_vcmd
         )
 
@@ -182,7 +194,7 @@ class Step1Frame(SidebarStepFrame):
         self.height_var.trace_add("write", lambda *_: self._on_import_param_changed())
         self.offset_var.trace_add("write", lambda *_: self._on_import_param_changed())
 
-        self.endian_var = tk.BooleanVar(value=True)
+        self.endian_var = tk.BooleanVar(value=self.default_little_endian)
         self.endian_var.trace_add("write", lambda *_: self._on_import_param_changed())
         self.endian_checkbox = ttk.Checkbutton(
             self.sdb_params_frame,
@@ -350,12 +362,12 @@ class Step1Frame(SidebarStepFrame):
         )
 
         self.batch_segment_cropped_btn_icon = load_ctk_image(
-            self, "lets-icons--flag-finish.png", size=action_icon_size
+            self, "flat-color-icons--right.png", size=20
         )
         self.batch_segment_cropped_btn = AppButton(
             self.step_actions_frame,
-            text="Go to Step 2 >>",
-            variant="secondary",
+            text="Go to Step 2",
+            variant="success",
             command=self._send_cropped_folders_to_step2,
             state="disabled",
             image=self.batch_segment_cropped_btn_icon,
@@ -438,6 +450,7 @@ class Step1Frame(SidebarStepFrame):
         self.view_mode_var = tk.StringVar(value="source")
         self.source_view_radio = ttk.Radiobutton(
             view_choices,
+            style="AIDaS.ContentHeader.TRadiobutton",
             text="Source",
             value="source",
             variable=self.view_mode_var,
@@ -446,6 +459,7 @@ class Step1Frame(SidebarStepFrame):
         self.source_view_radio.pack(side="left", padx=(0, 8))
         self.target_view_radio = ttk.Radiobutton(
             view_choices,
+            style="AIDaS.ContentHeader.TRadiobutton",
             text="Target",
             value="target",
             variable=self.view_mode_var,
@@ -473,6 +487,7 @@ class Step1Frame(SidebarStepFrame):
         self.crop_btn = self.crop_split_frame.action_button
         self.crop_options_btn = self.crop_split_frame.options_button
         self.crop_split_divider = self.crop_split_frame.divider
+        self.crop_btn.configure(state="disabled")
         self.crop_options_btn.configure(state="disabled")
         self.crop_options_menu = tk.Menu(self.crop_options_btn, tearoff=False)
         self.crop_options_menu.add_command(
@@ -491,7 +506,7 @@ class Step1Frame(SidebarStepFrame):
         self.undo_crop_btn = AppButton(
             toolbar,
             text="Undo",
-            variant="secondary",
+            variant="primary",
             bg_color=COLOR_PAIRS["surface_subtle"],
             width=96,
             height=CONTROLS.height_lg,
@@ -572,7 +587,10 @@ class Step1Frame(SidebarStepFrame):
             row_frame,
             self,
             "material-symbols-light--refresh-rounded.png",
-            command=lambda: self._reset_numeric_var(var, default_value),
+            command=lambda: self._reset_numeric_var(
+                var,
+                default_value() if callable(default_value) else default_value,
+            ),
             tooltip=f"Reset {label.rstrip(':').lower()}",
         )
         reset_btn.pack(side="left", padx=(8, 0), anchor="center")
@@ -625,7 +643,7 @@ class Step1Frame(SidebarStepFrame):
         desired_states = (
             (self.save_all_btn, has_processed),
             (getattr(self, "undo_crop_btn", None), has_processed),
-            (getattr(self, "crop_btn", None), not has_processed),
+            (getattr(self, "crop_btn", None), has_raw_image and not has_processed),
             (getattr(self, "crop_options_btn", None), has_raw_image and not has_processed),
             (getattr(self, "target_view_radio", None), has_raw_image),
             (getattr(self, "source_view_radio", None), has_raw_image and not has_processed),
@@ -751,6 +769,21 @@ class Step1Frame(SidebarStepFrame):
     def _reset_numeric_var(var, default_value):
         var.set(str(default_value))
 
+    def _configured_sdb_default(self, key, fallback, *, minimum):
+        value = fallback if self.preferences is None else self.preferences.get(key, fallback)
+        try:
+            return max(minimum, int(value))
+        except (TypeError, ValueError):
+            return int(fallback)
+
+    def set_sdb_parameter_defaults(self, *, width, height, offset, little_endian=True):
+        """Update reset defaults after they are changed in application settings."""
+
+        self.default_raw_width = max(1, int(width))
+        self.default_raw_height = max(1, int(height))
+        self.default_raw_offset = max(0, int(offset))
+        self.default_little_endian = bool(little_endian)
+
     @staticmethod
     def _validate_digits_only(proposed_value):
         """Allow only digits for numeric entries (empty is allowed while editing)."""
@@ -762,10 +795,10 @@ class Step1Frame(SidebarStepFrame):
 
     def _set_default_import_params(self):
         """Restore default SDB import parameters and apply them."""
-        self.width_var.set(str(DEFAULT_RAW_WIDTH))
-        self.height_var.set(str(DEFAULT_RAW_HEIGHT))
-        self.offset_var.set(str(DEFAULT_RAW_OFFSET))
-        self.endian_var.set(True)
+        self.width_var.set(str(self.default_raw_width))
+        self.height_var.set(str(self.default_raw_height))
+        self.offset_var.set(str(self.default_raw_offset))
+        self.endian_var.set(self.default_little_endian)
         return self._apply_import_params()
 
     def _on_import_param_changed(self):

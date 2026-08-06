@@ -231,6 +231,22 @@ class Step1WorkQueueTests(unittest.TestCase):
         self.assertEqual(frame.target_view_radio.state, "normal")
         self.assertEqual(frame.crop_options_btn.state, "disabled")
 
+    def test_crop_actions_stay_disabled_without_a_source_image(self):
+        frame = Step1Frame.__new__(Step1Frame)
+        frame.raw_image = None
+        frame.processed_image = None
+        frame.save_all_btn = _ButtonStub()
+        frame.undo_crop_btn = _ButtonStub()
+        frame.crop_btn = _ButtonStub()
+        frame.crop_options_btn = _ButtonStub()
+        frame.source_view_radio = _ButtonStub()
+        frame.target_view_radio = _ButtonStub()
+
+        frame._update_save_button_state()
+
+        self.assertEqual(frame.crop_btn.state, "disabled")
+        self.assertEqual(frame.crop_options_btn.state, "disabled")
+
     def test_step2_handoff_builds_one_batch_row_per_cropped_folder(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

@@ -33,6 +33,10 @@ COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
         "surface": ("#FFFFFF", "#141D27"),
         "surface_subtle": ("#F5F8FB", "#1A2530"),
         "surface_elevated": ("#FFFFFF", "#202D39"),
+        # Neutral controls need their own fill. Reusing surface_elevated made
+        # buttons white-on-white in light mode, hiding their clickable area.
+        "button": ("#E5EDF5", "#202D39"),
+        "button_hover": ("#D7E7F2", "#17384D"),
         "sidebar": ("#F8FAFC", "#111923"),
         "border": ("#D7E0E9", "#293847"),
         "border_strong": ("#B8C5D1", "#3B4C5C"),
@@ -44,6 +48,7 @@ COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
         "primary_soft": ("#DDEFFA", "#17384D"),
         "on_primary": ("#FFFFFF", "#07131C"),
         "success": ("#157A43", "#4FD18B"),
+        "success_hover": ("#106534", "#72DFA2"),
         "success_soft": ("#E3F5EA", "#173B2A"),
         "warning": ("#A35A00", "#F2B84B"),
         "warning_soft": ("#FFF1D6", "#493716"),
@@ -195,6 +200,21 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
             indicatorcolor=[("selected", color("primary")), ("!selected", color("surface_elevated"))],
         )
 
+    # Radio controls placed in a subtle toolbar should visually inherit that
+    # surface instead of drawing a white rectangle around their text.
+    style.configure(
+        "AIDaS.ContentHeader.TRadiobutton",
+        background=color("surface_subtle"),
+        foreground=color("text"),
+        padding=(2, 3),
+    )
+    style.map(
+        "AIDaS.ContentHeader.TRadiobutton",
+        background=[("active", color("surface_subtle"))],
+        foreground=[("disabled", color("disabled_text")), ("!disabled", color("text"))],
+        indicatorcolor=[("selected", color("primary")), ("!selected", color("surface_elevated"))],
+    )
+
     style.configure(
         "TLabelframe",
         background=color("surface"),
@@ -211,7 +231,7 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
     )
     style.configure(
         "TButton",
-        background=color("surface_elevated"),
+        background=color("button"),
         foreground=color("text"),
         bordercolor=color("border_strong"),
         focusthickness=1,
@@ -223,8 +243,8 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
         "TButton",
         background=[
             ("disabled", color("surface_subtle")),
-            ("pressed", color("primary_soft")),
-            ("active", color("primary_soft")),
+            ("pressed", color("button_hover")),
+            ("active", color("button_hover")),
         ],
         foreground=[("disabled", color("disabled_text")), ("!disabled", color("text"))],
         bordercolor=[("focus", color("primary")), ("!focus", color("border_strong"))],
@@ -239,7 +259,7 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
     ):
         style.configure(
             style_name,
-            background=color("surface_elevated"),
+            background=color("button"),
             foreground=color("text"),
             bordercolor=color("border_strong"),
             focusthickness=1,
@@ -251,8 +271,8 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
             style_name,
             background=[
                 ("disabled", color("surface_subtle")),
-                ("pressed", color("primary_soft")),
-                ("active", color("primary_soft")),
+                ("pressed", color("button_hover")),
+                ("active", color("button_hover")),
             ],
             foreground=[("disabled", color("disabled_text")), ("!disabled", color("text"))],
             bordercolor=[("focus", color("primary")), ("!focus", color("border_strong"))],
