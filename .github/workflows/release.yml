@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build (for example, v3.0.3a1)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -17,6 +23,8 @@ jobs:
     steps:
       - name: Check out the tagged source
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v6
@@ -36,7 +44,7 @@ jobs:
         shell: pwsh
         run: |
           python release_tools/release_metadata.py `
-            --tag "${{ github.ref_name }}" `
+            --tag "${{ inputs.tag || github.ref_name }}" `
             --github-output "$env:GITHUB_OUTPUT"
 
       - name: Install R 3.3.1 for integration tests
@@ -251,7 +259,7 @@ jobs:
           IS_PRERELEASE: ${{ steps.metadata.outputs.prerelease }}
         run: |
           $installer = Join-Path "release" $env:INSTALLER_NAME
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ inputs.tag || github.ref_name }}"
 
           # A rerun may find a draft or partially published release left by a
           # previous attempt. Reuse it and replace the generated assets instead

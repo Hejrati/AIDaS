@@ -56,12 +56,20 @@ class InstallerSafetyTests(unittest.TestCase):
 
 
 class ReleaseWorkflowTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
     def test_release_publish_step_is_safe_to_rerun(self):
-        workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
-        self.assertIn("gh release view $tag", workflow)
-        self.assertIn("gh release upload $tag $installer", workflow)
-        self.assertIn("--clobber", workflow)
-        self.assertIn("--draft=false", workflow)
+        self.assertIn("gh release view $tag", self.workflow)
+        self.assertIn("gh release upload $tag $installer", self.workflow)
+        self.assertIn("--clobber", self.workflow)
+        self.assertIn("--draft=false", self.workflow)
+
+    def test_release_can_be_started_manually_for_an_existing_tag(self):
+        self.assertIn("workflow_dispatch:", self.workflow)
+        self.assertIn("ref: ${{ inputs.tag || github.ref }}", self.workflow)
+        self.assertEqual(self.workflow.count("${{ inputs.tag || github.ref_name }}"), 2)
 
 
 if __name__ == "__main__":
