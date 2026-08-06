@@ -3003,12 +3003,12 @@ class Step2Frame(SidebarStepFrame):
         seen = set()
         for output_pair in saved_pairs or ():
             for base_path in output_pair or ():
-                folder = os.path.dirname(os.path.abspath(str(base_path)))
-                key = os.path.normcase(folder)
-                if not folder or key in seen:
+                folder = Path(base_path).resolve().parent
+                key = os.path.normcase(str(folder))
+                if key in seen:
                     continue
                 seen.add(key)
-                folders.append(folder)
+                folders.append(str(folder))
         return folders
 
     def _save_all_and_continue_to_step3_button(self):

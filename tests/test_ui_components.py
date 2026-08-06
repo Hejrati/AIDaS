@@ -95,10 +95,11 @@ class ActionButtonConventionTests(unittest.TestCase):
         configure_source = inspect.getsource(AppButton.configure)
 
         self.assertIn('options.get("state") == "disabled"', constructor_source)
-        self.assertIn("_DISABLED_PALETTE", constructor_source)
+        self.assertIn("self._disabled_palette()", constructor_source)
         self.assertIn('target_state == "disabled"', configure_source)
         self.assertIn("self._enabled_palette", configure_source)
         disabled_source = inspect.getsource(AppButton._disabled_palette)
+        self.assertIn("_DISABLED_PALETTE", disabled_source)
         self.assertIn('"background_corner_colors"', disabled_source)
         self.assertIn("disabled_fill if corner == enabled_fill", disabled_source)
         self.assertEqual(AppButton._DISABLED_PALETTE["border_width"], SHAPES.border_width)
