@@ -37,10 +37,18 @@ from PIL import Image, ImageDraw, ImageTk
 
 from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
+from aidas.ui.tabs import ClosableTabView
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
-from aidas.utils.ui_utils import HoverToolTip, NativeNumericSpinbox, SidebarStepFrame, apply_app_icon_to, load_ui_icon
+from aidas.utils.ui_utils import (
+    HoverToolTip,
+    NativeNumericSpinbox,
+    SidebarStepFrame,
+    action_button,
+    apply_app_icon_to,
+    icon_action_button,
+)
 
 
 BOUNDARY_PRESETS = [
@@ -477,12 +485,37 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             fill="x",
             expand=True,
         )
-        self.more_label = ttk.Label(top, text="", foreground="#0066cc", cursor="hand2")
+        self.more_label = ttk.Label(top, text="", style="AIDaS.Link.TLabel", cursor="hand2")
         self.more_label.pack(side="right", padx=(8, 0))
         self.more_tooltip = HoverToolTip(self.more_label, "")
 
+        run_box = ttk.Frame(wrapper)
+        run_box.pack(side="bottom", fill="x", pady=(10, 0))
+        self.action_footer = run_box
+        self.next_button = action_button(
+            run_box,
+            self,
+            "Continue",
+            self._run_selected,
+            "next",
+            tooltip="Continue with the selected folders.",
+            style="AIDaS.PrimaryAction.TButton",
+        )
+        self.next_button.pack(side="right")
+        self.next_button.state(["disabled"])
+        action_button(
+            run_box,
+            self,
+            "Cancel",
+            self._cancel,
+            "cancel",
+        ).pack(side="left")
+
+        # Pack the flexible table after the fixed footer. When vertical space
+        # becomes constrained, the table shrinks first and the actions remain
+        # visible at the bottom of the panel.
         self.table_host = ttk.Frame(wrapper)
-        self.table_host.pack(fill="both", expand=True)
+        self.table_host.pack(side="top", fill="both", expand=True)
         self.scan_label = ttk.Label(
             self.table_host,
             text="Scanning folders...",
@@ -490,13 +523,6 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             justify="center",
         )
         self.scan_label.pack(fill="both", expand=True)
-
-        run_box = ttk.Frame(wrapper)
-        run_box.pack(fill="x", pady=(10, 0))
-        self.next_button = ttk.Button(run_box, text="Next >", command=self._run_selected)
-        self.next_button.pack(side="right")
-        self.next_button.state(["disabled"])
-        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="left")
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -629,6 +655,10 @@ class Step2Frame(SidebarStepFrame):
         self.current_file = None  # Path to currently loaded image
         self.image_data = None  # Current numpy array displayed on canvas
         self._source_was_8bit = False  # True when an opened 8-bit source was promoted for saving
+        # Step 1 can produce a new crop while this notebook page is hidden.
+        # Retain only the latest prepared image and defer the expensive widget
+        # reset until the user actually opens Step 2.
+        self._pending_external_image = None
         
         # ─ Boundary tracing state ─
         self.active_boundary = None  # Name of boundary currently being traced
@@ -663,7 +693,10 @@ class Step2Frame(SidebarStepFrame):
         self.ai_for_aidas_root = os.path.join(app_root, "OCT Segmenter", "AI_ForAIDAS")
         self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.onnx")
 
-        self.build_standard_layout()
+        self.status_var = tk.StringVar(
+            value="Ready - process an image in Step 1, then trace boundaries or run batch segmentation."
+        )
+        self.build_standard_layout(status_var=self.status_var)
         right = self.content
 
         self.image_info_var = tk.StringVar(value="No image loaded")
@@ -692,11 +725,6 @@ class Step2Frame(SidebarStepFrame):
         self.image_canvas.enable_vertical_line(False)
         self.image_canvas.pack(fill="both", expand=True)
 
-        self.status_var = tk.StringVar(
-            value="Ready - process an image in Step 1, then trace boundaries or run batch segmentation."
-        )
-        self.add_status_bar(self.status_var, parent=right)
-
         self._build_controls()
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -716,10 +744,13 @@ class Step2Frame(SidebarStepFrame):
 
         ai_folder_buttons = ttk.Frame(segmentation)
         ai_folder_buttons.pack(fill="x", pady=(6, 0))
-        self.batch_ai_button = ttk.Button(
+        self.batch_ai_button = action_button(
             ai_folder_buttons,
-            text="Run Batch Segmentation",
-            command=self._open_batch_segmentation_scanner,
+            self,
+            "Select folders to segment…",
+            self._open_batch_segmentation_scanner,
+            "folder",
+            tooltip="Choose a parent folder. AIDaS will find eligible image folders inside it.",
         )
         self.batch_ai_button.pack(fill="x")
 
@@ -767,15 +798,33 @@ class Step2Frame(SidebarStepFrame):
         workflow_buttons.pack(fill="x", pady=(6, 0))
         workflow_buttons.grid_columnconfigure(0, weight=1, uniform="boundary_actions")
         workflow_buttons.grid_columnconfigure(1, weight=1, uniform="boundary_actions")
-        self.button_finish_icon = load_ui_icon(self, "el--ok.png")
-        self.finish_boundary_btn = ttk.Button(workflow_buttons, text="Done", command=self._finish_boundary, image=self.button_finish_icon, compound="left")
+        self.finish_boundary_btn = action_button(
+            workflow_buttons,
+            self,
+            "Done",
+            self._finish_boundary,
+            "confirm",
+            tooltip="Mark the active boundary as complete.",
+            style="AIDaS.PrimaryAction.TButton",
+        )
         self.finish_boundary_btn.grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        self.clear_all_traces_btn_icon = load_ui_icon(self, "solar--eraser-bold-duotone.png")
-        self.clear_all_traces_btn = ttk.Button(workflow_buttons, text="Clear", command=self._clear_all_traces, 
-                                               image=self.clear_all_traces_btn_icon, compound="left")
-        self.button_revert_icon = load_ui_icon(self, "grommet-icons--revert.png")
+        self.clear_all_traces_btn = action_button(
+            workflow_buttons,
+            self,
+            "Clear",
+            self._clear_all_traces,
+            "clear",
+            tooltip="Clear every point from the active boundary.",
+        )
         self.clear_all_traces_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
-        self.revert_boundary_btn = ttk.Button(workflow_buttons, text="Revert", command=self._revert_boundary, image=self.button_revert_icon, compound="left")
+        self.revert_boundary_btn = action_button(
+            workflow_buttons,
+            self,
+            "Revert",
+            self._revert_boundary,
+            "undo",
+            tooltip="Return the selected completed boundary to editing.",
+        )
         self.revert_boundary_btn.grid(
             row=1,
             column=0,
@@ -819,8 +868,13 @@ class Step2Frame(SidebarStepFrame):
         self.fovea_stepper.pack(side="left", padx=(8, 4))
         self.fovea_x_entry = self.fovea_stepper.entry
 
-        # Reset icon matches Step 1 numeric reset affordance.
-        self.fovea_reset_btn = ttk.Button(coord_row, text="↺", width=2, command=self._center_vertical_line)
+        self.fovea_reset_btn = icon_action_button(
+            coord_row,
+            self,
+            self._center_vertical_line,
+            "refresh",
+            tooltip="Reset the foveal center line",
+        )
         self.fovea_reset_btn.pack(side="left")
 
         fovea_action_row = ttk.Frame(fovea)
@@ -854,29 +908,32 @@ class Step2Frame(SidebarStepFrame):
         #     fill="x",
         #     padx=(0, 2),
         # )
-        self.button_save_icon = load_ui_icon(self, "ic--baseline-save.png")
-        self.button_save_all_icon = load_ui_icon(self, "ic--sharp-save-all.png")
-        self.saved_button = ttk.Button(saved_buttons, text="Save", command=self._save_current_marked_image_button, 
-                   image=self.button_save_icon, compound="left")
-        self.saved_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        self.save_all_button = ttk.Button(
+        self.saved_button = action_button(
             saved_buttons,
-            text="Save All",
-            command=self._save_all_batch_result_tabs_button,
-            image=self.button_save_all_icon,
-            compound="left",
+            self,
+            "Save",
+            self._save_current_marked_image_button,
+            "save",
+            tooltip="Save the current annotated image.",
+        )
+        self.saved_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
+        self.save_all_button = action_button(
+            saved_buttons,
+            self,
+            "Save all",
+            self._save_all_batch_result_tabs_button,
+            "save_all",
+            tooltip="Save every completed batch result.",
         )
         self.save_all_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
-        action_icon_size = 16
-        self.continue_to_step3_button_icon = load_ui_icon(
-            self, "lets-icons--flag-finish.png", size=action_icon_size
-        )
-        self.continue_to_step3_button = ttk.Button(
+        self.continue_to_step3_button = action_button(
             saved_buttons,
-            text="Go to Step 3 >>",
-            command=self._save_all_and_continue_to_step3_button,
-            image=self.continue_to_step3_button_icon,
-            compound="left",
+            self,
+            "Go to Step 3",
+            self._save_all_and_continue_to_step3_button,
+            "next",
+            tooltip="Save all results and continue to flattening.",
+            style="AIDaS.PrimaryAction.TButton",
         )
         self.continue_to_step3_button.grid(
             row=1,
@@ -946,7 +1003,7 @@ class Step2Frame(SidebarStepFrame):
             return
 
         folder = filedialog.askdirectory(
-            title="Select root folder for Step 2 batch segmentation",
+            title="Choose a parent folder for segmentation",
             initialdir=self._default_batch_initial_dir(),
         )
         if not folder:
@@ -1189,13 +1246,35 @@ class Step2Frame(SidebarStepFrame):
         def on_cancel():
             next_var.set("cancel")
             
-        btn_cancel = ttk.Button(temp_frame, text="Exit", command=on_cancel)
+        btn_cancel = action_button(
+            temp_frame,
+            self,
+            "Exit",
+            on_cancel,
+            "cancel",
+            tooltip="Exit batch segmentation.",
+        )
         btn_cancel.pack(side="right", padx=4, pady=4)
         
-        btn_skip = ttk.Button(temp_frame, text="Skip >", command=on_skip)
+        btn_skip = action_button(
+            temp_frame,
+            self,
+            "Skip",
+            on_skip,
+            "next",
+            tooltip="Skip this image without setting a foveal center.",
+        )
         btn_skip.pack(side="right", padx=4, pady=4)
 
-        btn_set = ttk.Button(temp_frame, text="Confirm", command=on_set)
+        btn_set = action_button(
+            temp_frame,
+            self,
+            "Confirm",
+            on_set,
+            "confirm",
+            tooltip="Confirm the foveal center for this image.",
+            style="AIDaS.PrimaryAction.TButton",
+        )
         btn_set.pack(side="right", padx=4, pady=4)
         
         # Save current editor state to restore later if canceled (optional, but good practice)
@@ -1248,17 +1327,46 @@ class Step2Frame(SidebarStepFrame):
 
         return fovea_by_path
 
-    def load_external_image(self, image, source_path=None):
+    def load_external_image(self, image, source_path=None, *, defer_render=False):
         """Load an externally supplied image into Step 2.
 
         Used by Step 1 auto-sync after crop so the latest .img-like result is
-        immediately available in this panel.
+        available in this panel. When ``defer_render`` is true, conversion is
+        performed immediately but the current editor and its widgets are left
+        untouched until :meth:`render_pending_external_image` is called.
         """
         if image is None:
             return
         display_path = source_path or "Step 1 output"
+        img, source_was_8bit = self._coerce_image_for_annotation(image)
+        prepared = (img, display_path, source_was_8bit)
+        if defer_render:
+            # A newer Step 1 crop supersedes an older crop that has not yet
+            # been displayed. Do not disturb the currently rendered editor.
+            self._pending_external_image = prepared
+            return
+
+        self._render_external_image(prepared)
+
+    def render_pending_external_image(self):
+        """Render the latest deferred Step 1 image, if one is waiting.
+
+        Returns:
+            bool: ``True`` when an image was rendered, otherwise ``False``.
+        """
+        prepared = getattr(self, "_pending_external_image", None)
+        if prepared is None:
+            return False
+        self._render_external_image(prepared)
+        return True
+
+    def _render_external_image(self, prepared):
+        """Apply prepared external-image state and rebuild the editor once."""
+
+        img, display_path, source_was_8bit = prepared
+        self._pending_external_image = None
         self._input_analyze_template = None
-        img = self._image_for_annotation(image)
+        self._source_was_8bit = source_was_8bit
         self._show_image(img, display_path)
 
     def _load_image_from_path(self, path):
@@ -1340,6 +1448,9 @@ class Step2Frame(SidebarStepFrame):
                 the canvas normalizes a preview for display only.
             path: Path or description string for the image source.
         """
+        # Any explicitly rendered image supersedes a crop that was queued
+        # while this page was hidden.
+        self._pending_external_image = None
         self._show_single_image_canvas()
         self.current_file = path
         self.image_data = image
@@ -1369,6 +1480,7 @@ class Step2Frame(SidebarStepFrame):
 
     def _clear_image_display(self, status_message=None):
         """Clear the editor canvas and reset image-specific annotation state."""
+        self._pending_external_image = None
         self._show_single_image_canvas()
         self.current_file = None
         self.image_data = None
@@ -2836,7 +2948,6 @@ class Step2Frame(SidebarStepFrame):
             try:
                 tab = notebook.nametowidget(tab_key)
                 notebook.forget(tab)
-                tab.destroy()
             except tk.TclError:
                 pass
 
@@ -3740,23 +3851,21 @@ class Step2Frame(SidebarStepFrame):
         if previous_notebook is not None:
             previous_notebook.destroy()
 
-        notebook = ttk.Notebook(self.canvas_area)
+        notebook = ClosableTabView(
+            self.canvas_area,
+            command=lambda _view, tab: self._activate_batch_result_tab(tab),
+            close_command=self._close_batch_result_tab,
+        )
         self.batch_results_notebook = notebook
         self._batch_result_canvases = []
         self._batch_result_tab_canvases = {}
         self._batch_result_states = {}
         self._active_batch_result_tab = None
-        notebook.bind("<Button-1>", self._on_batch_result_notebook_click, add="+")
-        notebook.bind("<Motion>", self._on_batch_result_notebook_motion, add="+")
-        notebook.bind("<Leave>", lambda event: event.widget.configure(cursor=""), add="+")
-        notebook.bind("<<NotebookTabChanged>>", self._on_batch_result_tab_changed, add="+")
-
         for index, item in enumerate(viewable_results, start=1):
-            frame = ttk.Frame(notebook)
             input_path = item["input"]
             input_name = self._batch_result_input_title(input_path)
             tab_text = self._batch_result_tab_text(input_name or f"Result {index}")
-            notebook.add(frame, text=tab_text)
+            frame = notebook.add(text=tab_text)
 
             info_var = tk.StringVar(value=input_path)
             ttk.Label(frame, textvariable=info_var, anchor="w", padding=4).pack(fill="x")
@@ -3823,15 +3932,13 @@ class Step2Frame(SidebarStepFrame):
 
         self._show_batch_results_canvas()
         if notebook.tabs():
-            first_tab = notebook.nametowidget(notebook.tabs()[0])
-            notebook.select(first_tab)
-            self._activate_batch_result_tab(first_tab)
+            notebook.select(notebook.tabs()[0])
         self.status_var.set(f"AI batch results opened: {len(viewable_results)} image(s). Select a tab to edit its boundaries.")
         self.after(100, self._fit_batch_result_canvases)
 
     @staticmethod
     def _batch_result_tab_text(title):
-        return f"{str(title)[:24]}\tx"
+        return str(title)[:24]
 
     @staticmethod
     def _batch_result_input_title(input_path):
@@ -3881,82 +3988,6 @@ class Step2Frame(SidebarStepFrame):
             status_message=f"Editing batch result: {os.path.basename(state.get('input') or '')}",
         )
 
-    def _on_batch_result_tab_changed(self, event):
-        notebook = event.widget
-        selected = notebook.select()
-        if not selected:
-            return
-        try:
-            self._activate_batch_result_tab(notebook.nametowidget(selected))
-        except tk.TclError:
-            return
-
-    def _batch_result_close_tab_at(self, notebook, x, y):
-        try:
-            index = notebook.index(f"@{x},{y}")
-        except tk.TclError:
-            return None
-
-        tab_bounds = self._batch_result_tab_bounds(notebook, index, y)
-        if tab_bounds is None:
-            return None
-        left, right = tab_bounds
-
-        close_width = min(15, max(1, right - left + 1))
-        if right - close_width <= x <= right:
-            return notebook.nametowidget(notebook.tabs()[index])
-        return None
-
-    @staticmethod
-    def _batch_result_tab_bounds(notebook, index, y):
-        try:
-            x0, _y0, width, _height = notebook.bbox(index)
-            if width > 0:
-                return x0, x0 + width
-        except tk.TclError:
-            pass
-
-        first_x = None
-        last_x = None
-        probe_y = max(1, int(y))
-        for probe_x in range(max(1, notebook.winfo_width())):
-            try:
-                probe_index = notebook.index(f"@{probe_x},{probe_y}")
-            except tk.TclError:
-                if first_x is not None:
-                    break
-                continue
-            if probe_index != index:
-                if first_x is not None:
-                    break
-                continue
-            if first_x is None:
-                first_x = probe_x
-            last_x = probe_x
-
-        if first_x is None or last_x is None:
-            return None
-        return first_x, last_x
-
-    def _on_batch_result_notebook_click(self, event):
-        notebook = event.widget
-        tab = self._batch_result_close_tab_at(notebook, event.x, event.y)
-        if tab is None:
-            return None
-        canvas = self._batch_result_tab_canvases.get(str(tab))
-        if canvas is None:
-            return None
-        self._close_batch_result_tab(notebook, tab, canvas)
-        return "break"
-
-    def _on_batch_result_notebook_motion(self, event):
-        notebook = event.widget
-        cursor = "hand2" if self._batch_result_close_tab_at(notebook, event.x, event.y) is not None else ""
-        try:
-            notebook.configure(cursor=cursor)
-        except tk.TclError:
-            pass
-
     def _fit_batch_result_canvases(self):
         for canvas in list(getattr(self, "_batch_result_canvases", [])):
             try:
@@ -3965,10 +3996,14 @@ class Step2Frame(SidebarStepFrame):
             except tk.TclError:
                 pass
 
-    def _close_batch_result_tab(self, notebook, tab, canvas):
+    def _close_batch_result_tab(self, notebook, tab, canvas=None):
         if tab is None:
             return
         tab_key = str(tab)
+        if canvas is None:
+            canvas = self._batch_result_tab_canvases.get(tab_key)
+        if canvas is None:
+            return
         closing_active = tab_key == getattr(self, "_active_batch_result_tab", None)
         if closing_active:
             self._sync_active_batch_result_state()
@@ -3988,7 +4023,6 @@ class Step2Frame(SidebarStepFrame):
             notebook.forget(tab)
         except tk.TclError:
             pass
-        tab.destroy()
 
         remaining_tabs = len(notebook.tabs())
         if remaining_tabs:

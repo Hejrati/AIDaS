@@ -13,26 +13,43 @@ import tkinter as tk
 import webbrowser
 from tkinter import filedialog, ttk
 
-from PIL import Image, ImageTk
+import customtkinter as ctk
+from PIL import Image
 
 from aidas import __version__
 from aidas.core.config import Config
 from aidas.core.display import (
     centered_decorated_position,
-    centered_geometry,
+    centered_position,
     enable_per_monitor_dpi_awareness,
-    fit_size_to_bounds,
     fractional_size_of_bounds,
     work_area_bounds,
 )
 from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
-from aidas.utils.ui_layout import COLORS, LAYOUT
+from aidas.ui.components import AppButton, AppStatusBar, WorkflowHeader
+from aidas.ui.menu_bar import ApplicationMenuBar
+from aidas.ui.splash import SplashWindow
+from aidas.ui.theme import (
+    APPEARANCE_MODES,
+    COLOR_PAIRS,
+    SHAPES,
+    TYPOGRAPHY,
+    apply_appearance_mode,
+    normalize_appearance_mode,
+    refresh_native_widgets,
+)
+from aidas.ui.title_bar import create_custom_windows_title_bar, reassert_client_size
+from aidas.ui.windowing import (
+    centered_logical_geometry,
+    logical_window_size,
+    physical_window_size,
+    synchronize_window_chrome,
+)
+from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     apply_app_icon_to,
-    build_app_menu,
-    configure_aidas_styles,
     resource_path,
 )
 
@@ -54,169 +71,27 @@ LAB_DESCRIPTION = (
     "Analysis."
 )
 
-WINDOW_BG = "#f7f8fa"
-BRAND_NAVY = "#103b64"
-BRAND_RED = "#c0002b"
-BODY_TEXT = "#07111c"
 SPLASH_MINIMUM_MS = 700
 
 
 def _center_geometry(window: tk.Misc, width: int, height: int, *, parent=None) -> str:
-    """Return geometry that centers a window on its parent or the screen."""
-    return centered_geometry(window, width, height, parent=parent)
+    """Center a CTk window whose width and height are logical UI units."""
+
+    return centered_logical_geometry(window, width, height, parent=parent)
 
 
-class SplashWindow(tk.Toplevel):
-    """Dynamic startup window that reports initialization progress."""
+class AboutDialog(ctk.CTkToplevel):
+    """Branded, responsive About window using the shared design system."""
 
-    WIDTH = 480
-    HEIGHT = 620
-    MAX_SCREEN_FRACTION = 0.88
-
-    def __init__(self, parent: tk.Tk) -> None:
-        super().__init__(parent)
-        self.withdraw()
-        apply_app_icon_to(self)
-        self.overrideredirect(True)
-        self.configure(bg=BRAND_NAVY)
-
-        bounds = work_area_bounds(self)
-        dpi_scale = max(0.75, float(self.winfo_fpixels("1i")) / 96.0)
-        splash_width, splash_height, fit_scale = fit_size_to_bounds(
-            bounds,
-            round(self.WIDTH * dpi_scale),
-            round(self.HEIGHT * dpi_scale),
-            maximum_fraction=self.MAX_SCREEN_FRACTION,
-        )
-        # Preserve the same apparent size at higher DPI when room permits,
-        # then uniformly shrink everything when the monitor is too small.
-        self.scale = dpi_scale * fit_scale
-
-        def px(value: int) -> int:
-            return max(1, round(value * self.scale))
-
-        def font(value: int, *styles: str) -> tuple:
-            # Negative Tk font sizes are pixels. This prevents the operating
-            # system's DPI scaling from making text larger than its layout.
-            return ("Segoe UI", -max(7, round(value * self.scale)), *styles)
-
-        panel = tk.Frame(self, bg=WINDOW_BG, bd=0, highlightthickness=0)
-        panel.pack(fill="both", expand=True, padx=1, pady=1)
-        panel.grid_columnconfigure(0, weight=1)
-        panel.grid_rowconfigure(5, weight=1)
-
-        logo_path = resource_path(os.path.join("assets", "aidas.png"))
-        logo_size = px(240)
-        with Image.open(logo_path) as logo:
-            resized_logo = logo.resize((logo_size, logo_size), Image.Resampling.LANCZOS)
-            self.logo_image = ImageTk.PhotoImage(resized_logo)
-        logo_label = tk.Label(
-            panel,
-            image=self.logo_image,
-            bg=WINDOW_BG,
-            bd=0,
-            highlightthickness=0,
-        )
-        logo_label.grid(row=0, column=0, pady=(px(22), 0))
-
-        tk.Label(
-            panel,
-            text=APP_TITLE,
-            font=font(34, "bold"),
-            fg=BRAND_NAVY,
-            bg=WINDOW_BG,
-        ).grid(row=1, column=0, pady=(px(12), 0))
-        tk.Label(
-            panel,
-            text=APP_SUBTITLE,
-            font=font(15),
-            fg=BRAND_NAVY,
-            bg=WINDOW_BG,
-        ).grid(row=2, column=0, pady=(px(1), 0))
-        tk.Label(
-            panel,
-            text=LAB_ACRONYM,
-            font=font(24, "bold"),
-            fg=BRAND_RED,
-            bg=WINDOW_BG,
-        ).grid(row=3, column=0, pady=(px(16), 0))
-        tk.Label(
-            panel,
-            text=LAB_NAME,
-            font=font(13, "bold"),
-            fg=BODY_TEXT,
-            bg=WINDOW_BG,
-            justify="center",
-            wraplength=max(1, splash_width - px(36)),
-        ).grid(row=4, column=0, sticky="ew", padx=px(18), pady=(px(2), 0))
-
-        loading_region = tk.Frame(panel, bg=WINDOW_BG, bd=0, highlightthickness=0)
-        loading_region.grid(row=5, column=0, sticky="nsew", padx=px(32), pady=px(12))
-        loading_region.grid_rowconfigure(0, weight=1)
-        loading_region.grid_columnconfigure(0, weight=1)
-        progress_header = tk.Frame(loading_region, bg=WINDOW_BG, bd=0, highlightthickness=0)
-        progress_header.grid(row=0, column=0, sticky="ew")
-        progress_header.grid_columnconfigure(0, weight=1)
-        progress_header.grid_columnconfigure(1, weight=0)
-        self.status_var = tk.StringVar(value="Starting AIDaS...")
-        self.percent_var = tk.StringVar(value="0%")
-        self.status_label = tk.Label(
-            progress_header,
-            textvariable=self.status_var,
-            font=font(13),
-            fg=BODY_TEXT,
-            bg=WINDOW_BG,
-            anchor="w",
-            justify="left",
-            # Keep the status text inside its column even if a future startup
-            # stage has a substantially longer description.
-            wraplength=max(px(120), splash_width - px(140)),
-        )
-        self.status_label.grid(row=0, column=0, sticky="ew", padx=(0, px(12)))
-        tk.Label(
-            progress_header,
-            textvariable=self.percent_var,
-            font=font(13, "bold"),
-            fg=BRAND_NAVY,
-            bg=WINDOW_BG,
-            anchor="e",
-            width=4,
-        ).grid(row=0, column=1, sticky="ne")
-
-        tk.Label(
-            panel,
-            text=COPYRIGHT_NOTICE,
-            font=font(11),
-            fg=BODY_TEXT,
-            bg=WINDOW_BG,
-            justify="center",
-            wraplength=max(1, splash_width - px(48)),
-        ).grid(row=6, column=0, sticky="ew", padx=px(24), pady=(0, px(22)))
-
-        self.attributes("-topmost", True)
-        self.geometry(_center_geometry(self, splash_width, splash_height))
-        self.deiconify()
-        self.lift()
-
-    def set_progress(self, value: float, message: str) -> None:
-        """Update the visible startup stage and percentage immediately."""
-        percent = max(0.0, min(float(value), 100.0))
-        self.percent_var.set(f"{percent:.0f}%")
-        self.status_var.set(str(message))
-        self.update_idletasks()
-
-
-class AboutDialog(tk.Toplevel):
-    """Branded, modal About window opened from the Help menu."""
-
-    PREFERRED_WIDTH = 520
+    PREFERRED_WIDTH = 540
+    PREFERRED_HEIGHT = 570
     MAX_SCREEN_FRACTION = 0.9
 
-    def __init__(self, parent: tk.Tk) -> None:
+    def __init__(self, parent: tk.Misc) -> None:
         super().__init__(parent)
         self.withdraw()
         self.title("About AIDaS")
-        self.configure(bg="#f2f2f2")
+        self.configure(fg_color=COLOR_PAIRS["application"])
         self.resizable(True, True)
         self.transient(parent)
         apply_app_icon_to(self)
@@ -224,34 +99,57 @@ class AboutDialog(tk.Toplevel):
         bounds = work_area_bounds(self, parent=parent)
         available_width = max(1, bounds[2] - bounds[0])
         available_height = max(1, bounds[3] - bounds[1])
-        dpi_scale = max(0.75, float(self.winfo_fpixels("1i")) / 96.0)
-        maximum_width = max(1, round(available_width * self.MAX_SCREEN_FRACTION))
-        maximum_height = max(1, round(available_height * self.MAX_SCREEN_FRACTION))
-        dialog_width = max(1, min(round(self.PREFERRED_WIDTH * dpi_scale), maximum_width))
-        content_wrap = max(40, dialog_width - 64)
+        preferred_physical_width, preferred_physical_height = physical_window_size(
+            self,
+            self.PREFERRED_WIDTH,
+            self.PREFERRED_HEIGHT,
+        )
+        physical_width = min(
+            preferred_physical_width,
+            round(available_width * self.MAX_SCREEN_FRACTION),
+        )
+        physical_height = min(
+            preferred_physical_height,
+            round(available_height * self.MAX_SCREEN_FRACTION),
+        )
+        dialog_width, dialog_height = logical_window_size(
+            self,
+            physical_width,
+            physical_height,
+        )
+        content_wrap = max(80, dialog_width - 96)
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
-        canvas = tk.Canvas(self, bg="#f2f2f2", bd=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+        content = ctk.CTkScrollableFrame(
+            self,
+            fg_color=COLOR_PAIRS["surface"],
+            corner_radius=SHAPES.corner_radius_lg,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
+            scrollbar_button_color=COLOR_PAIRS["border_strong"],
+            scrollbar_button_hover_color=COLOR_PAIRS["primary"],
+        )
+        content.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 8))
+        content.grid_columnconfigure(0, weight=1)
+        self._wrapped_about_labels: list[ctk.CTkLabel] = []
 
-        content = tk.Frame(canvas, bg="#f2f2f2", bd=0, highlightthickness=0)
-        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
-        self._about_canvas = canvas
-        self._about_content = content
-        self._about_content_window = content_window
-        self._wrapped_about_labels: list[tk.Label] = []
+        logo_path = resource_path(os.path.join("assets", "aidas.png"))
+        with Image.open(logo_path) as logo:
+            logo_source = logo.convert("RGBA").copy()
+        self.logo_image = ctk.CTkImage(
+            light_image=logo_source,
+            dark_image=logo_source,
+            size=(96, 96),
+        )
+        ctk.CTkLabel(content, text="", image=self.logo_image).grid(row=0, column=0, pady=(18, 4))
 
-        def add_label(*, text: str, font, **options) -> tk.Label:
-            label = tk.Label(
+        def add_label(*, text: str, font, text_color=None, **options) -> ctk.CTkLabel:
+            label = ctk.CTkLabel(
                 content,
                 text=text,
                 font=font,
-                fg=options.pop("fg", "#000000"),
-                bg="#f2f2f2",
+                text_color=text_color or COLOR_PAIRS["text"],
                 justify=options.pop("justify", "center"),
                 wraplength=content_wrap,
                 **options,
@@ -261,87 +159,105 @@ class AboutDialog(tk.Toplevel):
 
         add_label(
             text=APP_TITLE,
-            font=("Segoe UI", 18, "bold"),
-        ).pack(pady=(22, 0))
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.title_size,
+                weight=TYPOGRAPHY.bold_weight,
+            ),
+        ).grid(row=1, column=0)
         add_label(
-            text=f"{APP_SUBTITLE} - Version {__version__}",
-            font=("Segoe UI", 9),
-        ).pack(pady=(2, 0))
+            text=f"{APP_SUBTITLE}  ·  Version {__version__}",
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+        ).grid(row=2, column=0, pady=(2, 14))
         add_label(
             text=LAB_ACRONYM,
-            font=("Segoe UI", 11, "bold"),
-            fg=BRAND_RED,
-        ).pack(pady=(16, 0))
+            text_color=COLOR_PAIRS["institution"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.subtitle_size,
+                weight=TYPOGRAPHY.bold_weight,
+            ),
+        ).grid(row=3, column=0)
         add_label(
             text=LAB_NAME,
-            font=("Segoe UI", 9),
-        ).pack(pady=(5, 0))
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        ).grid(row=4, column=0, pady=(3, 0))
 
         link = add_label(
             text=LAB_URL_TEXT,
-            font=("Segoe UI", 9, "underline"),
-            fg="#0066cc",
+            text_color=COLOR_PAIRS["link"],
             cursor="hand2",
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                underline=True,
+            ),
         )
-        link.pack(pady=(11, 0))
+        link.grid(row=5, column=0, pady=(10, 0))
         link.bind("<Button-1>", lambda _event: webbrowser.open_new_tab(LAB_URL))
 
         add_label(
             text=" ".join(LAB_DESCRIPTION.splitlines()),
-            font=("Segoe UI", 8),
-        ).pack(pady=(13, 0))
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+        ).grid(row=6, column=0, padx=24, pady=(16, 0))
         add_label(
             text=UNIVERSITY_NAME,
-            font=("Segoe UI", 8),
-        ).pack(pady=(10, 0))
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        ).grid(row=7, column=0, pady=(14, 0))
         add_label(
             text=COPYRIGHT_NOTICE,
-            font=("Segoe UI", 8),
-        ).pack(pady=(10, 0))
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
+        ).grid(row=8, column=0, padx=24, pady=(10, 0))
         add_label(
-            text=f"Python {sys.version.split()[0]}",
-            font=("Segoe UI", 8),
-        ).pack(pady=(2, 16))
+            text=f"Python {sys.version.split()[0]}  ·  CustomTkinter {ctk.__version__}",
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.mono_family, size=TYPOGRAPHY.caption_size),
+        ).grid(row=9, column=0, pady=(10, 18))
 
-        button_panel = ttk.Frame(self, padding=(12, 8, 12, 12))
-        button_panel.grid(row=1, column=0, columnspan=2, sticky="ew")
-        ttk.Button(button_panel, text="OK", width=10, command=self._close).pack()
+        button_panel = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        button_panel.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
+        AppButton(
+            button_panel,
+            text="Close",
+            width=112,
+            variant="primary",
+            command=self._close,
+        ).pack(side="right")
 
-        content.bind("<Configure>", self._sync_about_scroll_region)
-        canvas.bind("<Configure>", self._resize_about_content)
-        self.bind("<MouseWheel>", self._scroll_about)
-
+        self.bind("<Configure>", self._resize_about_content, add="+")
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
         self.bind("<Return>", lambda _event: self._close())
-        self.update_idletasks()
-        desired_height = content.winfo_reqheight() + button_panel.winfo_reqheight()
-        preferred_minimum_height = min(round(240 * dpi_scale), maximum_height)
-        dialog_height = max(1, min(maximum_height, max(preferred_minimum_height, desired_height)))
-        self.minsize(
-            min(round(320 * dpi_scale), dialog_width),
-            min(round(240 * dpi_scale), dialog_height),
-        )
+        self.minsize(min(380, dialog_width), min(360, dialog_height))
         self.geometry(_center_geometry(self, dialog_width, dialog_height, parent=parent))
         self.deiconify()
+        synchronize_window_chrome(
+            self,
+            background=COLOR_PAIRS["window_chrome"],
+            foreground=COLOR_PAIRS["text"],
+            border=COLOR_PAIRS["window_chrome"],
+        )
         self.grab_set()
         self.focus_force()
 
-    def _sync_about_scroll_region(self, _event=None) -> None:
-        self._about_canvas.configure(scrollregion=self._about_canvas.bbox("all"))
-
     def _resize_about_content(self, event) -> None:
-        width = max(1, int(event.width))
-        self._about_canvas.itemconfigure(self._about_content_window, width=width)
-        wraplength = max(40, width - 40)
+        if event.widget is not self:
+            return
+        logical_width, _ = logical_window_size(self, event.width, 1)
+        wraplength = max(80, logical_width - 104)
         for label in self._wrapped_about_labels:
             label.configure(wraplength=wraplength)
-        self._sync_about_scroll_region()
-
-    def _scroll_about(self, event) -> str:
-        if event.delta:
-            self._about_canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
-        return "break"
 
     def _close(self) -> None:
         try:
@@ -351,18 +267,30 @@ class AboutDialog(tk.Toplevel):
         self.destroy()
 
 
-class AIDaSApp(tk.Tk):
+class AIDaSApp(ctk.CTk):
     """Root application window."""
+
+    # The main window owns a client-drawn Windows caption.  Disabling CTk's
+    # withdraw/restyle title-bar routine prevents it from restoring WS_CAPTION
+    # during later appearance changes. Dialogs retain CTk's native behavior.
+    _deactivate_windows_window_header_manipulation = True
 
     def __init__(self) -> None:
         enable_per_monitor_dpi_awareness()
+        ctk.set_default_color_theme("dark-blue")
+        ctk.set_appearance_mode("System")
         super().__init__()
         self.withdraw()
         self.title("AIDaS — Retinal Image Processing")
-        self.configure(background=COLORS.application)
+        self.configure(fg_color=COLOR_PAIRS["application"])
         bounds = work_area_bounds(self)
-        app_width, app_height = fractional_size_of_bounds(
+        physical_width, physical_height = fractional_size_of_bounds(
             bounds, LAYOUT.screen_fraction
+        )
+        app_width, app_height = logical_window_size(
+            self,
+            physical_width,
+            physical_height,
         )
         self._startup_window_size = (app_width, app_height)
         self.geometry(f"{app_width}x{app_height}")
@@ -374,7 +302,15 @@ class AIDaSApp(tk.Tk):
         self._set_app_icon()
 
         self._splash_started_at = time.monotonic()
-        self._splash = SplashWindow(self)
+        self._splash = SplashWindow(
+            self,
+            logo_path=resource_path(os.path.join("assets", "aidas.png")),
+            title=APP_TITLE,
+            subtitle=APP_SUBTITLE,
+            affiliation=f"{LAB_ACRONYM}  ·  {UNIVERSITY_NAME}",
+            lab_name=LAB_NAME,
+            copyright_notice=COPYRIGHT_NOTICE,
+        )
         self._set_splash_progress(3, "Starting AIDaS...")
 
         try:
@@ -422,17 +358,15 @@ class AIDaSApp(tk.Tk):
         self._set_splash_progress(50, "Loading preferences...")
         self.preferences = Config()
         self._set_splash_progress(54, "Applying the interface theme...")
-        self.style = ttk.Style()
-        available_themes = self.style.theme_names()
-        default_theme = "xpnative" if "xpnative" in available_themes else available_themes[0]
-        current_theme = self.preferences.get("theme", default_theme)
-
-        if current_theme in available_themes:
-            self.style.theme_use(current_theme)
-        else:
-            self.style.theme_use(available_themes[0])
-            self.preferences.set("theme", available_themes[0])
-        configure_aidas_styles(self.style)
+        self.style = ttk.Style(self)
+        self.appearance_mode = normalize_appearance_mode(
+            self.preferences.get("appearance_mode", self.preferences.get("theme", "System"))
+        )
+        apply_appearance_mode(
+            self.appearance_mode,
+            root=self,
+            style=self.style,
+        )
 
         self._set_splash_progress(58, "Starting application services...")
         self.update_controller = UpdateController(
@@ -443,12 +377,42 @@ class AIDaSApp(tk.Tk):
             restart_blocker_callback=self._update_restart_blocker,
             install_callback=self._queue_update_install,
         )
+        self.window_title_bar = create_custom_windows_title_bar(
+            self,
+            title=self.title(),
+            logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
+        )
+        if self.window_title_bar is not None:
+            self.window_title_bar.pack(side="top", fill="x")
+            # SWP_FRAMECHANGED can alter Tk's client dimensions. Preserve the
+            # logical startup size before the rest of the shell is composed.
+            width, height = self._startup_window_size
+            reassert_client_size(self, width, height)
         self._build_menu()
         self.bind_all("<Alt-F4>", lambda _event: self.destroy())
 
         self._set_splash_progress(62, "Creating the application workspace...")
+        self.header = WorkflowHeader(
+            self,
+            version=__version__,
+            appearance_mode=self.appearance_mode,
+            appearance_modes=APPEARANCE_MODES,
+            on_step_selected=self._select_workflow_step,
+            on_appearance_selected=self._set_theme,
+            logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
+        )
+        self.header.pack(side="top", fill="x")
+        self.status_bar = AppStatusBar(
+            self,
+            text=f"AIDaS v{__version__} — ready",
+        )
+        self.status_bar.pack(side="bottom", fill="x")
+        # Preserve the historical label attribute used by update callbacks.
+        self.status = self.status_bar.label
+
         self.notebook = ttk.Notebook(self, style="AIDaS.TNotebook")
         self.notebook.pack(fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_workflow_tab_changed, add="+")
 
         self._set_splash_progress(66, "Preparing Step 1 - Load, Resize & Crop...")
         self.step1 = Step1Frame(
@@ -478,13 +442,10 @@ class AIDaSApp(tk.Tk):
         self.notebook.add(self.step4, text="  Step 4 — Analyze ISEZ  ")
 
         self._set_splash_progress(97, "Finalizing the main window...")
-        self.status = ttk.Label(
-            self,
-            text=f"AIDaS v{__version__} — ready",
-            style="AIDaS.Status.TLabel",
-            anchor="w",
-        )
-        self.status.pack(side="bottom", fill="x")
+        self.header.select_step(0)
+        refresh_native_widgets(self)
+        self._last_effective_appearance = ctk.get_appearance_mode()
+        self._appearance_watch_after_id = self.after(1500, self._watch_system_appearance)
 
     def _finish_startup(self) -> None:
         """Close the splash and reveal the fully initialized main window."""
@@ -500,9 +461,19 @@ class AIDaSApp(tk.Tk):
         self.geometry(_center_geometry(self, width, height))
         self.deiconify()
         self.update_idletasks()
+        if self.window_title_bar is not None:
+            # Some Windows builds recalculate the captionless frame when it is
+            # first mapped. Reassert the requested client size before centering.
+            reassert_client_size(self, width, height)
         self._center_window(account_for_decorations=True)
         self.lift()
         self.update()
+        synchronize_window_chrome(
+            self,
+            background=COLOR_PAIRS["window_chrome"],
+            foreground=COLOR_PAIRS["text"],
+            border=COLOR_PAIRS["window_chrome"],
+        )
         self.focus_force()
         self.after(1500, self.update_controller.check_automatically)
 
@@ -512,21 +483,79 @@ class AIDaSApp(tk.Tk):
         return resource_path(relative_path)
 
     def _build_menu(self) -> None:
-        self.menubar = build_app_menu(
+        menu_bar = getattr(self, "menu_bar", None)
+        if menu_bar is not None:
+            menu_bar.set_appearance(self.appearance_mode)
+            return
+
+        self.menu_bar = ApplicationMenuBar(
             self,
-            themes=self.style.theme_names(),
-            current_theme=self.style.theme_use(),
-            set_theme_command=self._set_theme,
+            appearance_modes=APPEARANCE_MODES,
+            current_appearance=self.appearance_mode,
+            set_appearance_command=self._set_theme,
             browse_sdb_command=self._menu_browse_sdb,
             check_updates_command=self.update_controller.check_now,
             about_command=self._show_about,
+            exit_command=self.destroy,
         )
+        self.menu_bar.pack(side="top", fill="x")
+        # Preserve the historical attribute for integrations that only need a
+        # handle to the application menu surface.
+        self.menubar = self.menu_bar
 
     def _set_status_message(self, message: str) -> None:
         """Show a transient application-level status without assuming startup is complete."""
         status = getattr(self, "status", None)
         if status is not None:
-            status.config(text=f"AIDaS v{__version__} — {message}")
+            status.configure(text=f"AIDaS v{__version__} — {message}")
+
+    def _select_workflow_step(self, index: int) -> None:
+        """Select a workflow page without exposing its container to the header."""
+
+        notebook = getattr(self, "notebook", None)
+        if notebook is None:
+            return
+        try:
+            notebook.select(int(index))
+        except (tk.TclError, TypeError, ValueError):
+            return
+
+    def _on_workflow_tab_changed(self, _event=None) -> None:
+        """Synchronize navigation and render deferred work for the active step."""
+
+        notebook = getattr(self, "notebook", None)
+        header = getattr(self, "header", None)
+        if notebook is None:
+            return
+        try:
+            selected_index = notebook.index(notebook.select())
+        except (tk.TclError, TypeError, ValueError):
+            return
+
+        if header is not None:
+            try:
+                header.select_step(selected_index)
+            except (tk.TclError, TypeError, ValueError):
+                pass
+
+        step2 = getattr(self, "step2", None)
+        if step2 is None:
+            return
+        try:
+            step2_selected = selected_index == notebook.index(step2)
+        except (tk.TclError, TypeError, ValueError):
+            return
+        if step2_selected:
+            step2.render_pending_external_image()
+
+    def _watch_system_appearance(self) -> None:
+        """Keep retained ttk/native widgets synced with OS appearance changes."""
+
+        current = ctk.get_appearance_mode()
+        if self.appearance_mode == "System" and current != self._last_effective_appearance:
+            apply_appearance_mode("System", root=self, style=self.style)
+        self._last_effective_appearance = current
+        self._appearance_watch_after_id = self.after(1500, self._watch_system_appearance)
 
     def _update_restart_blocker(self) -> str | None:
         """Describe work that must finish before replacing the application."""
@@ -578,7 +607,8 @@ class AIDaSApp(tk.Tk):
         width = self.winfo_width()
         height = self.winfo_height()
         if not account_for_decorations:
-            self.geometry(_center_geometry(self, width, height))
+            x, y = centered_position(work_area_bounds(self), width, height)
+            self.geometry(f"{x:+d}{y:+d}")
             return
 
         frame_left = max(0, self.winfo_rootx() - self.winfo_x())
@@ -590,7 +620,7 @@ class AIDaSApp(tk.Tk):
             frame_left=frame_left,
             frame_top=frame_top,
         )
-        self.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        self.geometry(f"{x:+d}{y:+d}")
 
     def _menu_browse_sdb(self) -> None:
         self.notebook.select(0)
@@ -603,18 +633,42 @@ class AIDaSApp(tk.Tk):
             self.step1.refresh_sdb_list(preview_first=True)
 
     def _set_theme(self, theme_name: str) -> None:
-        """Change the application theme and save the preference."""
-        self.style.theme_use(theme_name)
-        configure_aidas_styles(self.style)
-        self.configure(background=COLORS.application)
-        self.preferences.set("theme", theme_name)
+        """Apply one unified CTk/native appearance and save the preference."""
+
+        self.appearance_mode = apply_appearance_mode(
+            theme_name,
+            root=self,
+            style=self.style,
+        )
+        self.preferences.set("appearance_mode", self.appearance_mode)
+        self._last_effective_appearance = ctk.get_appearance_mode()
+        header = getattr(self, "header", None)
+        if header is not None:
+            header.set_appearance(self.appearance_mode)
         self._build_menu()
-        self.status.config(text=f"AIDaS v{__version__} — theme changed to '{theme_name}'")
+        self.status.configure(
+            text=f"AIDaS v{__version__} — appearance changed to {self.appearance_mode}"
+        )
+        self.after_idle(lambda: refresh_native_widgets(self))
 
     def _on_step1_processed_image(self, image, source_path) -> None:
-        """Receive a cropped Step 1 image and load it into Step 2."""
-        if getattr(self, "step2", None) is not None:
-            self.step2.load_external_image(image, source_path=source_path)
+        """Receive a Step 1 crop without repainting a hidden Step 2 page."""
+
+        step2 = getattr(self, "step2", None)
+        if step2 is None:
+            return
+        notebook = getattr(self, "notebook", None)
+        defer_render = True
+        if notebook is not None:
+            try:
+                defer_render = notebook.index(notebook.select()) != notebook.index(step2)
+            except (tk.TclError, TypeError, ValueError):
+                pass
+        step2.load_external_image(
+            image,
+            source_path=source_path,
+            defer_render=defer_render,
+        )
 
     def _on_step1_batch_segment_folders(self, folders) -> None:
         """Open Step 2 and batch-segment completed Step 1 folders."""

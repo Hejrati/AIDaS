@@ -28,6 +28,7 @@ class ConfigPersistenceTests(unittest.TestCase):
             ):
                 config = Config()
                 self.assertEqual(config.get("theme"), "vista")
+                self.assertEqual(config.get("appearance_mode"), "System")
                 self.assertEqual(config.get("custom_future_setting"), "keep me")
                 self.assertTrue(config.get("check_for_updates"))
                 config.set("last_successful_update_check", 123)

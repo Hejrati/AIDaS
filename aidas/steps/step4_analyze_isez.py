@@ -42,6 +42,7 @@ import zipfile
 from io import BytesIO
 from xml.sax.saxutils import escape
 
+import customtkinter as ctk
 import numpy as np
 from PIL import Image
 from PIL import ImageDraw
@@ -51,9 +52,17 @@ from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
 from aidas.core.display import centered_position, work_area_bounds
+from aidas.ui.tabs import ClosableTabView
+from aidas.ui.theme import COLOR_PAIRS, COLORS
+from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
-from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame, load_ui_icon
+from aidas.utils.ui_utils import (
+    HoverToolTip,
+    SidebarStepFrame,
+    action_button,
+    icon_action_button,
+)
 
 
 MATLAB_ROI_LOW = 300
@@ -984,7 +993,7 @@ class Step4BatchROITable(ttk.Frame):
         self.tree.column("folder", width=520, minwidth=220, stretch=False, anchor="w")
         self.tree.column("status", width=220, minwidth=120, stretch=False, anchor="w")
         self.tree.column("outputs", width=120, minwidth=80, stretch=False, anchor="center")
-        self.tree.tag_configure("locked", foreground="#6b7280")
+        self.tree.tag_configure("locked", foreground=COLORS.muted_text)
 
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.yscroll.grid(row=0, column=1, sticky="ns")
@@ -1160,21 +1169,29 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         top.pack(fill="x", pady=(0, 8))
         self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
         ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
-        self.more_label = ttk.Label(top, text="", foreground="#0066cc", cursor="hand2")
+        self.more_label = ttk.Label(top, text="", style="AIDaS.Link.TLabel", cursor="hand2")
         self.more_label.pack(side="right", padx=(8, 0))
         self.more_tooltip = HoverToolTip(self.more_label, "")
 
-        self.table_host = ttk.Frame(wrapper)
-        self.table_host.pack(fill="both", expand=True)
-        self.scan_label = ttk.Label(self.table_host, text="Scanning folders...", anchor="center", justify="center")
-        self.scan_label.pack(fill="both", expand=True)
-
         run_box = ttk.Frame(wrapper)
-        run_box.pack(fill="x", pady=(10, 0))
-        self.process_button = ttk.Button(run_box, text="Process Selected", command=self._process_selected)
+        run_box.pack(side="bottom", fill="x", pady=(10, 0))
+        self.action_footer = run_box
+        self.process_button = action_button(
+            run_box,
+            self,
+            "Process selected folders",
+            self._process_selected,
+            "process",
+            style="AIDaS.PrimaryAction.TButton",
+        )
         self.process_button.pack(side="right")
         self.process_button.state(["disabled"])
-        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="left")
+        action_button(run_box, self, "Cancel", self._cancel, "cancel").pack(side="left")
+
+        self.table_host = ttk.Frame(wrapper)
+        self.table_host.pack(side="top", fill="both", expand=True)
+        self.scan_label = ttk.Label(self.table_host, text="Scanning folders...", anchor="center", justify="center")
+        self.scan_label.pack(fill="both", expand=True)
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning Step 4 ROI folders under {self.root_dir}...")
@@ -1254,7 +1271,7 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         self.step_frame._close_batch_roi_panel(restore_previous=True)
 
 
-class Step4ProfileZoomDialog(tk.Toplevel):
+class Step4ProfileZoomDialog(ctk.CTkToplevel):
     """Focused profile editor opened from a completed ROI preview cell."""
 
     START_COLOR = "#2563eb"
@@ -1276,6 +1293,7 @@ class Step4ProfileZoomDialog(tk.Toplevel):
     ):
         super().__init__(owner)
         self.withdraw()
+        self.configure(fg_color=COLOR_PAIRS["surface"])
         self.roi_index = int(roi_index)
         self.profile = np.asarray(profile, dtype=np.float64).reshape(-1)
         if self.profile.size < 2:
@@ -1355,13 +1373,13 @@ class Step4ProfileZoomDialog(tk.Toplevel):
             measurements,
             textvariable=self.measurement_status_var,
             anchor="w",
-            foreground="#4b5563",
+            style="AIDaS.Muted.TLabel",
         ).grid(row=2, column=0, columnspan=len(RESULTS_HEADERS) - 1, sticky="ew", padx=3, pady=(4, 0))
 
         footer = ttk.Frame(self, padding=(10, 5, 10, 10))
         footer.pack(side="bottom", fill="x")
         ttk.Label(footer, textvariable=self.cursor_var).pack(side="left")
-        ttk.Label(footer, textvariable=self.apply_status_var, foreground="#047857").pack(
+        ttk.Label(footer, textvariable=self.apply_status_var, style="AIDaS.Success.TLabel").pack(
             side="left", padx=(16, 0)
         )
         ttk.Button(footer, text="Close", command=self.close).pack(side="right")
@@ -1389,12 +1407,21 @@ class Step4ProfileZoomDialog(tk.Toplevel):
         bounds = work_area_bounds(self)
         dpi_scale = max(0.75, float(self.winfo_fpixels("1i")) / 96.0)
         width, height, x, y = _profile_zoom_window_geometry(bounds, dpi_scale)
-        self.minsize(
+        logical_width, logical_height = logical_window_size(self, width, height)
+        minimum_width, minimum_height = logical_window_size(
+            self,
             min(width, round(680 * dpi_scale)),
             min(height, round(500 * dpi_scale)),
         )
-        self.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        self.minsize(minimum_width, minimum_height)
+        self.geometry(f"{logical_width}x{logical_height}{x:+d}{y:+d}")
         self.deiconify()
+        synchronize_window_chrome(
+            self,
+            background=COLOR_PAIRS["window_chrome"],
+            foreground=COLOR_PAIRS["text"],
+            border=COLOR_PAIRS["window_chrome"],
+        )
 
     def _focus_window(self) -> None:
         try:
@@ -1716,12 +1743,13 @@ class Step4Frame(SidebarStepFrame):
         # Temporarily disable the file-open and Step 3 load buttons to prevent
         # loading files while the feature is disabled for maintenance/testing.
 
-        self.batch_roi_button = ttk.Button(
+        self.batch_roi_button = action_button(
             source,
-            text="Batch ROI...",
-            image=load_ui_icon(self, "glyphs-poly--folder.png"),
-            compound="left",
-            command=self._browse_batch_roi_root,
+            self,
+            "Select folders for ROI…",
+            self._browse_batch_roi_root,
+            "folder",
+            tooltip="Choose a parent folder. AIDaS will find eligible flattened images inside it.",
         )
         self.batch_roi_button.pack(fill="x", pady=(6, 8))
 
@@ -1729,7 +1757,7 @@ class Step4Frame(SidebarStepFrame):
             source,
             textvariable=self.image_label_var,
             wraplength=self.SIDEBAR_TEXT_WRAP,
-            foreground="gray",
+            style="AIDaS.Muted.TLabel",
             justify="left",
         ).pack(fill="x", pady=(6, 0))
 
@@ -1762,8 +1790,20 @@ class Step4Frame(SidebarStepFrame):
 
         nav = ttk.Frame(roi_box)
         nav.pack(fill="x", pady=(6, 0))
-        ttk.Button(nav, text="< Prev", command=lambda: self._move_roi(-1)).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        ttk.Button(nav, text="Next >", command=lambda: self._move_roi(1)).pack(side="right", expand=True, fill="x", padx=(2, 0))
+        action_button(
+            nav,
+            self,
+            "Previous",
+            lambda: self._move_roi(-1),
+            "previous",
+        ).pack(side="left", expand=True, fill="x", padx=(0, 2))
+        action_button(
+            nav,
+            self,
+            "Next",
+            lambda: self._move_roi(1),
+            "next",
+        ).pack(side="right", expand=True, fill="x", padx=(2, 0))
 
         # Create a SINGLE frame for the horizontal controls
         control_row = ttk.Frame(roi_box)
@@ -1781,11 +1821,21 @@ class Step4Frame(SidebarStepFrame):
         self.end_entry.pack(side="left", padx=(0, 10))
 
         # 3. Apply Button
-        self.apply_icon = load_ui_icon(self, "streamline-stickies-color--validation-1-duo.png")
-        self.apply_button = ttk.Button(control_row, image=self.apply_icon, command=self._apply_entry_clicks)
+        self.apply_button = icon_action_button(
+            control_row,
+            self,
+            self._apply_entry_clicks,
+            "confirm",
+            tooltip="Apply the start and end values",
+        )
         self.apply_button.pack(side="left", expand=False) 
-        self.clear_icon = load_ui_icon(self, "solar--eraser-bold-duotone.png")
-        self.clear_button = ttk.Button(control_row, image=self.clear_icon, command=self._clear_clicks)
+        self.clear_button = icon_action_button(
+            control_row,
+            self,
+            self._clear_clicks,
+            "clear",
+            tooltip="Clear the current start and end values",
+        )
         self.clear_button.pack(side="left", padx=(4, 0), expand=False)
         for entry in (self.start_entry, self.end_entry):
             entry.bind("<Return>", self._apply_entry_clicks)
@@ -1795,13 +1845,13 @@ class Step4Frame(SidebarStepFrame):
         # 4. Build Stacks Button
         # Change the parent from 'control_row' to 'roi_box'
         # Use side="bottom" to anchor it to the bottom of the roi_box frame
-        self.build_stacks_icon = load_ui_icon(self, "tabler--stack-push.png")
-        self.build_stacks_button = ttk.Button(
+        self.build_stacks_button = action_button(
             roi_box,
-            image=self.build_stacks_icon,
-            text="Build Stack",
-            compound="left",
-            command=self._build_stack_outputs,
+            self,
+            "Build stack",
+            self._build_stack_outputs,
+            "stack",
+            tooltip="Build output stacks after all ROIs are complete.",
         )
         self.build_stacks_button.pack(side="bottom", fill="x", pady=(6, 2))
         # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
@@ -1917,7 +1967,7 @@ class Step4Frame(SidebarStepFrame):
 
     def _browse_batch_roi_root(self) -> None:
         folder = filedialog.askdirectory(
-            title="Select root folder for batch Step 4 ROI",
+            title="Choose a parent folder for ROI analysis",
             initialdir=str(Path.home() / "Desktop"),
         )
         if not folder:
@@ -1999,20 +2049,22 @@ class Step4Frame(SidebarStepFrame):
         self.batch_roi_tab_states = {}
         self._active_batch_roi_tab = None
 
-        self._configure_batch_roi_tab_style()
-        notebook = ttk.Notebook(self.plot_container, style="Step4Batch.TNotebook")
+        notebook = ClosableTabView(
+            self.plot_container,
+            command=lambda _view, tab: self._activate_batch_roi_tab(tab),
+            close_command=self._close_batch_roi_tab,
+        )
         notebook.pack(fill="both", expand=True)
-        notebook.bind("<Button-1>", self._on_batch_roi_notebook_click, add="+")
-        notebook.bind("<Motion>", self._on_batch_roi_notebook_motion, add="+")
-        notebook.bind("<<NotebookTabChanged>>", self._on_batch_roi_tab_changed, add="+")
-        notebook.bind("<Configure>", self._on_batch_roi_notebook_configure, add="+")
+        notebook.bind(
+            "<Configure>",
+            lambda _event: self._refresh_batch_roi_tab_labels(),
+            add="+",
+        )
         self.batch_roi_notebook = notebook
 
         for idx, path in enumerate(paths, start=1):
-            frame = ttk.Frame(notebook)
-            tab_key = str(frame)
             folder = path.parent
-            self.batch_roi_tab_states[tab_key] = {
+            state = {
                 "path": path,
                 "folder": folder,
                 "base_label": f"{idx}. {folder.name}",
@@ -2023,18 +2075,12 @@ class Step4Frame(SidebarStepFrame):
                 "profile_clicks": [],
                 "complete": False,
             }
-            notebook.add(frame, text=self._batch_roi_tab_text(self.batch_roi_tab_states[tab_key]))
+            frame = notebook.add(text=self._batch_roi_tab_text(state))
+            self.batch_roi_tab_states[str(frame)] = state
 
         first_tab = notebook.tabs()[0] if notebook.tabs() else None
         if first_tab:
-            self._activate_batch_roi_tab(notebook.nametowidget(first_tab))
-
-    def _configure_batch_roi_tab_style(self) -> None:
-        try:
-            style = ttk.Style(self)
-            style.configure("Step4Batch.TNotebook", background="#f0f0f0", borderwidth=1)
-        except tk.TclError:
-            pass
+            notebook.select(first_tab)
 
     def _batch_roi_tab_name_limit(self) -> int:
         notebook = self.batch_roi_notebook
@@ -2070,7 +2116,7 @@ class Step4Frame(SidebarStepFrame):
         else:
             label = raw_label if active else self._compact_batch_roi_name(raw_label, self._batch_roi_tab_name_limit())
         done_prefix = "[Done] " if state.get("complete") or done >= total else ""
-        return f"{done_prefix}{label} ({done}/{total})    ×"
+        return f"{done_prefix}{label} ({done}/{total})"
 
     def _refresh_batch_roi_tab_labels(self) -> None:
         notebook = self.batch_roi_notebook
@@ -2090,9 +2136,6 @@ class Step4Frame(SidebarStepFrame):
                 notebook.tab(tab_id, text=self._batch_roi_tab_text(state, done, active=active))
             except tk.TclError:
                 pass
-
-    def _on_batch_roi_notebook_configure(self, _event) -> None:
-        self._refresh_batch_roi_tab_labels()
 
     def _sync_active_batch_roi_state(self) -> None:
         tab_key = self._active_batch_roi_tab
@@ -2177,82 +2220,6 @@ class Step4Frame(SidebarStepFrame):
         self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
         return True
 
-    def _on_batch_roi_tab_changed(self, event) -> None:
-        notebook = event.widget
-        try:
-            selected = notebook.select()
-        except tk.TclError:
-            return
-        if selected:
-            self._activate_batch_roi_tab(notebook.nametowidget(selected))
-
-    @staticmethod
-    def _batch_roi_tab_bounds(notebook, index: int, y: int):
-        try:
-            bbox = notebook.bbox(index)
-        except tk.TclError:
-            bbox = None
-        if bbox and bbox[2] > 0:
-            x0, _y0, width, _height = bbox
-            return x0, x0 + width
-
-        try:
-            width = max(1, notebook.winfo_width())
-        except tk.TclError:
-            return None
-        first_x = None
-        last_x = None
-        probe_y = max(1, int(y))
-        for probe_x in range(width):
-            try:
-                probe_index = notebook.index(f"@{probe_x},{probe_y}")
-            except tk.TclError:
-                if first_x is not None:
-                    break
-                continue
-            if probe_index != index:
-                if first_x is not None:
-                    break
-                continue
-            if first_x is None:
-                first_x = probe_x
-            last_x = probe_x
-        if first_x is None or last_x is None:
-            return None
-        return first_x, last_x + 1
-
-    @classmethod
-    def _batch_roi_close_tab_at(cls, notebook, x: int, y: int):
-        try:
-            index = notebook.index(f"@{x},{y}")
-        except tk.TclError:
-            return None
-        bounds = cls._batch_roi_tab_bounds(notebook, index, y)
-        if not bounds:
-            return None
-        left, right = bounds
-        close_width = min(24, max(14, right - left))
-        if right - close_width <= x <= right:
-            try:
-                return notebook.nametowidget(notebook.tabs()[index])
-            except (tk.TclError, IndexError):
-                return None
-        return None
-
-    def _on_batch_roi_notebook_click(self, event):
-        notebook = event.widget
-        tab = self._batch_roi_close_tab_at(notebook, event.x, event.y)
-        if tab is None:
-            return None
-        self._close_batch_roi_tab(notebook, tab)
-        return "break"
-
-    def _on_batch_roi_notebook_motion(self, event):
-        try:
-            event.widget.configure(cursor="hand2" if self._batch_roi_close_tab_at(event.widget, event.x, event.y) is not None else "")
-        except tk.TclError:
-            pass
-
     def _close_batch_roi_tab(self, notebook, tab) -> None:
         tab_key = str(tab)
         if tab_key == self._active_batch_roi_tab:
@@ -2263,10 +2230,6 @@ class Step4Frame(SidebarStepFrame):
             notebook.forget(tab)
         except tk.TclError:
             return
-        try:
-            tab.destroy()
-        except tk.TclError:
-            pass
         if tab_key == self._active_batch_roi_tab:
             self._active_batch_roi_tab = None
             if self.canvas is not None:
@@ -2277,8 +2240,9 @@ class Step4Frame(SidebarStepFrame):
                 self.canvas = None
             tabs = notebook.tabs()
             if tabs:
-                self._activate_batch_roi_tab(notebook.nametowidget(tabs[0]))
+                notebook.select(tabs[0])
             else:
+                notebook.destroy()
                 self.batch_roi_notebook = None
                 self.plot_holder = self.plot_container
                 self._render_empty_canvas()

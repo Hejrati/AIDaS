@@ -14,6 +14,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from aidas.app import AIDaSApp
+from aidas.ui.components import AppSplitButton
+from aidas.ui.theme import COLOR_PAIRS, resolve_color
 from aidas.utils.ui_layout import LAYOUT, workspace_sidebar_width
 
 
@@ -44,6 +46,113 @@ def _sidebar_horizontal_overflow(step):
     return overflow
 
 
+def _widget_center(widget):
+    return (
+        widget.winfo_rootx() + widget.winfo_width() / 2,
+        widget.winfo_rooty() + widget.winfo_height() / 2,
+    )
+
+
+def _assert_crop_split_button_geometry(step):
+    """Guard the rendered split control's silhouette and arrow alignment."""
+
+    split = step.crop_split_frame
+    action = step.crop_btn
+    options = step.crop_options_btn
+    divider = step.crop_split_divider
+    undo = step.undo_crop_btn
+    split.update_idletasks()
+
+    split_x = split.winfo_rootx()
+    split_y = split.winfo_rooty()
+    split_width = split.winfo_width()
+    split_height = split.winfo_height()
+    assert (split_width, split_height) == (
+        AppSplitButton.DEFAULT_WIDTH,
+        40,
+    ), (
+        "Crop & Scale must keep a clean 198x40 outer silhouette; "
+        f"rendered size is {split_width}x{split_height}."
+    )
+    assert split_height == undo.winfo_height(), (
+        "Crop & Scale and Undo do not have the same rendered height."
+    )
+    assert split_y == undo.winfo_rooty(), (
+        "Crop & Scale and Undo are not vertically aligned."
+    )
+    assert action.cget("corner_radius") == undo.cget("corner_radius"), (
+        "Crop & Scale does not use the same standard corner radius as Undo."
+    )
+    assert options.cget("corner_radius") == undo.cget("corner_radius"), (
+        "The split-button segments do not share the standard corner radius."
+    )
+    assert split.cget("fg_color") == "transparent", (
+        "The split button has a colored outer container that distorts its silhouette."
+    )
+
+    primary = COLOR_PAIRS["primary"]
+    exterior = split.cget("bg_color")
+    assert tuple(action.cget("background_corner_colors")) == (
+        exterior,
+        primary,
+        primary,
+        exterior,
+    ), "The action segment does not square off only its joined edge."
+    assert tuple(options.cget("background_corner_colors")) == (
+        primary,
+        exterior,
+        exterior,
+        primary,
+    ), "The dropdown segment does not square off only its joined edge."
+
+    assert options.winfo_width() == AppSplitButton.SEGMENT_WIDTH, (
+        "The Crop & Scale dropdown target is not the standard square width."
+    )
+    for name, segment in (("action", action), ("dropdown", options)):
+        assert segment.winfo_rooty() == split_y, (
+            f"The split button {name} segment does not align with the outer edge."
+        )
+        assert segment.winfo_height() == split_height, (
+            f"The split button {name} segment has an inconsistent height."
+        )
+
+    action_right = action.winfo_rootx() + action.winfo_width()
+    divider_x = divider.winfo_rootx()
+    options_x = options.winfo_rootx()
+    options_right = options_x + options.winfo_width()
+    assert action.winfo_rootx() == split_x
+    assert action_right == options_x, (
+        "The Crop & Scale segments overlap or leave a gap at their join."
+    )
+    assert divider.winfo_width() == 1, "The split-button divider must be exactly 1px."
+    assert abs((divider_x + divider.winfo_width() / 2) - options_x) <= 1, (
+        "The divider is not centered on the split-button join."
+    )
+    assert options_right == split_x + split_width, (
+        "The dropdown segment does not terminate cleanly at the outer edge."
+    )
+    assert divider.winfo_height() >= split_height // 2, (
+        "The split-button divider is too short to read as a segment boundary."
+    )
+
+    assert options.cget("text") == "\u25be", (
+        "Crop & Scale must use the standard small down-pointing triangle."
+    )
+    assert options.cget("anchor") == "center"
+    arrow_label = getattr(options, "_text_label", None)
+    assert arrow_label is not None and arrow_label.winfo_ismapped(), (
+        "The split-button arrow label is not rendered."
+    )
+    option_center = _widget_center(options)
+    arrow_center = _widget_center(arrow_label)
+    assert abs(option_center[0] - arrow_center[0]) <= 2, (
+        "The split-button arrow is not horizontally centered in its segment."
+    )
+    assert abs(option_center[1] - arrow_center[1]) <= 2, (
+        "The split-button arrow is not vertically centered in its segment."
+    )
+
+
 def main() -> int:
     app = AIDaSApp()
     results = []
@@ -53,6 +162,60 @@ def main() -> int:
         assert (app.winfo_width(), app.winfo_height()) == app._startup_window_size, (
             "The revealed main window does not match its adaptive startup size."
         )
+        for appearance_mode in ("Light", "Dark"):
+            assert resolve_color(
+                COLOR_PAIRS["window_chrome"], appearance_mode
+            ) != resolve_color(COLOR_PAIRS["menu_bar"], appearance_mode), (
+                f"The title and menu bars merge in {appearance_mode} mode."
+            )
+
+        navigation = app.header.navigation
+        assert navigation.cget("border_width") == 0, (
+            "The workflow step selector still draws a connecting outer boundary."
+        )
+        assert navigation.cget("fg_color") == "transparent", (
+            "The workflow step selector still draws a connecting background track."
+        )
+        navigation_buttons = tuple(navigation._buttons_dict.values())
+        assert len(navigation_buttons) == len(app.header.DEFAULT_STEPS)
+        assert all(button.cget("border_width") >= 1 for button in navigation_buttons), (
+            "One or more workflow steps has no individual boundary."
+        )
+        selected_label = navigation.get()
+        for label, button in navigation._buttons_dict.items():
+            selected = label == selected_label
+            assert button.cget("fg_color") == (
+                COLOR_PAIRS["primary"]
+                if selected
+                else COLOR_PAIRS["surface_subtle"]
+            )
+            assert button.cget("border_color") == (
+                COLOR_PAIRS["primary"]
+                if selected
+                else COLOR_PAIRS["border_strong"]
+            )
+            assert button.cget("text_color") == (
+                COLOR_PAIRS["on_primary"]
+                if selected
+                else COLOR_PAIRS["text"]
+            )
+        ordered_buttons = tuple(
+            sorted(navigation_buttons, key=lambda button: button.winfo_rootx())
+        )
+        button_widths = {button.winfo_width() for button in ordered_buttons}
+        assert max(button_widths) - min(button_widths) <= 1
+        button_gaps = tuple(
+            following.winfo_rootx()
+            - (current.winfo_rootx() + current.winfo_width())
+            for current, following in zip(ordered_buttons, ordered_buttons[1:])
+        )
+        assert button_gaps and min(button_gaps) > 0, (
+            "Workflow buttons are still visually connected."
+        )
+        assert max(button_gaps) - min(button_gaps) <= 1, (
+            "Workflow button spacing is not uniform."
+        )
+
         steps = (app.step1, app.step2, app.step3, app.step4)
         for width, height in WINDOW_SIZES:
             app.geometry(f"{width}x{height}")
@@ -116,6 +279,15 @@ def main() -> int:
                     )
                     step.sidebar.canvas.yview_moveto(0.0)
                 if step_number == 1:
+                    _assert_crop_split_button_geometry(step)
+                    assert (
+                        step.content_status_bar.winfo_rootx()
+                        == step.canvas_roi_toolbar.winfo_rootx()
+                    ), "Step 1 status and bottom toolbar do not share a left edge."
+                    assert (
+                        step.content_status_bar.winfo_width()
+                        == step.canvas_roi_toolbar.winfo_width()
+                    ), "Step 1 status and bottom toolbar do not have the same width."
                     action_heights = {
                         step.crop_split_frame.winfo_reqheight(),
                         step.undo_crop_btn.winfo_reqheight(),

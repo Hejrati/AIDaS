@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from aidas.ui.theme import COLORS
+
 
 @dataclass(frozen=True)
 class LayoutTokens:
@@ -26,23 +28,7 @@ class LayoutTokens:
     space_lg: int = 16
 
 
-@dataclass(frozen=True)
-class ColorTokens:
-    """Neutral scientific-workstation palette with one accessible accent."""
-
-    application: str = "#e9eef3"
-    surface: str = "#ffffff"
-    surface_subtle: str = "#f5f7fa"
-    border: str = "#c9d2dc"
-    text: str = "#17212b"
-    muted_text: str = "#5d6b78"
-    accent: str = "#0b5f9e"
-    accent_hover: str = "#084b7d"
-    accent_soft: str = "#e5f1f9"
-
-
 LAYOUT = LayoutTokens()
-COLORS = ColorTokens()
 
 
 def workspace_sidebar_width(

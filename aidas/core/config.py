@@ -15,6 +15,10 @@ class Config:
     # Default preferences
     DEFAULTS = {
         "theme": "clam",
+        # CustomTkinter appearance is intentionally separate from the legacy
+        # ttk theme preference.  Keeping both keys lets older preference files
+        # load unchanged while the UI moves to System/Light/Dark modes.
+        "appearance_mode": "System",
         "rscript_path": "",
         "check_for_updates": True,
         "last_successful_update_check": 0,

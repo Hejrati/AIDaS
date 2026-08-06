@@ -23,7 +23,9 @@ This document lists what you need before running AIDaS as a Python application.
 - `pip` available for package installation
 
 ### 3. System Packages
-AIDaS uses Tkinter for the desktop GUI.
+AIDaS uses CustomTkinter on top of Tkinter for its modern application UI, while
+retaining native Tkinter and scientific widgets where specialized integration is
+needed.
 
 **On Windows:**
 - Tkinter is included with Python by default
@@ -295,8 +297,16 @@ aidas/
 |-- core/                  Preferences and single-instance lifecycle
 |-- services/              Update discovery, download, installation, and update UI
 |-- steps/                 The four OCT workflow screens
+|-- ui/                    Centralized theme, appearance, and shared UI components
 `-- utils/                 Shared filesystem, image, I/O, logging, and UI helpers
 ```
+
+The interface supports **System**, **Light**, and **Dark** appearance modes.
+Shared colors, spacing, typography, and component styling live under `aidas/ui/`
+so the visual design can be changed without modifying workflow backends. Keep new
+UI styling in that package and reuse its components throughout the application.
+PyInstaller collects CustomTkinter's packaged theme and font data through
+`AIDaS.spec`; preserve that collection when changing the release configuration.
 
 `OCT Segmenter/AI_ForAIDAS/` remains a separate developer workspace for model
 training and experimentation. The installed application uses the ONNX runtime

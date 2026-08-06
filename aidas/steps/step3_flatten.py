@@ -34,7 +34,15 @@ from aidas.utils.step3_image_utils import (
 )
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.r_script_library import discover_r_scripts, import_r_script, user_r_script_dir
-from aidas.utils.ui_utils import HoverToolTip, SidebarStepFrame, resource_path
+from aidas.ui.theme import COLORS
+from aidas.ui.tabs import ClosableTabView
+from aidas.utils.ui_utils import (
+    HoverToolTip,
+    SidebarStepFrame,
+    action_button,
+    load_action_icon,
+    resource_path,
+)
 
 
 def _normalize_analyze_path(base_path):
@@ -96,10 +104,10 @@ class RSetupWizard(ttk.Frame):
     def _build_styles(self):
         self.style = ttk.Style(self)
         self.style.configure("WizardTitle.TLabel", font=("Segoe UI", 16, "bold"))
-        self.style.configure("WizardSubtitle.TLabel", foreground="#555555")
+        self.style.configure("WizardSubtitle.TLabel", foreground=COLORS.muted_text)
         self.style.configure("WizardStep.TLabel", padding=(10, 7))
         self.style.configure("WizardStepActive.TLabel", padding=(10, 7), font=("Segoe UI", 9, "bold"))
-        self.style.configure("WizardStepDone.TLabel", padding=(10, 7), foreground="#1b6e3c")
+        self.style.configure("WizardStepDone.TLabel", padding=(10, 7), foreground=COLORS.success)
         self.style.configure("WizardAccent.TButton", padding=(10, 5))
 
     def _build_shell(self):
@@ -143,12 +151,20 @@ class RSetupWizard(ttk.Frame):
 
         footer = ttk.Frame(root)
         footer.pack(fill="x", pady=(10, 0))
-        self.next_button = ttk.Button(footer, text="Next", command=self._next)
+        self.next_button = action_button(
+            footer,
+            self,
+            "Next",
+            self._next,
+            "next",
+            style="AIDaS.PrimaryAction.TButton",
+        )
+        self._wizard_finish_icon = load_action_icon(self, "confirm")
         self.next_button.pack(side="right", padx=(4, 0))
-        self.back_button = ttk.Button(footer, text="Back", command=self._back)
+        self.back_button = action_button(footer, self, "Back", self._back, "previous")
         self.back_button.pack(side="right", padx=(4, 0))
 
-        self.cancel_button = ttk.Button(footer, text="Cancel", command=self._cancel)
+        self.cancel_button = action_button(footer, self, "Cancel", self._cancel, "cancel")
         self.cancel_button.pack(side="right")
 
         self._log("R setup wizard opened.")
@@ -184,7 +200,11 @@ class RSetupWizard(ttk.Frame):
                 label.configure(style="WizardStep.TLabel")
 
         self.back_button.configure(state="disabled" if self.current_step == 0 else "normal")
-        self.next_button.configure(text="Finish" if self.current_step == len(self.STEPS) - 1 else "Next")
+        is_finish = self.current_step == len(self.STEPS) - 1
+        self.next_button.configure(
+            text="Finish" if is_finish else "Next",
+            image=self._wizard_finish_icon if is_finish else self.next_button._aidas_action_icon,
+        )
         if self.current_step == 0 and self.rscript_path is None:
             self.next_button.configure(state="disabled")
         elif self.current_step == 1 and (
@@ -256,7 +276,7 @@ class RSetupWizard(ttk.Frame):
         ttk.Label(
             self.content,
             text=f"Managed package library:\n{self.package_library_path}",
-            foreground="#555555",
+            style="AIDaS.Muted.TLabel",
             wraplength=620,
             justify="left",
         ).pack(anchor="w", pady=(0, 10))
@@ -280,7 +300,7 @@ class RSetupWizard(ttk.Frame):
         ttk.Label(
             self.content,
             text="All package installs use AIDaS's local resource bundle; the setup does not contact CRAN.",
-            foreground="#555555",
+            style="AIDaS.Muted.TLabel",
             wraplength=620,
             justify="left",
         ).pack(anchor="w", pady=(10, 0))
@@ -865,11 +885,11 @@ class RSetupWizard(ttk.Frame):
     def _build_styles(self):
         self.style = ttk.Style(self)
         self.style.configure("WizardTitle.TLabel", font=("Segoe UI", 16, "bold"))
-        self.style.configure("WizardSubtitle.TLabel", foreground="#555555")
+        self.style.configure("WizardSubtitle.TLabel", foreground=COLORS.muted_text)
         self.style.configure("WizardStatus.TLabel", font=("Segoe UI", 11, "bold"))
-        self.style.configure("WizardSuccess.TLabel", foreground="#1b6e3c", font=("Segoe UI", 10, "bold"))
-        self.style.configure("WizardMissing.TLabel", foreground="#a12622", font=("Segoe UI", 10, "bold"))
-        self.style.configure("WizardNeutral.TLabel", foreground="#555555", font=("Segoe UI", 10, "bold"))
+        self.style.configure("WizardSuccess.TLabel", foreground=COLORS.success, font=("Segoe UI", 10, "bold"))
+        self.style.configure("WizardMissing.TLabel", foreground=COLORS.danger, font=("Segoe UI", 10, "bold"))
+        self.style.configure("WizardNeutral.TLabel", foreground=COLORS.muted_text, font=("Segoe UI", 10, "bold"))
         self.style.configure("WizardPrimary.TButton", padding=(12, 6))
         self.style.configure("WizardClose.TButton", padding=(8, 3))
         self.style.configure("Wizard.Treeview", rowheight=24, font=("Segoe UI", 9))
@@ -911,17 +931,21 @@ class RSetupWizard(ttk.Frame):
         footer.columnconfigure(0, weight=1)
         footer_actions = ttk.Frame(footer)
         footer_actions.grid(row=0, column=0, sticky="w")
-        self.install_components_button = ttk.Button(
+        self.install_components_button = action_button(
             footer_actions,
-            text="Install Missing R and Packages",
-            command=self._install_missing_components,
-            style="WizardPrimary.TButton",
+            self,
+            "Install missing R and packages",
+            self._install_missing_components,
+            "package",
+            style="AIDaS.PrimaryAction.TButton",
         )
         self.install_components_button.pack(side="left", padx=(0, 6))
-        self.check_packages_button = ttk.Button(
+        self.check_packages_button = action_button(
             footer_actions,
-            text="Check Packages",
-            command=self._check_packages,
+            self,
+            "Check packages",
+            self._check_packages,
+            "refresh",
         )
         self.check_packages_button.pack(side="left")
         self.setup_complete_label = ttk.Label(
@@ -929,11 +953,12 @@ class RSetupWizard(ttk.Frame):
             text="Setup complete",
             style="WizardSuccess.TLabel",
         )
-        self.close_button = ttk.Button(
+        self.close_button = action_button(
             footer,
-            text="Close",
-            command=self._close,
-            style="WizardClose.TButton",
+            self,
+            "Close",
+            self._close,
+            "cancel",
         )
         self.close_button.grid(row=0, column=1, sticky="e", padx=(12, 0))
         self._log("R setup opened.")
@@ -973,12 +998,27 @@ class RSetupWizard(ttk.Frame):
         self.r_status_label.grid(row=0, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
         r_actions = ttk.Frame(r_frame)
         r_actions.grid(row=1, column=0, columnspan=2, sticky="w", padx=10, pady=(0, 8))
-        ttk.Button(r_actions, text="Check Again", command=self._check_all).pack(side="left", padx=(0, 6))
-        ttk.Button(r_actions, text="Search Locally...", command=self._locate_rscript).pack(side="left")
-        self.r_auto_install_button = ttk.Button(
+        action_button(
             r_actions,
-            text=f"Download and Install R {self.step_frame.R_REQUIRED_VERSION}",
-            command=lambda: self._download_and_install_r(continue_to_packages=True),
+            self,
+            "Check again",
+            self._check_all,
+            "refresh",
+        ).pack(side="left", padx=(0, 6))
+        action_button(
+            r_actions,
+            self,
+            "Find R locally…",
+            self._locate_rscript,
+            "opened_folder",
+        ).pack(side="left")
+        self.r_auto_install_button = action_button(
+            r_actions,
+            self,
+            f"Download and install R {self.step_frame.R_REQUIRED_VERSION}",
+            lambda: self._download_and_install_r(continue_to_packages=True),
+            "package",
+            style="AIDaS.PrimaryAction.TButton",
         )
         self.r_auto_install_button.pack(side="left", padx=(6, 0))
 
@@ -996,12 +1036,12 @@ class RSetupWizard(ttk.Frame):
         ttk.Label(
             package_header,
             text="Managed by AIDaS",
-            foreground="#555555",
+            style="AIDaS.Muted.TLabel",
         ).grid(row=0, column=1, sticky="e", padx=(12, 0))
         ttk.Label(
             package_frame,
             text=f"Local library: {self.package_library_path}",
-            foreground="#666666",
+            style="AIDaS.Muted.TLabel",
             wraplength=760,
             justify="left",
         ).pack(anchor="w", padx=10, pady=(0, 6))
@@ -1029,9 +1069,9 @@ class RSetupWizard(ttk.Frame):
         self.package_tree.column("package", width=220, minwidth=130, stretch=True, anchor="w")
         self.package_tree.column("role", width=110, minwidth=90, stretch=False, anchor="w")
         self.package_tree.column("status", width=110, minwidth=95, stretch=False, anchor="w")
-        self.package_tree.tag_configure("installed", foreground="#1b6e3c")
-        self.package_tree.tag_configure("missing", foreground="#a12622")
-        self.package_tree.tag_configure("neutral", foreground="#555555")
+        self.package_tree.tag_configure("installed", foreground=COLORS.success)
+        self.package_tree.tag_configure("missing", foreground=COLORS.danger)
+        self.package_tree.tag_configure("neutral", foreground=COLORS.muted_text)
         self.package_tree.grid(row=0, column=0, sticky="ew")
         package_scroll.grid(row=0, column=1, sticky="ns")
         self.package_tree_items = {}
@@ -1139,7 +1179,7 @@ class RSetupWizard(ttk.Frame):
             if self.install_components_button.winfo_manager():
                 self.install_components_button.pack_forget()
         else:
-            install_text = "Install Missing Packages"
+            install_text = "Install missing packages"
         if not ready and self.rscript_path is not None:
             if self.setup_complete_label.winfo_manager():
                 self.setup_complete_label.pack_forget()
@@ -1662,23 +1702,14 @@ class RBatchSelectionPanel(ttk.Frame):
             fill="x",
             expand=True,
         )
-        self.more_label = ttk.Label(top, text="", foreground="#0066cc", cursor="hand2")
+        self.more_label = ttk.Label(top, text="", style="AIDaS.Link.TLabel", cursor="hand2")
         self.more_label.pack(side="right", padx=(8, 0))
         self.more_tooltip = HoverToolTip(self.more_label, "")
 
-        self.table_host = ttk.Frame(wrapper)
-        self.table_host.pack(fill="both", expand=True)
-        self.scan_label = ttk.Label(
-            self.table_host,
-            text="Scanning folders...",
-            anchor="center",
-            justify="center",
-        )
-        self.scan_label.pack(fill="both", expand=True)
-
         run_box = ttk.Frame(wrapper)
-        run_box.pack(fill="x", pady=(10, 0))
-        ttk.Button(run_box, text="Cancel", command=self._cancel).pack(side="left")
+        run_box.pack(side="bottom", fill="x", pady=(10, 0))
+        self.action_footer = run_box
+        action_button(run_box, self, "Cancel", self._cancel, "cancel").pack(side="left")
         ttk.Label(run_box, text="Batch Size:").pack(side="left", padx=(12, 0))
         max_workers = self._max_worker_count()
         self.workers_var = tk.IntVar(value=min(4, max_workers))
@@ -1691,7 +1722,7 @@ class RBatchSelectionPanel(ttk.Frame):
         )
         self.workers_spin.pack(side="left", padx=(6, 12))
         self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
-        ttk.Label(run_box, textvariable=self.worker_limit_var, foreground="#555555").pack(side="left")
+        ttk.Label(run_box, textvariable=self.worker_limit_var, style="AIDaS.Muted.TLabel").pack(side="left")
         ttk.Label(run_box, text="Timeout/script (min):").pack(side="left", padx=(12, 0))
         self.timeout_var = tk.IntVar(value=self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES)
         self.timeout_spin = ttk.Spinbox(
@@ -1702,10 +1733,30 @@ class RBatchSelectionPanel(ttk.Frame):
             width=7,
         )
         self.timeout_spin.pack(side="left", padx=(6, 12))
-        self.next_button = ttk.Button(run_box, text="Start", command=self._run_selected)
+        self.next_button = action_button(
+            run_box,
+            self,
+            "Run selected folders",
+            self._run_selected,
+            "process",
+            tooltip="Start the configured R scripts for the selected folders.",
+            style="AIDaS.PrimaryAction.TButton",
+        )
         self.next_button.pack(side="right")
         self.next_button.state(["disabled"])
         self.workers_spin.configure(state="disabled")
+
+        # The table is the only vertically flexible region. Packing it after
+        # the footer guarantees that resize pressure cannot cover the actions.
+        self.table_host = ttk.Frame(wrapper)
+        self.table_host.pack(side="top", fill="both", expand=True)
+        self.scan_label = ttk.Label(
+            self.table_host,
+            text="Scanning folders...",
+            anchor="center",
+            justify="center",
+        )
+        self.scan_label.pack(fill="both", expand=True)
 
     def _max_worker_count(self, ready_count=None):
         cpu_limit = self.step_frame._cpu_worker_limit()
@@ -1934,11 +1985,24 @@ class RBatchRunPanel(ttk.Frame):
         )
         action_box = ttk.Frame(summary_row)
         action_box.pack(side="right", padx=(8, 0))
-        self.restart_button = ttk.Button(action_box, text="Restart", command=self._restart_batch)
+        self.restart_button = action_button(
+            action_box,
+            self,
+            "Restart",
+            self._restart_batch,
+            "refresh",
+        )
         self.restart_button.pack(side="left")
-        self.stop_button = ttk.Button(action_box, text="Stop", command=self._cancel_batch)
+        self.stop_button = action_button(
+            action_box,
+            self,
+            "Stop",
+            self._cancel_batch,
+            "cancel",
+            style="AIDaS.DangerAction.TButton",
+        )
         self.stop_button.pack(side="left", padx=(6, 0))
-        self.close_button = ttk.Button(action_box, text="Close", command=self._close)
+        self.close_button = action_button(action_box, self, "Close", self._close, "cancel")
         self.close_button.pack(side="left", padx=(6, 0))
         self.cancel_button = self.stop_button
 
@@ -2199,6 +2263,7 @@ class Step3Frame(SidebarStepFrame):
         self._active_batch_result_tab = None
         self.r_setup_button = None
         self.r_batch_button = None
+        self.load_r_results_button = None
         self.r_script_combos = {}
         self.add_r_script_buttons = {}
         self.r_script_choices = {"main": [], "output": []}
@@ -2228,13 +2293,35 @@ class Step3Frame(SidebarStepFrame):
         process_section = self.add_sidebar_section("Process", pady=(0, 5))
         process = process_section.body
 
-        self.r_setup_button = ttk.Button(process, text="Setup R and Packages...", command=self._open_r_setup_wizard)
+        self.r_setup_button = action_button(
+            process,
+            self,
+            "Set up R and packages…",
+            self._open_r_setup_wizard,
+            "settings",
+            tooltip="Check the R installation and manage the required packages.",
+        )
         self.r_setup_button.pack(fill="x", pady=2)
 
-        self.r_batch_button = ttk.Button(process, text="Batch Run R Script...", command=self._open_r_batch_scanner)
+        self.r_batch_button = action_button(
+            process,
+            self,
+            "Select folders to flatten…",
+            self._open_r_batch_scanner,
+            "folder",
+            tooltip="Choose a parent folder. AIDaS will find eligible annotated folders inside it.",
+        )
         self.r_batch_button.pack(fill="x", pady=2)
 
-        ttk.Button(process, text="Load R Results...", command=self._browse_r_results_folder).pack(fill="x", pady=2)
+        self.load_r_results_button = action_button(
+            process,
+            self,
+            "Load R results…",
+            self._browse_r_results_folder,
+            "results",
+            tooltip="Open a folder containing completed Step 3 results.",
+        )
+        self.load_r_results_button.pack(fill="x", pady=2)
 
         script_section = self.add_sidebar_section("R Scripts", pady=(0, 5))
         script_controls = script_section.body
@@ -2285,6 +2372,8 @@ class Step3Frame(SidebarStepFrame):
             self.r_setup_button.configure(state=state)
         if self.r_batch_button is not None:
             self.r_batch_button.configure(state=state)
+        if self.load_r_results_button is not None:
+            self.load_r_results_button.configure(state=state)
         for combo in self.r_script_combos.values():
             combo.configure(state="disabled" if state == "disabled" else "readonly")
         for button in self.add_r_script_buttons.values():
@@ -2322,10 +2411,12 @@ class Step3Frame(SidebarStepFrame):
         combo.bind("<<ComboboxSelected>>", lambda _event, selected_role=role: self._on_r_script_selected(selected_role))
         self.r_script_combos[role] = combo
 
-        button = ttk.Button(
+        button = action_button(
             controls,
-            text=add_button_text,
-            command=lambda selected_role=role: self._add_r_script(selected_role),
+            self,
+            add_button_text,
+            lambda selected_role=role: self._add_r_script(selected_role),
+            "opened_folder",
         )
         button.pack(fill="x", pady=2)
         self.add_r_script_buttons[role] = button
@@ -2333,7 +2424,7 @@ class Step3Frame(SidebarStepFrame):
             controls,
             textvariable=self.r_script_active_vars[role],
             wraplength=self.SIDEBAR_TEXT_WRAP,
-            foreground="#1b6e3c",
+            style="AIDaS.Success.TLabel",
             justify="left",
         ).pack(fill="x", anchor="w", pady=(3, 0))
         self._refresh_r_script_choices(role)
@@ -3203,7 +3294,7 @@ class Step3Frame(SidebarStepFrame):
         if self._busy:
             return
         root_dir = filedialog.askdirectory(
-            title="Select root folder for batch Step 3 R processing",
+            title="Choose a parent folder for flattening",
             initialdir=self.current_sdb_dir or None,
         )
         if not root_dir:
@@ -3917,13 +4008,6 @@ class Step3Frame(SidebarStepFrame):
             self.canvas = label
         self.after(0, redraw)
 
-    def _configure_batch_result_tab_style(self):
-        try:
-            style = ttk.Style(self)
-            style.configure("Step3Batch.TNotebook", background="#f0f0f0", borderwidth=1)
-        except tk.TclError:
-            pass
-
     def _batch_result_tab_name_limit(self):
         notebook = self.batch_results_notebook
         if notebook is None:
@@ -3954,7 +4038,7 @@ class Step3Frame(SidebarStepFrame):
             label = f"{prefix}. {tab_name}"
         else:
             label = raw_label if active else self._compact_batch_result_name(raw_label, self._batch_result_tab_name_limit())
-        return f"{label}    x"
+        return label
 
     def _refresh_batch_result_tab_labels(self):
         notebook = self.batch_results_notebook
@@ -3973,87 +4057,9 @@ class Step3Frame(SidebarStepFrame):
             except tk.TclError:
                 pass
 
-    def _on_batch_result_notebook_configure(self, _event):
+    def _on_batch_result_tab_changed(self, _notebook, tab):
+        self._active_batch_result_tab = str(tab)
         self._refresh_batch_result_tab_labels()
-
-    def _on_batch_result_tab_changed(self, event):
-        notebook = event.widget
-        try:
-            selected = notebook.select()
-        except tk.TclError:
-            return
-        if not selected:
-            return
-        self._active_batch_result_tab = str(notebook.nametowidget(selected))
-        self._refresh_batch_result_tab_labels()
-
-    @staticmethod
-    def _batch_result_tab_bounds(notebook, index, y):
-        try:
-            bbox = notebook.bbox(index)
-        except tk.TclError:
-            bbox = None
-        if bbox and bbox[2] > 0:
-            x0, _y0, width, _height = bbox
-            return x0, x0 + width
-
-        try:
-            width = max(1, notebook.winfo_width())
-        except tk.TclError:
-            return None
-        first_x = None
-        last_x = None
-        probe_y = max(1, int(y))
-        for probe_x in range(width):
-            try:
-                probe_index = notebook.index(f"@{probe_x},{probe_y}")
-            except tk.TclError:
-                if first_x is not None:
-                    break
-                continue
-            if probe_index != index:
-                if first_x is not None:
-                    break
-                continue
-            if first_x is None:
-                first_x = probe_x
-            last_x = probe_x
-        if first_x is None or last_x is None:
-            return None
-        return first_x, last_x + 1
-
-    @classmethod
-    def _batch_result_close_tab_at(cls, notebook, x, y):
-        try:
-            index = notebook.index(f"@{x},{y}")
-        except tk.TclError:
-            return None
-        bounds = cls._batch_result_tab_bounds(notebook, index, y)
-        if not bounds:
-            return None
-        left, right = bounds
-        close_width = min(24, max(14, right - left))
-        if right - close_width <= x <= right:
-            try:
-                return notebook.nametowidget(notebook.tabs()[index])
-            except (tk.TclError, IndexError):
-                return None
-        return None
-
-    def _on_batch_result_notebook_click(self, event):
-        notebook = event.widget
-        tab = self._batch_result_close_tab_at(notebook, event.x, event.y)
-        if tab is None:
-            return None
-        self._close_batch_result_tab(notebook, tab)
-        return "break"
-
-    def _on_batch_result_notebook_motion(self, event):
-        try:
-            cursor = "hand2" if self._batch_result_close_tab_at(event.widget, event.x, event.y) is not None else ""
-            event.widget.configure(cursor=cursor)
-        except tk.TclError:
-            pass
 
     def _close_batch_result_tab(self, notebook, tab):
         tab_key = str(tab)
@@ -4065,17 +4071,11 @@ class Step3Frame(SidebarStepFrame):
             notebook.forget(tab)
         except tk.TclError:
             return
-        try:
-            tab.destroy()
-        except tk.TclError:
-            pass
         if tab_key == self._active_batch_result_tab:
             self._active_batch_result_tab = None
             tabs = notebook.tabs()
             if tabs:
                 notebook.select(tabs[0])
-                self._active_batch_result_tab = str(notebook.nametowidget(tabs[0]))
-                self._refresh_batch_result_tab_labels()
             else:
                 self.batch_results_notebook = None
                 self.batch_result_folders = []
@@ -4117,25 +4117,27 @@ class Step3Frame(SidebarStepFrame):
         self.batch_result_folders = folders
         self.batch_result_tab_states = {}
         self._active_batch_result_tab = None
-        self._configure_batch_result_tab_style()
-        notebook = ttk.Notebook(self.plot_holder, style="Step3Batch.TNotebook")
+        notebook = ClosableTabView(
+            self.plot_holder,
+            command=self._on_batch_result_tab_changed,
+            close_command=self._close_batch_result_tab,
+        )
         notebook.pack(fill="both", expand=True)
-        notebook.bind("<Button-1>", self._on_batch_result_notebook_click, add="+")
-        notebook.bind("<Motion>", self._on_batch_result_notebook_motion, add="+")
-        notebook.bind("<Leave>", lambda event: event.widget.configure(cursor=""), add="+")
-        notebook.bind("<<NotebookTabChanged>>", self._on_batch_result_tab_changed, add="+")
-        notebook.bind("<Configure>", self._on_batch_result_notebook_configure, add="+")
+        notebook.bind(
+            "<Configure>",
+            lambda _event: self._refresh_batch_result_tab_labels(),
+            add="+",
+        )
         self.batch_results_notebook = notebook
 
         for index, folder in enumerate(folders, start=1):
-            frame = ttk.Frame(notebook)
-            tab_key = str(frame)
             state = {
                 "folder": folder,
                 "base_label": f"{index}. {folder.name or folder}",
             }
+            frame = notebook.add(text=self._batch_result_tab_text(state))
+            tab_key = str(frame)
             self.batch_result_tab_states[tab_key] = state
-            notebook.add(frame, text=self._batch_result_tab_text(state))
             ttk.Label(frame, text=str(folder), anchor="w", padding=4).pack(fill="x")
             image_host = ttk.Frame(frame)
             image_host.pack(fill="both", expand=True)
@@ -4144,8 +4146,6 @@ class Step3Frame(SidebarStepFrame):
         first_tab = notebook.tabs()[0] if notebook.tabs() else None
         if first_tab:
             notebook.select(first_tab)
-            self._active_batch_result_tab = str(notebook.nametowidget(first_tab))
-            self._refresh_batch_result_tab_labels()
 
         self.current_sdb_dir = str(folders[0])
         self.output_sdb_dir = str(folders[0])

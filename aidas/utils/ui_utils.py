@@ -7,86 +7,50 @@ import sys
 import tkinter as tk
 from tkinter import ttk
 
+import customtkinter as ctk
+from PIL import Image, ImageChops, ImageOps
+
+from aidas.core.display import work_area_bounds
+from aidas.ui.theme import (
+    COLOR_PAIRS,
+    CONTROLS,
+    SHAPES,
+    TYPOGRAPHY,
+    configure_ttk_styles,
+)
 from aidas.utils.ui_layout import COLORS, LAYOUT, workspace_sidebar_width
 
 
 ASSET_DIR_NAME = "assets"
-ICON_FOLDER = "glyphs-poly--folder.png"
-ICON_HOME = "streamline-flex-color--home-2-flat.png"
-ICON_REFRESH = "material-symbols-light--refresh-rounded.png"
+ACTION_ICON_SIZE = 20
+ACTION_ICON_FILES = {
+    "cancel": "flat-color-icons--cancel.png",
+    "clear": "flat-color-icons--empty-trash.png",
+    "confirm": "flat-color-icons--checkmark.png",
+    "folder": "flat-color-icons--folder.png",
+    "home": "flat-color-icons--home.png",
+    "next": "flat-color-icons--right.png",
+    "opened_folder": "flat-color-icons--opened-folder.png",
+    "package": "flat-color-icons--package.png",
+    "previous": "flat-color-icons--left.png",
+    "process": "flat-color-icons--process.png",
+    "refresh": "flat-color-icons--refresh.png",
+    "results": "flat-color-icons--data-sheet.png",
+    "save": "flat-color-icons--download.png",
+    "save_all": "flat-color-icons--data-backup.png",
+    "settings": "flat-color-icons--settings.png",
+    "stack": "flat-color-icons--stack-of-photos.png",
+    "undo": "flat-color-icons--undo-action.png",
+}
+ICON_FOLDER = ACTION_ICON_FILES["folder"]
+ICON_HOME = ACTION_ICON_FILES["home"]
+ICON_REFRESH = ACTION_ICON_FILES["refresh"]
 
 
 def configure_aidas_styles(style):
-    """Apply the common AIDaS visual language to the active ttk theme."""
+    """Compatibility entry point for the centralized CTk/ttk theme bridge."""
 
-    default_font = ("Segoe UI", 9)
-    style.configure(".", font=default_font)
-    style.configure("TFrame", background=COLORS.surface)
-    style.configure("TLabel", background=COLORS.surface, foreground=COLORS.text)
-    style.configure("TCheckbutton", background=COLORS.surface, foreground=COLORS.text)
-    style.configure("TRadiobutton", background=COLORS.surface, foreground=COLORS.text)
-    style.configure("TLabelframe", background=COLORS.surface, bordercolor=COLORS.border, relief="solid")
-    style.configure(
-        "TLabelframe.Label",
-        background=COLORS.surface,
-        foreground=COLORS.text,
-        font=("Segoe UI", 9, "bold"),
-    )
-    style.configure("TButton", padding=(9, 5))
-    style.configure("TEntry", padding=(5, 4))
-    style.configure("TCombobox", padding=(5, 3))
-    style.configure("Treeview", rowheight=24, background=COLORS.surface, fieldbackground=COLORS.surface)
-    style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), padding=(7, 5))
-
-    style.configure("AIDaS.App.TFrame", background=COLORS.application)
-    style.configure("AIDaS.Workspace.TFrame", background=COLORS.application)
-    style.configure("AIDaS.Sidebar.TFrame", background=COLORS.surface)
-    style.configure("AIDaS.Content.TFrame", background=COLORS.surface)
-    style.configure("AIDaS.Section.TFrame", background=COLORS.surface)
-    style.configure("AIDaS.ContentHeader.TFrame", background=COLORS.surface_subtle)
-    style.configure(
-        "AIDaS.ContentHeader.TLabel",
-        background=COLORS.surface_subtle,
-        foreground=COLORS.text,
-        font=("Segoe UI", 10, "bold"),
-    )
-    style.configure(
-        "AIDaS.Status.TLabel",
-        background=COLORS.surface_subtle,
-        foreground=COLORS.muted_text,
-        padding=(10, 5),
-        relief="flat",
-    )
-    style.configure(
-        "AIDaS.TNotebook",
-        background=COLORS.application,
-        borderwidth=0,
-        tabmargins=(8, 8, 8, 0),
-    )
-    style.configure(
-        "AIDaS.TNotebook.Tab",
-        background=COLORS.surface_subtle,
-        foreground=COLORS.muted_text,
-        font=("Segoe UI", 9, "bold"),
-        padding=(14, 8),
-    )
-    style.map(
-        "AIDaS.TNotebook.Tab",
-        background=[("selected", COLORS.surface), ("active", COLORS.accent_soft)],
-        foreground=[("selected", COLORS.accent), ("active", COLORS.text)],
-    )
-    style.configure(
-        "Accent.TButton",
-        background=COLORS.accent,
-        foreground="#ffffff",
-        font=("Segoe UI", 9, "bold"),
-        padding=(10, 6),
-    )
-    style.map(
-        "Accent.TButton",
-        background=[("pressed", COLORS.accent_hover), ("active", COLORS.accent_hover)],
-        foreground=[("disabled", "#d7dee5"), ("!disabled", "#ffffff")],
-    )
+    configure_ttk_styles(style)
 
 
 def resource_path(relative_path):
@@ -138,21 +102,115 @@ def load_ui_icon(owner, filename, *, size=None):
     return remember_image(owner, image)
 
 
-def icon_button(parent, owner, icon_filename, command, *, tooltip=None, **button_options):
-    """Create the flat icon-only Tk button style used by the Step 1 sidebar."""
-    icon = load_ui_icon(owner, icon_filename)
+def load_action_icon(owner, action, *, size=ACTION_ICON_SIZE):
+    """Load a semantic icon from the app's unified Flat Color icon family."""
+
+    try:
+        filename = ACTION_ICON_FILES[action]
+    except KeyError as exc:
+        raise ValueError(f"Unknown UI action icon: {action}") from exc
+    return load_ui_icon(owner, filename, size=size)
+
+
+def action_button(
+    parent,
+    owner,
+    text,
+    command,
+    action,
+    *,
+    tooltip=None,
+    icon_size=ACTION_ICON_SIZE,
+    **button_options,
+):
+    """Create a standard text-and-icon ttk action button.
+
+    Geometry and interaction states come from the global ``TButton`` style;
+    this helper standardizes semantic icons, their size, and tooltip behavior.
+    """
+
+    icon = load_action_icon(owner, action, size=icon_size)
     options = {
-        "image": icon,
+        "text": text,
         "command": command,
-        "bd": 0,
-        "relief": "flat",
-        "highlightthickness": 0,
-        "cursor": "hand2",
-        "bg": COLORS.surface,
-        "activebackground": COLORS.accent_soft,
+        "image": icon,
+        "compound": "left",
+        "style": "AIDaS.Action.TButton",
     }
     options.update(button_options)
-    button = tk.Button(parent, **options)
+    button = ttk.Button(parent, **options)
+    button._aidas_action_icon = icon
+    if tooltip:
+        HoverToolTip(button, tooltip)
+    return button
+
+
+def icon_action_button(
+    parent,
+    owner,
+    command,
+    action,
+    *,
+    tooltip,
+    icon_size=ACTION_ICON_SIZE,
+    **button_options,
+):
+    """Create the standard square icon-only ttk action button."""
+
+    button_options.setdefault("style", "AIDaS.Icon.TButton")
+    button_options.setdefault("width", 0)
+    return action_button(
+        parent,
+        owner,
+        "",
+        command,
+        action,
+        tooltip=tooltip,
+        icon_size=icon_size,
+        **button_options,
+    )
+
+
+def load_ctk_image(owner, filename, *, size=CONTROLS.icon_size):
+    """Load one DPI-aware image for modern CustomTkinter controls."""
+
+    path = asset_path(filename)
+    target_size = (size, size) if isinstance(size, int) else tuple(size)
+    with Image.open(path) as source:
+        image = source.convert("RGBA").copy()
+    # Preserve colored icons while lifting only near-black glyph pixels for
+    # dark mode. Transparent pixels stay transparent through the alpha mask.
+    luminance = ImageOps.grayscale(image.convert("RGB"))
+    dark_pixel_mask = luminance.point(lambda value: 255 if value < 92 else 0)
+    dark_pixel_mask = ImageChops.multiply(dark_pixel_mask, image.getchannel("A"))
+    light_glyph = Image.new("RGBA", image.size, "#DDE7F0")
+    dark_image = Image.composite(light_glyph, image, dark_pixel_mask)
+    return remember_image(
+        owner,
+        ctk.CTkImage(light_image=image, dark_image=dark_image, size=target_size),
+    )
+
+
+def icon_button(parent, owner, icon_filename, command, *, tooltip=None, **button_options):
+    """Create the shared modern icon-only button used in compact form rows."""
+
+    icon_size = button_options.pop("icon_size", CONTROLS.icon_size)
+    icon = load_ctk_image(owner, icon_filename, size=icon_size)
+    options = {
+        "text": "",
+        "image": icon,
+        "command": command,
+        "width": CONTROLS.height_md,
+        "height": CONTROLS.height_md,
+        "corner_radius": SHAPES.corner_radius_sm,
+        "border_width": 0,
+        "bg_color": COLOR_PAIRS["surface"],
+        "fg_color": "transparent",
+        "hover_color": COLOR_PAIRS["primary_soft"],
+        "text_color": COLOR_PAIRS["text"],
+    }
+    options.update(button_options)
+    button = ctk.CTkButton(parent, **options)
     button.image = icon
     if tooltip:
         HoverToolTip(button, tooltip)
@@ -172,8 +230,17 @@ def directory_row(
     refresh_tooltip="Refresh",
 ):
     """Create a Step-1-style directory entry row with shared icon buttons."""
-    row = ttk.Frame(parent)
-    entry = ttk.Entry(row, textvariable=textvariable)
+    row = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+    entry = ctk.CTkEntry(
+        row,
+        textvariable=textvariable,
+        height=CONTROLS.height_md,
+        corner_radius=SHAPES.corner_radius_sm,
+        border_width=SHAPES.border_width,
+        border_color=COLOR_PAIRS["border_strong"],
+        fg_color=COLOR_PAIRS["surface_elevated"],
+        text_color=COLOR_PAIRS["text"],
+    )
     entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
     buttons = {
@@ -194,47 +261,8 @@ def directory_row(
     return row, entry, buttons
 
 
-def build_app_menu(
-    root,
-    *,
-    themes,
-    current_theme,
-    set_theme_command,
-    browse_sdb_command,
-    check_updates_command,
-    about_command,
-):
-    """Build the shared application menu bar."""
-    menubar = tk.Menu(root)
-
-    file_menu = tk.Menu(menubar, tearoff=0)
-    file_menu.add_command(label="Browse SDB Parent Directory", command=browse_sdb_command)
-    file_menu.add_separator()
-    file_menu.add_command(label="Exit", command=root.destroy, accelerator="Alt+F4")
-    menubar.add_cascade(label="File", menu=file_menu)
-
-    theme_menu = tk.Menu(menubar, tearoff=0)
-    for theme in themes:
-        prefix = "* " if theme == current_theme else ""
-        theme_menu.add_command(label=f"{prefix}{theme.capitalize()}", command=lambda t=theme: set_theme_command(t))
-
-    help_menu = tk.Menu(menubar, tearoff=0)
-    help_menu.add_cascade(label="Theme", menu=theme_menu)
-    help_menu.add_separator()
-    help_menu.add_command(label="Check for Updates...", command=check_updates_command)
-    help_menu.add_separator()
-    help_menu.add_command(label="About", command=about_command)
-    menubar.add_cascade(label="Help", menu=help_menu)
-
-    root.config(menu=menubar)
-    return menubar
-
-
-class NativeNumericSpinbox(tk.Frame):
-    """Excel-style numeric entry with tangent up/down arrow buttons."""
-
-    FONT = ("Segoe UI", 9)
-    BUTTON_WIDTH = 15
+class NativeNumericSpinbox(ctk.CTkFrame):
+    """Modern numeric entry with compact, keyboard-friendly step controls."""
 
     def __init__(
         self,
@@ -246,125 +274,73 @@ class NativeNumericSpinbox(tk.Frame):
         minimum=0,
         maximum=10_000_000,
         validatecommand=None,
+        bg_color=None,
     ):
+        pixel_width = max(64, int(width) * 9 + 28)
         super().__init__(
             parent,
-            bd=1,
-            relief="solid",
-            highlightthickness=0,
-            bg="#ffffff",
+            width=pixel_width,
+            height=CONTROLS.height_md,
+            corner_radius=SHAPES.corner_radius_sm,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border_strong"],
+            bg_color=bg_color or COLOR_PAIRS["surface"],
+            fg_color=COLOR_PAIRS["surface_elevated"],
         )
         self.var = textvariable
         self.step = step
         self.minimum = minimum
         self.maximum = maximum
+        self._button_state = "normal"
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure((0, 1), weight=1)
+        # This is a fixed-size composite. Without this guard, changing a child
+        # entry/button state can briefly alter its requested size and bubble a
+        # geometry/redraw cascade through the surrounding sidebar.
+        self.grid_propagate(False)
 
         entry_options = {
             "textvariable": self.var,
-            "width": width,
+            "width": max(42, pixel_width - 24),
+            "height": CONTROLS.height_sm,
             "justify": "center",
-            "font": self.FONT,
-            "relief": "flat",
-            "bd": 0,
-            "highlightthickness": 0,
-            "bg": "#ffffff",
+            "font": ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+            "corner_radius": 0,
+            "border_width": 0,
+            "fg_color": "transparent",
+            "text_color": COLOR_PAIRS["text"],
         }
         if validatecommand is not None:
             entry_options["validate"] = "key"
             entry_options["validatecommand"] = validatecommand
-
-        self.entry = tk.Entry(self, **entry_options)
-        self.entry.pack(side="left", fill="both", expand=True, padx=(3, 1), pady=1, ipady=1)
+        self.entry = ctk.CTkEntry(self, **entry_options)
+        self.entry.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(4, 1), pady=2)
         self.spinbox = self.entry
 
-        self.button_stack = tk.Frame(self, bd=0, highlightthickness=0, bg="#d2d2d2", width=self.BUTTON_WIDTH)
-        self.button_stack.pack(side="right", fill="y")
-        self.button_stack.pack_propagate(False)
-
-        self.button_canvas = tk.Canvas(
-            self.button_stack,
-            width=self.BUTTON_WIDTH,
-            highlightthickness=0,
-            bd=0,
-            bg="#eeeeee",
-            cursor="hand2",
+        button_options = {
+            "width": 22,
+            "height": CONTROLS.height_sm // 2,
+            "corner_radius": 3,
+            "border_width": 0,
+            "fg_color": "transparent",
+            "hover_color": COLOR_PAIRS["primary_soft"],
+            "text_color": COLOR_PAIRS["muted_text"],
+            "font": ctk.CTkFont(family=TYPOGRAPHY.family, size=8, weight="bold"),
+        }
+        self.up_button = ctk.CTkButton(
+            self,
+            text="▲",
+            command=lambda: self._step(self.step),
+            **button_options,
         )
-        self.button_canvas.pack(fill="both", expand=True)
-        self.button_canvas.bind("<Configure>", self._draw_buttons, add="+")
-        self.button_canvas.bind("<ButtonPress-1>", self._on_button_press, add="+")
-        self.button_canvas.bind("<ButtonRelease-1>", self._on_button_release, add="+")
-        self._button_state = "normal"
-        self._pressed_half = None
-
-    def _draw_buttons(self, _event=None):
-        canvas = self.button_canvas
-        width = max(1, canvas.winfo_width())
-        height = max(1, canvas.winfo_height())
-        mid = max(1, height // 2)
-        disabled = self._button_state == "disabled"
-        pressed_up = self._pressed_half == "up"
-        pressed_down = self._pressed_half == "down"
-        fill_up = "#dedede" if pressed_up else "#eeeeee"
-        fill_down = "#dedede" if pressed_down else "#eeeeee"
-        outline = "#a7a7a7"
-        arrow = "#777777" if disabled else "#202020"
-
-        canvas.delete("all")
-        canvas.create_rectangle(0, 0, width - 1, mid, fill=fill_up, outline=outline)
-        canvas.create_rectangle(0, mid, width - 1, height - 1, fill=fill_down, outline=outline)
-
-        split = height / 2
-        top_center = split / 2
-        bottom_center = split + ((height - split) / 2)
-        half_w = min(4, max(3, width / 4))
-        half_h = min(2.6, max(2.0, (height / 2) * 0.22))
-        cx = (width - 1) / 2
-
-        def centered_triangle(center_y, direction):
-            # The centroid of an isosceles triangle is 1/3 from the base, so
-            # offset the bounding box center to make the icon look symmetric.
-            bbox_center_y = center_y + (half_h / 3 if direction == "up" else -half_h / 3)
-            if direction == "up":
-                return (
-                    cx,
-                    bbox_center_y - half_h,
-                    cx - half_w,
-                    bbox_center_y + half_h,
-                    cx + half_w,
-                    bbox_center_y + half_h,
-                )
-            return (
-                cx,
-                bbox_center_y + half_h,
-                cx - half_w,
-                bbox_center_y - half_h,
-                cx + half_w,
-                bbox_center_y - half_h,
-            )
-
-        canvas.create_polygon(*centered_triangle(top_center, "up"), fill=arrow, outline=arrow)
-        canvas.create_polygon(*centered_triangle(bottom_center, "down"), fill=arrow, outline=arrow)
-
-    def _button_half(self, event):
-        return "up" if event.y < max(1, self.button_canvas.winfo_height() // 2) else "down"
-
-    def _on_button_press(self, event):
-        if self._button_state == "disabled":
-            return "break"
-        self._pressed_half = self._button_half(event)
-        self._draw_buttons()
-        return "break"
-
-    def _on_button_release(self, event):
-        if self._button_state == "disabled":
-            return "break"
-        pressed = self._pressed_half
-        released = self._button_half(event)
-        self._pressed_half = None
-        self._draw_buttons()
-        if pressed == released:
-            self._step(self.step if released == "up" else -self.step)
-        return "break"
+        self.up_button.grid(row=0, column=1, sticky="nsew", padx=(0, 2), pady=(2, 0))
+        self.down_button = ctk.CTkButton(
+            self,
+            text="▼",
+            command=lambda: self._step(-self.step),
+            **button_options,
+        )
+        self.down_button.grid(row=1, column=1, sticky="nsew", padx=(0, 2), pady=(0, 2))
 
     def _step(self, delta):
         try:
@@ -386,15 +362,20 @@ class NativeNumericSpinbox(tk.Frame):
 
         state = options.pop("state", None)
         result = super().configure(**options) if options else None
-        if state is not None:
+        if state is not None and state != self._button_state:
             self.entry.configure(state=state)
+            self.up_button.configure(state=state)
+            self.down_button.configure(state=state)
             self._button_state = state
-            self._pressed_half = None
-            self.button_canvas.configure(cursor="" if state == "disabled" else "hand2")
-            self._draw_buttons()
         return result
 
     config = configure
+
+    def cget(self, attribute_name):
+        """Return the semantic control state without exposing child widgets."""
+        if attribute_name == "state":
+            return self._button_state
+        return super().cget(attribute_name)
 
 def apply_app_icon_to(window):
     """Apply the application's icon to `window` when available.
@@ -433,63 +414,256 @@ def apply_app_icon_to(window):
 
 
 class HoverToolTip:
-    """Small hover tooltip for Tk and ttk widgets."""
+    """One-at-a-time tooltip that cannot leave orphan hover windows behind."""
+
+    SHOW_DELAY_MS = 450
+    POINTER_CHECK_MS = 100
+    _active_tooltip = None
+    _pending_tooltip = None
+    _OWNER_DISMISS_EVENTS = (
+        "<ButtonPress>",
+        "<Escape>",
+        "<FocusOut>",
+        "<Unmap>",
+        "<<NotebookTabChanged>>",
+        "<<AIDaSThemeChanged>>",
+    )
 
     def __init__(self, widget, text):
         self.widget = widget
-        self.text = text
+        self._text = str(text or "")
         self.tipwindow = None
-        self.widget.bind("<Enter>", self._show, add="+")
+        self._show_after_id = None
+        self._pointer_after_id = None
+        self.widget.bind("<Enter>", self._schedule_show, add="+")
         self.widget.bind("<Leave>", self._hide, add="+")
         self.widget.bind("<ButtonPress>", self._hide, add="+")
+        self.widget.bind("<Unmap>", self._hide, add="+")
+        self.widget.bind("<Destroy>", self._hide, add="+")
+        self._bind_owner_dismiss_events()
 
-    def _show(self, _event=None):
-        if self.tipwindow is not None:
+    @property
+    def text(self):
+        return self._text
+
+    @text.setter
+    def text(self, value):
+        updated = str(value or "")
+        if updated == self._text:
             return
+        was_visible = self.tipwindow is not None
+        self._text = updated
+        # Never leave stale dynamic text on screen. The current hover can show
+        # the updated copy again after the normal short delay.
+        self._hide()
+        if was_visible and updated.strip() and self._pointer_is_over_widget():
+            self._schedule_show()
+
+    @classmethod
+    def dismiss_active(cls):
+        """Cancel a pending tooltip and dismiss the visible tooltip, if any."""
+
+        pending = cls._pending_tooltip
+        if pending is not None:
+            pending._cancel_scheduled_show()
+        active = cls._active_tooltip
+        if active is not None:
+            active._hide()
+
+    @classmethod
+    def _dismiss_for_owner_event(cls, _event=None):
+        cls.dismiss_active()
+
+    def _bind_owner_dismiss_events(self):
+        """Install one set of window-wide dismissal hooks per owning window."""
+
+        try:
+            owner = self.widget.winfo_toplevel()
+        except (AttributeError, tk.TclError):
+            return
+        marker = "_aidas_hover_tooltip_dismiss_events_bound"
+        if getattr(owner, marker, False):
+            return
+        setattr(owner, marker, True)
+        for sequence in self._OWNER_DISMISS_EVENTS:
+            try:
+                owner.bind(sequence, type(self)._dismiss_for_owner_event, add="+")
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _schedule_show(self, _event=None):
+        self._cancel_scheduled_show()
+        if not str(self.text or "").strip():
+            return
+        pending = type(self)._pending_tooltip
+        if pending is not None and pending is not self:
+            pending._cancel_scheduled_show()
+        try:
+            self._show_after_id = self.widget.after(self.SHOW_DELAY_MS, self._show_now)
+            type(self)._pending_tooltip = self
+        except tk.TclError:
+            self._show_after_id = None
+
+    def _show_now(self):
+        self._show_after_id = None
+        if type(self)._pending_tooltip is self:
+            type(self)._pending_tooltip = None
+        if self.tipwindow is not None or not str(self.text or "").strip():
+            return
+        if not self._pointer_is_over_widget():
+            return
+
+        active = type(self)._active_tooltip
+        if active is not None and active is not self:
+            active._hide()
 
         x = self.widget.winfo_pointerx() + 12
         y = self.widget.winfo_pointery() + 12
         tw = tk.Toplevel(self.widget)
+        tw.withdraw()
         tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        # Apply shared helper so tooltip windows use the app icon when shown
+        tw.transient(self.widget.winfo_toplevel())
+        tw.configure(background=COLORS.border_strong)
         try:
-            apply_app_icon_to(tw)
-        except Exception:
+            tw.attributes("-topmost", True)
+        except tk.TclError:
             pass
-        ttk.Label(
+
+        shell = ctk.CTkFrame(
             tw,
+            corner_radius=SHAPES.corner_radius_sm,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border_strong"],
+            fg_color=COLOR_PAIRS["surface_elevated"],
+        )
+        shell.pack(fill="both", expand=True)
+        ctk.CTkLabel(
+            shell,
             text=self.text,
             justify="left",
-            relief="solid",
-            borderwidth=1,
-            padding=(6, 3),
-        ).pack()
+            anchor="w",
+            wraplength=320,
+            fg_color="transparent",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
+        ).pack(padx=8, pady=5)
+
+        tw.update_idletasks()
+        width = max(1, tw.winfo_reqwidth())
+        height = max(1, tw.winfo_reqheight())
+        left, top, right, bottom = work_area_bounds(
+            tw,
+            parent=self.widget.winfo_toplevel(),
+        )
+        x = max(left, min(x, right - width))
+        y = max(top, min(y, bottom - height))
+        tw.wm_geometry(f"+{x}+{y}")
         self.tipwindow = tw
+        type(self)._active_tooltip = self
+        tw.deiconify()
+        tw.lift()
+        self._schedule_pointer_check()
+
+    def _pointer_is_over_widget(self):
+        try:
+            if not self.widget.winfo_exists() or not self.widget.winfo_viewable():
+                return False
+            x, y = self.widget.winfo_pointerxy()
+            target = self.widget.winfo_containing(x, y)
+        except tk.TclError:
+            return False
+        while target is not None:
+            if target is self.widget:
+                return True
+            target = getattr(target, "master", None)
+        return False
+
+    def _schedule_pointer_check(self):
+        self._cancel_pointer_check()
+        try:
+            self._pointer_after_id = self.widget.after(
+                self.POINTER_CHECK_MS,
+                self._check_pointer,
+            )
+        except tk.TclError:
+            self._pointer_after_id = None
+
+    def _check_pointer(self):
+        self._pointer_after_id = None
+        if self.tipwindow is None:
+            return
+        try:
+            tip_exists = bool(self.tipwindow.winfo_exists())
+        except tk.TclError:
+            tip_exists = False
+        if not tip_exists or not str(self.text or "").strip() or not self._pointer_is_over_widget():
+            self._hide()
+            return
+        self._schedule_pointer_check()
+
+    def _cancel_scheduled_show(self):
+        after_id = self._show_after_id
+        self._show_after_id = None
+        if type(self)._pending_tooltip is self:
+            type(self)._pending_tooltip = None
+        if after_id is not None:
+            try:
+                self.widget.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+    def _cancel_pointer_check(self):
+        after_id = self._pointer_after_id
+        self._pointer_after_id = None
+        if after_id is not None:
+            try:
+                self.widget.after_cancel(after_id)
+            except tk.TclError:
+                pass
 
     def _hide(self, _event=None):
-        if self.tipwindow is not None:
-            self.tipwindow.destroy()
-            self.tipwindow = None
+        self._cancel_scheduled_show()
+        self._cancel_pointer_check()
+        tw = self.tipwindow
+        self.tipwindow = None
+        if type(self)._active_tooltip is self:
+            type(self)._active_tooltip = None
+        if tw is not None:
+            try:
+                tw.destroy()
+            except tk.TclError:
+                pass
 
 
-class ScrollableSidebar(ttk.Frame):
+class ScrollableSidebar(ctk.CTkFrame):
     """A vertical sidebar whose content can be scrolled with the mouse."""
 
     def __init__(self, parent, *, width=None):
-        super().__init__(parent, style="AIDaS.Sidebar.TFrame")
+        super().__init__(parent, fg_color="transparent", corner_radius=0)
 
         canvas_options = {
             "highlightthickness": 0,
             "bd": 0,
-            "background": COLORS.surface,
+            "background": COLORS.sidebar,
         }
         if width is not None:
             canvas_options["width"] = width
 
         self.canvas = tk.Canvas(self, **canvas_options)
-        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
-        self.content = ttk.Frame(self.canvas, style="AIDaS.Sidebar.TFrame")
+        self.scrollbar = ctk.CTkScrollbar(
+            self,
+            orientation="vertical",
+            command=self.canvas.yview,
+            width=CONTROLS.scrollbar_width,
+            fg_color="transparent",
+            button_color=COLOR_PAIRS["border_strong"],
+            button_hover_color=COLOR_PAIRS["primary"],
+        )
+        self.content = ctk.CTkFrame(
+            self.canvas,
+            fg_color=COLOR_PAIRS["sidebar"],
+            corner_radius=0,
+        )
         self._content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self._middle_drag_active = False
         self._middle_drag_target = self.canvas
@@ -505,13 +679,18 @@ class ScrollableSidebar(ttk.Frame):
 
         # Mouse-wheel events are delivered to the widget under the pointer, so
         # bind at "all" and only act when the pointer is inside this sidebar.
-        self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
-        self.bind_all("<Button-4>", self._on_mousewheel, add="+")
-        self.bind_all("<Button-5>", self._on_mousewheel, add="+")
-        self.bind_all("<ButtonPress-2>", self._on_middle_press, add="+")
-        self.bind_all("<B2-Motion>", self._on_middle_drag, add="+")
-        self.bind_all("<ButtonRelease-2>", self._on_middle_release, add="+")
-        self.bind_all("<ButtonPress-1>", self._on_primary_press, add="+")
+        # CTkBaseClass deliberately blocks bind_all; call Tk's implementation
+        # explicitly for this established sidebar-wide wheel routing contract.
+        tk.Misc.bind_all(self, "<MouseWheel>", self._on_mousewheel, add="+")
+        tk.Misc.bind_all(self, "<Button-4>", self._on_mousewheel, add="+")
+        tk.Misc.bind_all(self, "<Button-5>", self._on_mousewheel, add="+")
+        tk.Misc.bind_all(self, "<ButtonPress-2>", self._on_middle_press, add="+")
+        tk.Misc.bind_all(self, "<B2-Motion>", self._on_middle_drag, add="+")
+        tk.Misc.bind_all(self, "<ButtonRelease-2>", self._on_middle_release, add="+")
+        tk.Misc.bind_all(self, "<ButtonPress-1>", self._on_primary_press, add="+")
+
+    def _apply_aidas_theme(self):
+        self.canvas.configure(background=COLORS.sidebar)
 
     def _on_content_configure(self, _event=None):
         self.refresh_scrollregion()
@@ -703,102 +882,66 @@ class ScrollableSidebar(ttk.Frame):
         return "break"
 
 
-class CollapsibleSection(ttk.Frame):
-    """A titled section that can hide or show its child controls."""
+class CollapsibleSection(ctk.CTkFrame):
+    """A rounded, accessible sidebar card with a collapsible body."""
 
-    HEADER_FONT = ("Segoe UI", 9, "bold")
-    INDICATOR_FONT = ("Segoe UI", 12, "bold")
-    HEADER_HEIGHT = 32
+    HEADER_HEIGHT = 36
 
     def __init__(self, parent, title, *, padding=3, expanded=True):
-        super().__init__(parent, style="AIDaS.Section.TFrame")
+        super().__init__(
+            parent,
+            fg_color=COLOR_PAIRS["surface"],
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
+        )
         self.title = title
         self.expanded = bool(expanded)
-        self._header_hovered = False
-        self._header_bg = COLORS.surface
-        self._header_fill = COLORS.surface_subtle
-        self._header_outline = COLORS.border
-        self._header_text = COLORS.text
-
-        self.header = tk.Canvas(
+        self.header = ctk.CTkButton(
             self,
+            text="",
+            command=self.toggle,
             height=self.HEADER_HEIGHT,
-            highlightthickness=0,
-            bd=0,
-            bg=self._header_bg,
-            cursor="hand2",
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=0,
+            fg_color="transparent",
+            hover_color=COLOR_PAIRS["primary_soft"],
+            text_color=COLOR_PAIRS["text"],
+            anchor="w",
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
         )
-        self.header.pack(fill="x")
-        self.header.bind("<Button-1>", self._on_header_click, add="+")
-        self.header.bind("<Configure>", lambda _event: self._draw_header(), add="+")
-        self.header.bind("<Enter>", self._on_header_enter, add="+")
-        self.header.bind("<Leave>", self._on_header_leave, add="+")
+        self.header.pack(fill="x", padx=2, pady=2)
 
-        self._body_container = ttk.Frame(
+        self._body_container = ctk.CTkFrame(
             self,
-            style="AIDaS.Section.TFrame",
-            relief="solid",
-            borderwidth=1,
-            padding=2,
+            fg_color="transparent",
+            corner_radius=0,
         )
-        self._body_container.pack(fill="both", expand=True, padx=(4, 0), pady=(0, 7))
-        self.body = ttk.Frame(self._body_container, style="AIDaS.Section.TFrame", padding=padding)
-        self.body.pack(fill="both", expand=True)
+        self._body_container.pack(fill="both", expand=True, padx=2, pady=(0, 4))
+        self.body = ctk.CTkFrame(
+            self._body_container,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        self.body.pack(fill="both", expand=True, padx=padding, pady=(1, padding))
         self._sync_header()
-
-    def _on_header_enter(self, _event):
-        self._header_hovered = True
-        self._draw_header()
-
-    def _on_header_leave(self, _event):
-        self._header_hovered = False
-        self._draw_header()
-
-    def _on_header_click(self, _event):
-        self.toggle()
-        return "break"
 
     def toggle(self):
         self.expanded = not self.expanded
         if self.expanded:
-            self._body_container.pack(fill="both", expand=True, padx=(4, 0), pady=(0, 7))
+            self._body_container.pack(fill="both", expand=True, padx=2, pady=(0, 4))
         else:
             self._body_container.pack_forget()
         self._sync_header()
         self._queue_sidebar_refresh()
 
     def _sync_header(self):
-        self._draw_header()
-
-    def _draw_header(self):
-        width = max(1, self.header.winfo_width())
-        height = max(self.HEADER_HEIGHT, self.header.winfo_height())
-
-        self.header.delete("all")
-        self.header.create_rectangle(
-            1,
-            1,
-            width - 1,
-            height - 1,
-            fill=COLORS.accent_soft if self._header_hovered else self._header_fill,
-            outline=self._header_outline,
-        )
-        marker = "\u25be" if self.expanded else "\u25b8"
-        self.header.create_text(
-            13,
-            height / 2,
-            text=marker,
-            fill=self._header_text,
-            font=self.INDICATOR_FONT,
-        )
-        self.header.create_text(
-            28,
-            height / 2,
-            text=self.title,
-            fill=self._header_text,
-            font=self.HEADER_FONT,
-            anchor="w",
-        )
+        marker = "▾" if self.expanded else "▸"
+        self.header.configure(text=f"  {marker}   {self.title}")
 
     def _queue_sidebar_refresh(self):
         widget = self.master
@@ -810,7 +953,7 @@ class CollapsibleSection(ttk.Frame):
             widget = getattr(widget, "master", None)
 
 
-class SidebarStepFrame(ttk.Frame):
+class SidebarStepFrame(ctk.CTkFrame):
     """Standard left-sidebar/right-content layout for AIDaS step pages."""
 
     SIDEBAR_WIDTH = LAYOUT.sidebar_width
@@ -819,6 +962,11 @@ class SidebarStepFrame(ttk.Frame):
     CONTENT_MINIMUM = LAYOUT.content_minimum
     SECTION_PADDING = 8
     SECTION_PACK = {"fill": "x", "padx": (0, 0), "pady": (0, 8)}
+
+    def __init__(self, parent, *args, **kwargs):
+        kwargs.setdefault("fg_color", "transparent")
+        kwargs.setdefault("corner_radius", 0)
+        super().__init__(parent, *args, **kwargs)
 
     def build_standard_layout(
         self,
@@ -833,7 +981,11 @@ class SidebarStepFrame(ttk.Frame):
         `self.ctrl` is the scrollable sidebar content frame. `self.content` is
         the main right-side work area.
         """
-        self.main = ttk.Frame(self, style="AIDaS.Workspace.TFrame")
+        self.main = ctk.CTkFrame(
+            self,
+            fg_color=COLOR_PAIRS["application"],
+            corner_radius=0,
+        )
         self.main.pack(fill="both", expand=True)
 
         if sidebar_width is None:
@@ -864,24 +1016,40 @@ class SidebarStepFrame(ttk.Frame):
             content_pack,
             default=(LAYOUT.space_sm, LAYOUT.space_sm, LAYOUT.space_sm, LAYOUT.space_sm),
         )
-        self.sidebar_shell = ttk.Frame(
+        self.sidebar_shell = ctk.CTkFrame(
             self.workspace,
-            style="AIDaS.Sidebar.TFrame",
-            padding=sidebar_padding,
+            fg_color=COLOR_PAIRS["sidebar"],
+            corner_radius=0,
+            border_width=0,
         )
         self.sidebar = ScrollableSidebar(self.sidebar_shell, width=self._sidebar_width)
-        self.sidebar.pack(fill="both", expand=True)
+        self.sidebar.pack(
+            fill="both",
+            expand=True,
+            padx=(sidebar_padding[0], sidebar_padding[2]),
+            pady=(sidebar_padding[1], sidebar_padding[3]),
+        )
         self.ctrl = self.sidebar.content
 
-        self.content_shell = ttk.Frame(
+        self.content_shell = ctk.CTkFrame(
             self.workspace,
-            style="AIDaS.Content.TFrame",
-            padding=content_padding,
+            fg_color=COLOR_PAIRS["surface"],
+            corner_radius=0,
+            border_width=0,
         )
         if status_var is not None:
             self.add_status_bar(status_var, parent=self.content_shell)
-        self.content = ttk.Frame(self.content_shell, style="AIDaS.Content.TFrame")
-        self.content.pack(fill="both", expand=True)
+        self.content = ctk.CTkFrame(
+            self.content_shell,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        self.content.pack(
+            fill="both",
+            expand=True,
+            padx=(content_padding[0], content_padding[2]),
+            pady=(content_padding[1], content_padding[3]),
+        )
 
         self.workspace.add(
             self.sidebar_shell,
@@ -901,6 +1069,9 @@ class SidebarStepFrame(ttk.Frame):
         self.after_idle(self._apply_workspace_layout)
 
         return self.ctrl, self.content
+
+    def _apply_aidas_theme(self):
+        self.workspace.configure(background=COLORS.border)
 
     @staticmethod
     def _pane_padding(options, *, default):
@@ -996,29 +1167,43 @@ class SidebarStepFrame(ttk.Frame):
         """Add the standard contextual header above a step's main canvas."""
 
         container = parent if parent is not None else self.content
-        frame = ttk.Frame(
+        frame = ctk.CTkFrame(
             container,
-            style="AIDaS.ContentHeader.TFrame",
-            padding=(LAYOUT.space_md, LAYOUT.space_sm),
+            fg_color=COLOR_PAIRS["surface_subtle"],
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
         )
         frame.pack(fill="x", pady=(0, LAYOUT.space_sm))
-        label = ttk.Label(
+        label = ctk.CTkLabel(
             frame,
             textvariable=textvariable,
-            style="AIDaS.ContentHeader.TLabel",
             anchor="w",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
         )
-        label.pack(fill="x")
+        label.pack(fill="x", padx=LAYOUT.space_md, pady=LAYOUT.space_sm)
         return frame
 
     def add_status_bar(self, status_var, *, parent=None):
         """Add a standard sunken status label."""
         container = parent if parent is not None else self
-        label = ttk.Label(
+        label = ctk.CTkLabel(
             container,
             textvariable=status_var,
-            style="AIDaS.Status.TLabel",
             anchor="w",
+            height=30,
+            corner_radius=SHAPES.corner_radius_sm,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
+            fg_color=COLOR_PAIRS["surface_subtle"],
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
         )
-        label.pack(side="bottom", fill="x")
+        label.pack(side="bottom", fill="x", pady=(0, LAYOUT.space_sm))
+        self.content_status_bar = label
         return label

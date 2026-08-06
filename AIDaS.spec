@@ -3,7 +3,7 @@
 import importlib.util
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 
 project_root = Path(SPECPATH)
@@ -15,6 +15,7 @@ datas = [
         "OCT Segmenter/AI_ForAIDAS",
     ),
 ]
+datas.extend(collect_data_files("customtkinter"))
 binaries = collect_dynamic_libs("pyreadr")
 hiddenimports = [
     "aidas.ai.worker",
@@ -43,6 +44,7 @@ collect_r_scripts()
 
 
 required_runtime_imports = (
+    "customtkinter",
     "numpy",
     "scipy",
     "PIL",

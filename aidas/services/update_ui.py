@@ -5,8 +5,10 @@ from __future__ import annotations
 import threading
 import time
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import messagebox
 import webbrowser
+
+import customtkinter as ctk
 
 from aidas.services.update_service import (
     DownloadCancelled,
@@ -16,6 +18,8 @@ from aidas.services.update_service import (
     find_available_update,
     supports_in_app_install,
 )
+from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
+from aidas.ui.windowing import synchronize_window_chrome
 from aidas.utils.ui_utils import apply_app_icon_to
 
 
@@ -23,8 +27,8 @@ AUTO_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 RELEASE_NOTES_LIMIT = 1600
 
 
-class DownloadProgressDialog(tk.Toplevel):
-    """Small non-modal progress window with a cooperative cancel button."""
+class DownloadProgressDialog(ctk.CTkToplevel):
+    """Themed non-modal progress window with a cooperative cancel button."""
 
     def __init__(self, parent: tk.Misc, release: ReleaseInfo, cancel_command) -> None:
         super().__init__(parent)
@@ -34,30 +38,83 @@ class DownloadProgressDialog(tk.Toplevel):
         self.resizable(False, False)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", cancel_command)
+        self.configure(fg_color=COLOR_PAIRS["surface"])
 
-        panel = ttk.Frame(self, padding=18)
-        panel.pack(fill="both", expand=True)
-        ttk.Label(
+        panel = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        panel.pack(fill="both", expand=True, padx=24, pady=22)
+        ctk.CTkLabel(
             panel,
             text=f"Downloading AIDaS {release.version_text}",
-            font=("Segoe UI", 10, "bold"),
-        ).pack(anchor="w")
-        self.detail_var = tk.StringVar(value="Connecting to GitHub...")
-        ttk.Label(panel, textvariable=self.detail_var).pack(anchor="w", pady=(7, 8))
-        self.progress = ttk.Progressbar(panel, length=390, mode="determinate", maximum=100)
+            anchor="w",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.heading_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        ).pack(fill="x")
+
+        self.detail_var = tk.StringVar(master=self, value="Connecting to GitHub...")
+        ctk.CTkLabel(
+            panel,
+            textvariable=self.detail_var,
+            anchor="w",
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                weight=TYPOGRAPHY.normal_weight,
+            ),
+        ).pack(fill="x", pady=(8, 10))
+
+        self.progress = ctk.CTkProgressBar(
+            panel,
+            width=420,
+            height=max(8, CONTROLS.gap),
+            corner_radius=SHAPES.corner_radius_sm,
+            border_width=0,
+            fg_color=COLOR_PAIRS["surface_subtle"],
+            progress_color=COLOR_PAIRS["primary"],
+        )
         self.progress.pack(fill="x")
-        self.cancel_button = ttk.Button(panel, text="Cancel", command=cancel_command)
-        self.cancel_button.pack(anchor="e", pady=(12, 0))
+        self.progress.set(0.0)
+
+        self.cancel_button = ctk.CTkButton(
+            panel,
+            text="Cancel",
+            command=cancel_command,
+            width=104,
+            height=CONTROLS.height_md,
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border_strong"],
+            fg_color="transparent",
+            hover_color=COLOR_PAIRS["surface_subtle"],
+            text_color=COLOR_PAIRS["text"],
+            text_color_disabled=COLOR_PAIRS["disabled_text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        )
+        self.cancel_button.pack(anchor="e", pady=(16, 0))
 
         self.update_idletasks()
         x = parent.winfo_rootx() + max(0, (parent.winfo_width() - self.winfo_width()) // 2)
         y = parent.winfo_rooty() + max(0, (parent.winfo_height() - self.winfo_height()) // 2)
         self.geometry(f"+{x}+{y}")
         self.deiconify()
+        synchronize_window_chrome(
+            self,
+            background=COLOR_PAIRS["window_chrome"],
+            foreground=COLOR_PAIRS["text"],
+            border=COLOR_PAIRS["window_chrome"],
+        )
 
     def set_progress(self, downloaded: int, total: int) -> None:
-        percent = 0.0 if total <= 0 else min(100.0, downloaded * 100.0 / total)
-        self.progress.configure(value=percent)
+        percent = 0.0 if total <= 0 else max(0.0, min(100.0, downloaded * 100.0 / total))
+        self.progress.set(percent / 100.0)
         downloaded_mb = downloaded / (1024 * 1024)
         total_mb = total / (1024 * 1024)
         self.detail_var.set(f"{downloaded_mb:,.1f} MB of {total_mb:,.1f} MB ({percent:.0f}%)")
@@ -65,7 +122,6 @@ class DownloadProgressDialog(tk.Toplevel):
     def mark_cancelling(self) -> None:
         self.detail_var.set("Cancelling download...")
         self.cancel_button.configure(state="disabled")
-
 
 class UpdateController:
     """Keep network work off the Tk thread and present update results safely."""

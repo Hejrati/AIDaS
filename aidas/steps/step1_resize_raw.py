@@ -11,18 +11,22 @@ import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+import customtkinter as ctk
 import numpy as np
 
 from aidas.canvas.image_canvas import ImageCanvas
 from aidas.utils.filesystem import find_sdb_directories, skipped_directories_warning
 from aidas.utils.io_utils import read_raw_oct, scale_image, write_analyze
+from aidas.ui.components import AppButton, AppSplitButton
+from aidas.ui.theme import COLOR_PAIRS, CONTROLS
 from aidas.utils.ui_layout import COLORS, LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     NativeNumericSpinbox,
     SidebarStepFrame,
     directory_row,
-    load_ui_icon,
+    icon_button,
+    load_ctk_image,
 )
 
 SDB_PREF_KEY = "sdb_dir"
@@ -35,9 +39,6 @@ CROP_SCALE_X = 3
 CROP_SCALE_Y = 1
 DEFAULT_ROI_Y = 585
 DEFAULT_ROI_HEIGHT = 128
-COMPLETED_ROW_BACKGROUND = "#dff3e4"
-COMPLETED_ROW_FOREGROUND = "#1f6b35"
-COMPLETED_ROW_SELECTED_BACKGROUND = "#2f7d4a"
 SAVED_OUTPUT_FILENAMES = frozenset(("light.hdr", "light.img"))
 
 
@@ -137,6 +138,13 @@ class Step1Frame(SidebarStepFrame):
         # Build control widgets
         self._build_controls()
 
+    def _apply_aidas_theme(self):
+        """Refresh the native workspace and progress-row semantic colors."""
+
+        super()._apply_aidas_theme()
+        if hasattr(self, "sdb_listbox") and hasattr(self, "sdb_directory_listbox"):
+            self._refresh_sdb_progress_colors()
+
     # ═══════════════════════════════════════════════════════════════════════
     #  Control-panel construction
     # ═══════════════════════════════════════════════════════════════════════
@@ -222,7 +230,7 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_scan_more_label = ttk.Label(
             sdb,
             text="",
-            foreground="#0066cc",
+            style="AIDaS.Link.TLabel",
             cursor="hand2",
         )
         self.sdb_scan_more_label.pack(anchor="w", pady=(0, 4))
@@ -251,13 +259,13 @@ class Step1Frame(SidebarStepFrame):
         ttk.Label(
             folder_counts,
             textvariable=self.cropped_folder_count_var,
-            foreground=COMPLETED_ROW_FOREGROUND,
+            style="AIDaS.Success.TLabel",
             font=("Segoe UI", 8),
         ).pack(side="left")
         ttk.Label(
             folder_counts,
             textvariable=self.uncropped_folder_count_var,
-            foreground=COLORS.muted_text,
+            style="AIDaS.Muted.TLabel",
             font=("Segoe UI", 8),
         ).pack(side="left", padx=(8, 0))
         directory_list_frame = ttk.Frame(sdb)
@@ -289,13 +297,13 @@ class Step1Frame(SidebarStepFrame):
         ttk.Label(
             image_counts,
             textvariable=self.cropped_image_count_var,
-            foreground=COMPLETED_ROW_FOREGROUND,
+            style="AIDaS.Success.TLabel",
             font=("Segoe UI", 8),
         ).pack(side="left")
         ttk.Label(
             image_counts,
             textvariable=self.uncropped_image_count_var,
-            foreground=COLORS.muted_text,
+            style="AIDaS.Muted.TLabel",
             font=("Segoe UI", 8),
         ).pack(side="left", padx=(8, 0))
         lb_frame = ttk.Frame(sdb)
@@ -323,12 +331,13 @@ class Step1Frame(SidebarStepFrame):
         self.step_actions_frame = ttk.Frame(self.ctrl)
         self.step_actions_frame.pack(fill="x", padx=2, pady=(0, 8))
         action_icon_size = 16
-        self.save_all_btn_icon = load_ui_icon(
+        self.save_all_btn_icon = load_ctk_image(
             self, "ic--baseline-save.png", size=action_icon_size
         )
-        self.save_all_btn = ttk.Button(
+        self.save_all_btn = AppButton(
             self.step_actions_frame,
             text="Save",
+            variant="primary",
             command=self._save_analyze_and_advance,
             state="disabled",
             image=self.save_all_btn_icon,
@@ -340,12 +349,13 @@ class Step1Frame(SidebarStepFrame):
             "Save IMG and HDR beside the source SDB image, then open the next SDB",
         )
 
-        self.batch_segment_cropped_btn_icon = load_ui_icon(
+        self.batch_segment_cropped_btn_icon = load_ctk_image(
             self, "lets-icons--flag-finish.png", size=action_icon_size
         )
-        self.batch_segment_cropped_btn = ttk.Button(
+        self.batch_segment_cropped_btn = AppButton(
             self.step_actions_frame,
             text="Go to Step 2 >>",
+            variant="secondary",
             command=self._send_cropped_folders_to_step2,
             state="disabled",
             image=self.batch_segment_cropped_btn_icon,
@@ -399,6 +409,7 @@ class Step1Frame(SidebarStepFrame):
                 minimum=minimum,
                 maximum=maximum,
                 validatecommand=numeric_vcmd,
+                bg_color=COLOR_PAIRS["surface_subtle"],
             )
             stepper.pack(fill="x")
             roi_steppers.append(stepper)
@@ -445,58 +456,24 @@ class Step1Frame(SidebarStepFrame):
 
         # Top canvas toolbar: ROI presets and processing actions.
         toolbar = self.canvas_toolbar
-        self.crop_split_frame = tk.Frame(
-            toolbar,
-            background="#a7adb3",
-            borderwidth=1,
-            relief="solid",
-        )
-        self.crop_split_frame.pack(side="left", padx=(0, 6))
-        self.crop_btn_icon = load_ui_icon(
+        self.crop_btn_icon = load_ctk_image(
             self, "material-symbols-light--crop.png", size=action_icon_size
         )
-        paint_button_options = {
-            "background": "#f7f8fa",
-            "activebackground": "#e5f3fb",
-            "foreground": COLORS.text,
-            "activeforeground": COLORS.text,
-            "disabledforeground": "#8b9298",
-            "font": ("Segoe UI", 9),
-            "relief": "flat",
-            "borderwidth": 0,
-            "highlightthickness": 0,
-            "cursor": "hand2",
-            "pady": 8,
-        }
-        self.crop_btn = tk.Button(
-            self.crop_split_frame,
+        self.crop_split_frame = AppSplitButton(
+            toolbar,
             text="Crop & Scale",
+            width=198,
+            height=CONTROLS.height_lg,
             command=self._crop_and_scale,
+            options_command=self._show_crop_options_menu,
             image=self.crop_btn_icon,
-            compound="left",
-            padx=9,
-            **paint_button_options,
+            bg_color=COLOR_PAIRS["surface_subtle"],
         )
-        self.crop_btn.pack(side="left", fill="y")
-
-        self.crop_split_divider = tk.Frame(
-            self.crop_split_frame,
-            width=1,
-            background="#a7adb3",
-        )
-        self.crop_split_divider.pack(side="left", fill="y")
-
-        self.crop_options_icon = tk.PhotoImage(master=self, width=16, height=16)
-        self.crop_options_btn = tk.Button(
-            self.crop_split_frame,
-            text="▼",
-            image=self.crop_options_icon,
-            compound="center",
-            state="disabled",
-            command=self._show_crop_options_menu,
-            padx=5,
-            **paint_button_options,
-        )
+        self.crop_split_frame.pack(side="left", padx=(0, CONTROLS.gap))
+        self.crop_btn = self.crop_split_frame.action_button
+        self.crop_options_btn = self.crop_split_frame.options_button
+        self.crop_split_divider = self.crop_split_frame.divider
+        self.crop_options_btn.configure(state="disabled")
         self.crop_options_menu = tk.Menu(self.crop_options_btn, tearoff=False)
         self.crop_options_menu.add_command(
             label="Default Region",
@@ -506,15 +483,18 @@ class Step1Frame(SidebarStepFrame):
             label="Entire Image",
             command=self._select_all_roi,
         )
-        self.crop_options_btn.pack(side="left")
         HoverToolTip(self.crop_options_btn, "Choose a crop region preset")
 
-        self.undo_crop_btn_icon = load_ui_icon(
+        self.undo_crop_btn_icon = load_ctk_image(
             self, "grommet-icons--revert.png", size=action_icon_size
         )
-        self.undo_crop_btn = ttk.Button(
+        self.undo_crop_btn = AppButton(
             toolbar,
             text="Undo",
+            variant="secondary",
+            bg_color=COLOR_PAIRS["surface_subtle"],
+            width=96,
+            height=CONTROLS.height_lg,
             command=self._reset,
             state="disabled",
             image=self.undo_crop_btn_icon,
@@ -536,7 +516,17 @@ class Step1Frame(SidebarStepFrame):
         #            command=self._fit_zoom).pack(fill="x", pady=2)
 
     @staticmethod
-    def _numeric_stepper(parent, var, *, width=8, step=1, minimum=0, maximum=10_000_000, validatecommand=None):
+    def _numeric_stepper(
+        parent,
+        var,
+        *,
+        width=8,
+        step=1,
+        minimum=0,
+        maximum=10_000_000,
+        validatecommand=None,
+        bg_color=None,
+    ):
         return NativeNumericSpinbox(
             parent,
             var,
@@ -545,6 +535,7 @@ class Step1Frame(SidebarStepFrame):
             minimum=minimum,
             maximum=maximum,
             validatecommand=validatecommand,
+            bg_color=bg_color,
         )
 
     def _show_crop_options_menu(self):
@@ -577,17 +568,13 @@ class Step1Frame(SidebarStepFrame):
         )
         stepper.pack(side="left", padx=0, anchor="center")
 
-        btn_icon = load_ui_icon(self, "material-symbols-light--refresh-rounded.png")
-        reset_btn = tk.Button(
+        reset_btn = icon_button(
             row_frame,
-            image=btn_icon,
-            bd=0,
-            relief="flat",
-            highlightthickness=0,
-            cursor="hand2",
+            self,
+            "material-symbols-light--refresh-rounded.png",
             command=lambda: self._reset_numeric_var(var, default_value),
+            tooltip=f"Reset {label.rstrip(':').lower()}",
         )
-        reset_btn.image = btn_icon
         reset_btn.pack(side="left", padx=(8, 0), anchor="center")
 
         return stepper, reset_btn
@@ -634,25 +621,17 @@ class Step1Frame(SidebarStepFrame):
         if getattr(self, "save_all_btn", None) is None:
             return
         has_processed = self.processed_image is not None
-        self.save_all_btn.configure(state="normal" if has_processed else "disabled")
-        if getattr(self, "undo_crop_btn", None) is not None:
-            self.undo_crop_btn.configure(state="normal" if has_processed else "disabled")
-        if getattr(self, "crop_btn", None) is not None:
-            self.crop_btn.configure(state="disabled" if has_processed else "normal")
-        if getattr(self, "crop_options_btn", None) is not None:
-            options_enabled = self.raw_image is not None and not has_processed
-            self.crop_options_btn.configure(
-                state="normal" if options_enabled else "disabled"
-            )
-        if getattr(self, "target_view_radio", None) is not None:
-            self.target_view_radio.configure(
-                state="normal" if self.raw_image is not None else "disabled"
-            )
-        if getattr(self, "source_view_radio", None) is not None:
-            source_enabled = self.raw_image is not None and not has_processed
-            self.source_view_radio.configure(
-                state="normal" if source_enabled else "disabled"
-            )
+        has_raw_image = self.raw_image is not None
+        desired_states = (
+            (self.save_all_btn, has_processed),
+            (getattr(self, "undo_crop_btn", None), has_processed),
+            (getattr(self, "crop_btn", None), not has_processed),
+            (getattr(self, "crop_options_btn", None), has_raw_image and not has_processed),
+            (getattr(self, "target_view_radio", None), has_raw_image),
+            (getattr(self, "source_view_radio", None), has_raw_image and not has_processed),
+        )
+        for control, enabled in desired_states:
+            self._set_control_enabled(control, enabled)
 
     @staticmethod
     def _to_uint8_preview(data):
@@ -666,21 +645,63 @@ class Step1Frame(SidebarStepFrame):
             arr = (arr - lo) / (hi - lo) * 255.0
         return np.clip(arr, 0, 255).astype(np.uint8)
 
-    def _set_widget_tree_state(self, widget, enabled):
-        """Recursively enable or disable widgets inside a container."""
-        state = "normal" if enabled else "disabled"
-        for child in widget.winfo_children():
+    @staticmethod
+    def _control_state(control):
+        """Read a CTk/ttk control state without causing a redraw."""
+        if control is None:
+            return None
+        try:
+            return str(control.cget("state"))
+        except (AttributeError, KeyError, tk.TclError, TypeError, ValueError):
+            pass
+
+        # Lightweight test doubles and a few native ttk wrappers expose state
+        # as an attribute or a state-token method instead of through ``cget``.
+        state_api = getattr(control, "state", None)
+        if isinstance(state_api, str):
+            return state_api
+        if callable(state_api):
             try:
-                child.configure(state=state)
-            except tk.TclError:
-                pass
-            self._set_widget_tree_state(child, enabled)
+                tokens = tuple(state_api())
+            except (tk.TclError, TypeError):
+                return None
+            return "disabled" if "disabled" in tokens else "normal"
+        return None
+
+    @classmethod
+    def _set_control_enabled(cls, control, enabled):
+        """Configure a semantic control only when its state actually changes."""
+        if control is None:
+            return False
+        desired = "normal" if enabled else "disabled"
+        if cls._control_state(control) == desired:
+            return False
+        try:
+            control.configure(state=desired)
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return False
+        return True
 
     def _set_sdb_parameters_enabled(self, enabled):
-        """Toggle the SDB import-parameter section as a group."""
-        if getattr(self, "sdb_params_frame", None) is None:
-            return
-        self._set_widget_tree_state(self.sdb_params_frame, enabled)
+        """Toggle only interactive SDB parameter controls."""
+        control_names = (
+            "width_stepper",
+            "width_reset_btn",
+            "height_stepper",
+            "height_reset_btn",
+            "offset_stepper",
+            "offset_reset_btn",
+            "endian_checkbox",
+        )
+        for name in control_names:
+            self._set_control_enabled(getattr(self, name, None), enabled)
+
+    def _set_roi_controls_enabled(self, enabled):
+        """Toggle ROI/target editors without reconfiguring unchanged controls."""
+        controls = list(getattr(self, "roi_entries", ()))
+        controls.extend(getattr(self, "target_size_entries", ()))
+        for control in controls:
+            self._set_control_enabled(control, enabled)
 
     def _confirm_discard_processed_image(self, next_path):
         """Ask before replacing an active cropped image with another source."""
@@ -1260,7 +1281,7 @@ class Step1Frame(SidebarStepFrame):
         enabled = callable(self._on_batch_segment_folders) and bool(
             self._completed_output_folders()
         )
-        button.configure(state="normal" if enabled else "disabled")
+        self._set_control_enabled(button, enabled)
 
     def _send_cropped_folders_to_step2(self):
         """Start Step 2 batch segmentation for all completed Step 1 folders."""
@@ -1280,10 +1301,10 @@ class Step1Frame(SidebarStepFrame):
     def _style_completed_row(listbox, index):
         listbox.itemconfigure(
             index,
-            background=COMPLETED_ROW_BACKGROUND,
-            foreground=COMPLETED_ROW_FOREGROUND,
-            selectbackground=COMPLETED_ROW_SELECTED_BACKGROUND,
-            selectforeground="#ffffff",
+            background=COLORS.success_soft,
+            foreground=COLORS.success,
+            selectbackground=COLORS.primary,
+            selectforeground=COLORS.on_primary,
         )
 
     def _refresh_sdb_progress_colors(self):
@@ -1667,8 +1688,7 @@ class Step1Frame(SidebarStepFrame):
 
         self._update_image_status()
         self._update_save_button_state()
-        for entry in self.roi_entries + self.target_size_entries:
-            entry.configure(state="disabled")
+        self._set_roi_controls_enabled(False)
         return True
 
     def _reset(self):
@@ -1683,8 +1703,7 @@ class Step1Frame(SidebarStepFrame):
         self._update_zoom_label()
         self._update_save_button_state()
         self._set_sdb_parameters_enabled(True)
-        for entry in self.roi_entries + self.target_size_entries:
-            entry.configure(state="normal")
+        self._set_roi_controls_enabled(True)
         self._update_image_status()
 
     # ── Save ──
