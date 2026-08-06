@@ -9,7 +9,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from aidas.core.display import fit_size_to_bounds, work_area_bounds
-from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY, resolve_color
+from aidas.ui.theme import COLOR_PAIRS, TYPOGRAPHY, resolve_color
 from aidas.ui.windowing import centered_logical_geometry, physical_window_size
 from aidas.utils.ui_utils import apply_app_icon_to
 
@@ -151,10 +151,9 @@ class SplashWindow(ctk.CTkToplevel):
 
         loading_region = ctk.CTkFrame(
             panel,
-            fg_color=_splash_color("surface_subtle"),
-            corner_radius=SHAPES.corner_radius_md,
-            border_width=SHAPES.border_width,
-            border_color=_splash_color("border"),
+            fg_color="transparent",
+            corner_radius=0,
+            border_width=0,
         )
         loading_region.grid(
             row=6,

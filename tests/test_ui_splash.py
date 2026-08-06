@@ -30,6 +30,17 @@ class SplashWindowTests(unittest.TestCase):
         self.assertNotIn('panel.pack(fill="both", expand=True, padx=1, pady=1)', source)
         self.assertIn("panel.grid_rowconfigure(0, minsize=", source)
 
+    def test_loading_region_blends_into_the_splash_surface(self):
+        source = inspect.getsource(SplashWindow.__init__)
+        loading_source = source[source.index("loading_region = ctk.CTkFrame(") :]
+        loading_source = loading_source.split("loading_region.grid(", 1)[0]
+
+        self.assertIn('fg_color="transparent"', loading_source)
+        self.assertIn("corner_radius=0", loading_source)
+        self.assertIn("border_width=0", loading_source)
+        self.assertNotIn('surface_subtle', loading_source)
+        self.assertNotIn('border_color=', loading_source)
+
     def test_progress_contract_clamps_and_normalizes_percentage(self):
         splash = object.__new__(SplashWindow)
         splash.percent_var = _ValueStub()

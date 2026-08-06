@@ -387,6 +387,8 @@ class WorkflowHeader(ctk.CTkFrame):
         on_settings_selected: Callable[[], None] | None = None,
         on_help_selected: Callable[[], None] | None = None,
         logo_path: str | None = None,
+        settings_icon_path: str | None = None,
+        help_icon_path: str | None = None,
         step_labels: Sequence[str] | None = None,
     ) -> None:
         super().__init__(
@@ -469,9 +471,23 @@ class WorkflowHeader(ctk.CTkFrame):
         header_actions = ctk.CTkFrame(top, fg_color="transparent", corner_radius=0)
         header_actions.grid(row=0, column=2, rowspan=2, sticky="e")
 
+        def load_header_action_icon(icon_path):
+            if not icon_path or not Path(icon_path).is_file():
+                return None
+            with Image.open(icon_path) as source:
+                icon = source.convert("RGBA").copy()
+            return ctk.CTkImage(
+                light_image=icon,
+                dark_image=icon,
+                size=(24, 24),
+            )
+
+        self.settings_image = load_header_action_icon(settings_icon_path)
+        self.help_image = load_header_action_icon(help_icon_path)
         self.settings_button = ctk.CTkButton(
             header_actions,
-            text="\ue713",
+            text="" if self.settings_image is not None else "\ue713",
+            image=self.settings_image,
             command=on_settings_selected,
             state="normal" if on_settings_selected is not None else "disabled",
             width=36,
@@ -483,11 +499,13 @@ class WorkflowHeader(ctk.CTkFrame):
             hover_color=COLOR_PAIRS["button_hover"],
             text_color=COLOR_PAIRS["text"],
             font=ctk.CTkFont(family="Segoe Fluent Icons", size=21),
+            anchor="center",
         )
         self.settings_button.pack(side="left", padx=(0, 4))
         self.help_button = ctk.CTkButton(
             header_actions,
-            text="\ue897",
+            text="" if self.help_image is not None else "\ue897",
+            image=self.help_image,
             command=on_help_selected,
             state="normal" if on_help_selected is not None else "disabled",
             width=36,
@@ -502,6 +520,7 @@ class WorkflowHeader(ctk.CTkFrame):
                 family="Segoe Fluent Icons",
                 size=21,
             ),
+            anchor="center",
         )
         self.help_button.pack(side="left")
 

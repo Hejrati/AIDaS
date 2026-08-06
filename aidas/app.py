@@ -82,7 +82,7 @@ def _center_geometry(window: tk.Misc, width: int, height: int, *, parent=None) -
 
 
 class AboutDialog(ctk.CTkToplevel):
-    """Branded, responsive About window using the shared design system."""
+    """Branded, fixed-layout About window using the shared design system."""
 
     PREFERRED_WIDTH = 540
     PREFERRED_HEIGHT = 570
@@ -93,7 +93,7 @@ class AboutDialog(ctk.CTkToplevel):
         self.withdraw()
         self.title("About AIDaS")
         self.configure(fg_color=COLOR_PAIRS["application"])
-        self.resizable(True, True)
+        self.resizable(False, False)
         self.transient(parent)
         apply_app_icon_to(self)
 
@@ -122,14 +122,12 @@ class AboutDialog(ctk.CTkToplevel):
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
-        content = ctk.CTkScrollableFrame(
+        content = ctk.CTkFrame(
             self,
             fg_color=COLOR_PAIRS["surface"],
             corner_radius=SHAPES.corner_radius_lg,
             border_width=SHAPES.border_width,
             border_color=COLOR_PAIRS["border"],
-            scrollbar_button_color=COLOR_PAIRS["border_strong"],
-            scrollbar_button_hover_color=COLOR_PAIRS["primary"],
         )
         content.grid(row=0, column=0, sticky="nsew", padx=16, pady=(16, 8))
         content.grid_columnconfigure(0, weight=1)
@@ -240,7 +238,6 @@ class AboutDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
         self.bind("<Return>", lambda _event: self._close())
-        self.minsize(min(380, dialog_width), min(360, dialog_height))
         self.geometry(_center_geometry(self, dialog_width, dialog_height, parent=parent))
         self.deiconify()
         synchronize_window_chrome(
@@ -895,6 +892,12 @@ class AIDaSApp(ctk.CTk):
             on_settings_selected=self._show_settings,
             on_help_selected=self._show_about,
             logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
+            settings_icon_path=self._resource_path(
+                os.path.join("assets", "iconify-fluent-color--settings-32.png")
+            ),
+            help_icon_path=self._resource_path(
+                os.path.join("assets", "iconify-fluent-color--question-circle-32.png")
+            ),
         )
         self.header.pack(side="top", fill="x")
         self.status_bar = AppStatusBar(

@@ -4,7 +4,9 @@ import inspect
 from pathlib import Path
 import unittest
 
-from aidas.app import SettingsDialog
+from PIL import Image
+
+from aidas.app import AboutDialog, SettingsDialog
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2BatchSegmentationSelectionPanel, Step2Frame
 from aidas.steps.step3_flatten import RBatchSelectionPanel, Step3Frame
@@ -106,6 +108,14 @@ class ActionButtonConventionTests(unittest.TestCase):
 
 
 class ResponsiveWorkflowPanelTests(unittest.TestCase):
+    def test_about_dialog_has_no_scrollable_container(self):
+        source = inspect.getsource(AboutDialog.__init__)
+
+        self.assertIn("content = ctk.CTkFrame(", source)
+        self.assertNotIn("CTkScrollableFrame", source)
+        self.assertIn("self.resizable(False, False)", source)
+        self.assertNotIn("scrollbar_button_color", source)
+
     def test_settings_owns_sdb_r_setup_and_script_configuration(self):
         source = inspect.getsource(SettingsDialog.__init__)
 
@@ -225,12 +235,24 @@ class WorkflowNavigationTests(unittest.TestCase):
         self.assertLess(help_index, navigation_index)
         self.assertNotIn("self.appearance_menu", source)
         self.assertNotIn('text="Appearance"', source)
-        self.assertIn('text="\\ue713"', source)
-        self.assertIn('text="\\ue897"', source)
-        self.assertGreaterEqual(source.count('family="Segoe Fluent Icons"'), 2)
+        self.assertIn("image=self.settings_image", source)
+        self.assertIn("image=self.help_image", source)
+        self.assertEqual(source.count('anchor="center"'), 2)
+        self.assertIn("size=(24, 24)", source)
         self.assertIn('text_color=COLOR_PAIRS["primary"]', source)
         self.assertGreaterEqual(source.count("width=36"), 2)
         self.assertGreaterEqual(source.count("height=36"), 2)
+
+    def test_header_iconify_assets_are_high_resolution(self):
+        filenames = (
+            "iconify-fluent-color--settings-32.png",
+            "iconify-fluent-color--question-circle-32.png",
+        )
+        for filename in filenames:
+            icon_path = PROJECT_ROOT / "assets" / filename
+            with self.subTest(filename=filename), Image.open(icon_path) as icon:
+                self.assertEqual(icon.size, (256, 256))
+                self.assertEqual(icon.mode, "RGBA")
 
     def test_header_uses_independent_navigation_buttons(self):
         source = inspect.getsource(WorkflowHeader.__init__)
