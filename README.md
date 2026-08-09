@@ -367,9 +367,13 @@ user's persistent AIDaS script library for reuse in later sessions.
 
 Batch Step 3 runs each R process without interactive standard input. The batch
 selection panel provides a configurable per-script timeout (240 minutes by
-default), and the progress panel provides **Cancel Batch**. Timed-out and
-cancelled R process trees are stopped, reported separately from script failures,
-and retained in the Step 3 logs.
+default) and a second-script schedule. The first script always runs across
+folders in parallel using **Batch Size**. In the default parallel mode, each
+worker starts the second script as soon as its folder finishes the first script.
+In sequential mode, all first-script jobs finish before the second script runs
+for one folder at a time. The progress panel provides **Cancel Batch**. Timed-out
+and cancelled R process trees are stopped, reported separately from script
+failures, and retained in the Step 3 logs.
 
 Step 2 model segmentation remains available while a Step 3 R batch is running.
 R worker and native-library thread limits reserve processing capacity for the UI

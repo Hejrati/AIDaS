@@ -40,6 +40,7 @@ from aidas.utils.ui_utils import (
     HoverToolTip,
     SidebarStepFrame,
     action_button,
+    load_color_close_icon,
     load_action_icon,
     resource_path,
 )
@@ -1456,11 +1457,66 @@ class RBatchSelectionTable(ttk.Frame):
     """Fast folder table for Step 3 batch R script selection."""
 
     COLUMNS = ("folder", "status", "inputs")
+    FOLDER_MIN_WIDTH = 120
+    SELECTION_STATUS_WIDTH_VALUES = (
+        "Ready",
+        "Skipped: RData exists",
+    )
+    RUN_STATUS_WIDTH_VALUES = (
+        "Queued",
+        "Validating",
+        "Running main R script",
+        "Starting R script",
+        "Reading R input configuration",
+        "Loading Analyze volumes in R",
+        "Calculating vertex",
+        "Reading RPE line",
+        "Fitting RPE spline",
+        "Computing apparent angles",
+        "Building perpendicular sampling lines",
+        "Flattening marker image",
+        "Flattening DARK slices",
+        "Flattening LIGHT slices",
+        "Converting flattened data to raw scale",
+        "Building grand mean image",
+        "Aligning retina profiles",
+        "Exporting R arrays",
+        "Drawing borders",
+        "Spatially normalizing main retina",
+        "Spatially normalizing fovea",
+        "Drawing borders and writing outputs",
+        "R processing complete",
+        "Waiting for output R script",
+        "Running output R script",
+        "Completed",
+        "Cancelled",
+        "Timed out",
+        "Failed",
+    )
+    # Kept as the complete public set for callers/tests that need to verify that
+    # every possible status has a sizing sample. Each table instance receives
+    # the narrower context-specific subset below.
+    STATUS_WIDTH_VALUES = SELECTION_STATUS_WIDTH_VALUES + RUN_STATUS_WIDTH_VALUES
+    MAX_PROGRESS_VALUE = "100%"
+    # The clam Treeview heading layout reserves substantially more horizontal
+    # space than its text alone: 16 px of configured padding plus the border and
+    # separator hit region at the cell edge. Keep heading sizing independent
+    # from body-cell padding so the trailing Progress glyph is never clipped.
+    HEADING_WIDTH_PADDING = 30
 
-    def __init__(self, parent):
+    def __init__(self, parent, *, status_width_values=None):
         super().__init__(parent)
         self.rows = []
         self._row_by_iid = {}
+        self._xscroll_visible = False
+        self._xscroll_after_id = None
+        self._column_resize_active = False
+        self._resize_start_widths = None
+        self._manual_column_widths = None
+        self._horizontal_chrome_width = None
+        self._status_width_values = tuple(
+            status_width_values or self.SELECTION_STATUS_WIDTH_VALUES
+        )
         self._checkbox_images = self._make_checkbox_images()
         self._tree_font = tkfont.nametofont("TkDefaultFont")
         self._heading_font = self._tree_font.copy()
@@ -1482,7 +1538,7 @@ class RBatchSelectionTable(ttk.Frame):
         )
         self.yscroll = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
         self.xscroll = ttk.Scrollbar(self, orient="horizontal", command=self.tree.xview)
-        self.tree.configure(yscrollcommand=self.yscroll.set, xscrollcommand=self.xscroll.set)
+        self.tree.configure(yscrollcommand=self.yscroll.set, xscrollcommand=self._on_xscroll)
 
         self.tree.heading(
             "#0",
@@ -1496,7 +1552,13 @@ class RBatchSelectionTable(ttk.Frame):
         self.tree.heading("inputs", text="Inputs")
 
         self.tree.column("#0", width=40, minwidth=40, stretch=False, anchor="center")
-        self.tree.column("folder", width=520, minwidth=220, stretch=False, anchor="w")
+        self.tree.column(
+            "folder",
+            width=520,
+            minwidth=self.FOLDER_MIN_WIDTH,
+            stretch=False,
+            anchor="w",
+        )
         self.tree.column("status", width=360, minwidth=120, stretch=False, anchor="w")
         self.tree.column("inputs", width=72, minwidth=60, stretch=False, anchor="center")
 
@@ -1504,11 +1566,14 @@ class RBatchSelectionTable(ttk.Frame):
         self.tree.grid(row=0, column=0, sticky="nsew")
         self.yscroll.grid(row=0, column=1, sticky="ns")
         self.xscroll.grid(row=1, column=0, sticky="ew")
+        self.xscroll.grid_remove()
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
 
         self.tree.bind("<Button-1>", self._on_click, add="+")
         self.tree.bind("<Configure>", self._on_tree_configure, add="+")
+        self.tree.bind("<ButtonPress-1>", self._on_tree_button_press, add="+")
+        self.tree.bind("<ButtonRelease-1>", self._on_tree_button_release, add="+")
 
     def _make_checkbox_images(self):
         images = {
@@ -1536,6 +1601,10 @@ class RBatchSelectionTable(ttk.Frame):
     def set_rows(self, rows):
         self.rows = list(rows or [])
         self._row_by_iid = {}
+        self._column_resize_active = False
+        self._resize_start_widths = None
+        self._manual_column_widths = None
+        self._set_xscroll_visible(False)
         self.tree.delete(*self.tree.get_children(""))
 
         if not self.rows:
@@ -1546,6 +1615,7 @@ class RBatchSelectionTable(ttk.Frame):
                 values=("No folders with complete Step 3 inputs were found.", "", ""),
                 tags=("locked",),
             )
+            self._fit_columns_to_content()
             self._refresh_header_checkbox()
             return
 
@@ -1584,44 +1654,213 @@ class RBatchSelectionTable(ttk.Frame):
         return int(font.measure(str(text or ""))) + int(padding)
 
     def _fit_columns_to_content(self):
+        if self._manual_column_widths is not None:
+            self._apply_manual_columns_to_view()
+            self._schedule_xscroll_visibility_update()
+            return
+        try:
+            status_heading = self.tree.heading("status", "text")
+            inputs_heading = self.tree.heading("inputs", "text")
+        except tk.TclError:
+            return
         widths = {
-            "folder": self._measure_text("Folder", heading=True),
-            "status": self._measure_text("Status", heading=True),
-            "inputs": self._measure_text("Inputs", heading=True),
+            "status": max(
+                self._measure_text(
+                    status_heading,
+                    heading=True,
+                    padding=self.HEADING_WIDTH_PADDING,
+                ),
+                *(self._measure_text(value) for value in self._status_width_values),
+            ),
+            "inputs": max(
+                self._measure_text(
+                    inputs_heading,
+                    heading=True,
+                    padding=self.HEADING_WIDTH_PADDING,
+                ),
+                self._measure_text(self.MAX_PROGRESS_VALUE),
+            ),
         }
+        # Status and Inputs/Progress fit their widest valid or displayed values.
+        # Folder paths are deliberately not measured: Folder owns the remaining
+        # view width by default, and a user drag may create horizontal overflow.
         for row in self.rows:
-            folder, status, inputs = self._values_for_row(row)
-            widths["folder"] = max(widths["folder"], self._measure_text(folder))
+            _folder, status, inputs = self._values_for_row(row)
             widths["status"] = max(widths["status"], self._measure_text(status))
             widths["inputs"] = max(widths["inputs"], self._measure_text(inputs))
 
-        self.tree.column("folder", width=max(220, widths["folder"]))
-        self.tree.column("status", width=max(120, widths["status"]))
-        self.tree.column("inputs", width=max(60, widths["inputs"]))
+        status_width = max(120, widths["status"])
+        inputs_width = max(60, widths["inputs"])
+        self.tree.column("status", width=status_width, minwidth=status_width)
+        self.tree.column("inputs", width=inputs_width, minwidth=inputs_width)
         self._expand_folder_to_view()
+        self._schedule_xscroll_visibility_update()
 
     def _on_tree_configure(self, _event=None):
-        self._expand_folder_to_view()
+        if self._manual_column_widths is None:
+            self._fit_columns_to_content()
+        else:
+            self._apply_manual_columns_to_view()
+        self._schedule_xscroll_visibility_update()
+
+    def _on_tree_button_press(self, event):
+        try:
+            self._column_resize_active = self.tree.identify_region(event.x, event.y) == "separator"
+            self._resize_start_widths = (
+                self._current_column_widths()
+                if self._column_resize_active
+                else None
+            )
+        except tk.TclError:
+            self._column_resize_active = False
+            self._resize_start_widths = None
+
+    def _on_tree_button_release(self, _event=None):
+        was_resizing = self._column_resize_active
+        self._column_resize_active = False
+        if not was_resizing:
+            self._schedule_xscroll_visibility_update()
+            return
+        try:
+            self.after_idle(self._finish_column_resize)
+        except tk.TclError:
+            self._resize_start_widths = None
+
+    def _current_column_widths(self):
+        try:
+            return {
+                column: int(self.tree.column(column, "width"))
+                for column in ("#0", *self.COLUMNS)
+            }
+        except tk.TclError:
+            return None
+
+    def _finish_column_resize(self):
+        start_widths = self._resize_start_widths
+        self._resize_start_widths = None
+        current_widths = self._current_column_widths()
+        if start_widths is not None and current_widths != start_widths:
+            self._manual_column_widths = current_widths
+            self._apply_manual_columns_to_view()
+        self._schedule_xscroll_visibility_update()
+
+    def _apply_manual_columns_to_view(self):
+        widths = self._manual_column_widths
+        if widths is None:
+            return
+        try:
+            view_width = max(1, int(self.tree.winfo_width()))
+            for column in ("#0", "status", "inputs"):
+                self.tree.column(column, width=widths[column])
+            chrome_width = self._tree_horizontal_chrome_width()
+            available_folder_width = (
+                view_width
+                - widths["#0"]
+                - widths["status"]
+                - widths["inputs"]
+                - chrome_width
+            )
+            folder_width = max(
+                self.FOLDER_MIN_WIDTH,
+                widths["folder"],
+                available_folder_width,
+            )
+            self.tree.column("folder", width=folder_width)
+        except (KeyError, tk.TclError):
+            return
+
+    def _tree_horizontal_chrome_width(self):
+        """Return cached theme border/padding outside the displayed columns."""
+        cached_width = getattr(self, "_horizontal_chrome_width", None)
+        if cached_width is not None:
+            return cached_width
+        try:
+            column_width = sum(
+                int(self.tree.column(column, "width"))
+                for column in ("#0", *self.COLUMNS)
+            )
+            measured_width = max(0, int(self.tree.winfo_reqwidth()) - column_width)
+        except tk.TclError:
+            return 0
+        # winfo_reqwidth() can be clamped once the columns overflow. Calibrate
+        # only while the table is in its known auto-fit state, then retain the
+        # theme/DPI-specific value for all later manual layouts.
+        if self._manual_column_widths is None:
+            self._horizontal_chrome_width = measured_width
+        return measured_width
+
+    def _on_xscroll(self, first, last):
+        """Update only the thumb; geometry is decided from integer widths."""
+        self.xscroll.set(first, last)
+
+    def _manual_columns_overflow_view(self):
+        """Return whether a user-sized column layout exceeds the usable view."""
+        if self._manual_column_widths is None:
+            return False
+        try:
+            displayed_width = sum(
+                int(self.tree.column(column, "width"))
+                for column in ("#0", *self.COLUMNS)
+            )
+            usable_width = max(
+                1,
+                int(self.tree.winfo_width()) - self._tree_horizontal_chrome_width(),
+            )
+        except tk.TclError:
+            return False
+        return displayed_width > usable_width
+
+    def _set_xscroll_visible(self, visible):
+        visible = bool(visible)
+        if visible == self._xscroll_visible:
+            return
+        self._xscroll_visible = visible
+        try:
+            if visible:
+                self.xscroll.grid(row=1, column=0, sticky="ew")
+            else:
+                self.xscroll.grid_remove()
+                self.tree.xview_moveto(0.0)
+        except tk.TclError:
+            pass
+
+    def _schedule_xscroll_visibility_update(self, _event=None):
+        if self._xscroll_after_id is not None:
+            return
+        try:
+            self._xscroll_after_id = self.after_idle(self._sync_xscroll_visibility)
+        except tk.TclError:
+            self._xscroll_after_id = None
+
+    def _sync_xscroll_visibility(self):
+        self._xscroll_after_id = None
+        # Long path text never controls the automatic geometry: it is clipped
+        # inside Folder and the bar stays hidden. A real separator drag stores
+        # a manual baseline; only that deterministic integer-width overflow may
+        # reveal the scrollbar.
+        self._set_xscroll_visible(self._manual_columns_overflow_view())
 
     def _expand_folder_to_view(self):
-        if not self.rows:
+        if self._manual_column_widths is not None:
             return
         try:
             view_width = max(1, int(self.tree.winfo_width()))
             checkbox_width = int(self.tree.column("#0", "width"))
-            folder_width = int(self.tree.column("folder", "width"))
             status_width = int(self.tree.column("status", "width"))
             inputs_width = int(self.tree.column("inputs", "width"))
         except tk.TclError:
             return
 
         non_folder_width = checkbox_width + status_width + inputs_width
-        desired_folder_width = max(220, view_width - non_folder_width - 2)
-        if desired_folder_width > folder_width:
-            try:
-                self.tree.column("folder", width=desired_folder_width)
-            except tk.TclError:
-                pass
+        chrome_width = self._tree_horizontal_chrome_width()
+        desired_folder_width = max(
+            self.FOLDER_MIN_WIDTH,
+            view_width - non_folder_width - chrome_width,
+        )
+        try:
+            self.tree.column("folder", width=desired_folder_width)
+        except tk.TclError:
+            pass
 
     def _refresh_row(self, iid, row):
         try:
@@ -1720,32 +1959,12 @@ class RBatchSelectionPanel(ttk.Frame):
         run_box = ttk.Frame(wrapper)
         run_box.pack(side="bottom", fill="x", pady=(10, 0))
         self.action_footer = run_box
-        action_button(run_box, self, "Cancel", self._cancel, "cancel").pack(side="left")
-        ttk.Label(run_box, text="Batch Size:").pack(side="left", padx=(12, 0))
-        max_workers = self._max_worker_count()
-        self.workers_var = tk.IntVar(value=min(4, max_workers))
-        self.workers_spin = ttk.Spinbox(
-            run_box,
-            from_=1,
-            to=max_workers,
-            textvariable=self.workers_var,
-            width=5,
-        )
-        self.workers_spin.pack(side="left", padx=(6, 12))
-        self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
-        ttk.Label(run_box, textvariable=self.worker_limit_var, style="AIDaS.Muted.TLabel").pack(side="left")
-        ttk.Label(run_box, text="Timeout/script (min):").pack(side="left", padx=(12, 0))
-        self.timeout_var = tk.IntVar(value=self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES)
-        self.timeout_spin = ttk.Spinbox(
-            run_box,
-            from_=1,
-            to=10080,
-            textvariable=self.timeout_var,
-            width=7,
-        )
-        self.timeout_spin.pack(side="left", padx=(6, 12))
+
+        action_row = ttk.Frame(run_box)
+        action_row.pack(side="bottom", fill="x")
+        action_button(action_row, self, "Cancel", self._cancel, "cancel").pack(side="left")
         self.next_button = action_button(
-            run_box,
+            action_row,
             self,
             "Run selected folders",
             self._run_selected,
@@ -1755,7 +1974,65 @@ class RBatchSelectionPanel(ttk.Frame):
         )
         self.next_button.pack(side="right")
         self.next_button.state(["disabled"])
+
+        settings_row = ttk.Frame(run_box)
+        settings_row.pack(side="bottom", fill="x", pady=(0, 8))
+        ttk.Label(settings_row, text="Batch Size:").pack(side="left")
+        max_workers = self._max_worker_count()
+        self.workers_var = tk.IntVar(value=min(4, max_workers))
+        self.workers_spin = ttk.Spinbox(
+            settings_row,
+            from_=1,
+            to=max_workers,
+            textvariable=self.workers_var,
+            width=5,
+        )
+        self.workers_spin.pack(side="left", padx=(6, 12))
+        self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
+        ttk.Label(settings_row, textvariable=self.worker_limit_var, style="AIDaS.Muted.TLabel").pack(side="left")
+        ttk.Label(settings_row, text="Timeout/script (min):").pack(side="left", padx=(12, 0))
+        self.timeout_var = tk.IntVar(value=self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES)
+        self.timeout_spin = ttk.Spinbox(
+            settings_row,
+            from_=1,
+            to=10080,
+            textvariable=self.timeout_var,
+            width=7,
+        )
+        self.timeout_spin.pack(side="left", padx=(6, 12))
         self.workers_spin.configure(state="disabled")
+
+        mode_row = ttk.Frame(run_box)
+        mode_row.pack(side="bottom", fill="x", pady=(0, 8))
+        self.execution_mode_footer = mode_row
+        ttk.Label(mode_row, text="Second script across folders:").pack(side="left")
+        self.output_mode_var = tk.StringVar(value=self.step_frame.R_OUTPUT_MODE_PARALLEL)
+        parallel_radio = ttk.Radiobutton(
+            mode_row,
+            text="Parallel (default)",
+            value=self.step_frame.R_OUTPUT_MODE_PARALLEL,
+            variable=self.output_mode_var,
+        )
+        parallel_radio.pack(side="left", padx=(8, 0))
+        sequential_radio = ttk.Radiobutton(
+            mode_row,
+            text="Sequential",
+            value=self.step_frame.R_OUTPUT_MODE_SEQUENTIAL,
+            variable=self.output_mode_var,
+        )
+        sequential_radio.pack(side="left", padx=(8, 0))
+        self.output_mode_tooltips = (
+            HoverToolTip(
+                parallel_radio,
+                "Each worker runs the first script and then the second script for its folder. "
+                "Multiple folders run in parallel using Batch Size.",
+            ),
+            HoverToolTip(
+                sequential_radio,
+                "The first script runs in parallel using Batch Size. After it finishes for all folders, "
+                "the second script runs for one folder at a time.",
+            ),
+        )
 
         # The table is the only vertically flexible region. Packing it after
         # the footer guarantees that resize pressure cannot cover the actions.
@@ -1917,12 +2194,14 @@ class RBatchSelectionPanel(ttk.Frame):
         max_workers = self._max_worker_count(len(folders))
         workers = min(workers, max_workers)
         self.workers_var.set(workers)
+        output_mode = self.step_frame._normalize_r_output_mode(self.output_mode_var.get())
         self.step_frame._start_batch_r_runs(
             folders,
             workers,
             main_script_path,
             output_script_path,
             timeout_minutes * 60,
+            output_mode=output_mode,
         )
 
     def _cancel(self):
@@ -1941,6 +2220,7 @@ class RBatchRunPanel(ttk.Frame):
         main_script_path,
         output_script_path,
         timeout_seconds,
+        output_mode="parallel",
     ):
         super().__init__(parent)
         self.step_frame = step_frame
@@ -1949,6 +2229,7 @@ class RBatchRunPanel(ttk.Frame):
         self.main_script_path = Path(main_script_path)
         self.output_script_path = Path(output_script_path)
         self.timeout_seconds = max(1, int(timeout_seconds))
+        self.output_mode = self.step_frame._normalize_r_output_mode(output_mode)
         self.row_by_folder = {}
         self.step_states_by_folder = {}
         self.current_step_by_folder = {}
@@ -1964,8 +2245,16 @@ class RBatchRunPanel(ttk.Frame):
         # region.  Tk's packer allocates geometry in packing order; keeping the
         # footer first means the table shrinks and scrolls instead of clipping
         # Restart, Stop, or Close when the window height is constrained.
+        output_parallelism = (
+            f"up to {self.workers} in parallel as folders finish the first script"
+            if self.output_mode == self.step_frame.R_OUTPUT_MODE_PARALLEL
+            else "sequentially after all first scripts finish"
+        )
         self.summary_var = tk.StringVar(
-            value=f"Running {len(self.folders)} folder(s) with up to {self.workers} parallel R process(es)."
+            value=(
+                f"Running {len(self.folders)} folder(s). First script: up to {self.workers} in parallel; "
+                f"second script: {output_parallelism}."
+            )
         )
         summary_row = ttk.Frame(wrapper)
         summary_row.pack(side="bottom", fill="x", pady=(8, 0))
@@ -1982,16 +2271,23 @@ class RBatchRunPanel(ttk.Frame):
             "refresh",
         )
         self.restart_button.pack(side="left")
-        self.stop_button = action_button(
+        self.stop_button = ttk.Button(
             action_box,
-            self,
-            "Stop",
-            self._cancel_batch,
-            "cancel",
+            text="\u25a0  Stop",
+            command=self._cancel_batch,
             style="AIDaS.DangerAction.TButton",
+            padding=(11, 6),
         )
         self.stop_button.pack(side="left", padx=(6, 0))
-        self.close_button = action_button(action_box, self, "Close", self._close, "cancel")
+        self.close_icon = load_color_close_icon(self)
+        self.close_button = ttk.Button(
+            action_box,
+            text="Close",
+            command=self._close,
+            image=self.close_icon,
+            compound="left",
+            style="AIDaS.Action.TButton",
+        )
         self.close_button.pack(side="left", padx=(6, 0))
         self.cancel_button = self.stop_button
 
@@ -2010,8 +2306,7 @@ class RBatchRunPanel(ttk.Frame):
             text=(
                 f"Main script: {self.main_script_path.name}\n"
                 f"Output script: {self.output_script_path.name}\n"
-                f"Timeout: {max(1, round(self.timeout_seconds / 60))} minute(s) per script\n"
-                "Progress and logs update as each folder finishes."
+                f"Output scheduling: {output_parallelism}"
             ),
             wraplength=760,
             justify="left",
@@ -2054,7 +2349,10 @@ class RBatchRunPanel(ttk.Frame):
 
         self.table_host = ttk.Frame(wrapper)
         self.table_host.pack(side="top", fill="both", expand=True)
-        self.table = RBatchSelectionTable(self.table_host)
+        self.table = RBatchSelectionTable(
+            self.table_host,
+            status_width_values=RBatchSelectionTable.RUN_STATUS_WIDTH_VALUES,
+        )
         self.table.tree.heading("inputs", text="Progress")
         self.table.pack(fill="both", expand=True)
         self.table.set_rows(rows)
@@ -2085,7 +2383,7 @@ class RBatchRunPanel(ttk.Frame):
         for iid, candidate in self.table._row_by_iid.items():
             if candidate is row:
                 self.table._refresh_row(iid, row)
-                self.table._fit_columns_to_content()
+                self.table._schedule_xscroll_visibility_update()
                 break
         if status is not None:
             if status == "Completed":
@@ -2143,6 +2441,7 @@ class RBatchRunPanel(ttk.Frame):
             self.main_script_path,
             self.output_script_path,
             self.timeout_seconds,
+            self.output_mode,
         )
 
     def _close(self):
@@ -2240,6 +2539,8 @@ class Step3Frame(SidebarStepFrame):
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
     R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
     DEFAULT_R_SCRIPT_TIMEOUT_MINUTES = 240
+    R_OUTPUT_MODE_PARALLEL = "parallel"
+    R_OUTPUT_MODE_SEQUENTIAL = "sequential"
     R_REQUIRED_VERSION = "3.3.1"
     R_DOWNLOAD_PAGE = "https://cran-archive.r-project.org/bin/windows/base/old/3.3.1/"
     R_INSTALLER_NAME = f"R-{R_REQUIRED_VERSION}-win.exe"
@@ -2696,6 +2997,13 @@ class Step3Frame(SidebarStepFrame):
     @staticmethod
     def _r_string(value):
         return "'" + str(value).replace("\\", "/").replace("'", "\\'") + "'"
+
+    @classmethod
+    def _normalize_r_output_mode(cls, output_mode):
+        """Return a supported second-script scheduling mode."""
+        if str(output_mode).strip().lower() == cls.R_OUTPUT_MODE_SEQUENTIAL:
+            return cls.R_OUTPUT_MODE_SEQUENTIAL
+        return cls.R_OUTPUT_MODE_PARALLEL
 
     @staticmethod
     def _cpu_worker_limit():
@@ -3509,6 +3817,7 @@ class Step3Frame(SidebarStepFrame):
         main_script_path,
         output_script_path,
         timeout_seconds,
+        output_mode="parallel",
     ):
         restart = (
             [Path(folder) for folder in folders],
@@ -3516,6 +3825,7 @@ class Step3Frame(SidebarStepFrame):
             Path(main_script_path),
             Path(output_script_path),
             int(timeout_seconds),
+            self._normalize_r_output_mode(output_mode),
         )
         if self._busy:
             self._pending_batch_restart = restart
@@ -3630,6 +3940,7 @@ class Step3Frame(SidebarStepFrame):
         main_script_path=None,
         output_script_path=None,
         timeout_seconds=None,
+        output_mode="parallel",
         allow_existing_rdata=False,
     ):
         folders = [Path(folder) for folder in folders]
@@ -3664,6 +3975,7 @@ class Step3Frame(SidebarStepFrame):
             return
 
         workers = max(1, min(int(workers), len(folders), self._r_worker_limit()))
+        output_mode = self._normalize_r_output_mode(output_mode)
         self._clear_plot_holder()
         self.r_batch_run_panel = RBatchRunPanel(
             self,
@@ -3673,6 +3985,7 @@ class Step3Frame(SidebarStepFrame):
             main_script_path,
             output_script_path,
             timeout_seconds,
+            output_mode,
         )
         self.r_batch_run_panel.pack(fill="both", expand=True)
         self._r_cancel_event.clear()
@@ -3680,8 +3993,14 @@ class Step3Frame(SidebarStepFrame):
         self._active_r_folder_keys = {self._folder_key(folder) for folder in folders}
         self._set_process_buttons("disabled")
         self.progress_text_var.set("Batch running")
+        output_schedule = (
+            "in parallel as each folder finishes its first script"
+            if output_mode == self.R_OUTPUT_MODE_PARALLEL
+            else "sequentially after all first-script jobs finish"
+        )
         self.status_var.set(
-            f"Running {main_script_path.name}, then {output_script_path.name}, for {len(folders)} folder(s)."
+            f"Running {main_script_path.name} in parallel, then {output_script_path.name} "
+            f"{output_schedule}, for {len(folders)} folder(s)."
         )
         worker_thread = threading.Thread(
             target=self._batch_r_worker,
@@ -3693,6 +4012,7 @@ class Step3Frame(SidebarStepFrame):
                 workers,
                 timeout_seconds,
                 bool(allow_existing_rdata),
+                output_mode,
             ),
             daemon=True,
         )
@@ -3719,30 +4039,7 @@ class Step3Frame(SidebarStepFrame):
         if log:
             panel.log(log)
 
-    def _run_r_script_for_config(
-        self,
-        rscript_path,
-        main_script_path,
-        output_script_path,
-        r_config,
-        batch_folder=None,
-        timeout_seconds=None,
-        r_thread_limit=None,
-    ):
-        folder = Path(batch_folder or r_config["input_dir"])
-        script_args = [
-            r_config["input_dir"],
-            r_config["output_dir"],
-            r_config["reference_dark"],
-            r_config["reference_light"],
-            r_config["to_process_dark"],
-            r_config["to_process_light"],
-            r_config["image_index_light"],
-            r_config["image_index_dark"],
-            r_config["pixel_width"],
-        ]
-        main_cmd = self._build_r_run_command(rscript_path, main_script_path, script_args)
-        commands = [main_cmd]
+    def _r_run_env_for_config(self, r_config, r_thread_limit):
         env = self._r_env(thread_limit=r_thread_limit)
         env.update(
             {
@@ -3757,6 +4054,54 @@ class Step3Frame(SidebarStepFrame):
                 "AIDAS_PIXEL_WIDTH": r_config["pixel_width"],
             }
         )
+        return env
+
+    @staticmethod
+    def _cancelled_r_stage_result(folder, message, prior_result=None):
+        prior_result = prior_result or {}
+        return {
+            "folder": Path(folder),
+            "returncode": 130,
+            "stdout": prior_result.get("stdout", ""),
+            "stderr": message,
+            "cmd": list(prior_result.get("cmd", [])),
+            "outcome": "cancelled",
+        }
+
+    def _run_main_r_script_for_config(
+        self,
+        rscript_path,
+        main_script_path,
+        r_config,
+        batch_folder=None,
+        timeout_seconds=None,
+        r_thread_limit=None,
+    ):
+        folder = Path(batch_folder or r_config["input_dir"])
+        if self._r_cancel_event.is_set():
+            return self._cancelled_r_stage_result(
+                folder,
+                "Cancelled before the main R script started.",
+            )
+
+        script_args = [
+            r_config["input_dir"],
+            r_config["output_dir"],
+            r_config["reference_dark"],
+            r_config["reference_light"],
+            r_config["to_process_dark"],
+            r_config["to_process_light"],
+            r_config["image_index_light"],
+            r_config["image_index_dark"],
+            r_config["pixel_width"],
+        ]
+        main_cmd = self._build_r_run_command(rscript_path, main_script_path, script_args)
+        env = self._r_run_env_for_config(r_config, r_thread_limit)
+        output_lines = []
+        timeout_seconds = max(
+            1,
+            int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
+        )
 
         self.after(
             0,
@@ -3767,70 +4112,108 @@ class Step3Frame(SidebarStepFrame):
                 log=f"Starting main R script {Path(main_script_path).name}: {f}",
             ),
         )
-        output_lines = []
+
+        def handle_line(line):
+            output_lines.append(line)
+            progress = self._progress_from_r_line(line)
+            if progress is None:
+                return
+            percent, label = progress
+            self.after(
+                0,
+                lambda f=folder, p=min(97, percent), s=label: self._batch_panel_update(
+                    f,
+                    status=s,
+                    progress=p,
+                ),
+            )
+
+        returncode, stderr, outcome = self._run_supervised_r_command(
+            main_cmd,
+            r_config["input_dir"],
+            env,
+            timeout_seconds,
+            handle_line,
+        )
+        return {
+            "folder": folder,
+            "returncode": returncode,
+            "stdout": "".join(output_lines),
+            "stderr": stderr,
+            "cmd": [main_cmd],
+            "outcome": "completed" if returncode == 0 else outcome,
+        }
+
+    def _run_output_r_script_for_config(
+        self,
+        rscript_path,
+        output_script_path,
+        r_config,
+        prior_result,
+        batch_folder=None,
+        timeout_seconds=None,
+        r_thread_limit=None,
+    ):
+        folder = Path(batch_folder or r_config["input_dir"])
+        if self._r_cancel_event.is_set():
+            return self._cancelled_r_stage_result(
+                folder,
+                "Cancelled before the output R script started.",
+                prior_result,
+            )
+
+        output_dir = Path(r_config["output_dir"])
+        workspace_path = output_dir / self.R_WORKSPACE_FILES[1]
+        output_expression = (
+            f"setwd({self._r_string(output_dir.resolve())}); "
+            f"load({self._r_string(workspace_path.resolve())}); "
+            f"source({self._r_string(Path(output_script_path).resolve())}, chdir=FALSE, echo=FALSE)"
+        )
+        output_cmd = self._build_r_eval_command(rscript_path, output_expression)
+        commands = list(prior_result.get("cmd", [])) + [output_cmd]
+        output_lines = [prior_result.get("stdout", "")]
+        output_lines.append(f"\n--- Output script: {Path(output_script_path).name} ---\n")
+        env = self._r_run_env_for_config(r_config, r_thread_limit)
         timeout_seconds = max(
             1,
             int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
         )
 
-        def run_command(command, cwd, *, track_main_progress):
-            def handle_line(line):
-                output_lines.append(line)
-                progress = self._progress_from_r_line(line) if track_main_progress else None
-                if progress is not None:
-                    percent, label = progress
-                    self.after(
-                        0,
-                        lambda f=folder, p=percent, s=label: self._batch_panel_update(
-                            f,
-                            status=s,
-                            progress=p,
-                        ),
-                    )
-
-            return self._run_supervised_r_command(
-                command,
-                cwd,
-                env,
-                timeout_seconds,
-                handle_line,
-            )
-
-        returncode, stderr, outcome = run_command(
-            main_cmd,
-            r_config["input_dir"],
-            track_main_progress=True,
+        self.after(
+            0,
+            lambda f=folder, name=Path(output_script_path).name: self._batch_panel_update(
+                f,
+                status="Running output R script",
+                progress=98,
+                log=f"Starting output R script {name}: {f}",
+            ),
         )
+        returncode, output_stderr, outcome = self._run_supervised_r_command(
+            output_cmd,
+            r_config["output_dir"],
+            env,
+            timeout_seconds,
+            output_lines.append,
+        )
+        return {
+            "folder": folder,
+            "returncode": returncode,
+            "stdout": "".join(output_lines),
+            "stderr": output_stderr or prior_result.get("stderr", ""),
+            "cmd": commands,
+            "outcome": "completed" if returncode == 0 else outcome,
+        }
 
-        if returncode == 0:
-            output_dir = Path(r_config["output_dir"])
-            workspace_path = output_dir / self.R_WORKSPACE_FILES[1]
-            output_expression = (
-                f"setwd({self._r_string(output_dir.resolve())}); "
-                f"load({self._r_string(workspace_path.resolve())}); "
-                f"source({self._r_string(Path(output_script_path).resolve())}, chdir=FALSE, echo=FALSE)"
-            )
-            output_cmd = self._build_r_eval_command(rscript_path, output_expression)
-            commands.append(output_cmd)
-            output_lines.append(f"\n--- Output script: {Path(output_script_path).name} ---\n")
-            self.after(
-                0,
-                lambda f=folder, name=Path(output_script_path).name: self._batch_panel_update(
-                    f,
-                    status="Running output R script",
-                    progress=98,
-                    log=f"Starting output R script {name}: {f}",
-                ),
-            )
-            returncode, output_stderr, outcome = run_command(
-                output_cmd,
-                r_config["output_dir"],
-                track_main_progress=False,
-            )
-            if output_stderr:
-                stderr = output_stderr
+    def _finalize_r_script_result(self, r_config, result, *, validate_exports):
+        result = dict(result)
+        folder = Path(result.get("folder") or r_config["input_dir"])
+        returncode = result.get("returncode", 1)
+        stdout = result.get("stdout", "")
+        stderr = result.get("stderr", "")
+        outcome = result.get("outcome", "completed" if returncode == 0 else "failed")
+        commands = list(result.get("cmd", []))
 
-        if returncode == 0:
+        if returncode == 0 and validate_exports:
             output_dir = Path(r_config["output_dir"])
             required_exports = (
                 output_dir / f"_thickness_vs_distance_from_fovea_{r_config['to_process_dark']}.txt",
@@ -3840,19 +4223,36 @@ class Step3Frame(SidebarStepFrame):
             if missing_exports:
                 returncode = 1
                 outcome = "failed"
-                output_lines.append(
+                stdout += (
                     "ERROR: R completed without required thickness export(s): "
                     + ", ".join(missing_exports)
                     + "\n"
                 )
 
-        stdout = "".join(output_lines)
-        log_path = self._write_r_run_log(r_config["output_dir"], returncode, stdout, stderr, commands)
+        log_path = self._write_r_run_log(
+            r_config["output_dir"],
+            returncode,
+            stdout,
+            stderr,
+            commands,
+        )
         if returncode == 0:
-            self.after(0, lambda f=folder, lp=log_path: self._batch_panel_update(f, log=f"Finished: {f}\nLog: {lp}"))
+            self.after(
+                0,
+                lambda f=folder, lp=log_path: self._batch_panel_update(
+                    f,
+                    log=f"Finished: {f}\nLog: {lp}",
+                ),
+            )
         else:
             short_output = self._short_process_text(stdout)
-            outcome_label = "Cancelled" if outcome == "cancelled" else "Timed out" if outcome == "timed_out" else "Failed"
+            outcome_label = (
+                "Cancelled"
+                if outcome == "cancelled"
+                else "Timed out"
+                if outcome == "timed_out"
+                else "Failed"
+            )
             self.after(
                 0,
                 lambda f=folder, lp=log_path, out=short_output, label=outcome_label: self._batch_panel_update(
@@ -3860,15 +4260,57 @@ class Step3Frame(SidebarStepFrame):
                     log=f"{label}: {f}\nLog: {lp}\n{out}",
                 ),
             )
-        return {
-            "folder": folder,
-            "returncode": returncode,
-            "stdout": stdout,
-            "stderr": stderr,
-            "cmd": commands,
-            "log": log_path,
-            "outcome": "completed" if returncode == 0 else outcome,
-        }
+        result.update(
+            {
+                "folder": folder,
+                "returncode": returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "cmd": commands,
+                "log": log_path,
+                "outcome": "completed" if returncode == 0 else outcome,
+            }
+        )
+        return result
+
+    def _run_r_script_for_config(
+        self,
+        rscript_path,
+        main_script_path,
+        output_script_path,
+        r_config,
+        batch_folder=None,
+        timeout_seconds=None,
+        r_thread_limit=None,
+    ):
+        main_result = self._run_main_r_script_for_config(
+            rscript_path,
+            main_script_path,
+            r_config,
+            batch_folder=batch_folder,
+            timeout_seconds=timeout_seconds,
+            r_thread_limit=r_thread_limit,
+        )
+        if main_result["returncode"] != 0:
+            return self._finalize_r_script_result(
+                r_config,
+                main_result,
+                validate_exports=False,
+            )
+        output_result = self._run_output_r_script_for_config(
+            rscript_path,
+            output_script_path,
+            r_config,
+            main_result,
+            batch_folder=batch_folder,
+            timeout_seconds=timeout_seconds,
+            r_thread_limit=r_thread_limit,
+        )
+        return self._finalize_r_script_result(
+            r_config,
+            output_result,
+            validate_exports=True,
+        )
 
     def _batch_r_worker(
         self,
@@ -3879,100 +4321,224 @@ class Step3Frame(SidebarStepFrame):
         workers,
         timeout_seconds,
         allow_existing_rdata=False,
+        output_mode="parallel",
     ):
-        results = []
+        folders = [Path(folder) for folder in folders]
+        results_by_folder = {}
+        main_successes = {}
 
-        def run_folder(folder):
+        def failed_result(folder, error, prior_result=None, *, outcome="failed", returncode=1):
+            prior_result = prior_result or {}
+            return {
+                "folder": Path(folder),
+                "returncode": returncode,
+                "stdout": prior_result.get("stdout", ""),
+                "stderr": str(error),
+                "cmd": list(prior_result.get("cmd", [])),
+                "outcome": outcome,
+            }
+
+        def record_final(result):
+            folder = Path(result["folder"])
+            results_by_folder[self._folder_key(folder)] = result
+            outcome = result.get(
+                "outcome",
+                "completed" if result.get("returncode") == 0 else "failed",
+            )
+            status = {
+                "completed": "Completed",
+                "cancelled": "Cancelled",
+                "timed_out": "Timed out",
+                "failed": "Failed",
+            }.get(outcome, "Failed")
+            self.after(
+                0,
+                lambda f=folder, s=status: self._batch_panel_update(
+                    f,
+                    status=s,
+                    progress=100 if s == "Completed" else None,
+                ),
+            )
+
+        def run_main(folder):
             folder = Path(folder)
             if self._r_cancel_event.is_set():
-                return {
-                    "folder": folder,
-                    "returncode": 130,
-                    "stdout": "",
-                    "stderr": "Cancelled before the folder started.",
-                    "cmd": [],
-                    "outcome": "cancelled",
-                }
+                return None, failed_result(
+                    folder,
+                    "Cancelled before the folder started.",
+                    outcome="cancelled",
+                    returncode=130,
+                )
+            self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
+            r_config = None
+            try:
+                if not allow_existing_rdata and self._folder_has_r_data(folder):
+                    raise RuntimeError("Skipped because this folder contains RData.")
+                r_config = self._r_script_config_for_folder(folder)
+                result = self._run_main_r_script_for_config(
+                    rscript_path,
+                    main_script_path,
+                    r_config,
+                    batch_folder=folder,
+                    timeout_seconds=timeout_seconds,
+                    r_thread_limit=main_thread_limit,
+                )
+            except Exception as exc:
+                result = failed_result(folder, exc)
+            return r_config, result
+
+        def run_parallel_pipeline(folder):
+            folder = Path(folder)
+            if self._r_cancel_event.is_set():
+                return failed_result(
+                    folder,
+                    "Cancelled before the folder started.",
+                    outcome="cancelled",
+                    returncode=130,
+                )
             self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
             try:
                 if not allow_existing_rdata and self._folder_has_r_data(folder):
                     raise RuntimeError("Skipped because this folder contains RData.")
                 r_config = self._r_script_config_for_folder(folder)
+                return self._run_r_script_for_config(
+                    rscript_path,
+                    main_script_path,
+                    output_script_path,
+                    r_config,
+                    batch_folder=folder,
+                    timeout_seconds=timeout_seconds,
+                    r_thread_limit=main_thread_limit,
+                )
             except Exception as exc:
-                return {
-                    "folder": folder,
-                    "returncode": 1,
-                    "stdout": "",
-                    "stderr": str(exc),
-                    "cmd": [],
-                    "outcome": "failed",
-                }
-            return self._run_r_script_for_config(
-                rscript_path,
-                main_script_path,
-                output_script_path,
-                r_config,
-                batch_folder=folder,
-                timeout_seconds=timeout_seconds,
-                r_thread_limit=r_thread_limit,
-            )
+                return failed_result(folder, exc)
+
+        def run_output(item, output_thread_limit):
+            folder, r_config, main_result = item
+            try:
+                output_result = self._run_output_r_script_for_config(
+                    rscript_path,
+                    output_script_path,
+                    r_config,
+                    main_result,
+                    batch_folder=folder,
+                    timeout_seconds=timeout_seconds,
+                    r_thread_limit=output_thread_limit,
+                )
+                return self._finalize_r_script_result(
+                    r_config,
+                    output_result,
+                    validate_exports=True,
+                )
+            except Exception as exc:
+                failure = failed_result(folder, exc, main_result)
+                try:
+                    return self._finalize_r_script_result(
+                        r_config,
+                        failure,
+                        validate_exports=False,
+                    )
+                except Exception:
+                    return failure
 
         try:
             workers = max(1, min(int(workers), len(folders), self._r_worker_limit()))
-            r_thread_limit = self._r_threads_per_process(workers)
+            output_mode = self._normalize_r_output_mode(output_mode)
+            main_thread_limit = self._r_threads_per_process(workers)
+
+            # Preserve the original/default behavior: each worker processes a
+            # complete main -> output folder pipeline. That lets the output
+            # script for a fast folder overlap another folder's main script.
+            if output_mode == self.R_OUTPUT_MODE_PARALLEL:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                    future_map = {
+                        executor.submit(run_parallel_pipeline, folder): folder
+                        for folder in folders
+                    }
+                    for future in concurrent.futures.as_completed(future_map):
+                        folder = future_map[future]
+                        try:
+                            result = future.result()
+                        except Exception as exc:
+                            result = failed_result(folder, exc)
+                        record_final(result)
+                return
+
+            # Sequential-output mode has an explicit phase barrier: every main
+            # script settles in parallel before outputs run one folder at a time.
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                future_map = {executor.submit(run_folder, folder): folder for folder in folders}
+                future_map = {executor.submit(run_main, folder): folder for folder in folders}
                 for future in concurrent.futures.as_completed(future_map):
                     folder = future_map[future]
                     try:
-                        result = future.result()
+                        r_config, result = future.result()
                     except Exception as exc:
-                        result = {
-                            "folder": folder,
-                            "returncode": 1,
-                            "stdout": "",
-                            "stderr": str(exc),
-                            "cmd": [],
-                            "outcome": "failed",
-                        }
-                    results.append(result)
-                    outcome = result.get("outcome", "completed" if result["returncode"] == 0 else "failed")
-                    status = {
-                        "completed": "Completed",
-                        "cancelled": "Cancelled",
-                        "timed_out": "Timed out",
-                        "failed": "Failed",
-                    }.get(outcome, "Failed")
-                    self.after(
-                        0,
-                        lambda f=folder, s=status: self._batch_panel_update(
-                            f,
-                            status=s,
-                            progress=100 if s == "Completed" else None,
-                        ),
-                    )
+                        r_config = None
+                        result = failed_result(folder, exc)
+
+                    if result["returncode"] == 0 and r_config is not None:
+                        main_successes[self._folder_key(folder)] = (folder, r_config, result)
+                        self.after(
+                            0,
+                            lambda f=folder: self._batch_panel_update(
+                                f,
+                                status="Waiting for output R script",
+                                progress=97,
+                                log=f"Main R script finished; waiting for the output phase: {f}",
+                            ),
+                        )
+                        continue
+
+                    if r_config is not None:
+                        try:
+                            result = self._finalize_r_script_result(
+                                r_config,
+                                result,
+                                validate_exports=False,
+                            )
+                        except Exception:
+                            pass
+                    record_final(result)
+
+            output_items = [
+                main_successes[self._folder_key(folder)]
+                for folder in folders
+                if self._folder_key(folder) in main_successes
+            ]
+            if output_items:
+                output_thread_limit = self._r_threads_per_process(1)
+                for item in output_items:
+                    record_final(run_output(item, output_thread_limit))
         except Exception as exc:
-            completed_keys = {
-                self._folder_key(result["folder"])
-                for result in results
-                if result.get("folder") is not None
-            }
             for folder in folders:
-                folder = Path(folder)
-                if self._folder_key(folder) in completed_keys:
+                folder_key = self._folder_key(folder)
+                if folder_key in results_by_folder:
                     continue
-                results.append(
-                    {
-                        "folder": folder,
-                        "returncode": 1,
-                        "stdout": "",
-                        "stderr": f"Batch coordinator failed: {exc}",
-                        "cmd": [],
-                        "outcome": "failed",
-                    }
+                prior_result = None
+                if folder_key in main_successes:
+                    prior_result = main_successes[folder_key][2]
+                record_final(
+                    failed_result(
+                        folder,
+                        f"Batch coordinator failed: {exc}",
+                        prior_result,
+                    )
                 )
         finally:
-            finished_results = list(results)
+            for folder in folders:
+                folder_key = self._folder_key(folder)
+                if folder_key in results_by_folder:
+                    continue
+                record_final(
+                    failed_result(
+                        folder,
+                        "Batch coordinator finished without a result for this folder.",
+                    )
+                )
+            finished_results = [
+                results_by_folder[self._folder_key(folder)]
+                for folder in folders
+            ]
             self.after(0, lambda batch_results=finished_results: self._on_batch_r_done(batch_results))
 
     def _on_batch_r_done(self, results):

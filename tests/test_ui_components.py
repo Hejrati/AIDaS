@@ -10,7 +10,12 @@ from PIL import Image
 from aidas.app import AboutDialog, SettingsDialog
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2BatchSegmentationSelectionPanel, Step2Frame
-from aidas.steps.step3_flatten import RBatchRunPanel, RBatchSelectionPanel, Step3Frame
+from aidas.steps.step3_flatten import (
+    RBatchRunPanel,
+    RBatchSelectionPanel,
+    RBatchSelectionTable,
+    Step3Frame,
+)
 from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel, Step4Frame
 from aidas.ui.components import AppButton, AppSplitButton, WorkflowHeader, WorkflowNavigation
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
@@ -231,6 +236,117 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
             source.index('self.summary_label.pack(side="left"'),
         )
         self.assertIn('summary_row.bind("<Configure>", self._resize_summary_footer', source)
+
+    def test_step3_batch_table_only_shows_horizontal_scroll_for_overflow(self):
+        table = RBatchSelectionTable.__new__(RBatchSelectionTable)
+        table.xscroll = mock.Mock()
+        table.tree = mock.Mock()
+        table._xscroll_visible = False
+        table._xscroll_after_id = None
+        table._manual_column_widths = None
+        table._horizontal_chrome_width = 4
+
+        # Tk's fractional callback controls only the thumb and cannot reveal
+        # the bar while automatic sizing is settling.
+        table._on_xscroll("0.0", "1.0")
+        table.xscroll.set.assert_called_once_with("0.0", "1.0")
+        table.xscroll.grid.assert_not_called()
+        table._on_xscroll("0.0", "0.75")
+        table.xscroll.grid.assert_not_called()
+
+        widths = {"#0": 40, "folder": 800, "status": 218, "inputs": 66}
+        table.tree.column.side_effect = lambda column, option: widths[column]
+        table.tree.winfo_width.return_value = 1000
+
+        # Automatic path overflow is clipped inside Folder without a scrollbar.
+        table._sync_xscroll_visibility()
+        table.xscroll.grid.assert_not_called()
+
+        # A real user-resize baseline enables the bar from integer width math.
+        table._manual_column_widths = dict(widths)
+        table._sync_xscroll_visibility()
+        table.xscroll.grid.assert_called_once_with(row=1, column=0, sticky="ew")
+
+        # Exact fit (996 usable pixels plus four pixels of chrome) hides it.
+        widths["folder"] = 672
+        table._sync_xscroll_visibility()
+        table.xscroll.grid_remove.assert_called_once_with()
+        table.tree.xview_moveto.assert_called_once_with(0.0)
+
+    def test_step3_batch_table_caches_theme_chrome_before_manual_overflow(self):
+        table = RBatchSelectionTable.__new__(RBatchSelectionTable)
+        table.tree = mock.Mock()
+        table._manual_column_widths = None
+        table._horizontal_chrome_width = None
+        widths = {"#0": 40, "folder": 672, "status": 218, "inputs": 66}
+        table.tree.column.side_effect = lambda column, option: widths[column]
+        table.tree.winfo_reqwidth.return_value = 1000
+
+        self.assertEqual(table._tree_horizontal_chrome_width(), 4)
+
+        # During overflow Tk may clamp reqwidth, but the calibrated value stays.
+        table._manual_column_widths = dict(widths)
+        widths["folder"] += 300
+        self.assertEqual(table._tree_horizontal_chrome_width(), 4)
+
+    def test_step3_batch_table_uses_viewport_not_folder_text_for_default_width(self):
+        fit_source = inspect.getsource(RBatchSelectionTable._fit_columns_to_content)
+        folder_source = inspect.getsource(RBatchSelectionTable._expand_folder_to_view)
+
+        self.assertNotIn("_measure_text(folder)", fit_source)
+        self.assertIn("_folder, status, inputs", fit_source)
+        self.assertIn('self.tree.heading("status", "text")', fit_source)
+        self.assertIn('self.tree.heading("inputs", "text")', fit_source)
+        self.assertIn("self._status_width_values", fit_source)
+        self.assertIn("self.MAX_PROGRESS_VALUE", fit_source)
+        self.assertIn("padding=self.HEADING_WIDTH_PADDING", fit_source)
+        self.assertGreaterEqual(RBatchSelectionTable.HEADING_WIDTH_PADDING, 30)
+        self.assertIn("view_width - non_folder_width - chrome_width", folder_source)
+        self.assertIn('self.tree.column("folder", width=desired_folder_width)', folder_source)
+
+    def test_step3_batch_table_preserves_user_column_resizing(self):
+        finish_source = inspect.getsource(RBatchSelectionTable._finish_column_resize)
+        release_source = inspect.getsource(RBatchSelectionTable._on_tree_button_release)
+        fit_source = inspect.getsource(RBatchSelectionTable._fit_columns_to_content)
+        update_source = inspect.getsource(RBatchRunPanel.update_folder)
+
+        self.assertIn("self.after_idle(self._finish_column_resize)", release_source)
+        self.assertIn("current_widths != start_widths", finish_source)
+        self.assertIn("self._manual_column_widths = current_widths", finish_source)
+        self.assertIn("if self._manual_column_widths is not None:", fit_source)
+        self.assertNotIn("_fit_columns_to_content", update_source)
+
+    def test_step3_status_width_samples_cover_every_r_progress_label(self):
+        progress_labels = {
+            label for _percent, label in Step3Frame.R_PROGRESS_BY_STEP.values()
+        }
+
+        self.assertTrue(
+            progress_labels.issubset(set(RBatchSelectionTable.STATUS_WIDTH_VALUES))
+        )
+        run_source = inspect.getsource(RBatchRunPanel._build_ui)
+        self.assertIn("RBatchSelectionTable.RUN_STATUS_WIDTH_VALUES", run_source)
+
+    def test_step3_run_header_and_action_glyphs_are_compact_and_legible(self):
+        source = inspect.getsource(RBatchRunPanel._build_ui)
+
+        self.assertNotIn('f"Timeout:', source)
+        self.assertNotIn('"Progress and logs update', source)
+        self.assertIn('text="\\u25a0  Stop"', source)
+        self.assertIn("self.close_icon = load_color_close_icon(self)", source)
+        self.assertIn("image=self.close_icon", source)
+        self.assertIn('text="Close"', source)
+        self.assertIn('style="AIDaS.DangerAction.TButton"', source)
+
+    def test_step3_second_script_schedule_defaults_to_parallel(self):
+        source = inspect.getsource(RBatchSelectionPanel._build_ui)
+
+        self.assertIn(
+            "tk.StringVar(value=self.step_frame.R_OUTPUT_MODE_PARALLEL)",
+            source,
+        )
+        self.assertIn('text="Parallel (default)"', source)
+        self.assertIn('text="Sequential"', source)
 
     def test_step3_run_summary_wraps_to_the_space_left_by_actions(self):
         panel = RBatchRunPanel.__new__(RBatchRunPanel)

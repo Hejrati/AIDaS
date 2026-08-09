@@ -72,6 +72,42 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         frame._active_r_processes = set()
         return frame
 
+    @staticmethod
+    def _batch_config(folder):
+        folder = Path(folder)
+        return {
+            "input_dir": str(folder),
+            "output_dir": str(folder),
+            "reference_dark": "DARK_MARKED",
+            "reference_light": "Light_MARKED",
+            "to_process_dark": "DARK",
+            "to_process_light": "LIGHT",
+            "image_index_light": "1:2",
+            "image_index_dark": "1:2",
+            "pixel_width": "3.89",
+        }
+
+    def _make_batch_frame(self):
+        frame = self._make_frame()
+        finished = []
+        frame._folder_has_r_data = lambda _folder: False
+        frame._r_script_config_for_folder = self._batch_config
+        frame._write_r_run_log = lambda output_dir, *_args: Path(output_dir) / "step3.log"
+        frame._r_env = lambda thread_limit=None: {}
+        frame._r_worker_limit = lambda: 8
+        frame._r_threads_per_process = lambda _workers: 1
+        frame._on_batch_r_done = finished.extend
+        return frame, finished
+
+    @staticmethod
+    def _write_required_exports(folder):
+        folder = Path(folder)
+        for suffix in ("DARK", "LIGHT"):
+            (folder / f"_thickness_vs_distance_from_fovea_{suffix}.txt").write_text(
+                suffix.lower(),
+                encoding="utf-8",
+            )
+
     def test_selected_main_and_output_scripts_run_in_order(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -128,6 +164,232 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             self.assertEqual(commands[1][2], "-e")
             self.assertIn(output_script.resolve().as_posix(), commands[1][3])
             self.assertIn(Step3Frame.R_WORKSPACE_FILES[1], commands[1][3])
+
+    def test_parallel_output_is_default_and_keeps_the_per_folder_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folders = [Path(temp_dir) / "folder-a", Path(temp_dir) / "folder-b"]
+            for folder in folders:
+                folder.mkdir()
+
+            frame, finished = self._make_batch_frame()
+            events = []
+            event_lock = threading.Lock()
+            main_barrier = threading.Barrier(2)
+            output_barrier = threading.Barrier(2)
+            output_started = threading.Event()
+            output_activity = {"active": 0, "maximum": 0}
+
+            def record(stage, action, folder):
+                with event_lock:
+                    events.append((stage, action, folder.name))
+
+            def fake_run(command, cwd, _env, _timeout, _on_line):
+                folder = Path(cwd)
+                is_output = "-e" in command
+                if not is_output:
+                    record("main", "start", folder)
+                    main_barrier.wait(timeout=3)
+                    if folder.name == "folder-b":
+                        # The default per-folder pipeline lets folder A start its
+                        # output while folder B is still finishing its main script.
+                        output_started.wait(timeout=0.5)
+                    record("main", "end", folder)
+                    return 0, "", "completed"
+
+                record("output", "start", folder)
+                output_started.set()
+                with event_lock:
+                    output_activity["active"] += 1
+                    output_activity["maximum"] = max(
+                        output_activity["maximum"],
+                        output_activity["active"],
+                    )
+                try:
+                    output_barrier.wait(timeout=3)
+                    self._write_required_exports(folder)
+                finally:
+                    with event_lock:
+                        output_activity["active"] -= 1
+                record("output", "end", folder)
+                return 0, "", "completed"
+
+            frame._run_supervised_r_command = fake_run
+            frame._batch_r_worker(
+                Path("Rscript.exe"),
+                Path("main.R"),
+                Path("output.R"),
+                folders,
+                workers=2,
+                timeout_seconds=60,
+            )
+
+            self.assertLess(
+                events.index(("output", "start", "folder-a")),
+                events.index(("main", "end", "folder-b")),
+            )
+            for folder in folders:
+                with self.subTest(folder=folder.name):
+                    self.assertLess(
+                        events.index(("main", "end", folder.name)),
+                        events.index(("output", "start", folder.name)),
+                    )
+            self.assertEqual(output_activity["maximum"], 2)
+            self.assertEqual(len(finished), 2)
+            self.assertTrue(all(result["outcome"] == "completed" for result in finished))
+
+    def test_sequential_output_keeps_main_parallel_and_outputs_nonoverlapping(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folders = [Path(temp_dir) / "folder-a", Path(temp_dir) / "folder-b"]
+            for folder in folders:
+                folder.mkdir()
+
+            frame, finished = self._make_batch_frame()
+            events = []
+            event_lock = threading.Lock()
+            main_barrier = threading.Barrier(2)
+            output_started = threading.Event()
+            second_output_started = threading.Event()
+            output_activity = {"active": 0, "maximum": 0, "calls": 0, "overlapped": False}
+
+            def record(stage, action, folder):
+                with event_lock:
+                    events.append((stage, action, folder.name))
+
+            def fake_run(command, cwd, _env, _timeout, _on_line):
+                folder = Path(cwd)
+                is_output = "-e" in command
+                if not is_output:
+                    record("main", "start", folder)
+                    main_barrier.wait(timeout=3)
+                    if folder.name == "folder-b":
+                        output_started.wait(timeout=0.5)
+                    record("main", "end", folder)
+                    return 0, "", "completed"
+
+                output_started.set()
+                record("output", "start", folder)
+                with event_lock:
+                    output_activity["calls"] += 1
+                    call_number = output_activity["calls"]
+                    output_activity["active"] += 1
+                    output_activity["maximum"] = max(
+                        output_activity["maximum"],
+                        output_activity["active"],
+                    )
+                    if call_number == 2:
+                        second_output_started.set()
+                if call_number == 1:
+                    output_activity["overlapped"] = second_output_started.wait(timeout=0.5)
+                self._write_required_exports(folder)
+                with event_lock:
+                    output_activity["active"] -= 1
+                record("output", "end", folder)
+                return 0, "", "completed"
+
+            frame._run_supervised_r_command = fake_run
+            frame._batch_r_worker(
+                Path("Rscript.exe"),
+                Path("main.R"),
+                Path("output.R"),
+                folders,
+                workers=2,
+                timeout_seconds=60,
+                output_mode="sequential",
+            )
+
+            last_main_end = max(
+                index
+                for index, event in enumerate(events)
+                if event[0:2] == ("main", "end")
+            )
+            first_output_start = min(
+                index
+                for index, event in enumerate(events)
+                if event[0:2] == ("output", "start")
+            )
+            self.assertLess(last_main_end, first_output_start)
+            self.assertEqual(output_activity["calls"], 2)
+            self.assertEqual(output_activity["maximum"], 1)
+            self.assertFalse(output_activity["overlapped"])
+            self.assertEqual(len(finished), 2)
+            self.assertTrue(all(result["outcome"] == "completed" for result in finished))
+
+    def test_failed_main_script_skips_output_for_only_that_folder(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folders = [Path(temp_dir) / "folder-a", Path(temp_dir) / "folder-b"]
+            for folder in folders:
+                folder.mkdir()
+
+            frame, finished = self._make_batch_frame()
+            main_barrier = threading.Barrier(2)
+            output_folders = []
+
+            def fake_run(command, cwd, _env, _timeout, _on_line):
+                folder = Path(cwd)
+                if "-e" not in command:
+                    main_barrier.wait(timeout=3)
+                    if folder.name == "folder-a":
+                        return 7, "main failed", "failed"
+                    return 0, "", "completed"
+                output_folders.append(folder.name)
+                self._write_required_exports(folder)
+                return 0, "", "completed"
+
+            frame._run_supervised_r_command = fake_run
+            frame._batch_r_worker(
+                Path("Rscript.exe"),
+                Path("main.R"),
+                Path("output.R"),
+                folders,
+                workers=2,
+                timeout_seconds=60,
+                output_mode="sequential",
+            )
+
+            results_by_folder = {Path(result["folder"]).name: result for result in finished}
+            self.assertEqual(output_folders, ["folder-b"])
+            self.assertEqual(results_by_folder["folder-a"]["outcome"], "failed")
+            self.assertEqual(results_by_folder["folder-b"]["outcome"], "completed")
+
+    def test_cancellation_skips_queued_sequential_outputs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folders = [Path(temp_dir) / f"folder-{name}" for name in ("a", "b", "c")]
+            for folder in folders:
+                folder.mkdir()
+
+            frame, finished = self._make_batch_frame()
+            main_barrier = threading.Barrier(3)
+            output_folders = []
+
+            def fake_run(command, cwd, _env, _timeout, _on_line):
+                folder = Path(cwd)
+                if "-e" not in command:
+                    main_barrier.wait(timeout=3)
+                    return 0, "", "completed"
+                output_folders.append(folder.name)
+                if len(output_folders) == 1:
+                    frame._r_cancel_event.set()
+                    return 130, "Cancelled by user.", "cancelled"
+                self._write_required_exports(folder)
+                return 0, "", "completed"
+
+            frame._run_supervised_r_command = fake_run
+            frame._batch_r_worker(
+                Path("Rscript.exe"),
+                Path("main.R"),
+                Path("output.R"),
+                folders,
+                workers=3,
+                timeout_seconds=60,
+                output_mode="sequential",
+            )
+
+            self.assertEqual(len(output_folders), 1)
+            self.assertEqual(len(finished), 3)
+            self.assertEqual(
+                {result["outcome"] for result in finished},
+                {"cancelled"},
+            )
 
     def test_step3_requires_only_the_app_light_inputs(self):
         self.assertEqual(
@@ -238,6 +500,44 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertEqual(lines, ["R error\n"])
 
+    def test_selection_forwards_the_selected_output_mode(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            folders = [root / "folder-a", root / "folder-b"]
+            main_script = root / "main.R"
+            output_script = root / "output.R"
+            main_script.write_text("# main", encoding="utf-8")
+            output_script.write_text("# output", encoding="utf-8")
+
+            panel = RBatchSelectionPanel.__new__(RBatchSelectionPanel)
+            panel.table = mock.Mock()
+            panel.table.selected_rows.return_value = [
+                {"folder": folder} for folder in folders
+            ]
+            panel.step_frame = mock.Mock()
+            panel.step_frame._selected_r_script_path.side_effect = [main_script, output_script]
+            panel.step_frame._normalize_r_output_mode.side_effect = (
+                Step3Frame._normalize_r_output_mode
+            )
+            panel.workers_var = mock.Mock()
+            panel.workers_var.get.return_value = 2
+            panel.timeout_var = mock.Mock()
+            panel.timeout_var.get.return_value = 5
+            panel.output_mode_var = mock.Mock()
+            panel.output_mode_var.get.return_value = "sequential"
+            panel._max_worker_count = lambda _ready_count: 2
+
+            panel._run_selected()
+
+            panel.step_frame._start_batch_r_runs.assert_called_once_with(
+                folders,
+                2,
+                main_script,
+                output_script,
+                300,
+                output_mode="sequential",
+            )
+
     def test_batch_coordinator_failure_still_releases_the_busy_lifecycle(self):
         frame = self._make_frame()
         finished = []
@@ -291,11 +591,48 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             Path("main.R"),
             Path("output.R"),
             60,
+            output_mode="sequential",
         )
 
         frame._cancel_batch_r_runs.assert_called_once_with()
         self.assertIsNotNone(frame._pending_batch_restart)
         self.assertEqual(frame._pending_batch_restart[0], [Path("folder-a")])
+        self.assertEqual(frame._pending_batch_restart[-1], "sequential")
+
+    def test_run_panel_restart_preserves_the_output_mode(self):
+        panel = RBatchRunPanel.__new__(RBatchRunPanel)
+        panel.folders = [Path("folder-a")]
+        panel.workers = 2
+        panel.main_script_path = Path("main.R")
+        panel.output_script_path = Path("output.R")
+        panel.timeout_seconds = 60
+        panel.output_mode = "sequential"
+        panel.restart_button = mock.Mock()
+        panel.stop_button = mock.Mock()
+        panel.close_button = mock.Mock()
+        panel.summary_var = mock.Mock()
+        panel.step_frame = mock.Mock()
+        panel.step_frame._busy = False
+
+        with mock.patch("aidas.steps.step3_flatten.messagebox.askyesno", return_value=True):
+            panel._restart_batch()
+
+        call = panel.step_frame._restart_batch_r_runs.call_args
+        self.assertEqual(
+            call.args[:5],
+            (
+                panel.folders,
+                2,
+                Path("main.R"),
+                Path("output.R"),
+                60,
+            ),
+        )
+        forwarded_mode = call.kwargs.get(
+            "output_mode",
+            call.args[5] if len(call.args) > 5 else None,
+        )
+        self.assertEqual(forwarded_mode, "sequential")
 
     def test_completed_batch_starts_pending_restart_without_an_event_loop_gap(self):
         restart = (
@@ -304,6 +641,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             Path("main.R"),
             Path("output.R"),
             60,
+            "sequential",
         )
         panel = mock.Mock()
         panel.close_when_finished = False

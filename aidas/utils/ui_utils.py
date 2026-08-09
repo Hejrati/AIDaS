@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk
 
 import customtkinter as ctk
-from PIL import Image, ImageChops, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
 
 from aidas.core.display import work_area_bounds
 from aidas.ui.theme import (
@@ -110,6 +110,37 @@ def load_action_icon(owner, action, *, size=ACTION_ICON_SIZE):
     except KeyError as exc:
         raise ValueError(f"Unknown UI action icon: {action}") from exc
     return load_ui_icon(owner, filename, size=size)
+
+
+def load_color_close_icon(owner, *, size=ACTION_ICON_SIZE):
+    """Create the colorful X badge used by Close actions."""
+
+    size = max(8, int(size))
+    scale = 4
+    canvas_size = size * scale
+    inset = 2 * scale
+    image = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse(
+        (inset, inset, canvas_size - inset - 1, canvas_size - inset - 1),
+        fill="#EF5350",
+        outline="#FFB74D",
+        width=2 * scale,
+    )
+    line_inset = 6 * scale
+    line_end = canvas_size - line_inset
+    draw.line(
+        (line_inset, line_inset, line_end, line_end),
+        fill="#FFFFFF",
+        width=2 * scale,
+    )
+    draw.line(
+        (line_end, line_inset, line_inset, line_end),
+        fill="#FFFFFF",
+        width=2 * scale,
+    )
+    rendered = image.resize((size, size), Image.Resampling.LANCZOS)
+    return remember_image(owner, ImageTk.PhotoImage(rendered, master=owner))
 
 
 def action_button(
