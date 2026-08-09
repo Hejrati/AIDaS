@@ -1770,13 +1770,13 @@ class RBatchSelectionPanel(ttk.Frame):
         self.scan_label.pack(fill="both", expand=True)
 
     def _max_worker_count(self, ready_count=None):
-        cpu_limit = self.step_frame._cpu_worker_limit()
+        cpu_limit = self.step_frame._r_worker_limit()
         if ready_count is None:
             return cpu_limit
         return max(1, min(int(ready_count) or 1, cpu_limit))
 
     def _worker_limit_text(self, max_workers):
-        return f"Max available: {max_workers}"
+        return f"Max: {max_workers} (1 CPU reserved)"
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -1959,51 +1959,21 @@ class RBatchRunPanel(ttk.Frame):
     def _build_ui(self):
         wrapper = ttk.Frame(self, padding=12)
         wrapper.pack(fill="both", expand=True)
-        ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w")
-        ttk.Label(
-            wrapper,
-            text=(
-                f"Main script: {self.main_script_path.name}\n"
-                f"Output script: {self.output_script_path.name}\n"
-                f"Timeout: {max(1, round(self.timeout_seconds / 60))} minute(s) per script\n"
-                "Progress and logs update as each folder finishes."
-            ),
-            wraplength=760,
-            justify="left",
-        ).pack(anchor="w", pady=(4, 10))
 
-        rows = []
-        for folder in self.folders:
-            row = {
-                "folder": folder,
-                "include": False,
-                "locked": True,
-                "values": {
-                    "folder": str(folder),
-                    "status": "Queued",
-                    "inputs": "0%",
-                },
-            }
-            rows.append(row)
-            self.row_by_folder[str(folder)] = row
-            self.step_states_by_folder[str(folder)] = []
-            self.current_step_by_folder[str(folder)] = None
-
-        self.table = RBatchSelectionTable(wrapper)
-        self.table.tree.heading("inputs", text="Progress")
-        self.table.pack(fill="both", expand=True)
-        self.table.set_rows(rows)
-
+        # Reserve the live summary and actions before adding either flexible
+        # region.  Tk's packer allocates geometry in packing order; keeping the
+        # footer first means the table shrinks and scrolls instead of clipping
+        # Restart, Stop, or Close when the window height is constrained.
         self.summary_var = tk.StringVar(
             value=f"Running {len(self.folders)} folder(s) with up to {self.workers} parallel R process(es)."
         )
         summary_row = ttk.Frame(wrapper)
-        summary_row.pack(fill="x", pady=(4, 10))
-        ttk.Label(summary_row, textvariable=self.summary_var, wraplength=680, justify="left").pack(
-            side="left", fill="x", expand=True
-        )
+        summary_row.pack(side="bottom", fill="x", pady=(8, 0))
+        self.action_footer = summary_row
+
         action_box = ttk.Frame(summary_row)
         action_box.pack(side="right", padx=(8, 0))
+        self.action_box = action_box
         self.restart_button = action_button(
             action_box,
             self,
@@ -2025,14 +1995,82 @@ class RBatchRunPanel(ttk.Frame):
         self.close_button.pack(side="left", padx=(6, 0))
         self.cancel_button = self.stop_button
 
+        self.summary_label = ttk.Label(
+            summary_row,
+            textvariable=self.summary_var,
+            wraplength=480,
+            justify="left",
+        )
+        self.summary_label.pack(side="left", fill="x", expand=True)
+        summary_row.bind("<Configure>", self._resize_summary_footer, add="+")
+
+        ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w")
+        ttk.Label(
+            wrapper,
+            text=(
+                f"Main script: {self.main_script_path.name}\n"
+                f"Output script: {self.output_script_path.name}\n"
+                f"Timeout: {max(1, round(self.timeout_seconds / 60))} minute(s) per script\n"
+                "Progress and logs update as each folder finishes."
+            ),
+            wraplength=760,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 10))
+
+        # Step details have their own scrollbar and a bounded requested height.
+        # Pack them above the already-reserved footer and before the table so
+        # neither fixed region can be covered by the flexible Treeview.
         step_frame = ttk.LabelFrame(wrapper, text="Step progress")
-        step_frame.pack(fill="both", expand=False, pady=(10, 0))
-        self.step_text = tk.Text(step_frame, height=8, wrap="word", state="disabled")
+        step_frame.pack(side="bottom", fill="x", pady=(8, 0))
+        self.step_progress_frame = step_frame
+        visible_step_rows = max(3, min(6, len(self.folders) + 2))
+        self.step_text = tk.Text(
+            step_frame,
+            height=visible_step_rows,
+            wrap="word",
+            state="disabled",
+        )
         step_scroll = ttk.Scrollbar(step_frame, orient="vertical", command=self.step_text.yview)
         self.step_text.configure(yscrollcommand=step_scroll.set)
         self.step_text.pack(side="left", fill="both", expand=True)
         step_scroll.pack(side="right", fill="y")
+
+        rows = []
+        for folder in self.folders:
+            row = {
+                "folder": folder,
+                "include": False,
+                "locked": True,
+                "values": {
+                    "folder": str(folder),
+                    "status": "Queued",
+                    "inputs": "0%",
+                },
+            }
+            rows.append(row)
+            self.row_by_folder[str(folder)] = row
+            self.step_states_by_folder[str(folder)] = []
+            self.current_step_by_folder[str(folder)] = None
+
+        self.table_host = ttk.Frame(wrapper)
+        self.table_host.pack(side="top", fill="both", expand=True)
+        self.table = RBatchSelectionTable(self.table_host)
+        self.table.tree.heading("inputs", text="Progress")
+        self.table.pack(fill="both", expand=True)
+        self.table.set_rows(rows)
         self._render_step_progress()
+
+    def _resize_summary_footer(self, event=None):
+        """Wrap summary text inside the width left after reserving action buttons."""
+        try:
+            total_width = int(event.width) if event is not None else int(self.action_footer.winfo_width())
+            action_width = int(self.action_box.winfo_reqwidth())
+            wraplength = max(120, total_width - action_width - 16)
+            current = int(float(self.summary_label.cget("wraplength")))
+            if current != wraplength:
+                self.summary_label.configure(wraplength=wraplength)
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return
 
     def update_folder(self, folder, status=None, progress=None):
         row = self.row_by_folder.get(str(folder))
@@ -2287,7 +2325,10 @@ class Step3Frame(SidebarStepFrame):
         self._r_cancel_event = threading.Event()
         self._r_process_lock = threading.Lock()
         self._active_r_processes = set()
+        self._active_r_folder_keys = set()
         self._pending_batch_restart = None
+        self._pending_input_folder = None
+        self._pending_batch_folders = None
         self.r_package_library_path = None if self.preferences is None else self.preferences.get("r_package_library_path")
 
         self.view_var = tk.StringVar(value="DARK_MARKED_find_vertex")
@@ -2675,6 +2716,17 @@ class Step3Frame(SidebarStepFrame):
                 pass
         return max(1, int(os.cpu_count() or 1))
 
+    @classmethod
+    def _r_worker_limit(cls):
+        """Leave one logical processor available for the UI and Step 2 AI work."""
+        return max(1, cls._cpu_worker_limit() - 1)
+
+    @classmethod
+    def _r_threads_per_process(cls, workers):
+        """Prevent nested R/BLAS threads from oversubscribing the shared host."""
+        workers = max(1, int(workers))
+        return max(1, cls._r_worker_limit() // workers)
+
     def _default_r_package_library(self):
         if self.r_package_library_path:
             configured_path = Path(self.r_package_library_path)
@@ -2695,11 +2747,23 @@ class Step3Frame(SidebarStepFrame):
             return documents / "AIDaS" / "R-packages"
         return Path.home() / "AIDaS_R_packages"
 
-    def _r_env(self):
+    def _r_env(self, thread_limit=None):
         env = os.environ.copy()
         library_path = self._default_r_package_library()
         if library_path:
             env["R_LIBS_USER"] = str(library_path.resolve())
+        if thread_limit is not None:
+            thread_limit = str(max(1, int(thread_limit)))
+            for name in (
+                "OMP_NUM_THREADS",
+                "OMP_THREAD_LIMIT",
+                "OPENBLAS_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "BLIS_NUM_THREADS",
+                "VECLIB_MAXIMUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+            ):
+                env[name] = thread_limit
         return env
 
     def _r_package_check_expression(self, package_name):
@@ -3168,6 +3232,10 @@ class Step3Frame(SidebarStepFrame):
         self._render()
 
     def _refresh_input_status(self):
+        # A Step 2 folder notification may arrive while this tab is hidden.
+        # Never replace the live R progress/Stop panel or its status text.
+        if getattr(self, "_busy", False):
+            return None, []
         if not self.current_sdb_dir:
             self._reset_to_tutorial_state()
             input_paths = {label: None for label, _names, _display_name, _required_bits in self.REQUIRED_INPUTS}
@@ -3206,12 +3274,31 @@ class Step3Frame(SidebarStepFrame):
 
     def set_input_folder(self, folder):
         if not folder:
-            return
+            return False
+        folder = os.path.abspath(os.fspath(folder))
+        if self._busy:
+            self._pending_input_folder = folder
+            panel = getattr(self, "r_batch_run_panel", None)
+            if panel is not None:
+                panel.log(f"Step 2 prepared another folder for a later Step 3 run: {folder}")
+            return False
+        self._pending_input_folder = None
         self.current_sdb_dir = folder
         self.output_sdb_dir = folder
         self.results = None
         self.original_light_volume = None
         self._refresh_input_status()
+        return True
+
+    @staticmethod
+    def _folder_key(folder):
+        return os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(folder))))
+
+    def is_folder_active(self, folder):
+        """Return True only for folders read/written by the current R batch."""
+        if not folder or not self._busy:
+            return False
+        return self._folder_key(folder) in getattr(self, "_active_r_folder_keys", set())
 
     def _clear_plot_holder(self):
         if self.canvas is not None:
@@ -3235,12 +3322,14 @@ class Step3Frame(SidebarStepFrame):
     def _open_r_batch_scanner(self):
         if self._busy:
             return
+        initial_dir = self._pending_input_folder or self.current_sdb_dir
         root_dir = filedialog.askdirectory(
             title="Choose a parent folder for flattening",
-            initialdir=self.current_sdb_dir or None,
+            initialdir=initial_dir or None,
         )
         if not root_dir:
             return
+        self._pending_input_folder = None
         self._show_r_batch_scanner(root_dir)
 
     @staticmethod
@@ -3259,12 +3348,25 @@ class Step3Frame(SidebarStepFrame):
 
     def open_batch_folders(self, folders):
         """Open Step 3's selector with the exact folders saved by Step 2."""
-        if self._busy:
-            return False
         folders = self._normalize_batch_input_folders(folders)
         if not folders:
             messagebox.showwarning("Batch Step 3", "No saved Step 3 input folders were found.")
             return False
+        if self._busy:
+            previously_queued = getattr(self, "_pending_batch_folders", None) or ()
+            self._pending_batch_folders = tuple(
+                self._normalize_batch_input_folders([*previously_queued, *folders])
+            )
+            self._pending_input_folder = None
+            panel = getattr(self, "r_batch_run_panel", None)
+            if panel is not None:
+                panel.log(
+                    f"Queued {len(self._pending_batch_folders)} Step 2 output folder(s); "
+                    "their selector will open when this R batch finishes."
+                )
+            return True
+        self._pending_batch_folders = None
+        self._pending_input_folder = None
         try:
             root_dir = Path(os.path.commonpath([str(folder) for folder in folders]))
         except ValueError:
@@ -3438,6 +3540,7 @@ class Step3Frame(SidebarStepFrame):
             popen_options["creationflags"] = (
                 getattr(subprocess, "CREATE_NO_WINDOW", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
             )
         else:
             popen_options["start_new_session"] = True
@@ -3560,7 +3663,7 @@ class Step3Frame(SidebarStepFrame):
             )
             return
 
-        workers = max(1, min(int(workers), len(folders), self._cpu_worker_limit()))
+        workers = max(1, min(int(workers), len(folders), self._r_worker_limit()))
         self._clear_plot_holder()
         self.r_batch_run_panel = RBatchRunPanel(
             self,
@@ -3574,12 +3677,13 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_run_panel.pack(fill="both", expand=True)
         self._r_cancel_event.clear()
         self._busy = True
+        self._active_r_folder_keys = {self._folder_key(folder) for folder in folders}
         self._set_process_buttons("disabled")
         self.progress_text_var.set("Batch running")
         self.status_var.set(
             f"Running {main_script_path.name}, then {output_script_path.name}, for {len(folders)} folder(s)."
         )
-        threading.Thread(
+        worker_thread = threading.Thread(
             target=self._batch_r_worker,
             args=(
                 Path(rscript),
@@ -3591,7 +3695,20 @@ class Step3Frame(SidebarStepFrame):
                 bool(allow_existing_rdata),
             ),
             daemon=True,
-        ).start()
+        )
+        try:
+            worker_thread.start()
+        except Exception as exc:
+            self._busy = False
+            self._active_r_folder_keys = set()
+            self._set_process_buttons("normal")
+            self.progress_text_var.set("Batch failed to start")
+            self.status_var.set(f"Could not start the Step 3 R batch: {exc}")
+            if self.r_batch_run_panel is not None:
+                self.r_batch_run_panel.set_summary("Batch failed to start.")
+                self.r_batch_run_panel.log(str(exc))
+                self.r_batch_run_panel.finish()
+            messagebox.showerror("Batch Step 3", f"Could not start the R batch worker:\n{exc}")
 
     def _batch_panel_update(self, folder, status=None, progress=None, log=None):
         panel = self.r_batch_run_panel
@@ -3610,6 +3727,7 @@ class Step3Frame(SidebarStepFrame):
         r_config,
         batch_folder=None,
         timeout_seconds=None,
+        r_thread_limit=None,
     ):
         folder = Path(batch_folder or r_config["input_dir"])
         script_args = [
@@ -3625,7 +3743,7 @@ class Step3Frame(SidebarStepFrame):
         ]
         main_cmd = self._build_r_run_command(rscript_path, main_script_path, script_args)
         commands = [main_cmd]
-        env = self._r_env()
+        env = self._r_env(thread_limit=r_thread_limit)
         env.update(
             {
                 "AIDAS_STEP3_INPUT_DIR": r_config["input_dir"],
@@ -3763,8 +3881,6 @@ class Step3Frame(SidebarStepFrame):
         allow_existing_rdata=False,
     ):
         results = []
-        completed = 0
-        total = len(folders)
 
         def run_folder(folder):
             folder = Path(folder)
@@ -3798,46 +3914,70 @@ class Step3Frame(SidebarStepFrame):
                 r_config,
                 batch_folder=folder,
                 timeout_seconds=timeout_seconds,
+                r_thread_limit=r_thread_limit,
             )
 
-        workers = max(1, min(int(workers), len(folders), self._cpu_worker_limit()))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-            future_map = {executor.submit(run_folder, folder): folder for folder in folders}
-            for future in concurrent.futures.as_completed(future_map):
-                folder = future_map[future]
-                try:
-                    result = future.result()
-                except Exception as exc:
-                    result = {
+        try:
+            workers = max(1, min(int(workers), len(folders), self._r_worker_limit()))
+            r_thread_limit = self._r_threads_per_process(workers)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                future_map = {executor.submit(run_folder, folder): folder for folder in folders}
+                for future in concurrent.futures.as_completed(future_map):
+                    folder = future_map[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:
+                        result = {
+                            "folder": folder,
+                            "returncode": 1,
+                            "stdout": "",
+                            "stderr": str(exc),
+                            "cmd": [],
+                            "outcome": "failed",
+                        }
+                    results.append(result)
+                    outcome = result.get("outcome", "completed" if result["returncode"] == 0 else "failed")
+                    status = {
+                        "completed": "Completed",
+                        "cancelled": "Cancelled",
+                        "timed_out": "Timed out",
+                        "failed": "Failed",
+                    }.get(outcome, "Failed")
+                    self.after(
+                        0,
+                        lambda f=folder, s=status: self._batch_panel_update(
+                            f,
+                            status=s,
+                            progress=100 if s == "Completed" else None,
+                        ),
+                    )
+        except Exception as exc:
+            completed_keys = {
+                self._folder_key(result["folder"])
+                for result in results
+                if result.get("folder") is not None
+            }
+            for folder in folders:
+                folder = Path(folder)
+                if self._folder_key(folder) in completed_keys:
+                    continue
+                results.append(
+                    {
                         "folder": folder,
                         "returncode": 1,
                         "stdout": "",
-                        "stderr": str(exc),
+                        "stderr": f"Batch coordinator failed: {exc}",
                         "cmd": [],
                         "outcome": "failed",
                     }
-                results.append(result)
-                completed += 1
-                outcome = result.get("outcome", "completed" if result["returncode"] == 0 else "failed")
-                status = {
-                    "completed": "Completed",
-                    "cancelled": "Cancelled",
-                    "timed_out": "Timed out",
-                    "failed": "Failed",
-                }.get(outcome, "Failed")
-                self.after(
-                    0,
-                    lambda f=folder, s=status: self._batch_panel_update(
-                        f,
-                        status=s,
-                        progress=100 if s == "Completed" else None,
-                    ),
                 )
-
-        self.after(0, lambda: self._on_batch_r_done(results))
+        finally:
+            finished_results = list(results)
+            self.after(0, lambda batch_results=finished_results: self._on_batch_r_done(batch_results))
 
     def _on_batch_r_done(self, results):
         self._busy = False
+        self._active_r_folder_keys = set()
         self._set_process_buttons("normal")
         panel = self.r_batch_run_panel
         close_when_finished = bool(panel is not None and panel.close_when_finished)
@@ -3876,14 +4016,28 @@ class Step3Frame(SidebarStepFrame):
             if panel is not None:
                 panel.set_summary("Starting a clean batch run...")
                 panel.log("The previous run stopped. Starting a clean batch run.")
-            self.after(
-                0,
-                lambda restart=pending_restart: self._start_batch_r_runs(
-                    *restart,
-                    allow_existing_rdata=True,
-                ),
+            # Start before returning to Tk's event loop so Step 2 cannot save
+            # into the restart folders during a transient unreserved gap.
+            self._start_batch_r_runs(
+                *pending_restart,
+                allow_existing_rdata=True,
             )
             return
+
+        pending_folders = self._pending_batch_folders
+        self._pending_batch_folders = None
+        if pending_folders:
+            folders = self._normalize_batch_input_folders(pending_folders)
+            if folders:
+                try:
+                    root_dir = Path(os.path.commonpath([str(folder) for folder in folders]))
+                except ValueError:
+                    root_dir = folders[0].parent
+                self._pending_input_folder = None
+                self.current_sdb_dir = str(root_dir)
+                self.output_sdb_dir = str(root_dir)
+                self._show_r_batch_scanner(root_dir, folders=folders)
+                return
 
         if close_when_finished:
             self._close_r_batch_run_panel(render_previous=True)

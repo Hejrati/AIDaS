@@ -3,13 +3,14 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 import unittest
+from unittest import mock
 
 from PIL import Image
 
 from aidas.app import AboutDialog, SettingsDialog
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2BatchSegmentationSelectionPanel, Step2Frame
-from aidas.steps.step3_flatten import RBatchSelectionPanel, Step3Frame
+from aidas.steps.step3_flatten import RBatchRunPanel, RBatchSelectionPanel, Step3Frame
 from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel, Step4Frame
 from aidas.ui.components import AppButton, AppSplitButton, WorkflowHeader, WorkflowNavigation
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
@@ -208,17 +209,43 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertNotIn("btn_set = action_button(", source)
 
     def test_batch_panels_reserve_the_footer_before_the_flexible_table(self):
-        panel_classes = (
-            Step2BatchSegmentationSelectionPanel,
-            RBatchSelectionPanel,
-            Step4BatchROISelectionPanel,
+        panel_footers = (
+            (Step2BatchSegmentationSelectionPanel, "run_box"),
+            (RBatchSelectionPanel, "run_box"),
+            (RBatchRunPanel, "summary_row"),
+            (Step4BatchROISelectionPanel, "run_box"),
         )
-        for panel_class in panel_classes:
+        for panel_class, footer_name in panel_footers:
             with self.subTest(panel=panel_class.__name__):
                 source = inspect.getsource(panel_class._build_ui)
-                self.assertIn('run_box.pack(side="bottom", fill="x"', source)
-                self.assertIn("self.action_footer = run_box", source)
-                self.assertLess(source.index("self.action_footer = run_box"), source.index("self.table_host ="))
+                self.assertIn(f'{footer_name}.pack(side="bottom", fill="x"', source)
+                footer_assignment = f"self.action_footer = {footer_name}"
+                self.assertIn(footer_assignment, source)
+                self.assertLess(source.index(footer_assignment), source.index("self.table_host ="))
+
+    def test_step3_run_footer_reserves_horizontal_space_for_actions(self):
+        source = inspect.getsource(RBatchRunPanel._build_ui)
+
+        self.assertLess(
+            source.index('action_box.pack(side="right"'),
+            source.index('self.summary_label.pack(side="left"'),
+        )
+        self.assertIn('summary_row.bind("<Configure>", self._resize_summary_footer', source)
+
+    def test_step3_run_summary_wraps_to_the_space_left_by_actions(self):
+        panel = RBatchRunPanel.__new__(RBatchRunPanel)
+        panel.action_box = mock.Mock()
+        panel.action_box.winfo_reqwidth.return_value = 260
+        panel.summary_label = mock.Mock()
+        panel.summary_label.cget.return_value = 480
+
+        panel._resize_summary_footer(type("Event", (), {"width": 520})())
+
+        panel.summary_label.configure.assert_called_once_with(wraplength=244)
+
+        panel.summary_label.reset_mock()
+        panel._resize_summary_footer(type("Event", (), {"width": 300})())
+        panel.summary_label.configure.assert_called_once_with(wraplength=120)
 
     def test_step2_reserves_status_space_through_the_shared_layout(self):
         source = inspect.getsource(Step2Frame.__init__)

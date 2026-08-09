@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -192,6 +193,11 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertEqual(outcome, "timed_out")
         self.assertIn("timeout", error)
         self.assertIs(popen_options["stdin"], subprocess.DEVNULL)
+        if os.name == "nt":
+            self.assertTrue(
+                popen_options["creationflags"]
+                & getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+            )
         self.assertTrue(process.stopped.is_set())
 
     def test_user_cancellation_stops_a_silent_process(self):
@@ -232,6 +238,29 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertEqual(error, "")
         self.assertEqual(lines, ["R error\n"])
 
+    def test_batch_coordinator_failure_still_releases_the_busy_lifecycle(self):
+        frame = self._make_frame()
+        finished = []
+        frame._on_batch_r_done = finished.extend
+        folders = [Path("folder-a"), Path("folder-b")]
+
+        with mock.patch(
+            "aidas.steps.step3_flatten.concurrent.futures.ThreadPoolExecutor",
+            side_effect=RuntimeError("executor unavailable"),
+        ):
+            frame._batch_r_worker(
+                Path("Rscript.exe"),
+                Path("main.R"),
+                Path("output.R"),
+                folders,
+                workers=2,
+                timeout_seconds=60,
+            )
+
+        self.assertEqual([result["folder"] for result in finished], folders)
+        self.assertTrue(all(result["outcome"] == "failed" for result in finished))
+        self.assertTrue(all("executor unavailable" in result["stderr"] for result in finished))
+
     def test_stop_requires_confirmation_before_cancelling_batch(self):
         panel = RBatchRunPanel.__new__(RBatchRunPanel)
         panel.stop_requested = False
@@ -268,6 +297,36 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertIsNotNone(frame._pending_batch_restart)
         self.assertEqual(frame._pending_batch_restart[0], [Path("folder-a")])
 
+    def test_completed_batch_starts_pending_restart_without_an_event_loop_gap(self):
+        restart = (
+            [Path("folder-a")],
+            2,
+            Path("main.R"),
+            Path("output.R"),
+            60,
+        )
+        panel = mock.Mock()
+        panel.close_when_finished = False
+        frame = Step3Frame.__new__(Step3Frame)
+        frame._busy = True
+        frame._active_r_folder_keys = {frame._folder_key("folder-a")}
+        frame._pending_batch_restart = restart
+        frame.r_batch_run_panel = panel
+        frame.progress_text_var = mock.Mock()
+        frame.status_var = mock.Mock()
+        frame.info_var = mock.Mock()
+        frame._set_process_buttons = mock.Mock()
+        frame._start_batch_r_runs = mock.Mock()
+        frame.after = mock.Mock()
+
+        frame._on_batch_r_done([])
+
+        frame._start_batch_r_runs.assert_called_once_with(
+            *restart,
+            allow_existing_rdata=True,
+        )
+        frame.after.assert_not_called()
+
     def test_cpu_worker_limit_uses_processors_available_to_the_process(self):
         with mock.patch(
             "aidas.steps.step3_flatten.os.process_cpu_count",
@@ -275,16 +334,40 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             return_value=12,
         ):
             self.assertEqual(Step3Frame._cpu_worker_limit(), 12)
+            self.assertEqual(Step3Frame._r_worker_limit(), 11)
 
-    def test_batch_can_use_every_available_logical_processor(self):
+    def test_batch_reserves_a_processor_for_step2_and_the_ui(self):
         panel = RBatchSelectionPanel.__new__(RBatchSelectionPanel)
         panel.step_frame = mock.Mock()
-        panel.step_frame._cpu_worker_limit.return_value = 8
+        panel.step_frame._r_worker_limit.return_value = 7
 
-        self.assertEqual(panel._max_worker_count(), 8)
-        self.assertEqual(panel._max_worker_count(20), 8)
+        self.assertEqual(panel._max_worker_count(), 7)
+        self.assertEqual(panel._max_worker_count(20), 7)
         self.assertEqual(panel._max_worker_count(3), 3)
-        self.assertEqual(panel._worker_limit_text(8), "Max available: 8")
+        self.assertEqual(
+            panel._worker_limit_text(7),
+            "Max: 7 (1 CPU reserved)",
+        )
+
+    def test_r_process_thread_budget_prevents_nested_cpu_oversubscription(self):
+        with mock.patch.object(Step3Frame, "_cpu_worker_limit", return_value=8):
+            self.assertEqual(Step3Frame._r_threads_per_process(1), 7)
+            self.assertEqual(Step3Frame._r_threads_per_process(2), 3)
+            self.assertEqual(Step3Frame._r_threads_per_process(7), 1)
+
+        frame = self._make_frame()
+        frame._default_r_package_library = lambda: None
+        env = frame._r_env(thread_limit=2)
+        for name in (
+            "OMP_NUM_THREADS",
+            "OMP_THREAD_LIMIT",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "BLIS_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+        ):
+            self.assertEqual(env[name], "2")
 
 
 if __name__ == "__main__":

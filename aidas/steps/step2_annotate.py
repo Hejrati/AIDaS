@@ -640,6 +640,7 @@ class Step2Frame(SidebarStepFrame):
         source_step=None,
         on_output_folder_changed=None,
         on_continue_to_step3=None,
+        is_step3_folder_active=None,
     ):
         """Initialize the Step 2 annotation panel.
 
@@ -648,12 +649,15 @@ class Step2Frame(SidebarStepFrame):
             preferences: User preferences dict (optional).
             source_step: Reference to Step 1 panel for linked image loading (optional).
             on_continue_to_step3: Callback receiving saved Step 3 input folders.
+            is_step3_folder_active: Callback used to prevent Step 2 from
+                overwriting a folder that a live Step 3 R process is reading.
         """
         super().__init__(parent)
         self.preferences = preferences
         self.source_step = source_step
         self.on_output_folder_changed = on_output_folder_changed
         self.on_continue_to_step3 = on_continue_to_step3
+        self.is_step3_folder_active = is_step3_folder_active
 
         # ─ Image data state ─
         self.current_file = None  # Path to currently loaded image
@@ -2004,9 +2008,11 @@ class Step2Frame(SidebarStepFrame):
                 return
             try:
                 self._save_marked_images(require_complete=True)
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:
                 messagebox.showerror("Save error", f"Could not save Light_MARKED Analyze image:\n{exc}")
-                self.status_var.set(f"Saved '{name}'. All preset boundaries are complete.")
+                self.status_var.set(
+                    f"Saved boundary '{name}', but the MARKED Analyze files were not saved."
+                )
 
     def _revert_boundary(self):
         """Mark a completed boundary as incomplete and re-open it for editing.
@@ -2791,6 +2797,39 @@ class Step2Frame(SidebarStepFrame):
         """Return the 16-bit source image that corresponds to current annotations."""
         return self.image_data
 
+    def _ensure_step3_is_not_using_output_folders(self, folders):
+        """Reject only saves that would overwrite inputs of a live Step 3 run.
+
+        Model inference remains fully available while R is running.  The guard
+        is intentionally applied at save time so disjoint Step 2 and Step 3
+        batches can continue concurrently without risking a partial Analyze
+        file read in Step 3.
+        """
+        callback = getattr(self, "is_step3_folder_active", None)
+        if callback is None:
+            return
+
+        active = []
+        seen = set()
+        for folder in folders or ():
+            resolved = os.path.abspath(os.fspath(folder))
+            key = os.path.normcase(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            if callback(resolved):
+                active.append(resolved)
+
+        if active:
+            preview = "\n".join(active[:4])
+            if len(active) > 4:
+                preview += f"\n...and {len(active) - 4} more"
+            raise RuntimeError(
+                "Step 3 is currently reading this output folder. "
+                "Step 2 segmentation can continue, but wait for the active R "
+                "batch to finish before saving here:\n" + preview
+            )
+
     def _save_light_image(self, reference_shape=None):
         """Export an unmarked LIGHT Analyze volume from the current image.
 
@@ -2818,8 +2857,12 @@ class Step2Frame(SidebarStepFrame):
             stack = _resize_to_standard_format(stack)
 
         stack = self._orient_volume_for_single_save(stack)
+        base_paths = self._source_output_basepaths()
+        self._ensure_step3_is_not_using_output_folders(
+            os.path.dirname(base_path) for base_path in base_paths
+        )
         saved_paths = []
-        for base_path in self._source_output_basepaths():
+        for base_path in base_paths:
             write_analyze(base_path, stack)
             saved_paths.append(base_path)
         return saved_paths
@@ -2854,10 +2897,15 @@ class Step2Frame(SidebarStepFrame):
             if not proceed:
                 return False
 
+        light_base_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME)
+        source_base_paths = self._source_output_basepaths()
+        self._ensure_step3_is_not_using_output_folders(
+            [os.path.dirname(light_base_path)]
+            + [os.path.dirname(base_path) for base_path in source_base_paths]
+        )
+
         light_marked = self._build_marked_volume()
         saved_paths = []
-
-        light_base_path = self._marked_output_basepath(LIGHT_MARKED_BASENAME)
         write_analyze(light_base_path, self._orient_volume_for_single_save(light_marked))
         saved_paths.append(light_base_path)
 
@@ -2919,6 +2967,7 @@ class Step2Frame(SidebarStepFrame):
                 return None
 
         out_base = self._current_marked_output_basepath()
+        self._ensure_step3_is_not_using_output_folders([os.path.dirname(out_base)])
         marked_volume = self._build_current_marked_volume()
         write_analyze(
             out_base,
@@ -2997,6 +3046,9 @@ class Step2Frame(SidebarStepFrame):
         temporal_base = os.path.join(parent, "temporal", source_base)
         nasal_light_base = os.path.join(parent, "nasal", LIGHT_SOURCE_BASENAME)
         temporal_light_base = os.path.join(parent, "temporal", LIGHT_SOURCE_BASENAME)
+        self._ensure_step3_is_not_using_output_folders(
+            [os.path.dirname(nasal_base), os.path.dirname(temporal_base)]
+        )
         os.makedirs(os.path.dirname(nasal_base), exist_ok=True)
         os.makedirs(os.path.dirname(temporal_base), exist_ok=True)
 
@@ -3133,6 +3185,27 @@ class Step2Frame(SidebarStepFrame):
         if not getattr(self, "_batch_result_states", None):
             messagebox.showinfo("No segmented images", "There are no segmented images to send to Step 3.")
             self._update_continue_to_step3_button_state()
+            return
+
+        # Preflight the whole handoff before writing anything.  Otherwise a
+        # mixed batch could save/close disjoint tabs, leave an active-folder
+        # tab behind, and then omit the already-closed folders on retry.
+        output_folders = []
+        for state in self._batch_result_states.values():
+            input_path = (state or {}).get("input")
+            if not input_path:
+                continue
+            parent = os.path.dirname(os.path.abspath(input_path))
+            output_folders.extend(
+                (os.path.join(parent, "nasal"), os.path.join(parent, "temporal"))
+            )
+        try:
+            self._ensure_step3_is_not_using_output_folders(output_folders)
+        except RuntimeError as exc:
+            messagebox.showwarning("Step 3 is using an output folder", str(exc))
+            self.status_var.set(
+                "Step 2 results are ready, but saving is waiting for the active Step 3 R batch."
+            )
             return
 
         saved = self._save_all_batch_result_tabs()

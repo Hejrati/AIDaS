@@ -371,6 +371,13 @@ default), and the progress panel provides **Cancel Batch**. Timed-out and
 cancelled R process trees are stopped, reported separately from script failures,
 and retained in the Step 3 logs.
 
+Step 2 model segmentation remains available while a Step 3 R batch is running.
+R worker and native-library thread limits reserve processing capacity for the UI
+and the segmentation worker. A Step 2 handoff made during an R batch is queued
+and opens after that batch finishes. Step 2 may save unrelated folders at the
+same time, but AIDaS blocks saves into a folder actively being read by Step 3 to
+avoid replacing Analyze inputs midway through an R run.
+
 Do not use a minimal PyInstaller command for release builds; it does not include
 the model/data files or the reliable one-directory layout defined in
 `AIDaS.spec`.

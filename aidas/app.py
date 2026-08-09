@@ -928,6 +928,7 @@ class AIDaSApp(ctk.CTk):
             source_step=self.step1,
             on_output_folder_changed=self._on_step2_output_folder_changed,
             on_continue_to_step3=self._on_step2_continue_to_step3,
+            is_step3_folder_active=self._is_step3_folder_active,
         )
         self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
 
@@ -1184,6 +1185,11 @@ class AIDaSApp(ctk.CTk):
         """Keep Step 3 pointed at Step 2's MARKED output folder."""
         if getattr(self, "step3", None) is not None:
             self.step3.set_input_folder(folder)
+
+    def _is_step3_folder_active(self, folder) -> bool:
+        """Return whether a live R batch is using a prospective Step 2 output folder."""
+        step3 = getattr(self, "step3", None)
+        return bool(step3 is not None and step3.is_folder_active(folder))
 
     def _on_step2_continue_to_step3(self, folders) -> None:
         """Open Step 3 with the exact nasal/temporal folders saved in Step 2."""
