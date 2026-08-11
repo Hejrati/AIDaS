@@ -10,6 +10,23 @@ from aidas.core.config import Config
 
 
 class ConfigPersistenceTests(unittest.TestCase):
+    def test_peek_reads_without_creating_the_preferences_directory(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir) / ".aidas"
+            config_file = config_dir / "preferences.json"
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file
+            ):
+                self.assertEqual(Config.peek("interface_mode"), "Modern")
+                self.assertFalse(config_dir.exists())
+
+                config_dir.mkdir()
+                config_file.write_text(
+                    json.dumps({"interface_mode": "Classic"}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(Config.peek("interface_mode"), "Classic")
+
     def test_existing_preferences_are_preserved_and_new_defaults_are_merged(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_dir = Path(temp_dir) / ".aidas"
@@ -29,6 +46,7 @@ class ConfigPersistenceTests(unittest.TestCase):
                 config = Config()
                 self.assertEqual(config.get("theme"), "vista")
                 self.assertEqual(config.get("appearance_mode"), "System")
+                self.assertEqual(config.get("interface_mode"), "Modern")
                 self.assertEqual(config.get("sdb_raw_width"), 768)
                 self.assertEqual(config.get("sdb_raw_height"), 1200)
                 self.assertEqual(config.get("sdb_raw_offset"), 1050)

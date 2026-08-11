@@ -672,26 +672,34 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             return_value=12,
         ):
             self.assertEqual(Step3Frame._cpu_worker_limit(), 12)
-            self.assertEqual(Step3Frame._r_worker_limit(), 11)
+            self.assertEqual(Step3Frame._r_worker_limit(), 12)
 
-    def test_batch_reserves_a_processor_for_step2_and_the_ui(self):
+    def test_batch_reports_job_limit_from_the_shared_core_budget(self):
         panel = RBatchSelectionPanel.__new__(RBatchSelectionPanel)
         panel.step_frame = mock.Mock()
-        panel.step_frame._r_worker_limit.return_value = 7
+        panel.step_frame._available_r_worker_limit.return_value = 7
+        panel.step_frame._step2_core_allocation.return_value = 0
 
         self.assertEqual(panel._max_worker_count(), 7)
         self.assertEqual(panel._max_worker_count(20), 7)
         self.assertEqual(panel._max_worker_count(3), 3)
         self.assertEqual(
             panel._worker_limit_text(7),
-            "Max: 7 (1 CPU reserved)",
+            "Max jobs: 7 (shared with Step 2)",
+        )
+        self.assertEqual(panel._worker_limit_text(1), "Max jobs: 1 (shared with Step 2)")
+
+        panel.step_frame._step2_core_allocation.return_value = 3
+        self.assertEqual(
+            panel._worker_limit_text(4),
+            "Max jobs: 4 (3 cores used by Step 2)",
         )
 
     def test_r_process_thread_budget_prevents_nested_cpu_oversubscription(self):
         with mock.patch.object(Step3Frame, "_cpu_worker_limit", return_value=8):
-            self.assertEqual(Step3Frame._r_threads_per_process(1), 7)
-            self.assertEqual(Step3Frame._r_threads_per_process(2), 3)
-            self.assertEqual(Step3Frame._r_threads_per_process(7), 1)
+            self.assertEqual(Step3Frame._r_threads_per_process(1), 1)
+            self.assertEqual(Step3Frame._r_threads_per_process(2), 1)
+            self.assertEqual(Step3Frame._r_threads_per_process(8), 1)
 
         frame = self._make_frame()
         frame._default_r_package_library = lambda: None
@@ -706,6 +714,19 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             "NUMEXPR_NUM_THREADS",
         ):
             self.assertEqual(env[name], "2")
+
+    def test_step3_allocation_subtracts_active_step2_cores(self):
+        frame = Step3Frame.__new__(Step3Frame)
+        frame.get_step2_core_usage = lambda: 3
+        frame._busy = True
+        frame._active_r_core_allocation = 4
+
+        with mock.patch.object(Step3Frame, "_cpu_worker_limit", return_value=8):
+            self.assertEqual(frame._step2_core_allocation(), 3)
+            self.assertEqual(frame._available_r_worker_limit(), 5)
+            self.assertEqual(frame.active_core_allocation(), 4)
+            frame._busy = False
+            self.assertEqual(frame.active_core_allocation(), 0)
 
 
 if __name__ == "__main__":

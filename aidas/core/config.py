@@ -19,6 +19,10 @@ class Config:
         # ttk theme preference.  Keeping both keys lets older preference files
         # load unchanged while the UI moves to System/Light/Dark modes.
         "appearance_mode": "System",
+        # Presentation is independent of color appearance. Classic restores
+        # the pre-v3 native shell while every processing workflow stays on the
+        # current implementation.
+        "interface_mode": "Modern",
         "sdb_raw_width": 768,
         "sdb_raw_height": 1200,
         "sdb_raw_offset": 1050,
@@ -33,6 +37,26 @@ class Config:
     def __init__(self):
         self._ensure_config_dir()
         self.prefs = self._load_prefs()
+
+    @classmethod
+    def peek(cls, key, default=None):
+        """Read one saved value without creating directories or raising I/O errors.
+
+        Startup uses this lightweight path to choose the splash presentation.
+        Full preference initialization still happens under the visible splash.
+        """
+
+        fallback = cls.DEFAULTS.get(key, default)
+        try:
+            if not cls.CONFIG_FILE.is_file():
+                return fallback
+            with open(cls.CONFIG_FILE, "r", encoding="utf-8") as file:
+                loaded = json.load(file)
+            if isinstance(loaded, dict):
+                return loaded.get(key, fallback)
+        except (json.JSONDecodeError, OSError):
+            pass
+        return fallback
     
     @classmethod
     def _ensure_config_dir(cls):

@@ -23,9 +23,9 @@ This document lists what you need before running AIDaS as a Python application.
 - `pip` available for package installation
 
 ### 3. System Packages
-AIDaS uses CustomTkinter on top of Tkinter for its modern application UI, while
-retaining native Tkinter and scientific widgets where specialized integration is
-needed.
+AIDaS offers both a CustomTkinter-based Modern interface and a Classic interface
+modeled on the native AIDaS v1/v2 desktop shell. Both use the same current
+workflow and processing backend.
 
 **On Windows:**
 - Tkinter is included with Python by default
@@ -301,10 +301,18 @@ aidas/
 `-- utils/                 Shared filesystem, image, I/O, logging, and UI helpers
 ```
 
-The interface supports **System**, **Light**, and **Dark** appearance modes.
-Shared colors, spacing, typography, and component styling live under `aidas/ui/`
-so the visual design can be changed without modifying workflow backends. Keep new
-UI styling in that package and reuse its components throughout the application.
+The **View > Interface** menu and **Settings > General** let users choose
+**Modern** or **Classic**. **System**, **Light**, and **Dark** remain in that
+same interface menu and are enabled only while Modern is selected. Classic
+restores the native title/menu bars, visible four-step tabs, compact status bar,
+flat controls, and the original fixed-light v2 palette; the saved Modern
+appearance is retained while Classic is active. Interface changes take effect
+immediately without reconstructing the active Step 1–4 workflow objects.
+
+Both modes instantiate the same Step 1–4 classes and callbacks. Shared colors,
+spacing, typography, and component styling live under `aidas/ui/`, so visual
+changes remain separate from workflow backends. Keep new UI styling in that
+package and reuse its components throughout the application.
 PyInstaller collects CustomTkinter's packaged theme and font data through
 `AIDaS.spec`; preserve that collection when changing the release configuration.
 
@@ -376,11 +384,16 @@ and cancelled R process trees are stopped, reported separately from script
 failures, and retained in the Step 3 logs.
 
 Step 2 model segmentation remains available while a Step 3 R batch is running.
-R worker and native-library thread limits reserve processing capacity for the UI
-and the segmentation worker. A Step 2 handoff made during an R batch is queued
-and opens after that batch finishes. Step 2 may save unrelated folders at the
-same time, but AIDaS blocks saves into a folder actively being read by Step 3 to
-avoid replacing Analyze inputs midway through an R run.
+The two steps share the logical cores available to the AIDaS process: every
+active Step 3 folder job reserves one core, and Step 2 limits its automatic GPU
+fallback to the remaining cores. If no core is free, AIDaS warns before Step 2
+shares a busy core. Step 2 also reports DirectML GPU compatibility and the
+provider actually selected by its isolated AI worker. Its fallback-core selector
+is hidden when compatible GPU execution is confirmed and returns if the live
+worker must use core processing. A Step 2 handoff made during an R batch is
+queued and opens after that batch finishes. Step 2 may save unrelated folders at
+the same time, but AIDaS blocks saves into a folder actively being read by Step 3
+to avoid replacing Analyze inputs midway through an R run.
 
 Do not use a minimal PyInstaller command for release builds; it does not include
 the model/data files or the reliable one-directory layout defined in

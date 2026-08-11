@@ -20,7 +20,7 @@ from aidas.services.update_service import (
 )
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
 from aidas.ui.windowing import synchronize_window_chrome
-from aidas.utils.ui_utils import apply_app_icon_to
+from aidas.utils.ui_utils import apply_app_icon_to, load_color_close_ctk_icon
 
 
 AUTO_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -79,10 +79,13 @@ class DownloadProgressDialog(ctk.CTkToplevel):
         self.progress.pack(fill="x")
         self.progress.set(0.0)
 
+        self.cancel_icon = load_color_close_ctk_icon(self, size=CONTROLS.icon_size)
         self.cancel_button = ctk.CTkButton(
             panel,
             text="Cancel",
             command=cancel_command,
+            image=self.cancel_icon,
+            compound="left",
             width=104,
             height=CONTROLS.height_md,
             corner_radius=SHAPES.corner_radius_md,

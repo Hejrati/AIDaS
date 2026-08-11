@@ -64,6 +64,7 @@ from aidas.utils.ui_utils import (
     action_button,
     apply_app_icon_to,
     icon_action_button,
+    load_color_close_ctk_icon,
     load_ctk_image,
 )
 
@@ -1421,11 +1422,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         ttk.Label(footer, textvariable=self.apply_status_var, style="AIDaS.Success.TLabel").pack(
             side="left", padx=(16, 0)
         )
-        self.close_button_icon = load_ctk_image(
-            self,
-            "flat-color-icons--cancel.png",
-            size=20,
-        )
+        self.close_button_icon = load_color_close_ctk_icon(self, size=20)
         self.close_button = AppButton(
             footer,
             text="Close",

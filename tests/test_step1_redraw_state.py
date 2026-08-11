@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import tkinter as tk
 
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.utils.ui_utils import NativeNumericSpinbox
@@ -25,6 +26,21 @@ class _ControlStub:
 class _UnexpectedContainerTraversal:
     def winfo_children(self):
         raise AssertionError("semantic state updates must not traverse widget internals")
+
+
+class _VariableStub:
+    def __init__(self, value=None, *, error=None):
+        self.value = value
+        self.error = error
+
+    def get(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+    def set(self, value):
+        self.error = None
+        self.value = value
 
 
 class Step1RedrawStateTests(unittest.TestCase):
@@ -111,6 +127,27 @@ class Step1RedrawStateTests(unittest.TestCase):
         self.assertEqual(spinbox.entry.configure_calls, [{"state": "disabled"}])
         self.assertEqual(spinbox.up_button.configure_calls, [{"state": "disabled"}])
         self.assertEqual(spinbox.down_button.configure_calls, [{"state": "disabled"}])
+
+    def test_numeric_spinbox_dynamic_maximum_clamps_the_current_value(self):
+        spinbox = object.__new__(NativeNumericSpinbox)
+        spinbox.minimum = 1
+        spinbox.maximum = 10
+        spinbox.var = _VariableStub("9")
+
+        spinbox.configure(maximum=3)
+
+        self.assertEqual(spinbox.maximum, 3)
+        self.assertEqual(spinbox.var.get(), "3")
+
+    def test_numeric_spinbox_arrows_recover_from_invalid_typed_text(self):
+        spinbox = object.__new__(NativeNumericSpinbox)
+        spinbox.minimum = 1
+        spinbox.maximum = 10
+        spinbox.var = _VariableStub(error=tk.TclError("invalid number"))
+
+        spinbox._step(1)
+
+        self.assertEqual(spinbox.var.get(), "1")
 
 
 if __name__ == "__main__":

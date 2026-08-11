@@ -25,8 +25,10 @@ ASSET_DIR_NAME = "assets"
 ACTION_ICON_SIZE = 20
 ACTION_ICON_FILES = {
     "cancel": "flat-color-icons--cancel.png",
+    "close": "flat-color-icons--cancel.png",
     "clear": "flat-color-icons--empty-trash.png",
     "confirm": "flat-color-icons--checkmark.png",
+    "download": "flat-color-icons--download.png",
     "folder": "flat-color-icons--folder.png",
     "home": "flat-color-icons--home.png",
     "next": "flat-color-icons--right.png",
@@ -105,6 +107,10 @@ def load_ui_icon(owner, filename, *, size=None):
 def load_action_icon(owner, action, *, size=ACTION_ICON_SIZE):
     """Load a semantic icon from the app's unified Flat Color icon family."""
 
+    if action in {"cancel", "close"}:
+        # The bundled Flat Color "cancel" glyph is a prohibition sign.  Use
+        # the app's established X badge for dismiss/cancel semantics instead.
+        return load_color_close_icon(owner, size=size)
     try:
         filename = ACTION_ICON_FILES[action]
     except KeyError as exc:
@@ -112,8 +118,8 @@ def load_action_icon(owner, action, *, size=ACTION_ICON_SIZE):
     return load_ui_icon(owner, filename, size=size)
 
 
-def load_color_close_icon(owner, *, size=ACTION_ICON_SIZE):
-    """Create the colorful X badge used by Close actions."""
+def _color_close_image(size=ACTION_ICON_SIZE):
+    """Render the shared red X badge as a DPI-friendly Pillow image."""
 
     size = max(8, int(size))
     scale = 4
@@ -139,8 +145,28 @@ def load_color_close_icon(owner, *, size=ACTION_ICON_SIZE):
         fill="#FFFFFF",
         width=2 * scale,
     )
-    rendered = image.resize((size, size), Image.Resampling.LANCZOS)
+    return image.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def load_color_close_icon(owner, *, size=ACTION_ICON_SIZE):
+    """Create the colorful X badge used by native Close/Cancel actions."""
+
+    rendered = _color_close_image(size)
     return remember_image(owner, ImageTk.PhotoImage(rendered, master=owner))
+
+
+def load_color_close_ctk_icon(owner, *, size=ACTION_ICON_SIZE):
+    """Create the shared X badge for DPI-aware CustomTkinter actions."""
+
+    rendered = _color_close_image(size)
+    return remember_image(
+        owner,
+        ctk.CTkImage(
+            light_image=rendered,
+            dark_image=rendered,
+            size=(max(8, int(size)), max(8, int(size))),
+        ),
+    )
 
 
 def action_button(
@@ -164,13 +190,16 @@ def action_button(
     options = {
         "text": text,
         "command": command,
-        "image": icon,
+        # Reusing the complete source glyph as an explicit disabled-state
+        # image prevents ttk's white stipple without hiding pale icon details.
+        "image": (icon, "disabled", icon),
         "compound": "left",
         "style": "AIDaS.Action.TButton",
     }
     options.update(button_options)
     button = ttk.Button(parent, **options)
     button._aidas_action_icon = icon
+    button._aidas_disabled_action_icon = icon
     if tooltip:
         HoverToolTip(button, tooltip)
     return button
@@ -190,6 +219,10 @@ def icon_action_button(
 
     button_options.setdefault("style", "AIDaS.Icon.TButton")
     button_options.setdefault("width", 0)
+    # ``action_button`` normally composes an icon to the left of text.  With
+    # an empty label, that layout can still reserve text spacing and nudge the
+    # glyph off center.  Use Tk's true image-only layout for square controls.
+    button_options.setdefault("compound", "image")
     return action_button(
         parent,
         owner,
@@ -397,8 +430,9 @@ class NativeNumericSpinbox(ctk.CTkFrame):
     def _step(self, delta):
         try:
             current = int(float(self.var.get()))
-        except (TypeError, ValueError):
-            current = self.minimum if delta > 0 else self.maximum
+        except (TypeError, ValueError, tk.TclError):
+            self.var.set(str(self.minimum if delta > 0 else self.maximum))
+            return
         next_value = max(self.minimum, min(self.maximum, current + int(delta)))
         self.var.set(str(next_value))
 
@@ -413,6 +447,20 @@ class NativeNumericSpinbox(ctk.CTkFrame):
         options.update(kwargs)
 
         state = options.pop("state", None)
+        minimum = options.pop("minimum", options.pop("from_", None))
+        maximum = options.pop("maximum", options.pop("to", None))
+        if minimum is not None:
+            self.minimum = int(minimum)
+        if maximum is not None:
+            self.maximum = int(maximum)
+        if minimum is not None or maximum is not None:
+            if self.minimum > self.maximum:
+                self.minimum, self.maximum = self.maximum, self.minimum
+            try:
+                current = int(float(self.var.get()))
+            except (TypeError, ValueError, tk.TclError):
+                current = self.minimum
+            self.var.set(str(max(self.minimum, min(self.maximum, current))))
         result = super().configure(**options) if options else None
         if state is not None and state != self._button_state:
             self.entry.configure(state=state)
@@ -1318,6 +1366,7 @@ class SidebarStepFrame(ctk.CTkFrame):
             container,
             textvariable=status_var,
             anchor="w",
+            padx=LAYOUT.space_sm,
             height=30,
             corner_radius=SHAPES.corner_radius_sm,
             border_width=SHAPES.border_width,

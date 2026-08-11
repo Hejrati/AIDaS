@@ -269,8 +269,13 @@ class Step1WorkQueueTests(unittest.TestCase):
                     Step2Frame._preferred_analyze_pair_path
                 )
 
-                def _start_step2_batch_segmentation_from_rows(self, rows, root_dir):
-                    self.started = (rows, root_dir)
+                def _open_step2_batch_segmentation_panel(
+                    self,
+                    root_dir,
+                    *,
+                    initial_rows=None,
+                ):
+                    self.opened = (initial_rows, root_dir)
 
             step2 = Step2Stub()
             Step2Frame.start_batch_segmentation_for_folders(
@@ -278,7 +283,7 @@ class Step1WorkQueueTests(unittest.TestCase):
                 [ready, already_marked],
             )
 
-            rows, batch_root = step2.started
+            rows, batch_root = step2.opened
             self.assertEqual(len(rows), 2)
             self.assertEqual(
                 {Path(row["folder"]) for row in rows},

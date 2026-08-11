@@ -15,7 +15,7 @@ import webbrowser
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageTk
 
 from aidas import __version__
 from aidas.core.config import Config
@@ -29,19 +29,29 @@ from aidas.core.display import (
 from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
+from aidas.ui.classic import build_classic_application_menu
 from aidas.ui.components import AppButton, AppStatusBar, WorkflowHeader
 from aidas.ui.menu_bar import ApplicationMenuBar
 from aidas.ui.splash import SplashWindow
 from aidas.ui.theme import (
     APPEARANCE_MODES,
     COLOR_PAIRS,
+    COLORS,
+    INTERFACE_MODES,
     SHAPES,
     TYPOGRAPHY,
     apply_appearance_mode,
     normalize_appearance_mode,
+    normalize_interface_mode,
+    refresh_interface_widgets,
     refresh_native_widgets,
+    set_interface_mode,
 )
-from aidas.ui.title_bar import create_custom_windows_title_bar, reassert_client_size
+from aidas.ui.title_bar import (
+    cache_native_window_handle,
+    create_custom_windows_title_bar,
+    reassert_client_size,
+)
 from aidas.ui.windowing import (
     centered_logical_geometry,
     logical_window_size,
@@ -50,7 +60,9 @@ from aidas.ui.windowing import (
 )
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
+    action_button,
     apply_app_icon_to,
+    load_color_close_ctk_icon,
     resource_path,
 )
 
@@ -88,11 +100,19 @@ class AboutDialog(ctk.CTkToplevel):
     PREFERRED_HEIGHT = 570
     MAX_SCREEN_FRACTION = 0.9
 
-    def __init__(self, parent: tk.Misc) -> None:
+    def __init__(self, parent: tk.Misc, *, interface_mode="Modern") -> None:
         super().__init__(parent)
         self.withdraw()
         self.title("About AIDaS")
-        self.configure(fg_color=COLOR_PAIRS["application"])
+        self._presentation_mode = normalize_interface_mode(interface_mode)
+        self._classic_about = self._presentation_mode == "Classic"
+        self.configure(
+            fg_color=(
+                COLOR_PAIRS["surface"]
+                if self._classic_about
+                else COLOR_PAIRS["application"]
+            )
+        )
         self.resizable(False, False)
         self.transient(parent)
         apply_app_icon_to(self)
@@ -119,6 +139,30 @@ class AboutDialog(ctk.CTkToplevel):
             physical_height,
         )
         content_wrap = max(80, dialog_width - 96)
+
+        if self._classic_about:
+            self._build_classic_about(content_wrap)
+            self.protocol("WM_DELETE_WINDOW", self._close)
+            self.bind("<Escape>", lambda _event: self._close())
+            self.bind("<Return>", lambda _event: self._close())
+            self.geometry(
+                _center_geometry(
+                    self,
+                    dialog_width,
+                    dialog_height,
+                    parent=parent,
+                )
+            )
+            self.deiconify()
+            synchronize_window_chrome(
+                self,
+                background=COLOR_PAIRS["window_chrome"],
+                foreground=COLOR_PAIRS["text"],
+                border=COLOR_PAIRS["window_chrome"],
+            )
+            self.grab_set()
+            self.ok_button.focus_set()
+            return
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -165,7 +209,7 @@ class AboutDialog(ctk.CTkToplevel):
             ),
         ).grid(row=1, column=0)
         add_label(
-            text=f"{APP_SUBTITLE}  ·  Version {__version__}",
+            text=f"{APP_SUBTITLE} - Version {__version__}",
             text_color=COLOR_PAIRS["muted_text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
         ).grid(row=2, column=0, pady=(2, 14))
@@ -217,22 +261,18 @@ class AboutDialog(ctk.CTkToplevel):
             text=COPYRIGHT_NOTICE,
             text_color=COLOR_PAIRS["muted_text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
-        ).grid(row=8, column=0, padx=24, pady=(10, 0))
-        add_label(
-            text=f"Python {sys.version.split()[0]}  ·  CustomTkinter {ctk.__version__}",
-            text_color=COLOR_PAIRS["muted_text"],
-            font=ctk.CTkFont(family=TYPOGRAPHY.mono_family, size=TYPOGRAPHY.caption_size),
-        ).grid(row=9, column=0, pady=(10, 18))
+        ).grid(row=8, column=0, padx=24, pady=(10, 18))
 
         button_panel = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         button_panel.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 14))
-        AppButton(
+        self.ok_button = AppButton(
             button_panel,
-            text="Close",
-            width=112,
+            text="OK",
+            width=96,
             variant="primary",
             command=self._close,
-        ).pack(side="right")
+        )
+        self.ok_button.pack(side="right")
 
         self.bind("<Configure>", self._resize_about_content, add="+")
         self.protocol("WM_DELETE_WINDOW", self._close)
@@ -247,7 +287,119 @@ class AboutDialog(ctk.CTkToplevel):
             border=COLOR_PAIRS["window_chrome"],
         )
         self.grab_set()
-        self.focus_force()
+        self.ok_button.focus_set()
+
+    def _build_classic_about(self, content_wrap: int) -> None:
+        """Build an opaque native About surface for the Classic interface."""
+
+        self.classic_footer = ttk.Frame(
+            self,
+            style="AIDaS.Content.TFrame",
+            padding=(12, 8),
+        )
+        self.classic_footer.pack(side="bottom", fill="x")
+        ttk.Separator(self).pack(side="bottom", fill="x")
+
+        self.classic_content = ttk.Frame(
+            self,
+            style="AIDaS.Content.TFrame",
+            padding=(28, 16, 28, 10),
+        )
+        self.classic_content.pack(side="top", fill="both", expand=True)
+        self.classic_content.grid_columnconfigure(0, weight=1)
+
+        logo_path = resource_path(os.path.join("assets", "aidas.png"))
+        with Image.open(logo_path) as logo:
+            logo_source = logo.convert("RGBA").resize(
+                (88, 88),
+                Image.Resampling.LANCZOS,
+            )
+        self.logo_image = ImageTk.PhotoImage(logo_source, master=self)
+        ttk.Label(
+            self.classic_content,
+            image=self.logo_image,
+            anchor="center",
+        ).grid(row=0, column=0, pady=(2, 4))
+
+        def add_label(
+            row,
+            text,
+            *,
+            font=None,
+            style=None,
+            pady=(0, 0),
+            wraplength=content_wrap,
+        ):
+            options = {
+                "text": text,
+                "anchor": "center",
+                "justify": "center",
+                "wraplength": wraplength,
+            }
+            if font is not None:
+                options["font"] = font
+            if style is not None:
+                options["style"] = style
+            label = ttk.Label(self.classic_content, **options)
+            label.grid(row=row, column=0, sticky="ew", pady=pady)
+            return label
+
+        add_label(
+            1,
+            APP_TITLE,
+            font=(TYPOGRAPHY.family, TYPOGRAPHY.title_size, "bold"),
+        )
+        add_label(
+            2,
+            f"{APP_SUBTITLE} - Version {__version__}",
+            style="AIDaS.Muted.TLabel",
+            pady=(2, 14),
+        )
+        add_label(
+            3,
+            LAB_ACRONYM,
+            font=(TYPOGRAPHY.family, TYPOGRAPHY.subtitle_size, "bold"),
+        )
+        add_label(
+            4,
+            LAB_NAME,
+            font=(TYPOGRAPHY.family, TYPOGRAPHY.body_size, "bold"),
+            pady=(3, 0),
+        )
+        link = add_label(
+            5,
+            LAB_URL_TEXT,
+            style="AIDaS.Link.TLabel",
+            pady=(10, 0),
+        )
+        link.configure(cursor="hand2")
+        link.bind("<Button-1>", lambda _event: webbrowser.open_new_tab(LAB_URL))
+        add_label(
+            6,
+            " ".join(LAB_DESCRIPTION.splitlines()),
+            style="AIDaS.Muted.TLabel",
+            pady=(16, 0),
+        )
+        add_label(
+            7,
+            UNIVERSITY_NAME,
+            font=(TYPOGRAPHY.family, TYPOGRAPHY.body_size, "bold"),
+            pady=(14, 0),
+        )
+        add_label(
+            8,
+            COPYRIGHT_NOTICE,
+            style="AIDaS.Muted.TLabel",
+            pady=(10, 8),
+        )
+
+        self.ok_button = ttk.Button(
+            self.classic_footer,
+            text="OK",
+            width=12,
+            command=self._close,
+        )
+        self.ok_button.pack(side="right")
 
     def _resize_about_content(self, event) -> None:
         if event.widget is not self:
@@ -278,6 +430,8 @@ class SettingsDialog(ctk.CTkToplevel):
         parent,
         *,
         preferences,
+        interface_mode,
+        set_interface_command,
         appearance_mode,
         set_appearance_command,
         step1,
@@ -292,9 +446,16 @@ class SettingsDialog(ctk.CTkToplevel):
         apply_app_icon_to(self)
         self._parent = parent
         self._preferences = preferences
+        self._set_interface_command = set_interface_command
         self._set_appearance_command = set_appearance_command
         self._step1 = step1
         self._step3 = step3
+        self._presentation_mode = normalize_interface_mode(interface_mode)
+        self._classic_settings = self._presentation_mode == "Classic"
+        self._presentation_refresh_after_id = None
+        self._presentation_refresh_pending = False
+        self._applying_changes = False
+        self._classic_mousewheel_binding_id = None
         self._r_setup_wizard = None
         self._script_choices = {"main": [], "output": []}
         self._script_by_label = {"main": {}, "output": {}}
@@ -306,6 +467,21 @@ class SettingsDialog(ctk.CTkToplevel):
             "main": tk.StringVar(master=self),
             "output": tk.StringVar(master=self),
         }
+
+        if self._classic_settings:
+            self._build_classic_settings(
+                preferences=preferences,
+                interface_mode=interface_mode,
+                appearance_mode=appearance_mode,
+                step3=step3,
+            )
+            self.protocol("WM_DELETE_WINDOW", self._close)
+            self.bind("<Escape>", lambda _event: self._close())
+            self.geometry(_center_geometry(self, 720, 720, parent=parent))
+            self.deiconify()
+            self.grab_set()
+            self.focus_force()
+            return
 
         self.settings_panel = ctk.CTkScrollableFrame(
             self,
@@ -332,6 +508,23 @@ class SettingsDialog(ctk.CTkToplevel):
         ).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
 
         general = self._settings_section("General", row=1)
+        self.interface_menu = ctk.CTkOptionMenu(
+            general,
+            values=list(INTERFACE_MODES),
+            command=self._interface_choice_changed,
+            width=140,
+            height=34,
+            corner_radius=SHAPES.corner_radius_sm,
+            fg_color=COLOR_PAIRS["button"],
+            button_color=COLOR_PAIRS["primary"],
+            button_hover_color=COLOR_PAIRS["primary_hover"],
+            text_color=COLOR_PAIRS["text"],
+            dropdown_fg_color=COLOR_PAIRS["surface_elevated"],
+            dropdown_hover_color=COLOR_PAIRS["primary_soft"],
+            dropdown_text_color=COLOR_PAIRS["text"],
+        )
+        self._labeled_control(general, 0, "Interface", self.interface_menu)
+        self.interface_menu.set(normalize_interface_mode(interface_mode))
         self.appearance_menu = ctk.CTkOptionMenu(
             general,
             values=list(APPEARANCE_MODES),
@@ -347,8 +540,9 @@ class SettingsDialog(ctk.CTkToplevel):
             dropdown_hover_color=COLOR_PAIRS["primary_soft"],
             dropdown_text_color=COLOR_PAIRS["text"],
         )
-        self._labeled_control(general, 0, "Appearance", self.appearance_menu)
+        self._labeled_control(general, 1, "Appearance", self.appearance_menu)
         self.appearance_menu.set(appearance_mode)
+        self._sync_interface_controls(interface_mode, appearance_mode)
         self.update_checks_var = tk.BooleanVar(
             master=self,
             value=bool(preferences.get("check_for_updates", True)),
@@ -364,7 +558,7 @@ class SettingsDialog(ctk.CTkToplevel):
             text_color=COLOR_PAIRS["text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
         )
-        self.update_switch.grid(row=1, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 12))
+        self.update_switch.grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 12))
 
         sdb = self._settings_section("Default SDB image parameters", row=2)
         self.sdb_default_vars = {
@@ -492,12 +686,14 @@ class SettingsDialog(ctk.CTkToplevel):
             anchor="w",
             text_color=COLOR_PAIRS["muted_text"],
         ).pack(side="left")
+        close_icon = load_color_close_ctk_icon(self)
         AppButton(
             self.footer,
             text="Close",
             variant="secondary",
             command=self._close,
             width=104,
+            image=close_icon,
         ).pack(side="right")
         AppButton(
             self.footer,
@@ -519,6 +715,241 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         self.grab_set()
         self.focus_force()
+
+    def _build_classic_settings(
+        self,
+        *,
+        preferences,
+        interface_mode,
+        appearance_mode,
+        step3,
+    ) -> None:
+        """Build a native property-sheet surface for the Classic interface."""
+
+        self.settings_panel = ttk.Frame(self, padding=(10, 10, 10, 0))
+        self.settings_panel.pack(fill="both", expand=True)
+        self.settings_panel.rowconfigure(0, weight=1)
+        self.settings_panel.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(
+            self.settings_panel,
+            background=COLORS.application,
+            highlightthickness=1,
+            highlightbackground=COLORS.border,
+            borderwidth=0,
+        )
+        scrollbar = ttk.Scrollbar(
+            self.settings_panel,
+            orient="vertical",
+            command=canvas.yview,
+        )
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        content = ttk.Frame(canvas, padding=14)
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def update_scroll_region(_event=None):
+            try:
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            except tk.TclError:
+                pass
+
+        def fit_content_width(event):
+            try:
+                canvas.itemconfigure(content_window, width=max(1, event.width))
+            except tk.TclError:
+                pass
+
+        content.bind("<Configure>", update_scroll_region, add="+")
+        canvas.bind("<Configure>", fit_content_width, add="+")
+        def scroll_classic_settings(event):
+            # Descendant widgets receive the toplevel bindtag, whereas a
+            # canvas-only binding stops working as soon as the pointer is over
+            # a label, entry, or combobox.  Ignore the binding while the
+            # embedded R setup wizard has replaced the settings property sheet.
+            try:
+                if self.settings_panel.winfo_manager() != "pack":
+                    return None
+                direction = -1 if event.delta > 0 else 1
+                canvas.yview_scroll(direction, "units")
+            except tk.TclError:
+                return None
+            return "break"
+
+        self._classic_mousewheel_binding_id = self.bind(
+            "<MouseWheel>",
+            scroll_classic_settings,
+            add="+",
+        )
+
+        ttk.Label(
+            content,
+            text="Settings",
+            font=("Segoe UI", 12, "bold"),
+        ).pack(anchor="w", pady=(0, 10))
+
+        general = ttk.LabelFrame(content, text="General", padding=10)
+        general.pack(fill="x", pady=(0, 10))
+        general.columnconfigure(1, weight=1)
+        ttk.Label(general, text="Interface").grid(row=0, column=0, sticky="w", pady=4)
+        self.interface_menu = ttk.Combobox(
+            general,
+            values=list(INTERFACE_MODES),
+            state="readonly",
+            width=18,
+        )
+        self.interface_menu.set(normalize_interface_mode(interface_mode))
+        self.interface_menu.grid(row=0, column=1, sticky="e", pady=4)
+        self.interface_menu.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: self._interface_choice_changed(self.interface_menu.get()),
+            add="+",
+        )
+        ttk.Label(general, text="Appearance").grid(row=1, column=0, sticky="w", pady=4)
+        self.appearance_menu = ttk.Combobox(
+            general,
+            values=list(APPEARANCE_MODES),
+            state="disabled",
+            width=18,
+        )
+        self.appearance_menu.set(normalize_appearance_mode(appearance_mode))
+        self.appearance_menu.grid(row=1, column=1, sticky="e", pady=4)
+        self.appearance_menu.bind(
+            "<<ComboboxSelected>>",
+            self._mark_dirty,
+            add="+",
+        )
+        self.update_checks_var = tk.BooleanVar(
+            master=self,
+            value=bool(preferences.get("check_for_updates", True)),
+        )
+        self.update_switch = ttk.Checkbutton(
+            general,
+            text="Check automatically for application updates",
+            variable=self.update_checks_var,
+            command=self._mark_dirty,
+        )
+        self.update_switch.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 2))
+
+        sdb = ttk.LabelFrame(content, text="Default SDB image parameters", padding=10)
+        sdb.pack(fill="x", pady=(0, 10))
+        sdb.columnconfigure(1, weight=1)
+        self.sdb_default_vars = {
+            "sdb_raw_width": tk.StringVar(value=str(preferences.get("sdb_raw_width", 768))),
+            "sdb_raw_height": tk.StringVar(value=str(preferences.get("sdb_raw_height", 1200))),
+            "sdb_raw_offset": tk.StringVar(value=str(preferences.get("sdb_raw_offset", 1050))),
+        }
+        for row, (key, label) in enumerate(
+            (
+                ("sdb_raw_width", "Width (px)"),
+                ("sdb_raw_height", "Height (px)"),
+                ("sdb_raw_offset", "Offset (bytes)"),
+            )
+        ):
+            ttk.Label(sdb, text=label).grid(row=row, column=0, sticky="w", pady=4)
+            ttk.Entry(
+                sdb,
+                textvariable=self.sdb_default_vars[key],
+                width=18,
+                justify="right",
+            ).grid(row=row, column=1, sticky="e", pady=4)
+        self.sdb_little_endian_var = tk.BooleanVar(
+            master=self,
+            value=bool(preferences.get("sdb_little_endian", True)),
+        )
+        ttk.Checkbutton(
+            sdb,
+            text="Little-endian byte order",
+            variable=self.sdb_little_endian_var,
+            command=self._mark_dirty,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 2))
+
+        r_environment = ttk.LabelFrame(content, text="R environment", padding=10)
+        r_environment.pack(fill="x", pady=(0, 10))
+        ttk.Label(
+            r_environment,
+            text=f"Install or verify R {step3.R_REQUIRED_VERSION} and all required packages.",
+        ).pack(anchor="w", pady=(0, 8))
+        action_button(
+            r_environment,
+            self,
+            "Install / set up R and packages",
+            self._open_r_setup,
+            "package",
+            style="AIDaS.PrimaryAction.TButton",
+        ).pack(anchor="w")
+
+        scripts = ttk.LabelFrame(content, text="Step 3 R scripts", padding=10)
+        scripts.pack(fill="x")
+        scripts.columnconfigure(0, weight=1)
+        ttk.Label(
+            scripts,
+            text="Choose each active script from its list, then click Apply.",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        self.script_menus = {}
+        for row, (role, label) in enumerate(self.SCRIPT_ROLES):
+            base_row = 1 + row * 3
+            ttk.Label(scripts, text=label).grid(
+                row=base_row,
+                column=0,
+                columnspan=2,
+                sticky="w",
+                pady=(5, 2),
+            )
+            menu = ttk.Combobox(
+                scripts,
+                textvariable=self._script_vars[role],
+                values=["No R scripts found"],
+                state="readonly",
+                width=62,
+            )
+            menu.grid(row=base_row + 1, column=0, sticky="ew")
+            menu.bind(
+                "<<ComboboxSelected>>",
+                lambda _event, selected_role=role: self._select_r_script(selected_role),
+                add="+",
+            )
+            self.script_menus[role] = menu
+            ttk.Button(
+                scripts,
+                text="Add R script...",
+                command=lambda selected_role=role: self._add_r_script(selected_role),
+            ).grid(row=base_row + 1, column=1, padx=(8, 0))
+            ttk.Label(
+                scripts,
+                textvariable=self._script_status_vars[role],
+                style="AIDaS.Muted.TLabel",
+            ).grid(row=base_row + 2, column=0, columnspan=2, sticky="w", pady=(2, 4))
+            self._refresh_r_script_choices(role)
+
+        self.footer = ttk.Frame(self, padding=(10, 8, 10, 10))
+        self.footer.pack(fill="x")
+        self.apply_status_var = tk.StringVar(master=self, value="")
+        ttk.Label(
+            self.footer,
+            textvariable=self.apply_status_var,
+            style="AIDaS.Muted.TLabel",
+        ).pack(side="left", fill="x", expand=True)
+        action_button(
+            self.footer,
+            self,
+            "Close",
+            self._close,
+            "close",
+        ).pack(side="right")
+        action_button(
+            self.footer,
+            self,
+            "Apply",
+            self._apply_changes,
+            "confirm",
+            style="AIDaS.PrimaryAction.TButton",
+        ).pack(side="right", padx=(0, 8))
+        for variable in self.sdb_default_vars.values():
+            variable.trace_add("write", self._mark_dirty)
+        self._sync_interface_controls(interface_mode, appearance_mode)
 
     def _settings_section(self, title, *, row):
         section = ctk.CTkFrame(
@@ -558,6 +989,59 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _mark_dirty(self, *_args) -> None:
         self.apply_status_var.set("Unsaved changes")
+
+    def _interface_choice_changed(self, mode_name: str) -> None:
+        """Keep dependent appearance controls honest before Apply is clicked."""
+
+        self._sync_interface_controls(mode_name)
+        self._mark_dirty()
+
+    def _sync_interface_controls(
+        self,
+        interface_mode: object,
+        appearance_mode: object | None = None,
+    ) -> None:
+        """Synchronize General controls after an external or local UI switch."""
+
+        selected = normalize_interface_mode(interface_mode)
+        self.interface_menu.set(selected)
+        if appearance_mode is not None:
+            self.appearance_menu.set(normalize_appearance_mode(appearance_mode))
+        self.appearance_menu.configure(
+            state=(
+                "readonly"
+                if getattr(self, "_classic_settings", False) and selected == "Modern"
+                else "normal"
+                if selected == "Modern"
+                else "disabled"
+            )
+        )
+
+    def _schedule_presentation_refresh(self) -> None:
+        """Reopen Settings in the active shell after the current Apply returns."""
+
+        if getattr(self, "_applying_changes", False):
+            self._presentation_refresh_pending = True
+            return
+        if self._presentation_refresh_after_id is not None:
+            return
+
+        def refresh() -> None:
+            self._presentation_refresh_after_id = None
+            parent = self._parent
+            show_settings = getattr(parent, "_show_settings", None)
+            self._close()
+            try:
+                parent._settings_dialog = None
+            except (AttributeError, TypeError):
+                pass
+            if callable(show_settings):
+                show_settings()
+
+        try:
+            self._presentation_refresh_after_id = self.after_idle(refresh)
+        except tk.TclError:
+            self._presentation_refresh_after_id = None
 
     def _validated_sdb_defaults(self):
         try:
@@ -708,9 +1192,38 @@ class SettingsDialog(ctk.CTkToplevel):
             self._script_status_vars[role].set(
                 f"Active: {self._compact_script_name(choice.path.name)}"
             )
-        self._set_appearance_command(self.appearance_menu.get())
-        self.appearance_menu.set(normalize_appearance_mode(self.appearance_menu.get()))
-        self.apply_status_var.set("All settings applied")
+        selected_interface = normalize_interface_mode(self.interface_menu.get())
+        self._applying_changes = True
+        try:
+            applied_interface = self._set_interface_command(selected_interface)
+            if applied_interface is None:
+                applied_interface = getattr(
+                    self._parent,
+                    "interface_mode",
+                    selected_interface,
+                )
+            applied_interface = normalize_interface_mode(applied_interface)
+            self.interface_menu.set(applied_interface)
+            if applied_interface == selected_interface == "Modern":
+                self._set_appearance_command(self.appearance_menu.get())
+                self.appearance_menu.set(
+                    normalize_appearance_mode(self.appearance_menu.get())
+                )
+            self._sync_interface_controls(
+                applied_interface,
+                self.appearance_menu.get(),
+            )
+            if applied_interface == selected_interface:
+                self.apply_status_var.set("All settings applied")
+            else:
+                self.apply_status_var.set(
+                    f"{applied_interface} remains active; interface change was not applied"
+                )
+        finally:
+            self._applying_changes = False
+            if getattr(self, "_presentation_refresh_pending", False):
+                self._presentation_refresh_pending = False
+                self._schedule_presentation_refresh()
 
     def _open_r_setup(self) -> None:
         if self._r_setup_wizard is not None:
@@ -744,14 +1257,25 @@ class SettingsDialog(ctk.CTkToplevel):
         self._r_setup_wizard = None
         if wizard is not None:
             wizard.destroy()
-        self.settings_panel.pack(fill="both", expand=True, padx=16, pady=(16, 8))
-        self.footer.pack(fill="x", padx=16, pady=(0, 14))
+        if self._classic_settings:
+            self.settings_panel.pack(fill="both", expand=True)
+            self.footer.pack(fill="x")
+        else:
+            self.settings_panel.pack(fill="both", expand=True, padx=16, pady=(16, 8))
+            self.footer.pack(fill="x", padx=16, pady=(0, 14))
         self.resizable(False, False)
         self.geometry(_center_geometry(self, 720, 720, parent=self._parent))
 
     def _close(self) -> None:
         if self._r_setup_wizard is not None and self._r_setup_wizard.busy:
             return
+        binding_id = getattr(self, "_classic_mousewheel_binding_id", None)
+        if binding_id is not None:
+            try:
+                self.unbind("<MouseWheel>", binding_id)
+            except tk.TclError:
+                pass
+            self._classic_mousewheel_binding_id = None
         try:
             self.grab_release()
         except tk.TclError:
@@ -771,7 +1295,30 @@ class AIDaSApp(ctk.CTk):
         enable_per_monitor_dpi_awareness()
         ctk.set_default_color_theme("dark-blue")
         ctk.set_appearance_mode("System")
+        # Resolve the presentation before constructing even the splash so a
+        # Classic launch never flashes modern chrome or rounded design tokens.
+        self.interface_mode = set_interface_mode(
+            Config.peek("interface_mode", "Modern"),
+            redraw=False,
+        )
+        self.requested_interface_mode = self.interface_mode
         super().__init__()
+        self._interface_refresh_after_id = None
+        self._interface_switching = False
+        self._normal_logical_client_size = None
+        self._pending_normal_client_size = None
+        self._normal_size_restore_after_id = None
+        tk.Misc.bind_all(
+            self,
+            "<Map>",
+            self._on_interface_widget_mapped,
+            add="+",
+        )
+        self.bind(
+            "<Configure>",
+            self._remember_normal_client_size,
+            add="+",
+        )
         self.withdraw()
         self.title("AIDaS — Retinal Image Processing")
         self.configure(fg_color=COLOR_PAIRS["application"])
@@ -804,6 +1351,7 @@ class AIDaSApp(ctk.CTk):
             lab_name=LAB_NAME,
             copyright_notice=COPYRIGHT_NOTICE,
         )
+        self._queue_interface_widget_refresh(include_splash=True)
         self._set_splash_progress(3, "Starting AIDaS...")
 
         try:
@@ -850,16 +1398,23 @@ class AIDaSApp(ctk.CTk):
 
         self._set_splash_progress(50, "Loading preferences...")
         self.preferences = Config()
+        self.interface_mode = set_interface_mode(
+            self.preferences.get("interface_mode", "Modern"),
+            redraw=False,
+        )
+        self.requested_interface_mode = self.interface_mode
         self._set_splash_progress(54, "Applying the interface theme...")
         self.style = ttk.Style(self)
         self.appearance_mode = normalize_appearance_mode(
             self.preferences.get("appearance_mode", self.preferences.get("theme", "System"))
         )
         apply_appearance_mode(
-            self.appearance_mode,
+            "Light" if self.interface_mode == "Classic" else self.appearance_mode,
             root=self,
             style=self.style,
+            force_ctk_redraw=True,
         )
+        self._queue_interface_widget_refresh(include_splash=True)
 
         self._set_splash_progress(58, "Starting application services...")
         self.update_controller = UpdateController(
@@ -870,13 +1425,18 @@ class AIDaSApp(ctk.CTk):
             restart_blocker_callback=self._update_restart_blocker,
             install_callback=self._queue_update_install,
         )
-        self.window_title_bar = create_custom_windows_title_bar(
-            self,
-            title=self.title(),
-            logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
-        )
+        self.window_title_bar = None
+        self.menu_bar = None
+        self._modern_menu_bar_cache = None
+        self.classic_menu = None
+        self.menubar = None
+        if self.interface_mode == "Classic":
+            # Resolve the unchanged HWND behind the splash so the first live
+            # move to custom Modern chrome does not flush the entire finished
+            # workflow tree merely to discover the native handle.
+            cache_native_window_handle(self)
+        self._install_modern_title_bar()
         if self.window_title_bar is not None:
-            self.window_title_bar.pack(side="top", fill="x")
             # SWP_FRAMECHANGED can alter Tk's client dimensions. Preserve the
             # logical startup size before the rest of the shell is composed.
             width, height = self._startup_window_size
@@ -885,28 +1445,13 @@ class AIDaSApp(ctk.CTk):
         self.bind_all("<Alt-F4>", lambda _event: self.destroy())
 
         self._set_splash_progress(62, "Creating the application workspace...")
-        self.header = WorkflowHeader(
-            self,
-            version=__version__,
-            on_step_selected=self._select_workflow_step,
-            on_settings_selected=self._show_settings,
-            on_help_selected=self._show_about,
-            logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
-            settings_icon_path=self._resource_path(
-                os.path.join("assets", "iconify-fluent-color--settings-32.png")
-            ),
-            help_icon_path=self._resource_path(
-                os.path.join("assets", "iconify-fluent-color--question-circle-32.png")
-            ),
-        )
-        self.header.pack(side="top", fill="x")
-        self.status_bar = AppStatusBar(
-            self,
-            text=f"AIDaS v{__version__} — ready",
-        )
-        self.status_bar.pack(side="bottom", fill="x")
-        # Preserve the historical label attribute used by update callbacks.
-        self.status = self.status_bar.label
+        self.header = None
+        self.status_bar = None
+        self.status = None
+        self._modern_header_cache = None
+        self._modern_status_bar_cache = None
+        self._build_workflow_header()
+        self._build_status_surface(f"AIDaS v{__version__} — ready")
 
         self.notebook = ttk.Notebook(self, style="AIDaS.TNotebook")
         self.notebook.pack(fill="both", expand=True)
@@ -929,11 +1474,16 @@ class AIDaSApp(ctk.CTk):
             on_output_folder_changed=self._on_step2_output_folder_changed,
             on_continue_to_step3=self._on_step2_continue_to_step3,
             is_step3_folder_active=self._is_step3_folder_active,
+            get_step3_core_usage=self._step3_core_usage,
         )
         self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
 
         self._set_splash_progress(83, "Preparing Step 3 - Flatten Retina...")
-        self.step3 = Step3Frame(self.notebook, preferences=self.preferences)
+        self.step3 = Step3Frame(
+            self.notebook,
+            preferences=self.preferences,
+            get_step2_core_usage=self._step2_core_usage,
+        )
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
 
         self._set_splash_progress(91, "Preparing Step 4 - Analyze ISEZ...")
@@ -941,8 +1491,16 @@ class AIDaSApp(ctk.CTk):
         self.notebook.add(self.step4, text="  Step 4 — Analyze ISEZ  ")
 
         self._set_splash_progress(97, "Finalizing the main window...")
-        self.header.select_step(0)
+        if self.interface_mode == "Classic":
+            # Build the reusable Modern-only surfaces while the startup splash
+            # is already present.  A user's first Classic -> Modern selection
+            # then swaps presentation immediately instead of constructing the
+            # popup canvases and header for the first time on that click.
+            self._prime_modern_shell_cache()
+        if self.header is not None:
+            self.header.select_step(0)
         refresh_native_widgets(self)
+        self._queue_interface_widget_refresh(include_splash=True)
         self._last_effective_appearance = ctk.get_appearance_mode()
         self._appearance_watch_after_id = self.after(1500, self._watch_system_appearance)
 
@@ -967,12 +1525,14 @@ class AIDaSApp(ctk.CTk):
         self._center_window(account_for_decorations=True)
         self.lift()
         self.update()
-        synchronize_window_chrome(
-            self,
-            background=COLOR_PAIRS["window_chrome"],
-            foreground=COLOR_PAIRS["text"],
-            border=COLOR_PAIRS["window_chrome"],
-        )
+        if self.interface_mode == "Modern":
+            synchronize_window_chrome(
+                self,
+                background=COLOR_PAIRS["window_chrome"],
+                foreground=COLOR_PAIRS["text"],
+                border=COLOR_PAIRS["window_chrome"],
+            )
+        self._queue_interface_widget_refresh()
         self.focus_force()
         self.after(1500, self.update_controller.check_automatically)
 
@@ -981,23 +1541,427 @@ class AIDaSApp(ctk.CTk):
         """Resolve a resource path for source runs and PyInstaller bundles."""
         return resource_path(relative_path)
 
-    def _build_menu(self) -> None:
-        menu_bar = getattr(self, "menu_bar", None)
-        if menu_bar is not None:
-            menu_bar.set_appearance(self.appearance_mode)
-            return
+    def _queue_interface_widget_refresh(self, *, include_splash: bool = False) -> None:
+        """Debounce one retained-widget interface refresh onto Tk's idle queue."""
 
-        self.menu_bar = ApplicationMenuBar(
+        pending = self.__dict__.get("_interface_refresh_after_id")
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except (AttributeError, tk.TclError):
+                pass
+            self._interface_refresh_after_id = None
+
+        def refresh() -> None:
+            self._interface_refresh_after_id = None
+            try:
+                refresh_interface_widgets(self)
+            except (AttributeError, tk.TclError):
+                return
+            if not include_splash:
+                return
+            splash = self.__dict__.get("_splash")
+            try:
+                if splash is not None and splash.winfo_exists():
+                    refresh_interface_widgets(splash)
+            except (AttributeError, tk.TclError):
+                pass
+
+        try:
+            self._interface_refresh_after_id = self.after_idle(refresh)
+        except (AttributeError, tk.TclError):
+            refresh()
+
+    def _on_interface_widget_mapped(self, _event=None) -> None:
+        """Settle lazily mapped startup, dialog, and workflow CTk surfaces."""
+
+        # Shell replacement maps several retained CTk surfaces at once.  The
+        # switch transaction queues one consolidated pass after its geometry
+        # work, so running an idle refresh for every intermediate map would
+        # make the menu command block while hundreds of canvases redraw.
+        if self.__dict__.get("_interface_switching", False):
+            return
+        self._queue_interface_widget_refresh(
+            include_splash=self.__dict__.get("_splash") is not None
+        )
+
+    def _remember_normal_client_size(self, event=None) -> None:
+        """Remember the last resizable client size for maximized UI switches."""
+
+        if event is not None and getattr(event, "widget", self) is not self:
+            return
+        if self.__dict__.get("_interface_switching", False):
+            return
+        try:
+            if str(self.state()).lower() != "normal":
+                return
+            pending = self.__dict__.get("_pending_normal_client_size")
+            if pending is not None:
+                if self.__dict__.get("_normal_size_restore_after_id") is None:
+
+                    def restore_pending_size() -> None:
+                        self._normal_size_restore_after_id = None
+                        target = self.__dict__.get("_pending_normal_client_size")
+                        if target is None or self.__dict__.get(
+                            "_interface_switching", False
+                        ):
+                            return
+                        try:
+                            if str(self.state()).lower() != "normal":
+                                return
+                            # Clear before geometry/update_idletasks so the
+                            # resulting Configure events cannot enqueue the
+                            # same correction recursively.
+                            self._pending_normal_client_size = None
+                            title_bar = self.__dict__.get("window_title_bar")
+                            if title_bar is not None:
+                                physical_size = physical_window_size(self, *target)
+                                title_bar.controller.resize_window(
+                                    int(self.winfo_x()),
+                                    int(self.winfo_y()),
+                                    *physical_size,
+                                )
+                            else:
+                                reassert_client_size(self, *target)
+                            self._normal_logical_client_size = target
+                        except (
+                            AttributeError,
+                            tk.TclError,
+                            TypeError,
+                            ValueError,
+                        ):
+                            self._pending_normal_client_size = target
+
+                    # Wait for Windows/Tk to finish leaving the maximized
+                    # state.  Running geometry correction in the same idle
+                    # drain can race the title-bar state synchronizer and keep
+                    # ``update()`` processing Configure events indefinitely.
+                    self._normal_size_restore_after_id = self.after(
+                        100,
+                        restore_pending_size,
+                    )
+                return
+            width = int(getattr(event, "width", self.winfo_width()))
+            height = int(getattr(event, "height", self.winfo_height()))
+            if width <= 1 or height <= 1:
+                return
+            self._normal_logical_client_size = logical_window_size(
+                self,
+                width,
+                height,
+            )
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            pass
+
+    def _pack_shell_surface(self, widget: tk.Misc, *, side: str) -> None:
+        """Pack shell chrome before the retained workflow notebook when present."""
+
+        options = {"side": side, "fill": "x"}
+        notebook = self.__dict__.get("notebook")
+        try:
+            if notebook is not None and notebook.winfo_manager() == "pack":
+                options["before"] = notebook
+        except (AttributeError, tk.TclError):
+            pass
+        widget.pack(**options)
+
+    def _install_modern_title_bar(self):
+        """Install a fresh custom caption, retaining native chrome as fallback."""
+
+        self.window_title_bar = None
+        if self.interface_mode != "Modern":
+            return None
+        title_bar = create_custom_windows_title_bar(
+            self,
+            title=self.title(),
+            logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
+        )
+        self.window_title_bar = title_bar
+        if title_bar is not None:
+            self._pack_shell_surface(title_bar, side="top")
+        return title_bar
+
+    def _restore_native_title_bar(self) -> bool:
+        """Restore the system caption before discarding custom window controls."""
+
+        title_bar = self.__dict__.get("window_title_bar")
+        if title_bar is None:
+            return True
+        try:
+            restored = title_bar.controller.restore_native_caption()
+        except (AttributeError, tk.TclError):
+            restored = False
+        if not restored:
+            return False
+        try:
+            title_bar.destroy()
+        except tk.TclError:
+            pass
+        self.window_title_bar = None
+        return True
+
+    def _new_modern_workflow_header(self):
+        """Construct the Modern workflow header without packing it."""
+
+        return WorkflowHeader(
+            self,
+            version=__version__,
+            on_step_selected=self._select_workflow_step,
+            on_settings_selected=self._show_settings,
+            on_help_selected=self._show_about,
+            logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
+            settings_icon_path=self._resource_path(
+                os.path.join("assets", "iconify-fluent-color--settings-32.png")
+            ),
+            help_icon_path=self._resource_path(
+                os.path.join("assets", "iconify-fluent-color--question-circle-32.png")
+            ),
+        )
+
+    def _build_workflow_header(self):
+        """Create Modern navigation without owning or rebuilding workflow pages."""
+
+        self.header = None
+        if self.interface_mode != "Modern":
+            return None
+        cached = self.__dict__.get("_modern_header_cache")
+        try:
+            if cached is not None and cached.winfo_exists():
+                self.header = cached
+                self._pack_shell_surface(cached, side="top")
+                return cached
+        except (AttributeError, tk.TclError):
+            self._modern_header_cache = None
+        header = self._new_modern_workflow_header()
+        self.header = header
+        self._modern_header_cache = header
+        self._pack_shell_surface(header, side="top")
+        return header
+
+    def _build_status_surface(self, text: str):
+        """Create the status presentation for the active interface."""
+
+        if self.interface_mode == "Modern":
+            status_bar = self.__dict__.get("_modern_status_bar_cache")
+            try:
+                if status_bar is not None and not status_bar.winfo_exists():
+                    status_bar = None
+            except (AttributeError, tk.TclError):
+                status_bar = None
+            if status_bar is None:
+                status_bar = AppStatusBar(self, text=str(text))
+                self._modern_status_bar_cache = status_bar
+            else:
+                status_bar.label.configure(text=str(text))
+            self.status_bar = status_bar
+            self.status = status_bar.label
+            self._pack_shell_surface(status_bar, side="bottom")
+            return status_bar
+
+        self.status_bar = None
+        status = ttk.Label(
+            self,
+            text=str(text),
+            style="AIDaS.Status.TLabel",
+            anchor="w",
+        )
+        self.status = status
+        self._pack_shell_surface(status, side="bottom")
+        return status
+
+    def _current_status_text(self) -> str:
+        status = self.__dict__.get("status")
+        try:
+            return str(status.cget("text"))
+        except (AttributeError, tk.TclError):
+            return f"AIDaS v{__version__} — ready"
+
+    def _destroy_status_surface(self) -> None:
+        status_bar = self.__dict__.get("status_bar")
+        status = self.__dict__.get("status")
+        try:
+            if status_bar is not None:
+                status_bar.pack_forget()
+                self._modern_status_bar_cache = status_bar
+            elif status is not None:
+                status.destroy()
+        except tk.TclError:
+            pass
+        self.status_bar = None
+        self.status = None
+
+    def _destroy_workflow_header(self) -> None:
+        header = self.__dict__.get("header")
+        if header is not None:
+            try:
+                header.pack_forget()
+                self._modern_header_cache = header
+            except tk.TclError:
+                pass
+        self.header = None
+
+    def _destroy_application_menus(self) -> None:
+        """Remove both menu implementations and all of their root bindings."""
+
+        menu_bar = self.__dict__.get("menu_bar")
+        if menu_bar is not None:
+            try:
+                menu_bar.suspend()
+                self._modern_menu_bar_cache = menu_bar
+            except tk.TclError:
+                pass
+        classic_menu = self.__dict__.get("classic_menu")
+        if classic_menu is not None:
+            try:
+                classic_menu.destroy()
+            except tk.TclError:
+                pass
+        self.menu_bar = None
+        self.classic_menu = None
+        self.menubar = None
+
+    def _selected_workflow_index(self) -> int:
+        notebook = self.__dict__.get("notebook")
+        try:
+            return int(notebook.index(notebook.select()))
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            return 0
+
+    def _sync_settings_interface_controls(self) -> None:
+        dialog = self.__dict__.get("_settings_dialog")
+        selected_interface = self.interface_mode
+        if self.__dict__.get("_interface_switching", False):
+            selected_interface = self.requested_interface_mode
+        try:
+            if dialog is not None and dialog.winfo_exists():
+                dialog._sync_interface_controls(
+                    selected_interface,
+                    self.appearance_mode,
+                )
+                if (
+                    not self.__dict__.get("_interface_switching", False)
+                    and normalize_interface_mode(
+                        getattr(dialog, "_presentation_mode", selected_interface)
+                    )
+                    != normalize_interface_mode(self.interface_mode)
+                ):
+                    dialog._schedule_presentation_refresh()
+        except (AttributeError, tk.TclError):
+            pass
+
+    def _new_modern_menu_bar(self):
+        """Construct the reusable Modern menu surface without packing it."""
+
+        return ApplicationMenuBar(
             self,
             appearance_modes=APPEARANCE_MODES,
             current_appearance=self.appearance_mode,
             set_appearance_command=self._set_theme,
+            interface_modes=INTERFACE_MODES,
+            current_interface=self.interface_mode,
+            set_interface_command=self._set_interface,
             browse_sdb_command=self._menu_browse_sdb,
             check_updates_command=self.update_controller.check_now,
             about_command=self._show_about,
             exit_command=self.destroy,
         )
-        self.menu_bar.pack(side="top", fill="x")
+
+    def _prime_modern_shell_cache(self) -> None:
+        """Prepare inactive Modern chrome without changing the Classic shell."""
+
+        if self.interface_mode != "Classic":
+            return
+
+        if self.__dict__.get("_modern_menu_bar_cache") is None:
+            try:
+                menu_bar = self._new_modern_menu_bar()
+                menu_bar.suspend()
+                self._modern_menu_bar_cache = menu_bar
+            except (AttributeError, tk.TclError):
+                self._modern_menu_bar_cache = None
+
+        if self.__dict__.get("_modern_header_cache") is None:
+            try:
+                self._modern_header_cache = self._new_modern_workflow_header()
+            except (AttributeError, tk.TclError):
+                self._modern_header_cache = None
+
+        if self.__dict__.get("_modern_status_bar_cache") is None:
+            try:
+                self._modern_status_bar_cache = AppStatusBar(
+                    self,
+                    text=self._current_status_text(),
+                )
+            except (AttributeError, tk.TclError):
+                self._modern_status_bar_cache = None
+
+    def _build_menu(self) -> None:
+        if self.interface_mode == "Classic":
+            menu_bar = self.__dict__.get("menu_bar")
+            if menu_bar is not None:
+                try:
+                    menu_bar.suspend()
+                    self._modern_menu_bar_cache = menu_bar
+                except tk.TclError:
+                    pass
+                self.menu_bar = None
+            classic_menu = self.__dict__.get("classic_menu")
+            if classic_menu is None:
+                self.classic_menu = build_classic_application_menu(
+                    self,
+                    interface_modes=INTERFACE_MODES,
+                    current_interface=self.interface_mode,
+                    set_interface_command=self._set_interface,
+                    appearance_modes=APPEARANCE_MODES,
+                    current_appearance=self.appearance_mode,
+                    set_appearance_command=self._set_theme,
+                    browse_sdb_command=self._menu_browse_sdb,
+                    settings_command=self._show_settings,
+                    check_updates_command=self.update_controller.check_now,
+                    about_command=self._show_about,
+                    exit_command=self.destroy,
+                )
+            else:
+                classic_menu.set_interface(self.interface_mode)
+                classic_menu.set_appearance(self.appearance_mode)
+            self.menubar = self.classic_menu.menubar
+            return
+
+        classic_menu = self.__dict__.get("classic_menu")
+        if classic_menu is not None:
+            try:
+                classic_menu.destroy()
+            except tk.TclError:
+                pass
+            self.classic_menu = None
+        menu_bar = self.__dict__.get("menu_bar")
+        if menu_bar is not None:
+            menu_bar.set_appearance(self.appearance_mode)
+            menu_bar.set_interface(self.interface_mode)
+            self.menubar = menu_bar
+            return
+
+        cached_menu = self.__dict__.get("_modern_menu_bar_cache")
+        try:
+            if cached_menu is not None and cached_menu.winfo_exists():
+                self.menu_bar = cached_menu
+                cached_menu.resume()
+                cached_menu.set_appearance(self.appearance_mode)
+                cached_menu.set_interface(self.interface_mode)
+                self._pack_shell_surface(cached_menu, side="top")
+                self.menubar = cached_menu
+                return
+        except (AttributeError, tk.TclError):
+            try:
+                if cached_menu is not None:
+                    cached_menu.destroy()
+            except (AttributeError, tk.TclError):
+                pass
+            self._modern_menu_bar_cache = None
+
+        self.menu_bar = self._new_modern_menu_bar()
+        self._pack_shell_surface(self.menu_bar, side="top")
+        self._modern_menu_bar_cache = self.menu_bar
         # Preserve the historical attribute for integrations that only need a
         # handle to the application menu surface.
         self.menubar = self.menu_bar
@@ -1051,7 +2015,11 @@ class AIDaSApp(ctk.CTk):
         """Keep retained ttk/native widgets synced with OS appearance changes."""
 
         current = ctk.get_appearance_mode()
-        if self.appearance_mode == "System" and current != self._last_effective_appearance:
+        if (
+            self.interface_mode == "Modern"
+            and self.appearance_mode == "System"
+            and current != self._last_effective_appearance
+        ):
             apply_appearance_mode("System", root=self, style=self.style)
             step3 = getattr(self, "step3", None)
             if step3 is not None:
@@ -1134,20 +2102,210 @@ class AIDaSApp(ctk.CTk):
             self.step1.set_sdb_directory(directory)
             self.step1.refresh_sdb_list(preview_first=True)
 
-    def _set_theme(self, theme_name: str) -> None:
-        """Apply one unified CTk/native appearance and save the preference."""
+    def _set_interface(self, mode_name: str) -> str:
+        """Switch presentation shells immediately around retained workflows."""
 
-        self.appearance_mode = apply_appearance_mode(
-            theme_name,
+        selected = normalize_interface_mode(mode_name)
+        previous = normalize_interface_mode(
+            self.__dict__.get("interface_mode", "Modern")
+        )
+        if self.__dict__.get("_interface_switching", False):
+            requested = normalize_interface_mode(
+                self.__dict__.get("requested_interface_mode", previous)
+            )
+            menu = self.__dict__.get("menu_bar") or self.__dict__.get("classic_menu")
+            if menu is not None:
+                menu.set_interface(requested)
+            self._sync_settings_interface_controls()
+            return requested
+        if selected == previous:
+            self.requested_interface_mode = previous
+            self._build_menu()
+            self._sync_settings_interface_controls()
+            return previous
+
+        selected_index = self._selected_workflow_index()
+        status_text = self._current_status_text()
+        logical_client_size = None
+        window_state = "normal"
+        try:
+            self.update_idletasks()
+            logical_client_size = logical_window_size(
+                self,
+                self.winfo_width(),
+                self.winfo_height(),
+            )
+            window_state = str(self.state()).lower()
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            pass
+        was_zoomed = window_state == "zoomed"
+        current_title_bar = self.__dict__.get("window_title_bar")
+        if current_title_bar is not None:
+            try:
+                was_zoomed = was_zoomed or current_title_bar.controller.is_maximized()
+            except (AttributeError, tk.TclError):
+                pass
+        if not was_zoomed and logical_client_size is not None:
+            self._normal_logical_client_size = logical_client_size
+        normal_client_size = self.__dict__.get("_normal_logical_client_size")
+
+        self._interface_switching = True
+        self.requested_interface_mode = selected
+        try:
+            # A captionless window must never lose its in-client controls.
+            # Confirm the native frame first and leave the active shell intact
+            # when Windows cannot complete that transition.
+            if selected == "Classic" and not self._restore_native_title_bar():
+                self.requested_interface_mode = previous
+                menu = self.__dict__.get("menu_bar")
+                if menu is not None:
+                    menu.set_interface(previous)
+                self._set_status_message(
+                    "the native window frame could not be restored; "
+                    "Modern remains active"
+                )
+                return previous
+
+            self._destroy_application_menus()
+            self._destroy_workflow_header()
+            self._destroy_status_surface()
+
+            self.interface_mode = set_interface_mode(selected, redraw=False)
+            active_appearance = (
+                "Light" if self.interface_mode == "Classic" else self.appearance_mode
+            )
+            apply_appearance_mode(
+                active_appearance,
+                root=self,
+                style=self.style,
+                force_ctk_redraw=True,
+                defer_ctk_ms=25,
+            )
+            self._last_effective_appearance = ctk.get_appearance_mode()
+
+            if self.interface_mode == "Modern":
+                self._install_modern_title_bar()
+            self._build_menu()
+            self._build_workflow_header()
+            self._build_status_surface(status_text)
+
+            notebook = self.__dict__.get("notebook")
+            if notebook is not None:
+                try:
+                    notebook.select(selected_index)
+                except (tk.TclError, TypeError, ValueError):
+                    pass
+            if self.header is not None:
+                self.header.select_step(selected_index)
+
+            self._sync_settings_interface_controls()
+            step3 = self.__dict__.get("step3")
+            if step3 is not None:
+                self.after(50, step3.refresh_appearance)
+
+            try:
+                self.update_idletasks()
+                if was_zoomed:
+                    # Keep the window continuously zoomed.  Changing frame
+                    # families changes the outer rectangle needed for the
+                    # saved normal client size, so correct it lazily when the
+                    # user eventually restores the window.
+                    if normal_client_size is not None:
+                        self._pending_normal_client_size = normal_client_size
+                    title_bar = self.__dict__.get("window_title_bar")
+                    if title_bar is not None:
+                        self.after_idle(
+                            title_bar.controller.correct_maximized_bounds
+                        )
+                elif logical_client_size is not None:
+                    reassert_client_size(self, *logical_client_size)
+            except (AttributeError, tk.TclError, TypeError, ValueError):
+                pass
+
+            synchronize_window_chrome(
+                self,
+                background=COLOR_PAIRS["window_chrome"],
+                foreground=COLOR_PAIRS["text"],
+                border=COLOR_PAIRS["window_chrome"],
+            )
+            # Commit the preference only after the replacement shell exists.
+            self.preferences.set("interface_mode", self.interface_mode)
+            self.requested_interface_mode = self.interface_mode
+            self._set_status_message(f"{self.interface_mode} interface is active")
+            # Queue the expensive retained-widget corner pass only after all
+            # synchronous frame/geometry work.  It will paint on the next Tk
+            # loop turn instead of delaying the menu command itself.
+            self._queue_interface_widget_refresh()
+            return self.interface_mode
+        except Exception as exc:
+            # Shell replacement is transactional: reconstruct the prior shell
+            # and presentation while retaining the same notebook/workflows.
+            try:
+                self._destroy_application_menus()
+                self._destroy_workflow_header()
+                self._destroy_status_surface()
+                if previous == "Classic":
+                    self._restore_native_title_bar()
+                self.interface_mode = set_interface_mode(previous, redraw=False)
+                self.requested_interface_mode = previous
+                prior_appearance = (
+                    "Light" if previous == "Classic" else self.appearance_mode
+                )
+                apply_appearance_mode(
+                    prior_appearance,
+                    root=self,
+                    style=self.style,
+                    force_ctk_redraw=True,
+                    defer_ctk_ms=25,
+                )
+                if previous == "Modern":
+                    self._install_modern_title_bar()
+                self._build_menu()
+                self._build_workflow_header()
+                self._build_status_surface(status_text)
+                notebook = self.__dict__.get("notebook")
+                if notebook is not None:
+                    notebook.select(selected_index)
+                if self.header is not None:
+                    self.header.select_step(selected_index)
+                self._queue_interface_widget_refresh()
+            except Exception:
+                self.interface_mode = previous
+                self.requested_interface_mode = previous
+            self._set_status_message(
+                f"interface change was not applied ({type(exc).__name__}); "
+                f"{previous} remains active"
+            )
+            return previous
+        finally:
+            self._interface_switching = False
+            self._sync_settings_interface_controls()
+
+    def _set_theme(self, theme_name: str) -> None:
+        """Apply Modern appearance, or retain it while Classic stays light."""
+
+        self.appearance_mode = normalize_appearance_mode(theme_name)
+        active_appearance = (
+            "Light" if self.interface_mode == "Classic" else self.appearance_mode
+        )
+        apply_appearance_mode(
+            active_appearance,
             root=self,
             style=self.style,
         )
         self.preferences.set("appearance_mode", self.appearance_mode)
         self._last_effective_appearance = ctk.get_appearance_mode()
         self._build_menu()
-        self.status.configure(
-            text=f"AIDaS v{__version__} — appearance changed to {self.appearance_mode}"
-        )
+        if self.interface_mode == "Classic":
+            status_text = (
+                f"AIDaS v{__version__} — Modern appearance saved as "
+                f"{self.appearance_mode}"
+            )
+        else:
+            status_text = (
+                f"AIDaS v{__version__} — appearance changed to {self.appearance_mode}"
+            )
+        self.status.configure(text=status_text)
         self.after_idle(lambda: refresh_native_widgets(self))
         step3 = getattr(self, "step3", None)
         if step3 is not None:
@@ -1191,6 +2349,18 @@ class AIDaSApp(ctk.CTk):
         step3 = getattr(self, "step3", None)
         return bool(step3 is not None and step3.is_folder_active(folder))
 
+    def _step3_core_usage(self) -> int:
+        step3 = getattr(self, "step3", None)
+        if step3 is None:
+            return 0
+        return int(step3.active_core_allocation())
+
+    def _step2_core_usage(self) -> int:
+        step2 = getattr(self, "step2", None)
+        if step2 is None:
+            return 0
+        return int(step2.active_core_allocation())
+
     def _on_step2_continue_to_step3(self, folders) -> None:
         """Open Step 3 with the exact nasal/temporal folders saved in Step 2."""
         step3 = getattr(self, "step3", None)
@@ -1210,7 +2380,10 @@ class AIDaSApp(ctk.CTk):
                 return
         except tk.TclError:
             pass
-        self._about_dialog = AboutDialog(self)
+        self._about_dialog = AboutDialog(
+            self,
+            interface_mode=self.interface_mode,
+        )
 
     def _show_settings(self) -> None:
         """Open one settings window, or focus the existing instance."""
@@ -1226,6 +2399,8 @@ class AIDaSApp(ctk.CTk):
         self._settings_dialog = SettingsDialog(
             self,
             preferences=self.preferences,
+            interface_mode=self.interface_mode,
+            set_interface_command=self._set_interface,
             appearance_mode=self.appearance_mode,
             set_appearance_command=self._set_theme,
             step1=self.step1,

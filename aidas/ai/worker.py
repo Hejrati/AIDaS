@@ -11,10 +11,37 @@ import traceback
 
 import numpy as np
 
-from aidas.ai.inference import AIForAIDASPredictor
+from aidas.ai.inference import AIForAIDASPredictor, probe_execution_devices
 
 
 _OUTPUT_STREAM = sys.stdout
+
+
+def _positive_core_limit(value):
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("core limit must be one or greater")
+    return parsed
+
+
+def _probe_device():
+    """Print one machine-readable provider capability record and exit."""
+
+    try:
+        result = probe_execution_devices()
+        payload = {
+            "compatible_gpu": bool(result.get("compatible_gpu")),
+            "providers": list(result.get("providers") or ()),
+        }
+    except Exception as exc:
+        payload = {
+            "compatible_gpu": False,
+            "providers": [],
+            "error": str(exc),
+        }
+    _OUTPUT_STREAM.write(json.dumps(payload) + "\n")
+    _OUTPUT_STREAM.flush()
+    return 0
 
 
 def _emit(message_type, **values):
@@ -66,6 +93,7 @@ def _build_predictor(args, progress_callback):
         boundary_model_path=args.model,
         provider_name=args.provider,
         device_id=args.device_id,
+        core_limit=args.core_limit,
         progress_callback=progress_callback,
     )
 
@@ -194,7 +222,12 @@ def _serve_tcp(args):
 def build_parser():
     parser = argparse.ArgumentParser(description="Run ONNX AI_ForAIDAS inference.")
     parser.add_argument("--image-npy", help="Input 2-D image saved with numpy.save")
-    parser.add_argument("--model", required=True, help="AI_ForAIDAS boundary model .onnx")
+    parser.add_argument("--model", help="AI_ForAIDAS boundary model .onnx")
+    parser.add_argument(
+        "--probe-device",
+        action="store_true",
+        help="Report compatible ONNX execution devices without loading a model",
+    )
     parser.add_argument(
         "--provider",
         default="auto",
@@ -206,6 +239,12 @@ def build_parser():
         default=0,
         type=int,
         help="DirectML adapter index (0 is the Windows default adapter)",
+    )
+    parser.add_argument(
+        "--core-limit",
+        default=None,
+        type=_positive_core_limit,
+        help="Maximum processing cores used when GPU acceleration is unavailable",
     )
     parser.add_argument("--output-npz", help="Output .npz path for predicted arrays")
     parser.add_argument(
@@ -220,7 +259,12 @@ def build_parser():
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.probe_device:
+        return _probe_device()
+    if not args.model:
+        parser.error("--model is required unless --probe-device is used")
     if args.connect_port is not None:
         if not args.connect_token:
             raise SystemExit("--connect-token is required with --connect-port")

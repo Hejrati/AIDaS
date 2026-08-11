@@ -8,13 +8,16 @@ from pathlib import Path
 import sys
 import time
 from types import SimpleNamespace
+from unittest import mock
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import aidas.app as app_module
 from aidas.app import AIDaSApp
+from aidas.core.config import Config
 from aidas.ui.title_bar import (
     _RETAINED_NATIVE_STYLES,
     _WS_CAPTION,
@@ -56,6 +59,16 @@ def _pump(window, seconds: float = 0.25) -> None:
         time.sleep(0.01)
 
 
+def _pump_until(window, predicate, *, seconds: float = 2.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        window.update()
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return bool(predicate())
+
+
 def _rect_tuple(rect: _Rect) -> tuple[int, int, int, int]:
     return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
 
@@ -68,6 +81,18 @@ def _client_screen_rect(user32, handle: int) -> tuple[int, int, int, int]:
     assert user32.ClientToScreen(handle, ctypes.byref(upper_left))
     assert user32.ClientToScreen(handle, ctypes.byref(lower_right))
     return upper_left.x, upper_left.y, lower_right.x, lower_right.y
+
+
+def _client_size(user32, handle: int) -> tuple[int, int]:
+    client = _Rect()
+    assert user32.GetClientRect(handle, ctypes.byref(client))
+    return int(client.right - client.left), int(client.bottom - client.top)
+
+
+def _outer_rect(user32, handle: int) -> tuple[int, int, int, int]:
+    outer = _Rect()
+    assert user32.GetWindowRect(handle, ctypes.byref(outer))
+    return _rect_tuple(outer)
 
 
 def _monitor_work_rect(user32, handle: int) -> tuple[int, int, int, int]:
@@ -102,7 +127,16 @@ def main() -> int:
     user32.GetMonitorInfoW.restype = ctypes.c_bool
     user32.IsIconic.argtypes = (ctypes.c_void_p,)
     user32.IsIconic.restype = ctypes.c_bool
-    app = AIDaSApp()
+    preference_values = Config.DEFAULTS.copy()
+    preference_values["interface_mode"] = "Modern"
+    preferences = SimpleNamespace(
+        get=lambda key, default=None: preference_values.get(key, default),
+        set=lambda key, value: preference_values.__setitem__(key, value),
+    )
+    config_factory = mock.Mock(return_value=preferences)
+    config_factory.peek.return_value = "Modern"
+    with mock.patch.object(app_module, "Config", config_factory):
+        app = AIDaSApp()
     try:
         app._finish_startup()
         _pump(app)
@@ -143,6 +177,57 @@ def main() -> int:
             "The client does not fill the captionless outer window: "
             f"client={client_rect}, outer={outer_rect}."
         )
+
+        # Exercise the full application switch, not only the controller.  The
+        # same HWND, workflow client size, and visible state must survive every
+        # round trip without accumulating caption/border pixels.
+        normal_client_size = _client_size(user32, handle)
+        for cycle in range(4):
+            assert app._set_interface("Classic") == "Classic"
+            _pump(app)
+            classic_style = int(get_window_long(handle, -16)) & 0xFFFFFFFF
+            assert classic_style & _WS_CAPTION == _WS_CAPTION
+            assert classic_style & _WS_THICKFRAME == _WS_THICKFRAME
+            assert app.window_title_bar is None
+            assert not bool(getattr(app, "_aidas_suppress_native_border", False))
+            assert app.winfo_viewable(), f"Classic cycle {cycle} hid the root window."
+            classic_outer = _outer_rect(user32, handle)
+            classic_client = _client_screen_rect(user32, handle)
+            assert classic_client[1] - classic_outer[1] > 1, (
+                "The Classic caption style was set without an applied native frame."
+            )
+            assert all(
+                abs(actual - expected) <= 1
+                for actual, expected in zip(
+                    _client_size(user32, handle),
+                    normal_client_size,
+                )
+            ), "Classic switching changed the preserved client size."
+
+            assert app._set_interface("Modern") == "Modern"
+            _pump(app)
+            title_bar = app.window_title_bar
+            assert title_bar is not None
+            controller = title_bar.controller
+            assert controller.handle == handle
+            modern_style = int(get_window_long(handle, -16)) & 0xFFFFFFFF
+            assert modern_style & _WS_CAPTION == 0
+            assert modern_style & _WS_THICKFRAME == 0
+            assert modern_style & _RETAINED_NATIVE_STYLES == _RETAINED_NATIVE_STYLES
+            assert bool(getattr(app, "_aidas_suppress_native_border", False))
+            modern_outer = _outer_rect(user32, handle)
+            modern_client = _client_screen_rect(user32, handle)
+            assert all(
+                abs(client_value - outer_value) <= 1
+                for client_value, outer_value in zip(modern_client, modern_outer)
+            )
+            assert all(
+                abs(actual - expected) <= 1
+                for actual, expected in zip(
+                    _client_size(user32, handle),
+                    normal_client_size,
+                )
+            ), "Modern switching changed the preserved client size."
 
         normal_width = outer_rect[2] - outer_rect[0]
         normal_height = outer_rect[3] - outer_rect[1]
@@ -190,11 +275,43 @@ def main() -> int:
         )
         assert (int(get_window_long(handle, _GWL_EXSTYLE)) & 0xFFFFFFFF) == extended_style
 
+        assert app._set_interface("Classic") == "Classic"
+        assert _pump_until(app, lambda: bool(user32.IsZoomed(handle))), (
+            "Classic switch restored a zoomed window: "
+            f"tk_state={app.state()}, geometry={app.geometry()}."
+        )
+        classic_max_style = int(get_window_long(handle, -16)) & 0xFFFFFFFF
+        assert classic_max_style & _WS_CAPTION == _WS_CAPTION
+        classic_max_client = _client_screen_rect(user32, handle)
+        assert classic_max_client[0] >= work_rect[0] - 1
+        assert classic_max_client[1] >= work_rect[1] - 1
+        assert classic_max_client[2] <= work_rect[2] + 1
+        assert classic_max_client[3] <= work_rect[3] + 1
+
+        assert app._set_interface("Modern") == "Modern"
+        assert _pump_until(app, lambda: bool(user32.IsZoomed(handle)))
+        title_bar = app.window_title_bar
+        assert title_bar is not None
+        controller = title_bar.controller
+        assert bool(user32.IsZoomed(handle)), "Modern switch restored a zoomed window."
+        client_rect = _client_screen_rect(user32, handle)
+        assert all(
+            abs(client_value - work_value) <= 1
+            for client_value, work_value in zip(client_rect, work_rect)
+        ), "Modern maximized bounds drifted after a live interface round trip."
+
         controller.toggle_maximize()
         _pump(app)
         assert not controller.is_maximized(), "Native restore left the window zoomed."
         assert abs(app.winfo_width() - expected_width) <= 1
         assert abs(app.winfo_height() - expected_height) <= 1
+        assert all(
+            abs(actual - expected) <= 1
+            for actual, expected in zip(
+                _client_size(user32, handle),
+                normal_client_size,
+            )
+        ), "Restoring after a maximized live switch changed normal client size."
 
         controller.minimize()
         _pump(app)

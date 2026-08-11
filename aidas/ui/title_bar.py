@@ -15,6 +15,8 @@ from ctypes import wintypes
 from pathlib import Path
 import sys
 import tkinter as tk
+import threading
+import time
 from typing import Protocol
 
 import customtkinter as ctk
@@ -31,16 +33,22 @@ _WS_THICKFRAME = 0x00040000
 _WS_SYSMENU = 0x00080000
 _WS_MINIMIZEBOX = 0x00020000
 _WS_MAXIMIZEBOX = 0x00010000
+_WS_MAXIMIZE = 0x01000000
+_WS_DISABLED = 0x08000000
+_WS_VISIBLE = 0x10000000
+_WS_MINIMIZE = 0x20000000
 _REQUIRED_NATIVE_STYLES = (
     _WS_THICKFRAME | _WS_SYSMENU | _WS_MINIMIZEBOX | _WS_MAXIMIZEBOX
 )
 _RETAINED_NATIVE_STYLES = _WS_SYSMENU | _WS_MINIMIZEBOX | _WS_MAXIMIZEBOX
+_RUNTIME_WINDOW_STYLES = _WS_VISIBLE | _WS_DISABLED | _WS_MINIMIZE | _WS_MAXIMIZE
 
 _SWP_NOSIZE = 0x0001
 _SWP_NOMOVE = 0x0002
 _SWP_NOZORDER = 0x0004
 _SWP_NOACTIVATE = 0x0010
 _SWP_FRAMECHANGED = 0x0020
+_SWP_ASYNCWINDOWPOS = 0x4000
 
 _WM_CLOSE = 0x0010
 _WM_NCLBUTTONDOWN = 0x00A1
@@ -127,6 +135,8 @@ class _NativeWindowAPI(Protocol):
 
     def refresh_frame(self, handle: int) -> bool: ...
 
+    def frame_insets(self, handle: int) -> tuple[int, int, int, int] | None: ...
+
     def resize_window(
         self,
         handle: int,
@@ -195,6 +205,16 @@ class _WindowsAPI:
         )
         self._set_window_pos.restype = ctypes.c_bool
 
+        # Frame changes are issued from a short-lived helper thread so
+        # SWP_ASYNCWINDOWPOS always posts to Tk's owning queue.  This separate
+        # WinDLL binding releases the GIL while the native call is in flight;
+        # the PyDLL binding above remains appropriate for calls made directly
+        # on Tk's owner thread.
+        frame_user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self._frame_set_window_pos = frame_user32.SetWindowPos
+        self._frame_set_window_pos.argtypes = self._set_window_pos.argtypes
+        self._frame_set_window_pos.restype = ctypes.c_bool
+
         self._release_capture = user32.ReleaseCapture
         self._release_capture.argtypes = ()
         self._release_capture.restype = ctypes.c_bool
@@ -245,6 +265,13 @@ class _WindowsAPI:
         self._post_message.restype = ctypes.c_bool
 
     def root_handle(self, window: tk.Misc) -> int:
+        # AIDaS swaps only its presentation shell; the Tk toplevel and its
+        # native HWND remain the same.  Resolving that HWND calls
+        # update_idletasks(), which is expensive once all workflow canvases
+        # exist, so retain the verified handle for later Classic/Modern swaps.
+        cached = getattr(window, "_aidas_native_root_handle", None)
+        if cached:
+            return int(cached)
         window.update_idletasks()
         widget_handle = ctypes.c_void_p(int(window.winfo_id()))
         handle = (
@@ -254,7 +281,12 @@ class _WindowsAPI:
         )
         if not handle:
             raise OSError("Unable to resolve the native root window")
-        return int(handle)
+        resolved = int(handle)
+        try:
+            setattr(window, "_aidas_native_root_handle", resolved)
+        except (AttributeError, TypeError):
+            pass
+        return resolved
 
     def get_style(self, handle: int) -> int:
         # Window styles are 32-bit bitfields even when LONG_PTR is 64-bit.
@@ -269,20 +301,70 @@ class _WindowsAPI:
         return self.get_style(handle) == (int(style) & 0xFFFFFFFF)
 
     def refresh_frame(self, handle: int) -> bool:
-        return bool(
-            self._set_window_pos(
-                handle,
-                None,
-                0,
-                0,
-                0,
-                0,
-                _SWP_NOMOVE
-                | _SWP_NOSIZE
-                | _SWP_NOZORDER
-                | _SWP_NOACTIVATE
-                | _SWP_FRAMECHANGED,
-            )
+        # Adding/removing a non-client frame synchronously from Tk's owning
+        # Python thread re-enters _tkinter through WM_NCCALCSIZE/Configure and
+        # can hit CPython with no restorable thread state.  A short-lived
+        # worker plus SWP_ASYNCWINDOWPOS asks Windows to post the operation to
+        # the owning UI queue instead.  Tk then handles it through its normal
+        # event-loop boundary, where Python callbacks have a valid state.
+        result: list[bool] = []
+
+        def apply() -> None:
+            try:
+                result.append(
+                    bool(
+                        self._frame_set_window_pos(
+                            handle,
+                            None,
+                            0,
+                            0,
+                            0,
+                            0,
+                            _SWP_NOMOVE
+                            | _SWP_NOSIZE
+                            | _SWP_NOZORDER
+                            | _SWP_NOACTIVATE
+                            | _SWP_FRAMECHANGED
+                            | _SWP_ASYNCWINDOWPOS,
+                        )
+                    )
+                )
+            except Exception:
+                result.append(False)
+
+        worker = threading.Thread(
+            target=apply,
+            name="AIDaS-WindowFrameRefresh",
+            daemon=True,
+        )
+        worker.start()
+        # SWP_ASYNCWINDOWPOS returns after Windows has accepted the request;
+        # there is no native operation left running after this join.  Callers
+        # separately confirm the resulting non-client insets on Tk's event
+        # loop before removing any fallback window controls.
+        worker.join()
+        return bool(result and result[0])
+
+    def frame_insets(self, handle: int) -> tuple[int, int, int, int] | None:
+        """Return physical left/top/right/bottom non-client frame insets."""
+
+        outer = _Rect()
+        client = _Rect()
+        if not self._get_window_rect(handle, ctypes.byref(outer)):
+            return None
+        if not self._get_client_rect(handle, ctypes.byref(client)):
+            return None
+        client_upper_left = _Point(client.left, client.top)
+        client_lower_right = _Point(client.right, client.bottom)
+        if not self._client_to_screen(handle, ctypes.byref(client_upper_left)):
+            return None
+        if not self._client_to_screen(handle, ctypes.byref(client_lower_right)):
+            return None
+        return (
+            int(client_upper_left.x) - int(outer.left),
+            int(client_upper_left.y) - int(outer.top),
+            int(outer.right) - int(client_lower_right.x),
+            int(outer.bottom) - int(client_lower_right.y),
         )
 
     def resize_window(
@@ -397,6 +479,9 @@ class WindowsCaptionController:
         self.original_style: int | None = None
         self.style: int | None = None
         self.installed = False
+        self._pending_restore_style: int | None = None
+        self._restore_rollback_style: int | None = None
+        self._normal_state_transition = False
 
     def install(self) -> bool:
         """Install once, returning false without mutating unsupported windows."""
@@ -462,30 +547,130 @@ class WindowsCaptionController:
         except Exception:
             pass
 
-    def restore_native_caption(self) -> bool:
-        """Restore the exact pre-install style, useful for reusable hosts."""
+    def begin_restore_native_caption(self) -> bool:
+        """Queue native-frame restoration without discarding client controls."""
 
         if (
             not self.installed
             or self._api is None
             or self.handle is None
             or self.original_style is None
+            or self._pending_restore_style is not None
         ):
             return False
         try:
-            restored = self._api.set_style(self.handle, self.original_style)
-            refreshed = self._api.refresh_frame(self.handle)
+            current_style = self._api.get_style(self.handle)
+            restored_style = (
+                (self.original_style & ~_RUNTIME_WINDOW_STYLES)
+                | (current_style & _RUNTIME_WINDOW_STYLES)
+            )
+            self._restore_rollback_style = current_style
+            self._pending_restore_style = restored_style
+            restored = self._api.set_style(self.handle, restored_style)
+            refreshed = restored and self._api.refresh_frame(self.handle)
+        except Exception:
+            self.cancel_restore_native_caption()
+            return False
+        if not refreshed:
+            self.cancel_restore_native_caption()
+            return False
+        return True
+
+    def finish_restore_native_caption(self) -> bool | None:
+        """Finish a queued restore once the native caption inset is observable.
+
+        ``None`` means Windows accepted the request but Tk has not processed
+        the queued frame transition yet.  Client-side controls must remain in
+        place until this method returns ``True``.
+        """
+
+        if (
+            not self.installed
+            or self._api is None
+            or self.handle is None
+            or self._pending_restore_style is None
+        ):
+            return False
+        try:
+            current_style = self._api.get_style(self.handle)
+            expected_nonruntime = self._pending_restore_style & ~_RUNTIME_WINDOW_STYLES
+            if current_style & ~_RUNTIME_WINDOW_STYLES != expected_nonruntime:
+                self.cancel_restore_native_caption()
+                return False
+            insets = self._api.frame_insets(self.handle)
+        except Exception:
+            self.cancel_restore_native_caption()
+            return False
+        if insets is None or int(insets[1]) <= 1:
+            return None
+
+        self.installed = False
+        self.style = current_style
+        self._pending_restore_style = None
+        self._restore_rollback_style = None
+        try:
+            setattr(self.window, "_aidas_suppress_native_border", False)
+        except (AttributeError, TypeError):
+            pass
+        return True
+
+    def cancel_restore_native_caption(self) -> bool:
+        """Roll a queued native restore back to the captionless frame."""
+
+        rollback_style = self._restore_rollback_style
+        self._pending_restore_style = None
+        self._restore_rollback_style = None
+        if self._api is None or self.handle is None or rollback_style is None:
+            return False
+        try:
+            current_style = self._api.get_style(self.handle)
+            captionless_style = (
+                (rollback_style & ~_RUNTIME_WINDOW_STYLES)
+                | (current_style & _RUNTIME_WINDOW_STYLES)
+            )
+            restored = self._api.set_style(self.handle, captionless_style)
+            refreshed = restored and self._api.refresh_frame(self.handle)
         except Exception:
             return False
-        if restored and refreshed:
-            self.installed = False
-            self.style = self.original_style
-            try:
-                setattr(self.window, "_aidas_suppress_native_border", False)
-            except (AttributeError, TypeError):
-                pass
-            return True
-        return False
+        if restored:
+            self.style = captionless_style
+        try:
+            setattr(self.window, "_aidas_suppress_native_border", True)
+        except (AttributeError, TypeError):
+            pass
+        return bool(restored and refreshed)
+
+    def restore_native_caption(self, *, timeout_ms: int = 1500) -> bool:
+        """Restore and confirm the native frame through Tk's event loop."""
+
+        if not self.begin_restore_native_caption():
+            return False
+        settled = self.finish_restore_native_caption()
+        if settled is not None:
+            return settled
+
+        try:
+            completed = tk.BooleanVar(master=self.window, value=False)
+            outcome = [False]
+            deadline = time.monotonic() + max(1, int(timeout_ms)) / 1000.0
+
+            def poll() -> None:
+                state = self.finish_restore_native_caption()
+                if state is None and time.monotonic() < deadline:
+                    self.window.after(10, poll)
+                    return
+                if state is None:
+                    self.cancel_restore_native_caption()
+                    state = False
+                outcome[0] = bool(state)
+                completed.set(True)
+
+            self.window.after(10, poll)
+            self.window.wait_variable(completed)
+            return outcome[0]
+        except (AttributeError, RuntimeError, tk.TclError):
+            self.cancel_restore_native_caption()
+            return False
 
     def begin_drag(self) -> None:
         if self.installed and self._api is not None and self.handle is not None:
@@ -511,16 +696,50 @@ class WindowsCaptionController:
     def toggle_maximize(self) -> None:
         if self.installed and self._api is not None and self.handle is not None:
             maximizing = not self._api.is_zoomed(self.handle)
+            if not maximizing:
+                self._begin_normal_state_transition()
+                return
             try:
-                self.window.state("zoomed" if maximizing else "normal")
+                self.window.state("zoomed")
             except (AttributeError, tk.TclError):
                 return
-            if maximizing:
-                self.correct_maximized_bounds()
+            self.correct_maximized_bounds()
+            try:
+                self.window.after_idle(self.correct_maximized_bounds)
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _begin_normal_state_transition(self) -> None:
+        """Restore without letting Configure callbacks re-fit zoomed bounds."""
+
+        self._normal_state_transition = True
+        try:
+            self.window.state("normal")
+        except (AttributeError, tk.TclError):
+            self._normal_state_transition = False
+            return
+
+        def settle(attempt: int = 0) -> None:
+            try:
+                still_zoomed = bool(
+                    self._api is not None
+                    and self.handle is not None
+                    and self._api.is_zoomed(self.handle)
+                )
+            except Exception:
+                still_zoomed = False
+            if still_zoomed and attempt < 20:
                 try:
-                    self.window.after_idle(self.correct_maximized_bounds)
+                    self.window.after(25, lambda: settle(attempt + 1))
+                    return
                 except (AttributeError, tk.TclError):
                     pass
+            self._normal_state_transition = False
+
+        try:
+            self.window.after(25, settle)
+        except (AttributeError, tk.TclError):
+            self._normal_state_transition = False
 
     def restore(self) -> None:
         """Restore safely through Tk instead of reentrant user32 ShowWindow."""
@@ -529,7 +748,7 @@ class WindowsCaptionController:
             return
         try:
             if self.is_maximized():
-                self.window.state("normal")
+                self._begin_normal_state_transition()
             self.window.deiconify()
         except (AttributeError, tk.TclError):
             pass
@@ -546,6 +765,7 @@ class WindowsCaptionController:
             not self.installed
             or self._api is None
             or self.handle is None
+            or self._normal_state_transition
             or not self._api.is_zoomed(self.handle)
         ):
             return False
@@ -995,7 +1215,19 @@ def create_custom_windows_title_bar(
         raise
 
 
+def cache_native_window_handle(window: tk.Misc) -> int | None:
+    """Resolve AIDaS's stable HWND early without changing its native frame."""
+
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        return _WindowsAPI().root_handle(window)
+    except Exception:
+        return None
+
+
 __all__ = [
+    "cache_native_window_handle",
     "CustomWindowsTitleBar",
     "WindowsCaptionController",
     "create_custom_windows_title_bar",

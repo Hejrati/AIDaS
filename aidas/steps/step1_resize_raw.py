@@ -207,7 +207,21 @@ class Step1Frame(SidebarStepFrame):
         # ── SDB Work Queue ──
         sdb_section = self.add_sidebar_section("SDB Work Queue", pady=(5, 5))
         sdb = sdb_section.body
-        ttk.Label(sdb, text="Parent dir:").pack(anchor="w", pady=(0, 2))
+        parent_dir_header = ttk.Frame(sdb)
+        parent_dir_header.pack(fill="x", pady=(0, 2))
+        ttk.Label(parent_dir_header, text="Parent dir:").pack(side="left")
+        self.exclude_saved_outputs_var = tk.BooleanVar(value=False)
+        self.exclude_saved_outputs_checkbox = ttk.Checkbutton(
+            parent_dir_header,
+            text="Exclude saved cropped folders",
+            variable=self.exclude_saved_outputs_var,
+            command=self._render_sdb_directories,
+        )
+        self.exclude_saved_outputs_checkbox.pack(side="left", padx=(4, 0))
+        HoverToolTip(
+            self.exclude_saved_outputs_checkbox,
+            "Hide SDB folders containing light.hdr and light.img",
+        )
         self.sdb_dir_var = tk.StringVar(value=self._initial_sdb_dir())
         
         dir_frame, _dir_entry, dir_buttons = directory_row(
@@ -247,19 +261,6 @@ class Step1Frame(SidebarStepFrame):
         )
         self.sdb_scan_more_label.pack(anchor="w", pady=(0, 4))
         self.sdb_scan_tooltip = HoverToolTip(self.sdb_scan_more_label, "")
-
-        self.exclude_saved_outputs_var = tk.BooleanVar(value=False)
-        self.exclude_saved_outputs_checkbox = ttk.Checkbutton(
-            sdb,
-            text="Exclude saved cropped folders",
-            variable=self.exclude_saved_outputs_var,
-            command=self._render_sdb_directories,
-        )
-        self.exclude_saved_outputs_checkbox.pack(anchor="w", pady=(0, 4))
-        HoverToolTip(
-            self.exclude_saved_outputs_checkbox,
-            "Hide SDB folders containing light.hdr and light.img",
-        )
 
         folder_header = ttk.Frame(sdb)
         folder_header.pack(fill="x", pady=(2, 2))

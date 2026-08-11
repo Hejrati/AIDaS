@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import inspect
+import tkinter as tk
 import unittest
 
 from aidas.ui.menu_bar import (
     ApplicationMenuBar,
+    _MenuItem,
     _PopupCommandRow,
     _PopupMenu,
 )
@@ -14,9 +16,27 @@ from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
 class _SelectionRow:
     def __init__(self):
         self.states = []
+        self.enabled_states = []
+        self.check_label = _OptionTarget(text="")
 
     def set_selected(self, selected):
         self.states.append(bool(selected))
+
+    def set_enabled(self, enabled):
+        self.enabled_states.append(bool(enabled))
+
+
+class _OptionTarget:
+    def __init__(self, **options):
+        self.options = dict(options)
+        self.configure_calls = []
+
+    def cget(self, name):
+        return self.options[name]
+
+    def configure(self, **options):
+        self.options.update(options)
+        self.configure_calls.append(options)
 
 
 class _ColorTarget:
@@ -63,6 +83,35 @@ class _CachedPopup:
 
 
 class MenuBarTests(unittest.TestCase):
+    def test_unbinding_one_stale_shortcut_still_releases_the_rest(self):
+        class Owner:
+            def __init__(self):
+                self.calls = []
+
+            def unbind(self, sequence, binding):
+                self.calls.append((sequence, binding))
+                if len(self.calls) == 1:
+                    raise tk.TclError("stale command")
+
+        owner = Owner()
+        bar = ApplicationMenuBar.__new__(ApplicationMenuBar)
+        bar._root_bindings = [("<Alt-f>", "first"), ("<Alt-v>", "second")]
+        bar.winfo_toplevel = lambda: owner
+
+        bar._unbind_root_shortcuts()
+
+        self.assertEqual(
+            owner.calls,
+            [("<Alt-f>", "first"), ("<Alt-v>", "second")],
+        )
+        self.assertEqual(bar._root_bindings, [])
+
+    def test_unknown_interface_falls_back_to_first_declared_mode(self):
+        bar = ApplicationMenuBar.__new__(ApplicationMenuBar)
+        bar._interface_modes = ("Modern", "Classic")
+
+        self.assertEqual(bar._canonical_interface("obsolete"), "Modern")
+
     def test_top_level_menu_targets_share_one_compact_geometry(self):
         self.assertEqual(ApplicationMenuBar.MENU_NAMES, ("File", "View", "Help"))
         self.assertEqual(ApplicationMenuBar._BUTTON_WIDTH, 50)
@@ -131,6 +180,7 @@ class MenuBarTests(unittest.TestCase):
         popup = _PopupMenu.__new__(_PopupMenu)
         row = _SelectionRow()
         popup._buttons = {2: row}
+        popup._command_indices = [2]
         popup._selected = 2
 
         popup._select(2)
@@ -158,6 +208,73 @@ class MenuBarTests(unittest.TestCase):
         row._handle_press()
         row._handle_invoke(_PointerEvent(120, 210))
         self.assertEqual(invoked, [True])
+
+    def test_disabled_popup_row_ignores_mouse_selection_and_invocation(self):
+        entered = []
+        invoked = []
+        row = _PopupCommandRow.__new__(_PopupCommandRow)
+        row._enabled = False
+        row._pressed = False
+        row._on_enter = lambda: entered.append(True)
+        row._on_invoke = lambda: invoked.append(True)
+        row.winfo_rootx = lambda: 100
+        row.winfo_rooty = lambda: 200
+        row.winfo_width = lambda: 240
+        row.winfo_height = lambda: 28
+
+        row._handle_enter()
+        row._handle_press()
+        row._handle_invoke(_PointerEvent(120, 210))
+
+        self.assertEqual(entered, [])
+        self.assertEqual(invoked, [])
+
+    def test_cached_popup_updates_enabled_rows_and_repairs_selection(self):
+        popup = _PopupMenu.__new__(_PopupMenu)
+        popup._items = (
+            _MenuItem("command", "Modern"),
+            _MenuItem("command", "System", checked=True),
+            _MenuItem("command", "Dark"),
+        )
+        popup._buttons = {
+            0: _SelectionRow(),
+            1: _SelectionRow(),
+            2: _SelectionRow(),
+        }
+        popup._command_indices = [0, 1, 2]
+        popup._selected = 1
+        popup._visible = False
+
+        popup.set_items(
+            (
+                _MenuItem("command", "Modern"),
+                _MenuItem("command", "System", checked=True, enabled=False),
+                _MenuItem("command", "Dark", enabled=False),
+            )
+        )
+
+        self.assertEqual(popup._command_indices, [0])
+        self.assertEqual(popup._selected, -1)
+        self.assertEqual(popup._buttons[1].enabled_states, [False])
+        self.assertEqual(popup._buttons[2].enabled_states, [False])
+        self.assertIn(False, popup._buttons[1].states)
+
+    def test_disabled_popup_item_cannot_close_or_invoke_via_keyboard_path(self):
+        calls = []
+        popup = _PopupMenu.__new__(_PopupMenu)
+        popup._items = (
+            _MenuItem(
+                "command",
+                "Dark",
+                lambda: calls.append("invoked"),
+                enabled=False,
+            ),
+        )
+        popup.hide = lambda: calls.append("hidden")
+
+        popup._invoke(0)
+
+        self.assertEqual(calls, [])
 
     def test_opening_menus_reuses_prebuilt_popup_widgets(self):
         bar = ApplicationMenuBar.__new__(ApplicationMenuBar)
@@ -221,6 +338,81 @@ class MenuBarTests(unittest.TestCase):
         self.assertEqual(calls, ["browse", "exit", "updates", "about", "Dark"])
         checked = [item.label for item in view_items if item.checked]
         self.assertEqual(checked, ["Dark"])
+
+    def test_view_menu_disables_but_retains_appearance_in_classic(self):
+        calls = []
+        bar = ApplicationMenuBar.__new__(ApplicationMenuBar)
+        bar._interface_modes = ("Modern", "Classic")
+        bar._current_interface = "Classic"
+        bar._appearance_modes = ("System", "Light", "Dark")
+        bar._current_appearance = "Light"
+        bar._select_interface = lambda mode: calls.append(("interface", mode))
+        bar._select_appearance = lambda mode: calls.append(("appearance", mode))
+
+        items = bar._items_for("View")
+        next(item for item in items if item.label == "Modern").command()
+
+        self.assertEqual(
+            [item.label for item in items if item.kind == "heading"],
+            ["Interface", "Appearance"],
+        )
+        self.assertEqual(
+            [item.label for item in items if item.checked],
+            ["Classic", "Light"],
+        )
+        self.assertEqual(
+            [item.label for item in items if item.kind == "command" and item.enabled],
+            ["Modern", "Classic"],
+        )
+        self.assertEqual(
+            [item.label for item in items if item.kind == "command" and not item.enabled],
+            ["System", "Light", "Dark"],
+        )
+        self.assertEqual(calls, [("interface", "Modern")])
+
+    def test_set_interface_refreshes_cached_view_state_in_both_directions(self):
+        bar = ApplicationMenuBar.__new__(ApplicationMenuBar)
+        bar._interface_modes = ("Modern", "Classic")
+        bar._current_interface = "Classic"
+        bar._appearance_modes = ("System", "Light", "Dark")
+        bar._current_appearance = "System"
+        popup = _CachedPopup()
+        bar._popup_cache = {"View": popup}
+
+        bar.set_interface("Modern")
+        modern_items = popup.items[-1]
+        self.assertTrue(
+            all(
+                item.enabled
+                for item in modern_items
+                if item.label in bar._appearance_modes
+            )
+        )
+
+        bar.set_interface("Classic")
+        classic_items = popup.items[-1]
+        self.assertTrue(
+            all(
+                not item.enabled
+                for item in classic_items
+                if item.label in bar._appearance_modes
+            )
+        )
+
+    def test_classic_defensively_ignores_appearance_selection(self):
+        calls = []
+        bar = ApplicationMenuBar.__new__(ApplicationMenuBar)
+        bar._interface_modes = ("Modern", "Classic")
+        bar._current_interface = "Classic"
+        bar._appearance_modes = ("System", "Light", "Dark")
+        bar._current_appearance = "Light"
+        bar._set_appearance_command = lambda mode: calls.append(mode)
+        bar._popup_cache = {}
+
+        bar._select_appearance("Dark")
+
+        self.assertEqual(bar.current_appearance, "Light")
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

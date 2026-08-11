@@ -15,10 +15,27 @@ from aidas.ai.inference import (
     _normalize_for_model,
     _soft_argmax_y_numpy,
     choose_execution_providers,
+    probe_execution_devices,
 )
 
 
 class ProviderSelectionTests(unittest.TestCase):
+    def test_device_probe_reports_directml_compatibility(self):
+        fake_ort = types.SimpleNamespace(
+            get_available_providers=lambda: [DIRECTML_PROVIDER, CPU_PROVIDER]
+        )
+        with mock.patch(
+            "aidas.ai.inference._import_onnxruntime",
+            return_value=fake_ort,
+        ):
+            result = probe_execution_devices()
+
+        self.assertTrue(result["compatible_gpu"])
+        self.assertEqual(
+            result["providers"],
+            (DIRECTML_PROVIDER, CPU_PROVIDER),
+        )
+
     def test_auto_prefers_directml_and_keeps_cpu_fallback(self):
         selection = choose_execution_providers(
             [CPU_PROVIDER, DIRECTML_PROVIDER],
@@ -91,6 +108,8 @@ class _FakeOrt:
             self.graph_optimization_level = None
             self.enable_mem_pattern = True
             self.execution_mode = None
+            self.intra_op_num_threads = None
+            self.inter_op_num_threads = None
 
     GraphOptimizationLevel = types.SimpleNamespace(ORT_ENABLE_ALL="all")
     ExecutionMode = types.SimpleNamespace(ORT_SEQUENTIAL="sequential")
@@ -147,6 +166,30 @@ class PredictorFallbackTests(unittest.TestCase):
         self.assertIn("execution failed", result.fallback_reason)
         self.assertEqual(result.boundaries.shape, (6, 7))
         self.assertEqual(len(fake_ort.session_calls), 2)
+
+    def test_core_limit_configures_every_fallback_session(self):
+        fake_ort = _FakeOrt(fail_directml_init=True)
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch("aidas.ai.inference._import_onnxruntime", return_value=fake_ort):
+                AIForAIDASPredictor(
+                    boundary_model_path=str(self._model_path(directory)),
+                    provider_name="auto",
+                    core_limit=3,
+                )
+
+        self.assertEqual(len(fake_ort.session_calls), 2)
+        for _model, options, _providers in fake_ort.session_calls:
+            self.assertEqual(options.intra_op_num_threads, 3)
+            self.assertEqual(options.inter_op_num_threads, 1)
+            self.assertEqual(options.execution_mode, "sequential")
+
+    def test_predictor_rejects_nonpositive_core_limit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ValueError, "one or greater"):
+                AIForAIDASPredictor(
+                    boundary_model_path=str(self._model_path(directory)),
+                    core_limit=0,
+                )
 
 
 if __name__ == "__main__":

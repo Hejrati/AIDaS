@@ -21,6 +21,7 @@ class PackageStructureTests(unittest.TestCase):
             "aidas.core.single_instance",
             "aidas.services.update_service",
             "aidas.services.update_ui",
+            "aidas.ui.classic",
             "aidas.ui.components",
             "aidas.ui.menu_bar",
             "aidas.ui.splash",
@@ -57,13 +58,14 @@ class PackageStructureTests(unittest.TestCase):
         self.assertIn('collect_data_files("customtkinter")', spec_text)
         self.assertIn('"customtkinter",', spec_text)
 
-    def test_application_chrome_uses_the_custom_menu_bar(self):
+    def test_application_chrome_supports_modern_and_classic_menu_bars(self):
         app_source = (PROJECT_ROOT / "aidas" / "app.py").read_text(encoding="utf-8")
         menu_source = (PROJECT_ROOT / "aidas" / "ui" / "menu_bar.py").read_text(
             encoding="utf-8"
         )
 
         self.assertIn("ApplicationMenuBar", app_source)
+        self.assertIn("build_classic_application_menu", app_source)
         self.assertNotIn("build_app_menu", app_source)
         self.assertIn("class _PopupMenu(tk.Toplevel)", menu_source)
         self.assertNotIn("class _PopupMenu(ctk.CTkToplevel)", menu_source)

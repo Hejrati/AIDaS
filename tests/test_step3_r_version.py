@@ -73,6 +73,14 @@ class Step3RVersionTests(unittest.TestCase):
             ("Installed", "WizardSuccess.TLabel"),
         )
 
+    def test_open_setup_wizard_rebuilds_styles_on_live_theme_change(self):
+        wizard = RSetupWizard.__new__(RSetupWizard)
+        wizard._build_styles = mock.Mock()
+
+        wizard._apply_aidas_theme()
+
+        wizard._build_styles.assert_called_once_with()
+
     def test_installer_is_saved_in_per_user_app_data(self):
         wizard = RSetupWizard.__new__(RSetupWizard)
         wizard.step_frame = SimpleNamespace(R_INSTALLER_NAME="R-3.3.1-win.exe")

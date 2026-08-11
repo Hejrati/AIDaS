@@ -14,6 +14,7 @@ from aidas.steps.step3_flatten import (
     RBatchRunPanel,
     RBatchSelectionPanel,
     RBatchSelectionTable,
+    RSetupWizard,
     Step3Frame,
 )
 from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel, Step4Frame
@@ -26,6 +27,7 @@ from aidas.utils.ui_utils import (
     action_button,
     apply_app_icon_to,
     icon_action_button,
+    load_action_icon,
 )
 
 
@@ -87,13 +89,30 @@ class ActionButtonConventionTests(unittest.TestCase):
             with self.subTest(filename=filename):
                 self.assertTrue((PROJECT_ROOT / "assets" / filename).is_file())
 
+        self.assertEqual(
+            ACTION_ICON_FILES["download"],
+            "flat-color-icons--download.png",
+        )
+
     def test_text_and_icon_only_helpers_share_one_icon_size(self):
         text_source = inspect.getsource(action_button)
         icon_source = inspect.getsource(icon_action_button)
 
         self.assertEqual(ACTION_ICON_SIZE, 20)
         self.assertIn('"compound": "left"', text_source)
+        self.assertIn('"image": (icon, "disabled", icon)', text_source)
+        self.assertIn("_aidas_disabled_action_icon", text_source)
         self.assertIn('"AIDaS.Icon.TButton"', icon_source)
+        self.assertIn('setdefault("compound", "image")', icon_source)
+
+    def test_close_and_cancel_actions_use_the_shared_x_badge(self):
+        source = inspect.getsource(load_action_icon)
+
+        self.assertIn('action in {"cancel", "close"}', source)
+        self.assertIn("load_color_close_icon(owner, size=size)", source)
+
+        settings_source = inspect.getsource(SettingsDialog.__init__)
+        self.assertIn("load_color_close_ctk_icon(self)", settings_source)
 
     def test_ctk_buttons_default_to_left_compound_when_they_have_icons(self):
         source = inspect.getsource(AppButton.__init__)
@@ -123,6 +142,24 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("self.resizable(False, False)", source)
         self.assertNotIn("scrollbar_button_color", source)
 
+    def test_about_dialog_uses_ok_and_has_a_native_classic_surface(self):
+        constructor_source = inspect.getsource(AboutDialog.__init__)
+        classic_source = inspect.getsource(AboutDialog._build_classic_about)
+
+        self.assertIn('text="OK"', constructor_source)
+        self.assertNotIn('text="Close"', constructor_source)
+        self.assertNotIn("load_color_close_ctk_icon", constructor_source)
+        self.assertNotIn("CustomTkinter {ctk.__version__}", constructor_source)
+        self.assertNotIn("Â", constructor_source)
+        self.assertIn('f"{APP_SUBTITLE} - Version {__version__}"', constructor_source)
+        self.assertIn('self._presentation_mode == "Classic"', constructor_source)
+        self.assertIn("ttk.Frame(", classic_source)
+        self.assertIn('text="OK"', classic_source)
+        self.assertNotIn("AppButton(", classic_source)
+        self.assertNotIn("CustomTkinter {ctk.__version__}", classic_source)
+        self.assertNotIn("Â", classic_source)
+        self.assertIn('f"{APP_SUBTITLE} - Version {__version__}"', classic_source)
+
     def test_settings_owns_sdb_r_setup_and_script_configuration(self):
         source = inspect.getsource(SettingsDialog.__init__)
 
@@ -137,6 +174,31 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn('self._preferences.set("sdb_raw_width"', apply_source)
         self.assertIn("self._step3.select_r_script", apply_source)
         self.assertIn("self._set_appearance_command", apply_source)
+
+    def test_classic_settings_uses_native_property_sheet_controls(self):
+        source = inspect.getsource(SettingsDialog._build_classic_settings)
+
+        self.assertIn("ttk.LabelFrame(", source)
+        self.assertIn("ttk.Combobox(", source)
+        self.assertIn("ttk.Checkbutton(", source)
+        self.assertIn("ttk.Entry(", source)
+        self.assertIn("action_button(", source)
+        self.assertNotIn("ctk.CTkOptionMenu(", source)
+        self.assertNotIn("ctk.CTkSwitch(", source)
+        self.assertIn("base_row = 1 + row * 3", source)
+
+    def test_classic_settings_appearance_state_uses_native_readonly_mode(self):
+        dialog = SettingsDialog.__new__(SettingsDialog)
+        dialog._classic_settings = True
+        dialog.interface_menu = mock.Mock()
+        dialog.appearance_menu = mock.Mock()
+
+        dialog._sync_interface_controls("Classic", "Dark")
+        dialog.appearance_menu.configure.assert_called_with(state="disabled")
+
+        dialog.appearance_menu.reset_mock()
+        dialog._sync_interface_controls("Modern", "Dark")
+        dialog.appearance_menu.configure.assert_called_with(state="readonly")
 
     def test_settings_compacts_long_r_script_names(self):
         filename = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_noHypoDenseBand_EA_edited.R"
@@ -182,6 +244,20 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("self.default_raw_height", source)
         self.assertIn("self.default_raw_offset", source)
 
+    def test_step1_exclude_saved_filter_is_above_the_directory_buttons(self):
+        source = inspect.getsource(Step1Frame._build_controls)
+
+        header_start = source.index("parent_dir_header = ttk.Frame(sdb)")
+        parent_label = source.index('text="Parent dir:"')
+        exclude_filter = source.index("self.exclude_saved_outputs_checkbox")
+        directory_controls = source.index("dir_frame, _dir_entry, dir_buttons")
+        header_source = source[header_start:directory_controls]
+        self.assertLess(parent_label, exclude_filter)
+        self.assertLess(exclude_filter, directory_controls)
+        self.assertIn('ttk.Label(parent_dir_header, text="Parent dir:")', header_source)
+        self.assertIn("parent_dir_header,\n            text=", header_source)
+        self.assertIn('pack(side="left", padx=(4, 0))', header_source)
+
     def test_step1_view_selectors_blend_into_the_toolbar(self):
         source = inspect.getsource(Step1Frame._build_controls)
         self.assertEqual(source.count('style="AIDaS.ContentHeader.TRadiobutton"'), 2)
@@ -208,10 +284,36 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertEqual(source.count("= AppButton("), 3)
         self.assertIn('variant="success"', source)
         self.assertIn('tint=COLOR_PAIRS["on_primary"]', source)
-        self.assertEqual(source.count("load_ctk_image("), 3)
+        self.assertEqual(source.count("load_ctk_image("), 2)
+        self.assertIn("load_color_close_ctk_icon(self, size=20)", source)
         self.assertNotIn("btn_cancel = action_button(", source)
         self.assertNotIn("btn_skip = action_button(", source)
         self.assertNotIn("btn_set = action_button(", source)
+
+    def test_step3_r_download_uses_the_download_action(self):
+        source = inspect.getsource(RSetupWizard._render_page)
+        start = source.index("self.r_auto_install_button = action_button(")
+        block = source[start : source.index("self.r_auto_install_button.pack", start)]
+
+        self.assertIn('"download"', block)
+        self.assertNotIn('"package"', block)
+
+    def test_step3_batch_limits_use_large_numeric_steppers_and_core_wording(self):
+        source = inspect.getsource(RBatchSelectionPanel._build_ui)
+
+        self.assertEqual(source.count("NativeNumericSpinbox("), 2)
+        self.assertNotIn("ttk.Spinbox(", source)
+        self.assertIn('text="Batch size:"', source)
+        self.assertIn('text="Timeout per script (min):"', source)
+
+    def test_step2_exposes_the_maximum_fallback_core_limit(self):
+        source = inspect.getsource(Step2BatchSegmentationSelectionPanel._build_ui)
+
+        self.assertIn("NativeNumericSpinbox(", source)
+        self.assertIn("Maximum Step 2 cores for GPU fallback", source)
+        self.assertIn("_shared_core_budget()", source)
+        self.assertIn("ai_device_status_var", source)
+        self.assertNotIn("CPU reserved", source)
 
     def test_batch_panels_reserve_the_footer_before_the_flexible_table(self):
         panel_footers = (
@@ -377,6 +479,11 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
 
         layout_source = inspect.getsource(SidebarStepFrame.build_standard_layout)
         self.assertIn("(content_padding[0], content_padding[2])", layout_source)
+
+    def test_workflow_status_text_has_an_internal_left_inset(self):
+        source = inspect.getsource(SidebarStepFrame.add_status_bar)
+
+        self.assertIn("padx=LAYOUT.space_sm", source)
 
 
 class WorkflowNavigationTests(unittest.TestCase):

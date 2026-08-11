@@ -19,11 +19,39 @@ import customtkinter as ctk
 from aidas.ui.windowing import synchronize_window_chrome
 
 
-ColorPair: TypeAlias = tuple[str, str]
+class _LiveColorPair(list[str]):
+    """A two-color CTk value whose identity survives interface switches.
+
+    CustomTkinter keeps the color sequence supplied at construction time.  A
+    normal dictionary replacement therefore leaves already-created widgets on
+    the old palette.  These tiny mutable pairs let us update every semantic
+    color in place while retaining tuple-friendly equality for callers and
+    tests that treat theme values as ordinary color pairs.
+    """
+
+    def __init__(self, values) -> None:
+        super().__init__(str(value) for value in values)
+        if len(self) != 2:
+            raise ValueError("A live color pair must contain two colors")
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, (list, tuple)):
+            return list(self) == list(other)
+        return super().__eq__(other)
+
+    def __ne__(self, other) -> bool:
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return NotImplemented
+        return not result
+
+
+ColorPair: TypeAlias = tuple[str, str] | list[str]
 APPEARANCE_MODES = ("System", "Light", "Dark")
+INTERFACE_MODES = ("Modern", "Classic")
 
 
-COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
+MODERN_COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
     {
         "application": ("#EEF3F8", "#0B1118"),
         # Keep the native caption and in-app menu visually related without
@@ -64,6 +92,54 @@ COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
         "accent_soft": ("#DDEFFA", "#17384D"),
     }
 )
+
+# The Classic palette is taken from the final v2 interface immediately before
+# the v3 redesign.  Both members of each pair are intentionally the same:
+# classic mode mirrors the original light, native-desktop presentation while
+# the appearance preference remains available for a later return to Modern.
+CLASSIC_COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
+    {
+        "application": ("#E9EEF3", "#E9EEF3"),
+        "window_chrome": ("#F0F0F0", "#F0F0F0"),
+        "menu_bar": ("#F0F0F0", "#F0F0F0"),
+        "surface": ("#FFFFFF", "#FFFFFF"),
+        "surface_subtle": ("#F5F7FA", "#F5F7FA"),
+        "surface_elevated": ("#FFFFFF", "#FFFFFF"),
+        "button": ("#F0F0F0", "#F0F0F0"),
+        "button_hover": ("#E5F1F9", "#E5F1F9"),
+        "sidebar": ("#FFFFFF", "#FFFFFF"),
+        "border": ("#C9D2DC", "#C9D2DC"),
+        "border_strong": ("#A7ADB3", "#A7ADB3"),
+        "text": ("#17212B", "#17212B"),
+        "muted_text": ("#5D6B78", "#5D6B78"),
+        "disabled_text": ("#8B9298", "#8B9298"),
+        "primary": ("#0B5F9E", "#0B5F9E"),
+        "primary_hover": ("#084B7D", "#084B7D"),
+        "primary_soft": ("#E5F1F9", "#E5F1F9"),
+        "on_primary": ("#FFFFFF", "#FFFFFF"),
+        "success": ("#1F6B35", "#1F6B35"),
+        "success_hover": ("#18562A", "#18562A"),
+        "success_soft": ("#DFF3E4", "#DFF3E4"),
+        "warning": ("#8A5200", "#8A5200"),
+        "warning_soft": ("#FFF1D6", "#FFF1D6"),
+        "danger": ("#A1262F", "#A1262F"),
+        "danger_hover": ("#811E26", "#811E26"),
+        "danger_soft": ("#F7E4E6", "#F7E4E6"),
+        "link": ("#0066CC", "#0066CC"),
+        "institution": ("#C0002B", "#C0002B"),
+        "selection": ("#CBE8F8", "#CBE8F8"),
+        "canvas": ("#101820", "#101820"),
+        "accent": ("#0B5F9E", "#0B5F9E"),
+        "accent_hover": ("#084B7D", "#084B7D"),
+        "accent_soft": ("#E5F1F9", "#E5F1F9"),
+    }
+)
+
+_ACTIVE_COLOR_PAIRS: dict[str, ColorPair] = {
+    name: _LiveColorPair(value) for name, value in MODERN_COLOR_PAIRS.items()
+}
+COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(_ACTIVE_COLOR_PAIRS)
+_active_interface_mode = "Modern"
 
 
 @dataclass(frozen=True)
@@ -117,6 +193,40 @@ CONTROLS = ControlTokens()
 THEME = ThemeTokens(COLOR_PAIRS, TYPOGRAPHY, SHAPES, CONTROLS)
 
 
+def normalize_interface_mode(value: object) -> str:
+    """Return a supported presentation mode, defaulting safely to Modern."""
+
+    text = str(value or "").strip().lower()
+    return {"modern": "Modern", "classic": "Classic"}.get(text, "Modern")
+
+
+def get_interface_mode() -> str:
+    """Return the presentation mode currently supplying the design tokens."""
+
+    return _active_interface_mode
+
+
+def set_interface_mode(value: object, *, redraw: bool = True) -> str:
+    """Select live design tokens without replacing their shared identities."""
+
+    global _active_interface_mode
+    normalized = normalize_interface_mode(value)
+    palette = CLASSIC_COLOR_PAIRS if normalized == "Classic" else MODERN_COLOR_PAIRS
+    for name, value in palette.items():
+        live_pair = _ACTIVE_COLOR_PAIRS[name]
+        live_pair[:] = value
+    _active_interface_mode = normalized
+    # Changing Light to Light is intentionally a no-op in CTk.  Force its
+    # registered widgets to redraw because the stable color pairs changed
+    # beneath them even when the appearance index did not.
+    if redraw:
+        try:
+            ctk.AppearanceModeTracker.update_callbacks()
+        except (AttributeError, tk.TclError):
+            pass
+    return normalized
+
+
 def normalize_appearance_mode(value: object) -> str:
     """Return a supported CTk mode, safely mapping legacy ttk theme names."""
 
@@ -163,10 +273,18 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
     """Synchronize retained ttk widgets with the active CustomTkinter palette."""
 
     mode = normalize_appearance_mode(appearance_mode) if appearance_mode else ctk.get_appearance_mode()
+    classic = get_interface_mode() == "Classic"
     color = lambda name: resolve_color(COLOR_PAIRS[name], mode)
     available = style.theme_names()
-    if "clam" in available and style.theme_use() != "clam":
-        style.theme_use("clam")
+    if classic:
+        preferred_theme = next(
+            (name for name in ("xpnative", "vista", "clam") if name in available),
+            available[0],
+        )
+    else:
+        preferred_theme = "clam" if "clam" in available else available[0]
+    if style.theme_use() != preferred_theme:
+        style.theme_use(preferred_theme)
 
     body_font = (TYPOGRAPHY.family, 9)
     strong_font = (TYPOGRAPHY.family, 9, "bold")
@@ -236,8 +354,8 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
         bordercolor=color("border_strong"),
         focusthickness=1,
         focuscolor=color("primary"),
-        padding=(11, 7),
-        relief="flat",
+        padding=(9, 5) if classic else (11, 7),
+        relief="raised" if classic else "flat",
     )
     style.map(
         "TButton",
@@ -252,10 +370,10 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
     # Icon actions retain the standard 34 px control height. Text-and-icon
     # buttons need less vertical padding than text-only ttk buttons because
     # their 20 px glyph determines the content height. Icon-only controls use
-    # narrower symmetric padding so their requested size is a true square.
+    # equal padding on every side so their glyph stays centered in a square.
     for style_name, padding in (
         ("AIDaS.Action.TButton", (11, 4)),
-        ("AIDaS.Icon.TButton", (2, 4)),
+        ("AIDaS.Icon.TButton", (4, 4)),
     ):
         style.configure(
             style_name,
@@ -301,6 +419,7 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
             foreground=[("disabled", color("disabled_text")), ("!disabled", color("on_primary"))],
             bordercolor=[("disabled", color("border")), ("!disabled", color(base_color))],
         )
+    style.configure("AIDaS.Icon.TButton", anchor="center")
     for entry_style in ("TEntry", "TCombobox", "TSpinbox"):
         style.configure(
             entry_style,
@@ -321,7 +440,7 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
 
     style.configure(
         "Treeview",
-        rowheight=CONTROLS.tree_row_height,
+        rowheight=24 if classic else CONTROLS.tree_row_height,
         background=color("surface"),
         fieldbackground=color("surface"),
         foreground=color("text"),
@@ -338,8 +457,8 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
         background=color("surface_subtle"),
         foreground=color("text"),
         font=strong_font,
-        padding=(8, 7),
-        relief="flat",
+        padding=(7, 5) if classic else (8, 7),
+        relief="raised" if classic else "flat",
     )
     style.map("Treeview.Heading", background=[("active", color("primary_soft"))])
     style.configure(
@@ -362,13 +481,20 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
     )
     style.configure("TSeparator", background=color("border"))
 
-    style.configure("TNotebook", background=color("application"), borderwidth=0, tabmargins=(0, 0, 0, 0))
+    notebook_margins = (8, 8, 8, 0) if classic else (0, 0, 0, 0)
+    tab_padding = (14, 8) if classic else (12, 7)
+    style.configure(
+        "TNotebook",
+        background=color("application"),
+        borderwidth=0,
+        tabmargins=notebook_margins,
+    )
     style.configure(
         "TNotebook.Tab",
         background=color("surface_subtle"),
         foreground=color("muted_text"),
         font=strong_font,
-        padding=(12, 7),
+        padding=tab_padding,
         borderwidth=0,
     )
     style.map(
@@ -397,18 +523,39 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
         "AIDaS.Status.TLabel",
         background=color("surface_subtle"),
         foreground=color("muted_text"),
-        padding=(12, 6),
-        relief="flat",
+        padding=(10, 5) if classic else (12, 6),
+        relief="sunken" if classic else "flat",
     )
     style.map(
         "AIDaS.Status.TLabel",
         background=[("disabled", color("surface_subtle"))],
     )
-    style.configure("AIDaS.TNotebook", background=color("application"), borderwidth=0, tabmargins=(0, 0, 0, 0))
-    # The app supplies its own CTk workflow navigation; the retained Notebook
-    # remains the compatibility container used by all cross-step callbacks.
+    style.configure(
+        "AIDaS.TNotebook",
+        background=color("application"),
+        borderwidth=0,
+        tabmargins=notebook_margins,
+    )
+    style.configure(
+        "AIDaS.TNotebook.Tab",
+        background=color("surface_subtle"),
+        foreground=color("muted_text"),
+        font=strong_font,
+        padding=tab_padding,
+        borderwidth=0,
+    )
+    style.map(
+        "AIDaS.TNotebook.Tab",
+        background=[("selected", color("surface")), ("active", color("primary_soft"))],
+        foreground=[("selected", color("primary")), ("active", color("text"))],
+    )
+    # Modern supplies its own workflow header, while Classic restores the
+    # visible four-tab navigation used by AIDaS v2.
     try:
-        style.layout("AIDaS.TNotebook.Tab", [])
+        style.layout(
+            "AIDaS.TNotebook.Tab",
+            style.layout("TNotebook.Tab") if classic else [],
+        )
     except tk.TclError:
         pass
 
@@ -452,6 +599,56 @@ def _walk_widgets(widget: tk.Misc):
         yield from _walk_widgets(child)
 
 
+def refresh_interface_widgets(root: tk.Misc) -> int:
+    """Flatten or restore existing CTk corners for the active interface.
+
+    Color tokens update live because every widget holds the same mutable color
+    pair.  Corner radii are scalar values, so Classic temporarily stores each
+    widget's exact Modern value and restores it on the return trip.  This also
+    handles widgets created while Classic is active: their canonical radius is
+    captured before the widget is flattened.
+    """
+
+    classic = get_interface_mode() == "Classic"
+    changed = 0
+    for widget in (root, *_walk_widgets(root)):
+        try:
+            current = widget.cget("corner_radius")
+        except (AttributeError, KeyError, tk.TclError, TypeError, ValueError):
+            continue
+        snapshot_name = "_aidas_modern_corner_radius"
+        if classic:
+            if not hasattr(widget, snapshot_name):
+                try:
+                    setattr(widget, snapshot_name, current)
+                except (AttributeError, TypeError):
+                    continue
+            if current == 0:
+                continue
+            target = 0
+        else:
+            if not hasattr(widget, snapshot_name):
+                continue
+            target = getattr(widget, snapshot_name)
+            if current == target:
+                try:
+                    delattr(widget, snapshot_name)
+                except AttributeError:
+                    pass
+                continue
+        try:
+            widget.configure(corner_radius=target)
+            if not classic:
+                try:
+                    delattr(widget, snapshot_name)
+                except AttributeError:
+                    pass
+            changed += 1
+        except (AttributeError, KeyError, tk.TclError, TypeError, ValueError):
+            pass
+    return changed
+
+
 def refresh_native_widgets(root: tk.Misc) -> None:
     """Refresh native widgets and shared composites after an appearance change."""
 
@@ -489,7 +686,7 @@ def refresh_native_widgets(root: tk.Misc) -> None:
                     selectforeground=on_selected,
                     highlightbackground=border,
                 )
-            elif isinstance(widget, tk.Menu):
+            elif isinstance(widget, tk.Menu) and get_interface_mode() == "Modern":
                 widget.configure(
                     background=surface,
                     foreground=text,
@@ -512,14 +709,63 @@ def apply_appearance_mode(
     *,
     root: tk.Misc | None = None,
     style: ttk.Style | None = None,
+    force_ctk_redraw: bool = False,
+    defer_ctk_ms: int = 0,
 ) -> str:
     """Apply one appearance mode to CTk plus all retained native widgets."""
 
     normalized = normalize_appearance_mode(mode)
-    ctk.set_appearance_mode(normalized)
-    if style is not None:
-        configure_ttk_styles(style, normalized)
+    pending_name = "_aidas_deferred_appearance_after_id"
     if root is not None:
+        pending = getattr(root, pending_name, None)
+        if pending is not None:
+            try:
+                root.after_cancel(pending)
+            except (AttributeError, tk.TclError):
+                pass
+            try:
+                setattr(root, pending_name, None)
+            except (AttributeError, TypeError):
+                pass
+    if style is not None:
+        # ttk styling is cheap and must be ready before the replacement shell
+        # is constructed. The expensive CTk callback fan-out may be deferred
+        # until after the menu command has returned and the shell can paint.
+        configure_ttk_styles(style, normalized)
+
+    def finish() -> None:
+        if root is not None:
+            try:
+                setattr(root, pending_name, None)
+            except (AttributeError, TypeError):
+                pass
+        previous_effective = ctk.get_appearance_mode()
+        ctk.set_appearance_mode(normalized)
+        if normalized == "System":
+            # CTk's public System setter only changes who owns the mode; its
+            # periodic detector updates the effective Light/Dark value later.
+            # Resolve it now so retained ttk widgets and the replacement shell
+            # agree on the first frame after a Classic -> Modern switch.
+            try:
+                ctk.AppearanceModeTracker.init_appearance_mode()
+            except (AttributeError, tk.TclError):
+                pass
+        if force_ctk_redraw and ctk.get_appearance_mode() == previous_effective:
+            try:
+                ctk.AppearanceModeTracker.update_callbacks()
+            except (AttributeError, tk.TclError):
+                pass
+        if style is not None and normalized == "System":
+            # The eager pass above establishes the correct Notebook layout;
+            # this pass resolves colors against CTk's now-current OS mode.
+            configure_ttk_styles(style, normalized)
+        if root is None:
+            return
+        if hasattr(root, "_last_effective_appearance"):
+            try:
+                root._last_effective_appearance = ctk.get_appearance_mode()
+            except (AttributeError, TypeError):
+                pass
         try:
             root.configure(fg_color=COLOR_PAIRS["application"])
         except (tk.TclError, ValueError, TypeError):
@@ -545,20 +791,36 @@ def apply_appearance_mode(
             root.event_generate("<<AIDaSThemeChanged>>", when="tail")
         except tk.TclError:
             pass
+
+    if root is not None and int(defer_ctk_ms) > 0:
+        try:
+            pending = root.after(max(1, int(defer_ctk_ms)), finish)
+            setattr(root, pending_name, pending)
+            return normalized
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            pass
+    finish()
     return normalized
 
 
 __all__ = [
     "APPEARANCE_MODES",
+    "CLASSIC_COLOR_PAIRS",
     "COLORS",
     "COLOR_PAIRS",
     "CONTROLS",
+    "INTERFACE_MODES",
+    "MODERN_COLOR_PAIRS",
     "SHAPES",
     "THEME",
     "TYPOGRAPHY",
     "apply_appearance_mode",
     "configure_ttk_styles",
+    "get_interface_mode",
     "normalize_appearance_mode",
+    "normalize_interface_mode",
+    "refresh_interface_widgets",
     "refresh_native_widgets",
     "resolve_color",
+    "set_interface_mode",
 ]

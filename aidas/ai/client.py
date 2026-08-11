@@ -24,6 +24,7 @@ class AIWorkerClient:
         model_path,
         provider_name="auto",
         device_id=0,
+        core_limit=None,
         env=None,
         popen_kwargs=None,
         startup_progress_callback=None,
@@ -34,6 +35,12 @@ class AIWorkerClient:
         self.model_path = os.path.abspath(model_path)
         self.provider_name = str(provider_name)
         self.device_id = int(device_id)
+        if core_limit is None:
+            self.core_limit = None
+        else:
+            self.core_limit = int(core_limit)
+            if self.core_limit < 1:
+                raise ValueError("core_limit must be one or greater")
         self.env = env
         self.popen_kwargs = dict(popen_kwargs or {})
         self.startup_progress_callback = startup_progress_callback
@@ -56,13 +63,17 @@ class AIWorkerClient:
         if self._listener is None or self._connect_token is None:
             raise RuntimeError("ONNX worker IPC listener has not been initialized.")
         host, port = self._listener.getsockname()
-        return self.command + [
+        command = self.command + [
             "--model",
             self.model_path,
             "--provider",
             self.provider_name,
             "--device-id",
             str(self.device_id),
+        ]
+        if self.core_limit is not None:
+            command.extend(("--core-limit", str(self.core_limit)))
+        command.extend([
             "--connect-host",
             str(host),
             "--connect-port",
@@ -71,7 +82,8 @@ class AIWorkerClient:
             # a token contains a leading '-' and avoids platform/parser-specific
             # interpretation of the token as another command-line option.
             f"--connect-token={self._connect_token}",
-        ]
+        ])
+        return command
 
     @property
     def command_line(self):

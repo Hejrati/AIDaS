@@ -37,7 +37,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertIn('variant="primary"', source)
         self.assertIn('variant="secondary"', source)
         self.assertIn('"flat-color-icons--checkmark.png"', source)
-        self.assertIn('"flat-color-icons--cancel.png"', source)
+        self.assertIn("load_color_close_ctk_icon(self, size=20)", source)
 
     def test_focused_limits_add_margin_around_selection(self):
         self.assertEqual(_focused_profile_limits(100, 20, 40), (15, 45))

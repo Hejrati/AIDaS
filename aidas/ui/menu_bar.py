@@ -29,6 +29,7 @@ class _MenuItem:
     label: str = ""
     command: Callable[[], None] | None = None
     checked: bool = False
+    enabled: bool = True
 
 
 class _PopupCommandRow(ctk.CTkFrame):
@@ -42,10 +43,18 @@ class _PopupCommandRow(ctk.CTkFrame):
         height: int,
         label: str,
         checked: bool,
+        enabled: bool,
         check_column_width: int,
         on_enter: Callable[[], None],
         on_invoke: Callable[[], None],
     ) -> None:
+        self._enabled = bool(enabled)
+        cursor = "hand2" if self._enabled else "arrow"
+        text_color = (
+            COLOR_PAIRS["text"]
+            if self._enabled
+            else COLOR_PAIRS["disabled_text"]
+        )
         super().__init__(
             master,
             width=width,
@@ -53,7 +62,7 @@ class _PopupCommandRow(ctk.CTkFrame):
             corner_radius=SHAPES.corner_radius_sm,
             border_width=0,
             fg_color=COLOR_PAIRS["surface_elevated"],
-            cursor="hand2",
+            cursor=cursor,
         )
         self.grid_propagate(False)
         self.grid_rowconfigure(0, weight=1)
@@ -71,8 +80,8 @@ class _PopupCommandRow(ctk.CTkFrame):
             height=height,
             anchor="center",
             fg_color=COLOR_PAIRS["surface_elevated"],
-            text_color=COLOR_PAIRS["text"],
-            cursor="hand2",
+            text_color=text_color,
+            cursor=cursor,
             font=ctk.CTkFont(
                 family=TYPOGRAPHY.family,
                 size=TYPOGRAPHY.body_size,
@@ -91,8 +100,8 @@ class _PopupCommandRow(ctk.CTkFrame):
             height=height,
             anchor="w",
             fg_color=COLOR_PAIRS["surface_elevated"],
-            text_color=COLOR_PAIRS["text"],
-            cursor="hand2",
+            text_color=text_color,
+            cursor=cursor,
             font=ctk.CTkFont(
                 family=TYPOGRAPHY.family,
                 size=TYPOGRAPHY.body_size,
@@ -106,9 +115,13 @@ class _PopupCommandRow(ctk.CTkFrame):
             widget.bind("<ButtonRelease-1>", self._handle_invoke, add="+")
 
     def _handle_enter(self, _event=None) -> None:
-        self._on_enter()
+        if getattr(self, "_enabled", True):
+            self._on_enter()
 
     def _handle_press(self, _event=None) -> str:
+        if not getattr(self, "_enabled", True):
+            self._pressed = False
+            return "break"
         self._pressed = True
         self._on_enter()
         return "break"
@@ -116,7 +129,11 @@ class _PopupCommandRow(ctk.CTkFrame):
     def _handle_invoke(self, event=None) -> str:
         pressed = self._pressed
         self._pressed = False
-        if pressed and self._event_is_inside(event):
+        if (
+            getattr(self, "_enabled", True)
+            and pressed
+            and self._event_is_inside(event)
+        ):
             self._on_invoke()
         return "break"
 
@@ -140,12 +157,30 @@ class _PopupCommandRow(ctk.CTkFrame):
 
         color = (
             COLOR_PAIRS["primary_soft"]
-            if selected
+            if selected and getattr(self, "_enabled", True)
             else COLOR_PAIRS["surface_elevated"]
         )
         self.configure(fg_color=color)
         self.check_label.configure(fg_color=color)
         self.text_label.configure(fg_color=color)
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Apply disabled semantics without replacing the cached row."""
+
+        enabled = bool(enabled)
+        if enabled == self._enabled:
+            return
+        self._enabled = enabled
+        self._pressed = False
+        cursor = "hand2" if enabled else "arrow"
+        text_color = (
+            COLOR_PAIRS["text"] if enabled else COLOR_PAIRS["disabled_text"]
+        )
+        self.configure(cursor=cursor)
+        self.check_label.configure(cursor=cursor, text_color=text_color)
+        self.text_label.configure(cursor=cursor, text_color=text_color)
+        if not enabled:
+            self.set_selected(False)
 
 
 class _PopupMenu(tk.Toplevel):
@@ -242,6 +277,7 @@ class _PopupMenu(tk.Toplevel):
                 height=self._ITEM_HEIGHT,
                 label=item.label,
                 checked=item.checked,
+                enabled=item.enabled,
                 check_column_width=self._CHECK_COLUMN_WIDTH,
                 on_enter=lambda row=index: self._select(row),
                 on_invoke=lambda row=index: self._invoke(row),
@@ -257,7 +293,8 @@ class _PopupMenu(tk.Toplevel):
                 ),
             )
             self._buttons[index] = button
-            self._command_indices.append(index)
+            if item.enabled:
+                self._command_indices.append(index)
 
         # Let geometry negotiation size the popup to its rows, but retain a
         # stable width so switching File/View/Help does not make the bar jump.
@@ -280,7 +317,7 @@ class _PopupMenu(tk.Toplevel):
         self._owner = master.winfo_toplevel()
 
     def set_items(self, items: Sequence[_MenuItem]) -> None:
-        """Refresh commands/checkmarks without rebuilding the cached widgets."""
+        """Refresh commands, checks, and states without rebuilding widgets."""
 
         updated = tuple(items)
         if len(updated) != len(self._items) or any(
@@ -289,10 +326,23 @@ class _PopupMenu(tk.Toplevel):
         ):
             raise ValueError("Cached popup menu structure cannot change")
         self._items = updated
+        enabled_indices: list[int] = []
         for index, row in self._buttons.items():
             text = "\u2713" if updated[index].checked else ""
             if row.check_label.cget("text") != text:
                 row.check_label.configure(text=text)
+            row.set_enabled(updated[index].enabled)
+            if updated[index].enabled:
+                enabled_indices.append(index)
+
+        self._command_indices = enabled_indices
+        if self._selected not in self._command_indices:
+            previous = self._buttons.get(self._selected)
+            if previous is not None:
+                previous.set_selected(False)
+            self._selected = -1
+            if self._visible and self._command_indices:
+                self._select(self._command_indices[0])
 
     def show(self, anchor: ctk.CTkButton) -> None:
         """Position and reveal a prebuilt popup without recreating its rows."""
@@ -362,7 +412,7 @@ class _PopupMenu(tk.Toplevel):
             separator.configure(background=COLORS.border_strong)
 
     def _select(self, index: int) -> None:
-        if index not in self._buttons:
+        if index not in self._command_indices:
             return
         if index == self._selected:
             return
@@ -392,12 +442,13 @@ class _PopupMenu(tk.Toplevel):
     def _invoke(self, index: int) -> None:
         item = self._items[index]
         command = item.command
+        if not item.enabled or command is None:
+            return
         self.hide()
-        if command is not None:
-            command()
+        command()
 
     def _invoke_selected(self, _event=None) -> str:
-        if self._selected in self._buttons:
+        if self._selected in self._command_indices:
             self._invoke(self._selected)
         return "break"
 
@@ -477,6 +528,9 @@ class ApplicationMenuBar(ctk.CTkFrame):
         check_updates_command: Callable[[], None],
         about_command: Callable[[], None],
         exit_command: Callable[[], None] | None = None,
+        interface_modes: Sequence[str] = (),
+        current_interface: str = "Modern",
+        set_interface_command: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(
             master,
@@ -491,6 +545,9 @@ class ApplicationMenuBar(ctk.CTkFrame):
         self._appearance_modes = tuple(str(mode) for mode in appearance_modes)
         self._current_appearance = self._canonical_appearance(current_appearance)
         self._set_appearance_command = set_appearance_command
+        self._interface_modes = tuple(str(mode) for mode in interface_modes)
+        self._current_interface = self._canonical_interface(current_interface)
+        self._set_interface_command = set_interface_command
         self._browse_sdb_command = browse_sdb_command
         self._check_updates_command = check_updates_command
         self._about_command = about_command
@@ -500,6 +557,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         self._active_menu: str | None = None
         self._buttons: dict[str, ctk.CTkButton] = {}
         self._root_bindings: list[tuple[str, str]] = []
+        self._suspended = False
 
         row = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         row.pack(
@@ -540,7 +598,18 @@ class ApplicationMenuBar(ctk.CTkFrame):
             fg_color=COLOR_PAIRS["border"],
         ).place(relx=0, rely=1, relwidth=1, anchor="sw")
 
-        owner = master.winfo_toplevel()
+        self._bind_root_shortcuts()
+
+        # Popup construction is the expensive part of CustomTkinter menus
+        # (font/canvas creation and anti-aliased drawing). Build each menu once
+        # while the startup splash is visible, then only show/hide it on click.
+        for menu_name in self.MENU_NAMES:
+            self._popup_cache[menu_name] = self._create_popup(menu_name)
+
+    def _bind_root_shortcuts(self) -> None:
+        if self._root_bindings:
+            return
+        owner = self.winfo_toplevel()
         for sequence, name in (("<Alt-f>", "File"), ("<Alt-v>", "View"), ("<Alt-h>", "Help")):
             binding = owner.bind(
                 sequence,
@@ -553,11 +622,40 @@ class ApplicationMenuBar(ctk.CTkFrame):
         if binding:
             self._root_bindings.append(("<F10>", binding))
 
-        # Popup construction is the expensive part of CustomTkinter menus
-        # (font/canvas creation and anti-aliased drawing). Build each menu once
-        # while the startup splash is visible, then only show/hide it on click.
-        for menu_name in self.MENU_NAMES:
-            self._popup_cache[menu_name] = self._create_popup(menu_name)
+    def _unbind_root_shortcuts(self) -> None:
+        try:
+            owner = self.winfo_toplevel()
+        except tk.TclError:
+            owner = None
+        for sequence, binding in self._root_bindings:
+            if owner is None:
+                break
+            try:
+                owner.unbind(sequence, binding)
+            except tk.TclError:
+                # One stale Tcl command must not prevent the remaining global
+                # shortcuts from being released before this menu is cached.
+                continue
+        self._root_bindings.clear()
+
+    def suspend(self) -> None:
+        """Hide the Modern menu and disable its global shortcuts for reuse."""
+
+        self._suspended = True
+        self.close_menu()
+        for popup in self._popup_cache.values():
+            popup.hide()
+        self._unbind_root_shortcuts()
+        try:
+            self.pack_forget()
+        except tk.TclError:
+            pass
+
+    def resume(self) -> None:
+        """Reactivate a cached Modern menu after leaving Classic mode."""
+
+        self._suspended = False
+        self._bind_root_shortcuts()
 
     @property
     def current_appearance(self) -> str:
@@ -569,6 +667,20 @@ class ApplicationMenuBar(ctk.CTkFrame):
         """Update the checked appearance entry without invoking its callback."""
 
         self._current_appearance = self._canonical_appearance(mode)
+        popup = self._popup_cache.get("View")
+        if popup is not None:
+            popup.set_items(self._items_for("View"))
+
+    @property
+    def current_interface(self) -> str:
+        """Return the interface style currently marked in the View menu."""
+
+        return self._current_interface
+
+    def set_interface(self, mode: str) -> None:
+        """Update the checked interface preference without invoking it."""
+
+        self._current_interface = self._canonical_interface(mode)
         popup = self._popup_cache.get("View")
         if popup is not None:
             popup.set_items(self._items_for("View"))
@@ -587,6 +699,23 @@ class ApplicationMenuBar(ctk.CTkFrame):
                 return candidate
         return requested
 
+    def _canonical_interface(self, mode: object) -> str:
+        requested = str(mode)
+        for candidate in self._interface_modes:
+            if candidate.casefold() == requested.casefold():
+                return candidate
+        if self._interface_modes:
+            return self._interface_modes[0]
+        return requested
+
+    @property
+    def appearance_enabled(self) -> bool:
+        """Return whether appearance commands are available in this shell."""
+
+        interface_modes = getattr(self, "_interface_modes", ())
+        current = getattr(self, "_current_interface", "Modern")
+        return not interface_modes or str(current).casefold() == "modern"
+
     def _items_for(self, menu_name: str) -> tuple[_MenuItem, ...]:
         if menu_name == "File":
             return (
@@ -595,15 +724,33 @@ class ApplicationMenuBar(ctk.CTkFrame):
                 _MenuItem("command", "Exit", self._exit_command),
             )
         if menu_name == "View":
+            interface_items = tuple(
+                _MenuItem(
+                    "command",
+                    mode,
+                    lambda selected=mode: self._select_interface(selected),
+                    checked=mode == self._current_interface,
+                )
+                for mode in getattr(self, "_interface_modes", ())
+            )
             appearance_items = tuple(
                 _MenuItem(
                     "command",
                     mode,
                     lambda selected=mode: self._select_appearance(selected),
                     checked=mode == self._current_appearance,
+                    enabled=self.appearance_enabled,
                 )
                 for mode in self._appearance_modes
             )
+            if interface_items:
+                return (
+                    _MenuItem("heading", "Interface"),
+                    *interface_items,
+                    _MenuItem("separator"),
+                    _MenuItem("heading", "Appearance"),
+                    *appearance_items,
+                )
             return (_MenuItem("heading", "Appearance"), *appearance_items)
         return (
             _MenuItem("command", "Check for Updates...", self._check_updates_command),
@@ -612,8 +759,15 @@ class ApplicationMenuBar(ctk.CTkFrame):
         )
 
     def _select_appearance(self, mode: str) -> None:
-        self._current_appearance = self._canonical_appearance(mode)
+        if not self.appearance_enabled:
+            return
+        self.set_appearance(mode)
         self._set_appearance_command(self._current_appearance)
+
+    def _select_interface(self, mode: str) -> None:
+        self.set_interface(mode)
+        if self._set_interface_command is not None:
+            self._set_interface_command(self._current_interface)
 
     def _toggle_menu(self, menu_name: str) -> None:
         if self._active_menu == menu_name and self._popup is not None:
@@ -630,7 +784,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         )
 
     def _open_menu(self, menu_name: str) -> None:
-        if menu_name not in self._buttons:
+        if getattr(self, "_suspended", False) or menu_name not in self._buttons:
             return
         old_popup = self._popup
         if old_popup is not None:
@@ -680,13 +834,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         for popup in self._popup_cache.values():
             popup.destroy()
         self._popup_cache.clear()
-        try:
-            owner = self.winfo_toplevel()
-            for sequence, binding in self._root_bindings:
-                owner.unbind(sequence, binding)
-        except tk.TclError:
-            pass
-        self._root_bindings.clear()
+        self._unbind_root_shortcuts()
         super().destroy()
 
 

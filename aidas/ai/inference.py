@@ -37,6 +37,17 @@ class ProviderSelection:
     device_label: str
 
 
+def probe_execution_devices() -> dict:
+    """Report lightweight ONNX provider compatibility without loading a model."""
+
+    ort = _import_onnxruntime()
+    providers = tuple(str(name) for name in ort.get_available_providers())
+    return {
+        "compatible_gpu": DIRECTML_PROVIDER in providers,
+        "providers": providers,
+    }
+
+
 class AIForAIDASPredictor:
     """Reusable ONNX predictor that keeps one optimized session in memory."""
 
@@ -46,6 +57,7 @@ class AIForAIDASPredictor:
         boundary_model_path: str,
         provider_name: str = "auto",
         device_id: int = 0,
+        core_limit: int | None = None,
         progress_callback: Optional[Callable[[str, float], None]] = None,
     ):
         if not os.path.isfile(boundary_model_path):
@@ -55,6 +67,12 @@ class AIForAIDASPredictor:
         self.boundary_model_path = os.path.abspath(boundary_model_path)
         self.requested_provider = _normalize_provider_name(provider_name)
         self.device_id = _validate_device_id(device_id)
+        if core_limit is None:
+            self.core_limit = None
+        else:
+            self.core_limit = int(core_limit)
+            if self.core_limit < 1:
+                raise ValueError("core_limit must be one or greater")
         self.fallback_reason = None
 
         self._report_progress("importing_onnx_runtime", 0.10)
@@ -93,6 +111,7 @@ class AIForAIDASPredictor:
                 self._ort,
                 self.boundary_model_path,
                 selection,
+                self.core_limit,
             )
         except Exception as exc:
             if not selection.uses_directml or selection.requested != "auto":
@@ -110,6 +129,7 @@ class AIForAIDASPredictor:
                 self._ort,
                 self.boundary_model_path,
                 self._selection,
+                self.core_limit,
             )
 
     def _validate_model_contract(self) -> None:
@@ -150,6 +170,7 @@ class AIForAIDASPredictor:
                 self._ort,
                 self.boundary_model_path,
                 self._selection,
+                self.core_limit,
             )
             self._validate_model_contract()
             try:
@@ -159,7 +180,7 @@ class AIForAIDASPredictor:
                 )[0]
             except Exception as cpu_exc:
                 raise RuntimeError(
-                    "AI_ForAIDAS ONNX inference failed on DirectML and on the CPU fallback.\n\n"
+                    "AI_ForAIDAS ONNX inference failed on DirectML and on the core-processing fallback.\n\n"
                     f"DirectML error: {exc}\n\nCPU error: {cpu_exc}"
                 ) from cpu_exc
 
@@ -281,9 +302,18 @@ def choose_execution_providers(
     )
 
 
-def _create_onnx_session(ort, model_path: str, selection: ProviderSelection):
+def _create_onnx_session(
+    ort,
+    model_path: str,
+    selection: ProviderSelection,
+    core_limit: int | None = None,
+):
     options = ort.SessionOptions()
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+    if core_limit is not None:
+        options.intra_op_num_threads = int(core_limit)
+        options.inter_op_num_threads = 1
+        options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
     if selection.uses_directml:
         # Required by the DirectML execution provider.
         options.enable_mem_pattern = False
@@ -327,6 +357,7 @@ def predict_boundaries_and_fovea(
     boundary_model_path: str,
     provider_name: str = "auto",
     device_id: int = 0,
+    core_limit: int | None = None,
     progress_callback: Optional[Callable[[str, float], None]] = None,
 ) -> PredictionResult:
     """Run ONNX AI_ForAIDAS inference on a 2-D OCT image."""
@@ -334,6 +365,7 @@ def predict_boundaries_and_fovea(
         boundary_model_path=boundary_model_path,
         provider_name=provider_name,
         device_id=device_id,
+        core_limit=core_limit,
         progress_callback=progress_callback,
     )
     result = predictor.predict(image)

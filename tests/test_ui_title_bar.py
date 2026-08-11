@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import unittest
+import threading
 from types import SimpleNamespace
 
 from aidas.ui.title_bar import (
     CustomWindowsTitleBar,
     WindowsCaptionController,
+    _SWP_ASYNCWINDOWPOS,
+    _WindowsAPI,
     _REQUIRED_NATIVE_STYLES,
     _RETAINED_NATIVE_STYLES,
     _WS_CAPTION,
     _WS_THICKFRAME,
+    _WS_VISIBLE,
     _outer_rect_for_client_work_area,
     _resized_window_rect,
     reassert_client_size,
@@ -23,10 +27,12 @@ class _FakeNativeAPI:
         *,
         refresh_succeeds: bool = True,
         refresh_raises: bool = False,
+        frame_applied: bool = True,
     ):
         self.style = style
         self.refresh_succeeds = refresh_succeeds
         self.refresh_raises = refresh_raises
+        self.frame_applied = frame_applied
         self.set_styles: list[int] = []
         self.refresh_count = 0
         self.drag_count = 0
@@ -52,6 +58,13 @@ class _FakeNativeAPI:
             self.refresh_raises = False
             raise OSError("simulated FRAMECHANGED failure")
         return self.refresh_succeeds
+
+    def frame_insets(self, _handle: int):
+        if not self.frame_applied:
+            return (0, 0, 0, 0)
+        if self.style & _WS_CAPTION:
+            return (8, 31, 8, 8)
+        return (0, 0, 0, 0)
 
     def begin_caption_drag(self, _handle: int) -> None:
         self.drag_count += 1
@@ -98,6 +111,10 @@ class _ActionWindow:
     def after_idle(self, _callback):
         return "after-id"
 
+    def after(self, _delay, callback):
+        callback()
+        return "after-id"
+
 
 class _FrameAdjustedWindow:
     def __init__(self, scale: float = 1.0):
@@ -129,6 +146,33 @@ class _FrameAdjustedWindow:
 
 
 class WindowsCaptionControllerTests(unittest.TestCase):
+    def test_cached_root_handle_skips_a_finished_widget_tree_flush(self):
+        calls = []
+        window = SimpleNamespace(
+            _aidas_native_root_handle=4321,
+            update_idletasks=lambda: calls.append("flush"),
+        )
+        api = _WindowsAPI.__new__(_WindowsAPI)
+
+        self.assertEqual(api.root_handle(window), 4321)
+        self.assertEqual(calls, [])
+
+    def test_frame_refresh_is_posted_from_a_non_ui_thread(self):
+        api = _WindowsAPI.__new__(_WindowsAPI)
+        calls = []
+        ui_thread = threading.get_ident()
+
+        def set_window_pos(*args):
+            calls.append((threading.get_ident(), args))
+            return True
+
+        api._frame_set_window_pos = set_window_pos
+
+        self.assertTrue(api.refresh_frame(101))
+        self.assertEqual(len(calls), 1)
+        self.assertNotEqual(calls[0][0], ui_thread)
+        self.assertTrue(calls[0][1][-1] & _SWP_ASYNCWINDOWPOS)
+
     def test_descendant_configure_does_not_schedule_title_state_work(self):
         title_bar = object.__new__(CustomWindowsTitleBar)
         root = object()
@@ -273,6 +317,54 @@ class WindowsCaptionControllerTests(unittest.TestCase):
         self.assertEqual(api.style, original_style)
         self.assertEqual(api.refresh_count, 2)
 
+    def test_restore_keeps_client_controls_installed_until_frame_is_visible(self):
+        original_style = 0x16000008 | _WS_CAPTION | _REQUIRED_NATIVE_STYLES
+        api = _FakeNativeAPI(original_style, frame_applied=False)
+        window = SimpleNamespace(_aidas_suppress_native_border=True)
+        controller = WindowsCaptionController(window, native_api=api)
+        self.assertTrue(controller.install())
+
+        self.assertTrue(controller.begin_restore_native_caption())
+        self.assertTrue(controller.installed)
+        self.assertTrue(window._aidas_suppress_native_border)
+        self.assertIsNone(controller.finish_restore_native_caption())
+
+        api.frame_applied = True
+        self.assertTrue(controller.finish_restore_native_caption())
+        self.assertFalse(controller.installed)
+        self.assertFalse(window._aidas_suppress_native_border)
+
+    def test_failed_restore_refresh_rolls_back_captionless_style(self):
+        original_style = 0x16000008 | _WS_CAPTION | _REQUIRED_NATIVE_STYLES
+        api = _FakeNativeAPI(original_style)
+        window = SimpleNamespace(_aidas_suppress_native_border=True)
+        controller = WindowsCaptionController(window, native_api=api)
+        self.assertTrue(controller.install())
+        captionless_style = controller.style
+        api.refresh_succeeds = False
+
+        self.assertFalse(controller.begin_restore_native_caption())
+
+        self.assertTrue(controller.installed)
+        self.assertEqual(api.style, captionless_style)
+        self.assertTrue(window._aidas_suppress_native_border)
+        self.assertIsNone(controller._pending_restore_style)
+
+    def test_restore_preserves_visibility_acquired_after_hidden_install(self):
+        original_style = 0x06000008 | _WS_CAPTION | _REQUIRED_NATIVE_STYLES
+        api = _FakeNativeAPI(original_style)
+        controller = WindowsCaptionController(object(), native_api=api)
+        self.assertTrue(controller.install())
+
+        # Startup installs custom chrome while the root is withdrawn.  The
+        # visible bit is added later when the completed window is revealed.
+        api.style |= _WS_VISIBLE
+        self.assertTrue(controller.restore_native_caption())
+
+        self.assertTrue(api.style & _WS_VISIBLE)
+        self.assertTrue(api.style & _WS_CAPTION)
+        self.assertEqual(controller.style, api.style)
+
     def test_controls_delegate_to_native_window_management(self):
         original_style = _WS_CAPTION | _REQUIRED_NATIVE_STYLES
         api = _FakeNativeAPI(original_style)
@@ -312,6 +404,16 @@ class WindowsCaptionControllerTests(unittest.TestCase):
         api.zoomed = True
         self.assertTrue(controller.correct_maximized_bounds())
         self.assertEqual(api.fit_count, 1)
+
+    def test_normal_state_transition_suppresses_maximized_bound_refits(self):
+        api = _FakeNativeAPI(_WS_CAPTION | _REQUIRED_NATIVE_STYLES)
+        controller = WindowsCaptionController(object(), native_api=api)
+        self.assertTrue(controller.install())
+        api.zoomed = True
+        controller._normal_state_transition = True
+
+        self.assertFalse(controller.correct_maximized_bounds())
+        self.assertEqual(api.fit_count, 0)
 
 
 if __name__ == "__main__":

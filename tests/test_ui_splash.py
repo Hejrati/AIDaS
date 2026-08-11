@@ -41,6 +41,14 @@ class SplashWindowTests(unittest.TestCase):
         self.assertNotIn('surface_subtle', loading_source)
         self.assertNotIn('border_color=', loading_source)
 
+    def test_classic_splash_uses_a_flat_progress_track(self):
+        source = inspect.getsource(SplashWindow.__init__)
+
+        self.assertIn(
+            'corner_radius=0 if get_interface_mode() == "Classic" else spacing(4)',
+            source,
+        )
+
     def test_progress_contract_clamps_and_normalizes_percentage(self):
         splash = object.__new__(SplashWindow)
         splash.percent_var = _ValueStub()

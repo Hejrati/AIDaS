@@ -25,8 +25,10 @@ Core Functionality:
 
 import csv
 import datetime
+import json
 import os
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import threading
@@ -51,6 +53,7 @@ from aidas.utils.ui_utils import (
     action_button,
     apply_app_icon_to,
     icon_action_button,
+    load_color_close_ctk_icon,
     load_ctk_image,
 )
 
@@ -456,7 +459,7 @@ class Step2BatchSegmentationTable(ttk.Frame):
 class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     """Embedded panel for selecting folders to run through Step 2 AI segmentation."""
 
-    def __init__(self, step_frame, parent, root_dir):
+    def __init__(self, step_frame, parent, root_dir, *, initial_rows=None):
         super().__init__(parent)
         self.step_frame = step_frame
         self.root_dir = os.path.abspath(root_dir)
@@ -464,7 +467,19 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.table = None
 
         self._build_ui()
-        self._start_scan()
+        if initial_rows is None:
+            self._start_scan()
+        else:
+            rows = list(initial_rows)
+            self._scan_done(rows, len(rows), 0, [])
+            ready = sum(1 for row in rows if not row.get("locked"))
+            self.summary_var.set(
+                f"Received {len(rows)} folder(s) from Step 1; "
+                f"{ready} ready for AI segmentation."
+            )
+            self.step_frame.status_var.set(
+                "Confirm the Step 1 folders for AI segmentation."
+            )
 
     def _build_ui(self):
         wrapper = ttk.Frame(self, padding=12)
@@ -496,8 +511,10 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         run_box = ttk.Frame(wrapper)
         run_box.pack(side="bottom", fill="x", pady=(10, 0))
         self.action_footer = run_box
+        action_row = ttk.Frame(run_box)
+        action_row.pack(side="bottom", fill="x")
         self.next_button = action_button(
-            run_box,
+            action_row,
             self,
             "Continue",
             self._run_selected,
@@ -508,12 +525,55 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.next_button.pack(side="right")
         self.next_button.state(["disabled"])
         action_button(
-            run_box,
+            action_row,
             self,
             "Cancel",
             self._cancel,
             "cancel",
         ).pack(side="left")
+
+        device_row = ttk.Frame(run_box)
+        device_row.pack(side="bottom", fill="x", pady=(0, 5))
+        ttk.Label(
+            device_row,
+            textvariable=self.step_frame.ai_device_status_var,
+            style="AIDaS.Muted.TLabel",
+            wraplength=760,
+            justify="left",
+        ).pack(side="left", fill="x", expand=True)
+
+        self.core_row = ttk.Frame(run_box)
+        self._core_row_pack_options = {
+            "side": "bottom",
+            "fill": "x",
+            "pady": (0, 8),
+        }
+        self.core_row.pack(**self._core_row_pack_options)
+        _total_cores, _step3_used, free_cores = self.step_frame._shared_core_budget()
+        max_cores = max(1, free_cores)
+        self._last_shared_core_max = max_cores
+        self.core_limit_var = tk.IntVar(value=max_cores)
+        ttk.Label(
+            self.core_row,
+            text="Maximum Step 2 cores for GPU fallback:",
+        ).pack(side="left")
+        self.core_limit_spin = NativeNumericSpinbox(
+            self.core_row,
+            textvariable=self.core_limit_var,
+            minimum=1,
+            maximum=max_cores,
+            width=5,
+        )
+        self.core_limit_spin.pack(side="left", padx=(6, 8))
+        self.core_budget_var = tk.StringVar()
+        self.core_budget_label = ttk.Label(
+            self.core_row,
+            textvariable=self.core_budget_var,
+            style="AIDaS.Muted.TLabel",
+        )
+        self.core_budget_label.pack(side="left")
+        self._sync_shared_core_budget()
+        self._sync_device_controls()
 
         # Pack the flexible table after the fixed footer. When vertical space
         # becomes constrained, the table shrinks first and the actions remain
@@ -601,6 +661,58 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
                 self.next_button.state(["disabled"])
         except tk.TclError:
             pass
+
+    def _sync_shared_core_budget(self):
+        """Refresh the Step 2 limit from the currently active Step 3 batch."""
+
+        total, step3_used, free = self.step_frame._shared_core_budget()
+        maximum = max(1, free)
+        previous_maximum = getattr(self, "_last_shared_core_max", maximum)
+        try:
+            current = int(self.core_limit_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            current = previous_maximum
+        follow_available_maximum = current == previous_maximum
+        self.core_limit_spin.configure(maximum=maximum)
+        if follow_available_maximum or current > maximum:
+            self.core_limit_var.set(maximum)
+        elif current < 1:
+            self.core_limit_var.set(1)
+        self._last_shared_core_max = maximum
+
+        if free <= 0:
+            unit = "core" if total == 1 else "cores"
+            text = (
+                f"No free cores: Step 3 is using all {total} {unit}; "
+                "Step 2 can share 1 core."
+            )
+        elif step3_used:
+            free_unit = "core" if free == 1 else "cores"
+            used_unit = "core" if step3_used == 1 else "cores"
+            text = (
+                f"Available: {free} {free_unit} of {total} "
+                f"({step3_used} {used_unit} used by Step 3)"
+            )
+        else:
+            unit = "core" if total == 1 else "cores"
+            text = f"Available: all {total} {unit}"
+        self.core_budget_var.set(text)
+        return total, step3_used, free
+
+    def _sync_device_controls(self):
+        """Show fallback-core controls only when GPU execution is unavailable."""
+
+        show_core_controls = not self.step_frame._gpu_execution_available()
+        try:
+            manager = self.core_row.winfo_manager()
+            if show_core_controls and manager != "pack":
+                self.core_row.pack(**self._core_row_pack_options)
+            elif not show_core_controls and manager == "pack":
+                self.core_row.pack_forget()
+        except tk.TclError:
+            pass
+        return show_core_controls
+
     def _run_selected(self):
         if self.table is None:
             return
@@ -608,7 +720,17 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         if not rows:
             messagebox.showwarning("Batch Step 2", "Select at least one ready folder.", parent=self)
             return
-        self.step_frame._start_step2_batch_segmentation_from_rows(rows, self.root_dir)
+        _total, _step3_used, free = self._sync_shared_core_budget()
+        try:
+            core_limit = int(self.core_limit_var.get())
+        except (TypeError, ValueError, tk.TclError):
+            core_limit = max(1, free)
+        core_limit = max(1, min(core_limit, max(1, free)))
+        self.step_frame._start_step2_batch_segmentation_from_rows(
+            rows,
+            self.root_dir,
+            core_limit=core_limit,
+        )
 
     def _cancel(self):
         self.step_frame._close_step2_batch_segmentation_panel(restore_previous=True)
@@ -641,6 +763,7 @@ class Step2Frame(SidebarStepFrame):
         on_output_folder_changed=None,
         on_continue_to_step3=None,
         is_step3_folder_active=None,
+        get_step3_core_usage=None,
     ):
         """Initialize the Step 2 annotation panel.
 
@@ -651,6 +774,8 @@ class Step2Frame(SidebarStepFrame):
             on_continue_to_step3: Callback receiving saved Step 3 input folders.
             is_step3_folder_active: Callback used to prevent Step 2 from
                 overwriting a folder that a live Step 3 R process is reading.
+            get_step3_core_usage: Callback returning the core budget currently
+                reserved by a live Step 3 batch.
         """
         super().__init__(parent)
         self.preferences = preferences
@@ -658,6 +783,12 @@ class Step2Frame(SidebarStepFrame):
         self.on_output_folder_changed = on_output_folder_changed
         self.on_continue_to_step3 = on_continue_to_step3
         self.is_step3_folder_active = is_step3_folder_active
+        self.get_step3_core_usage = get_step3_core_usage
+        self._active_ai_core_limit = 0
+        self._active_ai_using_gpu = False
+        self._ai_device_probe_started = False
+        self._ai_gpu_compatible = None
+        self._ai_runtime_using_gpu = None
 
         # ─ Image data state ─
         self.current_file = None  # Path to currently loaded image
@@ -704,6 +835,9 @@ class Step2Frame(SidebarStepFrame):
         self.status_var = tk.StringVar(
             value="Ready - process an image in Step 1, then trace boundaries or run batch segmentation."
         )
+        self.ai_device_status_var = tk.StringVar(
+            value="AI device: Checking GPU compatibility..."
+        )
         self.build_standard_layout(
             status_var=self.status_var,
             status_bar_content_margin=True,
@@ -740,6 +874,7 @@ class Step2Frame(SidebarStepFrame):
         self.image_canvas.pack(fill="both", expand=True)
 
         self._build_controls()
+        self.after(100, self._start_ai_device_probe)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
@@ -767,6 +902,14 @@ class Step2Frame(SidebarStepFrame):
             tooltip="Choose a parent folder. AIDaS will find eligible image folders inside it.",
         )
         self.batch_ai_button.pack(fill="x")
+        self.ai_device_status_label = ttk.Label(
+            segmentation,
+            textvariable=self.ai_device_status_var,
+            style="AIDaS.Muted.TLabel",
+            wraplength=300,
+            justify="left",
+        )
+        self.ai_device_status_label.pack(fill="x", pady=(5, 0))
 
         workflow = ttk.LabelFrame(segmentation, text="Boundary Progress", padding=3)
         workflow.pack(fill="x", pady=(4, 0))
@@ -1046,7 +1189,7 @@ class Step2Frame(SidebarStepFrame):
 
         self._open_step2_batch_segmentation_panel(folder)
 
-    def _open_step2_batch_segmentation_panel(self, root_dir):
+    def _open_step2_batch_segmentation_panel(self, root_dir, *, initial_rows=None):
         self._close_step2_batch_segmentation_panel(restore_previous=False)
 
         if getattr(self, "_active_batch_result_tab", None):
@@ -1065,9 +1208,15 @@ class Step2Frame(SidebarStepFrame):
             except tk.TclError:
                 pass
 
-        self.batch_segmentation_panel = Step2BatchSegmentationSelectionPanel(self, self.canvas_area, root_dir)
+        self.batch_segmentation_panel = Step2BatchSegmentationSelectionPanel(
+            self,
+            self.canvas_area,
+            root_dir,
+            initial_rows=initial_rows,
+        )
         self.batch_segmentation_panel.pack(fill="both", expand=True)
-        self.status_var.set(f"Scanning batch segmentation root: {os.path.abspath(root_dir)}")
+        if initial_rows is None:
+            self.status_var.set(f"Scanning batch segmentation root: {os.path.abspath(root_dir)}")
         self._update_batch_ai_button_state()
 
     def _close_step2_batch_segmentation_panel(self, restore_previous=True):
@@ -1154,7 +1303,7 @@ class Step2Frame(SidebarStepFrame):
         rows.sort(key=lambda row: os.path.relpath(row["folder"], root_dir).lower())
         return rows, scanned, skipped, access_errors
 
-    def _start_step2_batch_segmentation_from_rows(self, rows, root_dir):
+    def _start_step2_batch_segmentation_from_rows(self, rows, root_dir, core_limit=None):
         image_paths = []
         seen = set()
         for row in rows:
@@ -1187,7 +1336,108 @@ class Step2Frame(SidebarStepFrame):
             image_paths=image_paths,
             manual_fovea_by_path=manual_fovea_by_path,
             manual_orientation_by_path=getattr(self, "_collected_orientation_by_path", None),
+            core_limit=self._normalized_shared_core_limit(core_limit),
         )
+
+    @staticmethod
+    def _available_core_count():
+        """Return the logical cores available to the current process."""
+
+        process_count = getattr(os, "process_cpu_count", None)
+        if callable(process_count):
+            try:
+                count = process_count()
+                if count:
+                    return max(1, int(count))
+            except (OSError, TypeError, ValueError):
+                pass
+        if hasattr(os, "sched_getaffinity"):
+            try:
+                count = len(os.sched_getaffinity(0))
+                if count:
+                    return max(1, int(count))
+            except (OSError, TypeError, ValueError):
+                pass
+        return max(1, int(os.cpu_count() or 1))
+
+    @classmethod
+    def _normalized_core_limit(cls, value):
+        maximum = cls._available_core_count()
+        try:
+            selected = int(value)
+        except (TypeError, ValueError):
+            selected = maximum
+        return max(1, min(selected, maximum))
+
+    def _step3_core_allocation(self):
+        callback = getattr(self, "get_step3_core_usage", None)
+        if not callable(callback):
+            return 0
+        try:
+            used = int(callback())
+        except (TypeError, ValueError, tk.TclError):
+            return 0
+        return max(0, min(used, self._available_core_count()))
+
+    def _shared_core_budget(self):
+        """Return total, Step 3 allocation, and free cores for Step 2."""
+
+        total = self._available_core_count()
+        step3_used = self._step3_core_allocation()
+        return total, step3_used, max(0, total - step3_used)
+
+    def _normalized_shared_core_limit(self, value):
+        _total, _step3_used, free = self._shared_core_budget()
+        try:
+            selected = int(value)
+        except (TypeError, ValueError, tk.TclError):
+            selected = max(1, free)
+        return max(1, min(selected, max(1, free)))
+
+    def _confirm_shared_core_contention(self, total_cores, step3_used):
+        """Warn before Step 2 shares a core when Step 3 occupies all of them."""
+
+        if int(step3_used) < int(total_cores):
+            return True
+        unit = "core" if int(total_cores) == 1 else "cores"
+        return bool(
+            messagebox.askyesno(
+                "All cores are in use",
+                f"Step 3 is using all {total_cores} {unit}.\n\n"
+                "Step 2 can share one core, but running both steps may slow down AIDaS.\n\n"
+                "Run Step 2 anyway?",
+                parent=self,
+            )
+        )
+
+    def active_core_allocation(self):
+        """Return cores reserved for an active Step 2 fallback session."""
+
+        if not getattr(self, "_segmenter_running", False):
+            return 0
+        if getattr(self, "_active_ai_using_gpu", False):
+            return 0
+        return self._normalized_core_limit(
+            getattr(self, "_active_ai_core_limit", 0) or 1
+        )
+
+    def _gpu_execution_available(self):
+        """Return whether Step 2 has confirmed usable GPU execution."""
+
+        runtime_using_gpu = getattr(self, "_ai_runtime_using_gpu", None)
+        if runtime_using_gpu is not None:
+            return bool(runtime_using_gpu)
+        return getattr(self, "_ai_gpu_compatible", None) is True
+
+    def _sync_batch_device_controls(self):
+        panel = getattr(self, "batch_segmentation_panel", None)
+        if panel is None:
+            return
+        try:
+            if panel.winfo_exists():
+                panel._sync_device_controls()
+        except tk.TclError:
+            pass
 
     def start_batch_segmentation_for_folders(self, folders):
         """Run the existing Step 2 batch workflow for explicit Step 1 folders."""
@@ -1253,7 +1503,12 @@ class Step2Frame(SidebarStepFrame):
         self.status_var.set(
             f"Received {len(rows)} cropped folder(s) from Step 1 for batch segmentation."
         )
-        self._start_step2_batch_segmentation_from_rows(rows, root_dir)
+        # Reuse the normal confirmation panel so Step 1 handoffs expose the
+        # same maximum-core selector as folder-scanned batches.
+        self._open_step2_batch_segmentation_panel(
+            root_dir,
+            initial_rows=rows,
+        )
 
     def _collect_folder_fovea_lines(self, image_paths):
         """Prompt for each image's fovea line and anatomical side assignment."""
@@ -1284,7 +1539,7 @@ class Step2Frame(SidebarStepFrame):
         def on_cancel():
             next_var.set("cancel")
             
-        cancel_icon = load_ctk_image(self, "flat-color-icons--cancel.png", size=20)
+        cancel_icon = load_color_close_ctk_icon(self, size=20)
         btn_cancel = AppButton(
             temp_frame,
             text="Exit",
@@ -3406,6 +3661,116 @@ class Step2Frame(SidebarStepFrame):
             return [sys.executable, "--aidas-ai-worker"]
         return [sys.executable, "-m", "aidas.ai.worker"]
 
+    def _probe_ai_device_capability(self):
+        """Probe ONNX providers in the same isolated runtime used for AI."""
+
+        command = [*self._aidas_worker_command(), "--probe-device"]
+        result = subprocess.run(
+            command,
+            env=self._aidas_worker_env(),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+            **self._hidden_subprocess_kwargs(),
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "provider probe failed").strip()
+            raise RuntimeError(detail)
+        for line in reversed((result.stdout or "").splitlines()):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict) and "compatible_gpu" in payload:
+                return payload
+        raise RuntimeError("AI provider probe returned no compatibility record")
+
+    def _start_ai_device_probe(self):
+        if getattr(self, "_ai_device_probe_started", False):
+            return
+        self._ai_device_probe_started = True
+        self._ai_device_probe_results = queue.SimpleQueue()
+
+        def worker():
+            try:
+                result = self._probe_ai_device_capability()
+            except Exception:
+                result = {"compatible_gpu": None, "providers": ()}
+            self._ai_device_probe_results.put(result)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(50, self._poll_ai_device_probe)
+
+    def _poll_ai_device_probe(self):
+        """Apply a background probe result only from Tk's owner thread."""
+
+        results = getattr(self, "_ai_device_probe_results", None)
+        if results is None:
+            return
+        try:
+            result = results.get_nowait()
+        except queue.Empty:
+            try:
+                if self.winfo_exists():
+                    self.after(50, self._poll_ai_device_probe)
+            except tk.TclError:
+                pass
+            return
+
+        compatible = result.get("compatible_gpu")
+        self._ai_gpu_compatible = None if compatible is None else bool(compatible)
+        if self._ai_gpu_compatible is True:
+            text = (
+                "AI device: Compatible DirectML GPU detected; "
+                "GPU will be preferred."
+            )
+        elif self._ai_gpu_compatible is False:
+            text = (
+                "AI device: No compatible DirectML GPU detected; "
+                "core processing will be used."
+            )
+        else:
+            text = (
+                "AI device: GPU compatibility could not be verified; "
+                "core fallback remains available."
+            )
+        try:
+            self.ai_device_status_var.set(text)
+        except tk.TclError:
+            pass
+        self._sync_batch_device_controls()
+
+    def _set_runtime_ai_device_status(
+        self,
+        device=None,
+        execution_provider=None,
+        fallback_reason=None,
+    ):
+        """Show the provider that the live AI worker actually selected."""
+
+        provider = str(execution_provider or "")
+        device_text = str(device or "")
+        using_gpu = "DmlExecutionProvider" in provider or "GPU" in device_text
+        self._active_ai_using_gpu = using_gpu
+        self._ai_runtime_using_gpu = using_gpu
+        if using_gpu:
+            text = f"AI device: Using compatible GPU ({device_text or 'DirectML'})."
+        elif self._ai_gpu_compatible is True:
+            text = (
+                "AI device: Using core processing; the compatible GPU "
+                "was unavailable for this model."
+            )
+        else:
+            text = "AI device: Using core processing (GPU unavailable or unsupported)."
+        if fallback_reason:
+            text += " GPU fallback was activated."
+        try:
+            self.ai_device_status_var.set(text)
+        except tk.TclError:
+            pass
+        self._sync_batch_device_controls()
+
     def _aidas_worker_env(self):
         """Return an environment for AI_ForAIDAS worker subprocesses."""
         env = self._segmenter_subprocess_env()
@@ -3647,6 +4012,9 @@ class Step2Frame(SidebarStepFrame):
             status_message: Optional status text to display to user.
         """
         self._segmenter_running = bool(running)
+        if not self._segmenter_running:
+            self._active_ai_core_limit = 0
+            self._active_ai_using_gpu = False
         if running:
             if hasattr(self, "batch_ai_button"):
                 self.batch_ai_button.state(["disabled"])
@@ -3779,6 +4147,7 @@ class Step2Frame(SidebarStepFrame):
         image_paths=None,
         manual_fovea_by_path=None,
         manual_orientation_by_path=None,
+        core_limit=None,
     ):
         """Run AI_ForAIDAS predictions for multiple images and preview them in tabs."""
         if self._segmenter_running:
@@ -3833,9 +4202,20 @@ class Step2Frame(SidebarStepFrame):
 
         provider_name = "auto"
         device_id = 0
+        total_cores, step3_used, free_cores = self._shared_core_budget()
+        core_limit = self._normalized_shared_core_limit(core_limit)
+        if not self._confirm_shared_core_contention(total_cores, step3_used):
+            self.status_var.set(
+                "Step 2 AI was not started because Step 3 is using all cores."
+            )
+            return
+        self._active_ai_core_limit = core_limit
+        self._active_ai_using_gpu = False
         self._append_segmenter_log(
             f"Starting AI_ForAIDAS batch for {len(image_paths)} image(s); "
-            f"model={model_path}; provider={provider_name}; DirectML adapter={device_id}"
+            f"model={model_path}; provider={provider_name}; DirectML adapter={device_id}; "
+            f"software fallback core limit={core_limit}; "
+            f"Step 3 core allocation={step3_used}; free shared cores={free_cores}"
         )
         self._set_segmentation_running(
             True,
@@ -3851,6 +4231,7 @@ class Step2Frame(SidebarStepFrame):
                 model_path,
                 provider_name,
                 device_id,
+                core_limit,
                 manual_fovea_by_key,
                 orientation_by_key,
             ),
@@ -3864,6 +4245,7 @@ class Step2Frame(SidebarStepFrame):
         model_path,
         provider_name,
         device_id,
+        core_limit,
         manual_fovea_by_key=None,
         orientation_by_key=None,
     ):
@@ -3876,10 +4258,13 @@ class Step2Frame(SidebarStepFrame):
             "Anatomical side assignments: per image",
             f"Requested provider: {provider_name}",
             f"DirectML adapter: {device_id}",
+            f"Software fallback core limit: {core_limit}",
             f"Images: {len(image_paths)}",
             "",
         ]
         device = None
+        execution_provider = None
+        fallback_reason = None
         batch_exception = None
 
         def report_status(index, path):
@@ -3902,6 +4287,7 @@ class Step2Frame(SidebarStepFrame):
                 model_path=model_path,
                 provider_name=provider_name,
                 device_id=device_id,
+                core_limit=core_limit,
                 env=self._aidas_worker_env(),
                 popen_kwargs=self._hidden_subprocess_kwargs(),
                 startup_progress_callback=lambda fraction, stage: report_model_progress(
@@ -3915,12 +4301,24 @@ class Step2Frame(SidebarStepFrame):
             with worker_client:
                 startup = worker_client.startup_result or {}
                 device = startup.get("device") or device
+                execution_provider = (
+                    startup.get("execution_provider") or execution_provider
+                )
+                fallback_reason = startup.get("fallback_reason") or fallback_reason
+                self.after(
+                    0,
+                    lambda d=device, p=execution_provider, f=fallback_reason: (
+                        self._set_runtime_ai_device_status(d, p, f)
+                    ),
+                )
                 log_lines.append(f"Worker: {worker_client.command_line}")
                 log_lines.append(
                     f"Execution provider: {startup.get('execution_provider') or 'unknown'}"
                 )
                 if startup.get("fallback_reason"):
-                    log_lines.append(f"CPU fallback: {startup['fallback_reason']}")
+                    log_lines.append(
+                        f"Core-processing fallback: {startup['fallback_reason']}"
+                    )
                 log_lines.append("")
 
                 for index, path in enumerate(image_paths, start=1):
@@ -3940,10 +4338,20 @@ class Step2Frame(SidebarStepFrame):
                         )
                         if prediction.get("device"):
                             device = prediction["device"]
+                        if prediction.get("execution_provider"):
+                            execution_provider = prediction["execution_provider"]
                         if prediction.get("fallback_reason"):
+                            fallback_reason = prediction["fallback_reason"]
                             log_lines.append(
-                                f"  CPU fallback: {prediction['fallback_reason']}"
+                                "  Core-processing fallback: "
+                                f"{prediction['fallback_reason']}"
                             )
+                        self.after(
+                            0,
+                            lambda d=device, p=execution_provider, f=fallback_reason: (
+                                self._set_runtime_ai_device_status(d, p, f)
+                            ),
+                        )
                         fovea_x = None
                         manual_fovea = manual_fovea_by_key is not None
                         if manual_fovea_by_key is not None:
@@ -4003,6 +4411,8 @@ class Step2Frame(SidebarStepFrame):
             "failures": failures,
             "exception": batch_exception,
             "device": device,
+            "execution_provider": execution_provider,
+            "fallback_reason": fallback_reason,
             "log_path": log_path,
             "total": len(image_paths),
         }
@@ -4031,6 +4441,11 @@ class Step2Frame(SidebarStepFrame):
                 return
 
             device = result.get("device") or "unknown"
+            self._set_runtime_ai_device_status(
+                device,
+                result.get("execution_provider"),
+                result.get("fallback_reason"),
+            )
             self.status_var.set(
                 f"AI_ForAIDAS batch complete on {device}: {completed} processed, {failed} failed."
             )

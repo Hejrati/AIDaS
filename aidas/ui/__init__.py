@@ -1,5 +1,6 @@
 """Reusable visual components and theme primitives for AIDaS."""
 
+from aidas.ui.classic import ClassicApplicationMenu, build_classic_application_menu
 from aidas.ui.menu_bar import ApplicationMenuBar
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.title_bar import (
@@ -10,17 +11,24 @@ from aidas.ui.title_bar import (
 )
 from aidas.ui.theme import (
     APPEARANCE_MODES,
+    CLASSIC_COLOR_PAIRS,
     COLORS,
     COLOR_PAIRS,
     CONTROLS,
+    INTERFACE_MODES,
+    MODERN_COLOR_PAIRS,
     SHAPES,
     THEME,
     TYPOGRAPHY,
     apply_appearance_mode,
     configure_ttk_styles,
+    get_interface_mode,
     normalize_appearance_mode,
+    normalize_interface_mode,
+    refresh_interface_widgets,
     refresh_native_widgets,
     resolve_color,
+    set_interface_mode,
 )
 from aidas.ui.windowing import (
     apply_windows_titlebar_colors,
@@ -33,23 +41,32 @@ from aidas.ui.windowing import (
 
 __all__ = [
     "ApplicationMenuBar",
+    "ClassicApplicationMenu",
+    "build_classic_application_menu",
     "ClosableTabView",
     "CustomWindowsTitleBar",
     "WindowsCaptionController",
     "create_custom_windows_title_bar",
     "reassert_client_size",
     "APPEARANCE_MODES",
+    "CLASSIC_COLOR_PAIRS",
     "COLORS",
     "COLOR_PAIRS",
     "CONTROLS",
+    "INTERFACE_MODES",
+    "MODERN_COLOR_PAIRS",
     "SHAPES",
     "THEME",
     "TYPOGRAPHY",
     "apply_appearance_mode",
     "configure_ttk_styles",
+    "get_interface_mode",
     "normalize_appearance_mode",
+    "normalize_interface_mode",
+    "refresh_interface_widgets",
     "refresh_native_widgets",
     "resolve_color",
+    "set_interface_mode",
     "apply_windows_titlebar_colors",
     "centered_logical_geometry",
     "centered_physical_geometry",

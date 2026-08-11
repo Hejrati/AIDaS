@@ -99,10 +99,19 @@ class AppButton(ctk.CTkButton):
         """Return a neutral palette while preserving a composite's silhouette."""
 
         disabled = dict(self._DISABLED_PALETTE)
+        # Interface tokens are selected before widgets are built, whereas this
+        # class-level compatibility constant is initialized at import time.
+        # Resolve the color values here so Classic launches use the v2 palette.
+        disabled.update(
+            fg_color=COLOR_PAIRS["surface_subtle"],
+            hover_color=COLOR_PAIRS["surface_subtle"],
+            border_color=COLOR_PAIRS["border"],
+            border_width=SHAPES.border_width,
+        )
         enabled_corners = self._enabled_palette.get("background_corner_colors")
         if enabled_corners is not None:
             enabled_fill = self._enabled_palette.get("fg_color")
-            disabled_fill = self._DISABLED_PALETTE["fg_color"]
+            disabled_fill = disabled["fg_color"]
             disabled["background_corner_colors"] = tuple(
                 disabled_fill if corner == enabled_fill else corner
                 for corner in enabled_corners

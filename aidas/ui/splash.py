@@ -9,7 +9,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from aidas.core.display import fit_size_to_bounds, work_area_bounds
-from aidas.ui.theme import COLOR_PAIRS, TYPOGRAPHY, resolve_color
+from aidas.ui.theme import COLOR_PAIRS, TYPOGRAPHY, get_interface_mode, resolve_color
 from aidas.ui.windowing import centered_logical_geometry, physical_window_size
 from aidas.utils.ui_utils import apply_app_icon_to
 
@@ -208,7 +208,7 @@ class SplashWindow(ctk.CTkToplevel):
         self.progress = ctk.CTkProgressBar(
             loading_region,
             height=max(7, spacing(7)),
-            corner_radius=spacing(4),
+            corner_radius=0 if get_interface_mode() == "Classic" else spacing(4),
             fg_color=_splash_color("border"),
             progress_color=_splash_color("primary"),
         )

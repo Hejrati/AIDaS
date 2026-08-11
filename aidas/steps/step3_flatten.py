@@ -38,6 +38,7 @@ from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
 from aidas.ui.tabs import ClosableTabView
 from aidas.utils.ui_utils import (
     HoverToolTip,
+    NativeNumericSpinbox,
     SidebarStepFrame,
     action_button,
     load_color_close_icon,
@@ -273,10 +274,12 @@ class RSetupWizard(ttk.Frame):
         ttk.Button(actions, text="Check Again", command=self._detect_rscript).pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Search Locally...", command=self._locate_rscript).pack(side="left", padx=(0, 6))
         if self.rscript_path is None:
-            self.r_install_button = ttk.Button(
+            self.r_install_button = action_button(
                 actions,
+                self,
                 text=f"Download and Install R {self.step_frame.R_REQUIRED_VERSION}",
                 command=self._download_and_install_r,
+                action="download",
             )
             self.r_install_button.pack(side="left", padx=(0, 6))
 
@@ -907,6 +910,11 @@ class RSetupWizard(ttk.Frame):
         self.style.configure("Wizard.Treeview", rowheight=24, font=("Segoe UI", 9))
         self.style.configure("Wizard.Treeview.Heading", font=("Segoe UI", 9, "bold"))
 
+    def _apply_aidas_theme(self):
+        """Re-resolve wizard ttk colors during a live interface switch."""
+
+        self._build_styles()
+
     def _build_shell(self):
         root = ttk.Frame(self, padding=12)
         root.pack(fill="both", expand=True)
@@ -1029,7 +1037,7 @@ class RSetupWizard(ttk.Frame):
             self,
             f"Download and install R {self.step_frame.R_REQUIRED_VERSION}",
             lambda: self._download_and_install_r(continue_to_packages=True),
-            "package",
+            "download",
             style="AIDaS.PrimaryAction.TButton",
         )
         self.r_auto_install_button.pack(side="left", padx=(6, 0))
@@ -1977,26 +1985,26 @@ class RBatchSelectionPanel(ttk.Frame):
 
         settings_row = ttk.Frame(run_box)
         settings_row.pack(side="bottom", fill="x", pady=(0, 8))
-        ttk.Label(settings_row, text="Batch Size:").pack(side="left")
+        ttk.Label(settings_row, text="Batch size:").pack(side="left")
         max_workers = self._max_worker_count()
         self.workers_var = tk.IntVar(value=min(4, max_workers))
-        self.workers_spin = ttk.Spinbox(
+        self.workers_spin = NativeNumericSpinbox(
             settings_row,
-            from_=1,
-            to=max_workers,
             textvariable=self.workers_var,
+            minimum=1,
+            maximum=max_workers,
             width=5,
         )
         self.workers_spin.pack(side="left", padx=(6, 12))
         self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
         ttk.Label(settings_row, textvariable=self.worker_limit_var, style="AIDaS.Muted.TLabel").pack(side="left")
-        ttk.Label(settings_row, text="Timeout/script (min):").pack(side="left", padx=(12, 0))
+        ttk.Label(settings_row, text="Timeout per script (min):").pack(side="left", padx=(12, 0))
         self.timeout_var = tk.IntVar(value=self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES)
-        self.timeout_spin = ttk.Spinbox(
+        self.timeout_spin = NativeNumericSpinbox(
             settings_row,
-            from_=1,
-            to=10080,
             textvariable=self.timeout_var,
+            minimum=1,
+            maximum=10080,
             width=7,
         )
         self.timeout_spin.pack(side="left", padx=(6, 12))
@@ -2047,13 +2055,17 @@ class RBatchSelectionPanel(ttk.Frame):
         self.scan_label.pack(fill="both", expand=True)
 
     def _max_worker_count(self, ready_count=None):
-        cpu_limit = self.step_frame._r_worker_limit()
+        core_limit = self.step_frame._available_r_worker_limit()
         if ready_count is None:
-            return cpu_limit
-        return max(1, min(int(ready_count) or 1, cpu_limit))
+            return core_limit
+        return max(1, min(int(ready_count) or 1, core_limit))
 
     def _worker_limit_text(self, max_workers):
-        return f"Max: {max_workers} (1 CPU reserved)"
+        step2_used = self.step_frame._step2_core_allocation()
+        if step2_used:
+            unit = "core" if step2_used == 1 else "cores"
+            return f"Max jobs: {max_workers} ({step2_used} {unit} used by Step 2)"
+        return f"Max jobs: {max_workers} (shared with Step 2)"
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -2146,7 +2158,7 @@ class RBatchSelectionPanel(ttk.Frame):
         self.more_label.configure(text="More" if access_errors else "")
         self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         max_workers = self._max_worker_count(ready)
-        self.workers_spin.configure(to=max_workers)
+        self.workers_spin.configure(maximum=max_workers)
         self.workers_var.set(min(4, max_workers))
         self.worker_limit_var.set(self._worker_limit_text(max_workers))
         self.step_frame.status_var.set("Batch scan complete. Select folders to process.")
@@ -2182,16 +2194,25 @@ class RBatchSelectionPanel(ttk.Frame):
                 parent=self,
             )
             return
+        # Step 2 may have started after this panel was opened. Refresh the
+        # shared limit at the commit point so the displayed value and the
+        # launched worker count both reflect the cores still available.
+        max_workers = self._max_worker_count(len(folders))
+        workers_spin = getattr(self, "workers_spin", None)
+        if workers_spin is not None:
+            workers_spin.configure(maximum=max_workers)
+        worker_limit_var = getattr(self, "worker_limit_var", None)
+        if worker_limit_var is not None:
+            worker_limit_var.set(self._worker_limit_text(max_workers))
         try:
             workers = max(1, int(self.workers_var.get()))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, tk.TclError):
             workers = 1
         try:
             timeout_minutes = max(1, min(10080, int(self.timeout_var.get())))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, tk.TclError):
             timeout_minutes = self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES
         self.timeout_var.set(timeout_minutes)
-        max_workers = self._max_worker_count(len(folders))
         workers = min(workers, max_workers)
         self.workers_var.set(workers)
         output_mode = self.step_frame._normalize_r_output_mode(self.output_mode_var.get())
@@ -2601,9 +2622,10 @@ class Step3Frame(SidebarStepFrame):
         "done": (100, "R processing complete"),
     }
 
-    def __init__(self, parent, preferences=None):
+    def __init__(self, parent, preferences=None, get_step2_core_usage=None):
         super().__init__(parent)
         self.preferences = preferences
+        self.get_step2_core_usage = get_step2_core_usage
 
         self.current_sdb_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         self.output_sdb_dir = self.current_sdb_dir
@@ -3026,14 +3048,42 @@ class Step3Frame(SidebarStepFrame):
 
     @classmethod
     def _r_worker_limit(cls):
-        """Leave one logical processor available for the UI and Step 2 AI work."""
-        return max(1, cls._cpu_worker_limit() - 1)
+        """Return every logical core available to the current process."""
+        return cls._cpu_worker_limit()
+
+    def _step2_core_allocation(self):
+        callback = getattr(self, "get_step2_core_usage", None)
+        if not callable(callback):
+            return 0
+        try:
+            used = int(callback())
+        except (TypeError, ValueError, tk.TclError):
+            return 0
+        return max(0, min(used, self._cpu_worker_limit()))
+
+    def _available_r_worker_limit(self):
+        """Return Step 3 jobs that fit beside the active Step 2 allocation."""
+
+        return max(1, self._cpu_worker_limit() - self._step2_core_allocation())
+
+    def active_core_allocation(self):
+        """Return the core budget reserved by the current Step 3 batch."""
+
+        if not getattr(self, "_busy", False):
+            return 0
+        return max(
+            0,
+            min(
+                int(getattr(self, "_active_r_core_allocation", 0) or 0),
+                self._cpu_worker_limit(),
+            ),
+        )
 
     @classmethod
     def _r_threads_per_process(cls, workers):
-        """Prevent nested R/BLAS threads from oversubscribing the shared host."""
-        workers = max(1, int(workers))
-        return max(1, cls._r_worker_limit() // workers)
+        """Keep each folder job inside the one-core budget shown in the UI."""
+
+        return 1
 
     def _default_r_package_library(self):
         if self.r_package_library_path:
@@ -3974,7 +4024,10 @@ class Step3Frame(SidebarStepFrame):
             )
             return
 
-        workers = max(1, min(int(workers), len(folders), self._r_worker_limit()))
+        workers = max(
+            1,
+            min(int(workers), len(folders), self._available_r_worker_limit()),
+        )
         output_mode = self._normalize_r_output_mode(output_mode)
         self._clear_plot_holder()
         self.r_batch_run_panel = RBatchRunPanel(
@@ -3990,6 +4043,7 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_run_panel.pack(fill="both", expand=True)
         self._r_cancel_event.clear()
         self._busy = True
+        self._active_r_core_allocation = workers
         self._active_r_folder_keys = {self._folder_key(folder) for folder in folders}
         self._set_process_buttons("disabled")
         self.progress_text_var.set("Batch running")
@@ -4020,6 +4074,7 @@ class Step3Frame(SidebarStepFrame):
             worker_thread.start()
         except Exception as exc:
             self._busy = False
+            self._active_r_core_allocation = 0
             self._active_r_folder_keys = set()
             self._set_process_buttons("normal")
             self.progress_text_var.set("Batch failed to start")
@@ -4543,6 +4598,7 @@ class Step3Frame(SidebarStepFrame):
 
     def _on_batch_r_done(self, results):
         self._busy = False
+        self._active_r_core_allocation = 0
         self._active_r_folder_keys = set()
         self._set_process_buttons("normal")
         panel = self.r_batch_run_panel
