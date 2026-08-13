@@ -766,8 +766,18 @@ class ApplicationMenuBar(ctk.CTkFrame):
 
     def _select_interface(self, mode: str) -> None:
         self.set_interface(mode)
-        if self._set_interface_command is not None:
-            self._set_interface_command(self._current_interface)
+        callback = self._set_interface_command
+        if callback is None:
+            return
+        selected = self._current_interface
+        # A popup row invokes this method from ButtonRelease.  Replacing the
+        # application chrome synchronously from that callback can suspend the
+        # menu and destroy its active focus chain before Tk has completed the
+        # event.  Let the popup callback return first, then switch shells.
+        try:
+            self.after_idle(lambda: callback(selected))
+        except tk.TclError:
+            callback(selected)
 
     def _toggle_menu(self, menu_name: str) -> None:
         if self._active_menu == menu_name and self._popup is not None:

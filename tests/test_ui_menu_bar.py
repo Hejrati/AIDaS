@@ -83,6 +83,24 @@ class _CachedPopup:
 
 
 class MenuBarTests(unittest.TestCase):
+    def test_interface_switch_waits_for_popup_callback_to_return(self):
+        bar = ApplicationMenuBar.__new__(ApplicationMenuBar)
+        bar._interface_modes = ("Modern", "Classic")
+        bar._current_interface = "Modern"
+        bar._popup_cache = {}
+        calls = []
+        queued = []
+        bar._set_interface_command = calls.append
+        bar.after_idle = lambda callback: queued.append(callback) or "after#1"
+
+        bar._select_interface("Classic")
+
+        self.assertEqual(bar.current_interface, "Classic")
+        self.assertEqual(calls, [])
+        self.assertEqual(len(queued), 1)
+        queued.pop()()
+        self.assertEqual(calls, ["Classic"])
+
     def test_unbinding_one_stale_shortcut_still_releases_the_rest(self):
         class Owner:
             def __init__(self):

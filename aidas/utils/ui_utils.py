@@ -17,6 +17,7 @@ from aidas.ui.theme import (
     SHAPES,
     TYPOGRAPHY,
     configure_ttk_styles,
+    get_interface_mode,
 )
 from aidas.utils.ui_layout import COLORS, LAYOUT, workspace_sidebar_width
 
@@ -775,8 +776,18 @@ class ScrollableSidebar(ctk.CTkFrame):
             canvas_options["width"] = width
 
         self.canvas = tk.Canvas(self, **canvas_options)
-        self.scrollbar = ctk.CTkScrollbar(
+        # Keep a narrow rail reserved even while the scrollbar is hidden.  A
+        # fixed rail avoids resizing every sidebar control when hover reveals
+        # the scrollbar.
+        self._scrollbar_slot = ctk.CTkFrame(
             self,
+            width=CONTROLS.scrollbar_width,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        self._scrollbar_slot.pack_propagate(False)
+        self.scrollbar = ctk.CTkScrollbar(
+            self._scrollbar_slot,
             orientation="vertical",
             command=self.canvas.yview,
             width=CONTROLS.scrollbar_width,
@@ -792,12 +803,13 @@ class ScrollableSidebar(ctk.CTkFrame):
         self._content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
         self._middle_drag_active = False
         self._middle_drag_target = self.canvas
-        self._active_nested_scroll = None
+        self._scrollbar_visible = False
+        self._scrollbar_hide_after_id = None
         self._refreshing = False
 
         self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self._scrollbar_slot.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.scrollbar.pack(side="right", fill="y")
 
         self.content.bind("<Configure>", self._on_content_configure, add="+")
         self.canvas.bind("<Configure>", self._on_canvas_configure, add="+")
@@ -813,9 +825,72 @@ class ScrollableSidebar(ctk.CTkFrame):
         tk.Misc.bind_all(self, "<B2-Motion>", self._on_middle_drag, add="+")
         tk.Misc.bind_all(self, "<ButtonRelease-2>", self._on_middle_release, add="+")
         tk.Misc.bind_all(self, "<ButtonPress-1>", self._on_primary_press, add="+")
+        # Children do not bubble pointer events to their parent in Tk.  Use the
+        # same pointer-scoped global routing as the wheel handler so entering
+        # any control in the sidebar reveals its scrollbar.  Do not bind the
+        # high-frequency Motion event here: each workflow owns a sidebar, and
+        # several global geometry callbacks per pointer pixel can starve Tk's
+        # deferred title-bar and dialog work during an interface switch.
+        tk.Misc.bind_all(self, "<Enter>", self._on_pointer_activity, add="+")
+        tk.Misc.bind_all(self, "<Leave>", self._hide_scrollbar, add="+")
 
     def _apply_aidas_theme(self):
         self.canvas.configure(background=COLORS.sidebar)
+        if get_interface_mode() == "Classic":
+            self._cancel_scrollbar_hide()
+            if self._scrollbar_visible:
+                self.scrollbar.pack_forget()
+                self._scrollbar_visible = False
+
+    def _on_pointer_activity(self, _event=None):
+        if self._contains_scroll_area_pointer():
+            self._show_scrollbar()
+
+    def _cancel_scrollbar_hide(self):
+        after_id = getattr(self, "_scrollbar_hide_after_id", None)
+        self._scrollbar_hide_after_id = None
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+    def _show_scrollbar(self, _event=None):
+        """Reveal the sidebar thumb without changing the content width."""
+
+        self._cancel_scrollbar_hide()
+        if get_interface_mode() == "Classic":
+            if self._scrollbar_visible:
+                self.scrollbar.pack_forget()
+                self._scrollbar_visible = False
+            return
+        if self._scrollbar_visible:
+            return
+        self.scrollbar.pack(fill="both", expand=True)
+        self._scrollbar_visible = True
+
+    def _hide_scrollbar(self, event=None):
+        """Hide the thumb after pointer crossings have finished settling."""
+
+        self._cancel_scrollbar_hide()
+        if event is not None:
+            if self._contains_scroll_area_pointer():
+                return
+            # Moving between descendants generates Leave/Enter pairs.  Waiting
+            # until idle lets _contains_pointer distinguish those crossings
+            # from actually leaving the complete sidebar.
+            try:
+                self._scrollbar_hide_after_id = self.after_idle(self._hide_scrollbar)
+            except tk.TclError:
+                pass
+            return
+
+        if self._contains_scroll_area_pointer():
+            return
+        if not self._scrollbar_visible:
+            return
+        self.scrollbar.pack_forget()
+        self._scrollbar_visible = False
 
     def _on_content_configure(self, _event=None):
         self.refresh_scrollregion()
@@ -905,30 +980,42 @@ class ScrollableSidebar(ctk.CTkFrame):
                 return widget
             if isinstance(widget, ttk.Treeview):
                 return widget
+            if isinstance(widget, (tk.Scrollbar, ttk.Scrollbar)):
+                return widget
             if isinstance(widget, tk.Canvas) and widget is not self.canvas:
                 return widget
             widget = getattr(widget, "master", None)
         return None
 
-    def _nested_scroll_is_active(self, owner):
+    def _event_widget_owns_scroll(self, widget):
+        # An overflowing widget under the pointer always wins. Requiring a
+        # previous click/focus caused one wheel gesture to affect both a list
+        # and the outer sidebar, and scroll chaining at an overflowing list's
+        # edge made the surrounding controls jump unexpectedly.
+        owner = self._nested_scroll_owner(widget)
         if owner is None:
             return False
-        focus = self.focus_get()
-        return (
-            owner is self._active_nested_scroll
-            or focus is owner
-            or self._is_descendant(focus, owner)
-        )
+        if isinstance(owner, (tk.Scrollbar, ttk.Scrollbar)):
+            return True
 
-    def _event_widget_owns_scroll(self, widget):
-        owner = self._nested_scroll_owner(widget)
-        return self._nested_scroll_is_active(owner)
+        # A fixed list that already exposes its entire contents is not a
+        # scroll target.  Let the gesture continue to the outer sidebar so
+        # hovering the six-row Step 2 boundary lists does not create a dead
+        # wheel zone.  Overflowing nested views still retain exclusive wheel
+        # ownership, including at their top and bottom boundaries.
+        yview = getattr(owner, "yview", None)
+        if not callable(yview):
+            return True
+        try:
+            first, last = yview()
+            return float(first) > 0.0 or float(last) < 1.0
+        except (TypeError, ValueError, tk.TclError):
+            return True
 
     def _on_primary_press(self, event):
         if not self._contains_scroll_area_pointer():
             return None
         owner = self._nested_scroll_owner(getattr(event, "widget", None))
-        self._active_nested_scroll = owner
         if owner is not None:
             try:
                 owner.focus_set()
@@ -937,7 +1024,7 @@ class ScrollableSidebar(ctk.CTkFrame):
         return None
 
     def _on_mousewheel(self, event):
-        if not self._contains_pointer():
+        if not self._contains_scroll_area_pointer():
             return None
         if self._event_widget_owns_scroll(getattr(event, "widget", None)):
             return None
@@ -951,6 +1038,7 @@ class ScrollableSidebar(ctk.CTkFrame):
             if delta == 0:
                 return None
             units = -1 if delta > 0 else 1
+        self._show_scrollbar()
         self.canvas.yview_scroll(units, "units")
         return "break"
 
@@ -971,12 +1059,17 @@ class ScrollableSidebar(ctk.CTkFrame):
         if not self._contains_scroll_area_pointer():
             return None
         owner = self._nested_scroll_owner(getattr(event, "widget", None))
-        if self._nested_scroll_is_active(owner) and hasattr(owner, "scan_mark"):
+        if owner is not None and hasattr(owner, "scan_mark"):
             self._middle_drag_target = owner
             x, y = self._pointer_widget_xy(owner)
+        elif owner is not None:
+            # Treeviews and scrollbars do not implement canvas-style scanning;
+            # do not let a middle press over them drag the outer sidebar.
+            return None
         else:
             self._middle_drag_target = self.canvas
             x, y = self._pointer_canvas_xy()
+            self._show_scrollbar()
 
         self._middle_drag_active = True
         self._middle_drag_target.scan_mark(x, y)

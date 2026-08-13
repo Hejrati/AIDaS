@@ -455,6 +455,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self._presentation_refresh_after_id = None
         self._presentation_refresh_pending = False
         self._applying_changes = False
+        self._modal_activation_after_id = None
         self._classic_mousewheel_binding_id = None
         self._r_setup_wizard = None
         self._script_choices = {"main": [], "output": []}
@@ -479,8 +480,7 @@ class SettingsDialog(ctk.CTkToplevel):
             self.bind("<Escape>", lambda _event: self._close())
             self.geometry(_center_geometry(self, 720, 720, parent=parent))
             self.deiconify()
-            self.grab_set()
-            self.focus_force()
+            self._schedule_modal_activation()
             return
 
         self.settings_panel = ctk.CTkScrollableFrame(
@@ -713,8 +713,7 @@ class SettingsDialog(ctk.CTkToplevel):
             foreground=COLOR_PAIRS["text"],
             border=COLOR_PAIRS["window_chrome"],
         )
-        self.grab_set()
-        self.focus_force()
+        self._schedule_modal_activation()
 
     def _build_classic_settings(
         self,
@@ -1018,7 +1017,7 @@ class SettingsDialog(ctk.CTkToplevel):
         )
 
     def _schedule_presentation_refresh(self) -> None:
-        """Reopen Settings in the active shell after the current Apply returns."""
+        """Close Settings after its presentation shell has been replaced."""
 
         if getattr(self, "_applying_changes", False):
             self._presentation_refresh_pending = True
@@ -1029,19 +1028,60 @@ class SettingsDialog(ctk.CTkToplevel):
         def refresh() -> None:
             self._presentation_refresh_after_id = None
             parent = self._parent
-            show_settings = getattr(parent, "_show_settings", None)
             self._close()
             try:
                 parent._settings_dialog = None
             except (AttributeError, TypeError):
                 pass
-            if callable(show_settings):
-                show_settings()
+            try:
+                parent.focus_force()
+            except (AttributeError, tk.TclError):
+                pass
 
         try:
             self._presentation_refresh_after_id = self.after_idle(refresh)
         except tk.TclError:
             self._presentation_refresh_after_id = None
+
+    def _schedule_modal_activation(self, *, delay_ms: int = 50) -> None:
+        """Acquire the modal grab only after Windows has mapped this dialog."""
+
+        pending = getattr(self, "_modal_activation_after_id", None)
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except tk.TclError:
+                pass
+            self._modal_activation_after_id = None
+        try:
+            self.deiconify()
+            self._modal_activation_after_id = self.after(
+                max(1, int(delay_ms)),
+                self._activate_modal_when_visible,
+            )
+        except (tk.TclError, TypeError, ValueError):
+            self._modal_activation_after_id = None
+
+    def _activate_modal_when_visible(self, attempt: int = 0) -> None:
+        """Finish a modal handoff without leaving an invisible input grab."""
+
+        self._modal_activation_after_id = None
+        try:
+            if not self.winfo_exists():
+                return
+            if not self.winfo_viewable():
+                self.deiconify()
+                if attempt < 20:
+                    self._modal_activation_after_id = self.after(
+                        25,
+                        lambda: self._activate_modal_when_visible(attempt + 1),
+                    )
+                return
+            self.lift()
+            self.grab_set()
+            self.focus_force()
+        except tk.TclError:
+            self._modal_activation_after_id = None
 
     def _validated_sdb_defaults(self):
         try:
@@ -1269,6 +1309,13 @@ class SettingsDialog(ctk.CTkToplevel):
     def _close(self) -> None:
         if self._r_setup_wizard is not None and self._r_setup_wizard.busy:
             return
+        activation_id = getattr(self, "_modal_activation_after_id", None)
+        self._modal_activation_after_id = None
+        if activation_id is not None:
+            try:
+                self.after_cancel(activation_id)
+            except tk.TclError:
+                pass
         binding_id = getattr(self, "_classic_mousewheel_binding_id", None)
         if binding_id is not None:
             try:
@@ -2391,8 +2438,10 @@ class AIDaSApp(ctk.CTk):
         dialog = self._settings_dialog
         try:
             if dialog is not None and dialog.winfo_exists():
+                dialog.deiconify()
                 dialog.lift()
                 dialog.focus_force()
+                dialog._schedule_modal_activation(delay_ms=1)
                 return
         except tk.TclError:
             pass

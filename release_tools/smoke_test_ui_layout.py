@@ -330,6 +330,54 @@ def _assert_step1_sidebar_actions_visible(step, width, height):
     )
 
 
+def _assert_step2_sidebar_actions_visible(step, width, height):
+    """Guard the fixed Step 2 save and handoff footer."""
+
+    assert step.step_actions_footer.master is step.sidebar_shell, (
+        "Step 2 workflow actions are not attached to the fixed sidebar shell."
+    )
+    assert step.saved_buttons_frame.master is step.step_actions_footer
+    assert step.saved_button.master is step.saved_buttons_frame
+    assert step.save_all_button.master is step.saved_buttons_frame
+    assert step.continue_to_step3_button.master is step.saved_buttons_frame
+
+    shell_left = step.sidebar_shell.winfo_rootx()
+    shell_top = step.sidebar_shell.winfo_rooty()
+    shell_right = shell_left + step.sidebar_shell.winfo_width()
+    shell_bottom = shell_top + step.sidebar_shell.winfo_height()
+    for name, widget in (
+        ("footer", step.step_actions_footer),
+        ("action grid", step.saved_buttons_frame),
+        ("Save", step.saved_button),
+        ("Save all", step.save_all_button),
+        ("Go to Step 3", step.continue_to_step3_button),
+    ):
+        assert widget.winfo_ismapped(), (
+            f"Step 2 {name} is hidden at {width}x{height}."
+        )
+        widget_left = widget.winfo_rootx()
+        widget_top = widget.winfo_rooty()
+        widget_right = widget_left + widget.winfo_width()
+        widget_bottom = widget_top + widget.winfo_height()
+        assert (
+            widget_left >= shell_left - 1
+            and widget_top >= shell_top - 1
+            and widget_right <= shell_right + 1
+            and widget_bottom <= shell_bottom + 1
+        ), f"Step 2 {name} escapes the sidebar viewport at {width}x{height}."
+        if name not in {"footer", "action grid"}:
+            assert widget.winfo_height() + 1 >= widget.winfo_reqheight(), (
+                f"Step 2 {name} is vertically clipped at {width}x{height}."
+            )
+
+    scroll_bottom = (
+        step.sidebar.canvas.winfo_rooty() + step.sidebar.canvas.winfo_height()
+    )
+    assert scroll_bottom <= step.step_actions_footer.winfo_rooty() + 1, (
+        f"Step 2 scrolling controls overlap its fixed actions at {width}x{height}."
+    )
+
+
 def _assert_step4_build_stack_visible(step, width, height):
     """Guard the fixed Step 4 footer and Build stack action."""
 
@@ -681,8 +729,17 @@ def main(interface_mode="Modern") -> int:
                         button.master.master.master is step.canvas_roi_toolbar
                         for button in view_buttons
                     ), "Step 1 view choices are not in the bottom canvas toolbar."
+                if step_number == 2:
+                    _assert_step2_sidebar_actions_visible(step, width, height)
                 if step_number == 4:
                     _assert_step4_build_stack_visible(step, width, height)
+                if interface_mode == "Classic":
+                    step.sidebar._show_scrollbar()
+                    app.update_idletasks()
+                    assert not step.sidebar._scrollbar_visible
+                    assert not step.sidebar.scrollbar.winfo_manager(), (
+                        f"Step {step_number} shows a sidebar scrollbar in Classic mode."
+                    )
                 results.append(
                     (
                         width,

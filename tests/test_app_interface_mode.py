@@ -337,7 +337,7 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
             dialog.apply_status_var.set.call_args.args[0],
         )
 
-    def test_settings_reopen_is_deferred_until_apply_has_finished(self):
+    def test_settings_close_is_deferred_until_apply_has_finished(self):
         dialog = SettingsDialog.__new__(SettingsDialog)
         dialog._validated_sdb_defaults = mock.Mock(return_value=(10, 20, 0, True))
         choices = {
@@ -394,7 +394,29 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
         dialog.apply_status_var.set.assert_called_with("All settings applied")
         queued[0]()
         dialog._close.assert_called_once_with()
-        parent._show_settings.assert_called_once_with()
+        self.assertIsNone(parent._settings_dialog)
+        parent._show_settings.assert_not_called()
+
+    def test_settings_modal_grab_waits_until_replacement_is_viewable(self):
+        dialog = SettingsDialog.__new__(SettingsDialog)
+        dialog._modal_activation_after_id = None
+        dialog.winfo_exists = mock.Mock(return_value=True)
+        dialog.winfo_viewable = mock.Mock(side_effect=(False, True))
+        dialog.deiconify = mock.Mock()
+        dialog.lift = mock.Mock()
+        dialog.grab_set = mock.Mock()
+        dialog.focus_force = mock.Mock()
+        queued = []
+        dialog.after = lambda _delay, callback: queued.append(callback) or "after#1"
+
+        dialog._activate_modal_when_visible()
+
+        dialog.grab_set.assert_not_called()
+        self.assertEqual(len(queued), 1)
+        queued.pop()()
+        dialog.grab_set.assert_called_once_with()
+        dialog.focus_force.assert_called_once_with()
+        dialog.lift.assert_called_once_with()
 
     def test_show_settings_uses_the_active_interface_and_reuses_dialog(self):
         app = AIDaSApp.__new__(AIDaSApp)
@@ -414,8 +436,10 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
 
         self.assertEqual(dialog_type.call_count, 1)
         self.assertEqual(dialog_type.call_args.kwargs["interface_mode"], "Classic")
+        existing.deiconify.assert_called_once_with()
         existing.lift.assert_called_once_with()
         existing.focus_force.assert_called_once_with()
+        existing._schedule_modal_activation.assert_called_once_with(delay_ms=1)
 
     def test_show_about_uses_the_active_interface_and_reuses_dialog(self):
         app = AIDaSApp.__new__(AIDaSApp)

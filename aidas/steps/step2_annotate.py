@@ -46,6 +46,7 @@ from aidas.ui.theme import COLOR_PAIRS
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
+from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     NativeNumericSpinbox,
@@ -932,10 +933,7 @@ class Step2Frame(SidebarStepFrame):
             selectmode="browse",
             exportselection=False,
         )
-        incomplete_scroll = ttk.Scrollbar(incomplete_box, orient="vertical", command=self.boundary_incomplete_listbox.yview)
-        self.boundary_incomplete_listbox.configure(yscrollcommand=incomplete_scroll.set)
-        self.boundary_incomplete_listbox.pack(side="left", fill="both", expand=True)
-        incomplete_scroll.pack(side="right", fill="y")
+        self.boundary_incomplete_listbox.pack(fill="both", expand=True)
         self.boundary_incomplete_listbox.bind("<<ListboxSelect>>", self._on_boundary_incomplete_selected)
 
         self.boundary_completed_listbox = tk.Listbox(
@@ -945,10 +943,7 @@ class Step2Frame(SidebarStepFrame):
             selectmode="browse",
             exportselection=False,
         )
-        completed_scroll = ttk.Scrollbar(completed_box, orient="vertical", command=self.boundary_completed_listbox.yview)
-        self.boundary_completed_listbox.configure(yscrollcommand=completed_scroll.set)
-        self.boundary_completed_listbox.pack(side="left", fill="both", expand=True)
-        completed_scroll.pack(side="right", fill="y")
+        self.boundary_completed_listbox.pack(fill="both", expand=True)
         self.boundary_completed_listbox.bind("<<ListboxSelect>>", self._on_boundary_completed_selected)
 
         workflow_buttons = ttk.Frame(workflow)
@@ -1056,8 +1051,30 @@ class Step2Frame(SidebarStepFrame):
             command=self._on_save_orientation_changed,
         ).pack(anchor="w")
 
-        saved_buttons = ttk.Frame(segmentation)
-        saved_buttons.pack(fill="x", pady=(6, 0))
+        # Reserve the final workflow actions in the non-scrolling sidebar
+        # shell.  The Segmentation card is taller than the compact Modern
+        # viewport, so keeping these actions in that card can put every save
+        # and handoff button below the visible area.
+        self.step_actions_footer = ttk.Frame(
+            self.sidebar_shell,
+            style="AIDaS.Sidebar.TFrame",
+        )
+        self.step_actions_footer.pack(
+            side="bottom",
+            fill="x",
+            padx=(LAYOUT.space_sm, LAYOUT.space_xs),
+            pady=(0, LAYOUT.space_sm),
+            before=self.sidebar,
+        )
+        ttk.Separator(self.step_actions_footer, orient="horizontal").pack(
+            fill="x",
+            pady=(LAYOUT.space_xs, 6),
+        )
+        saved_buttons = ttk.Frame(
+            self.step_actions_footer,
+            style="AIDaS.Sidebar.TFrame",
+        )
+        saved_buttons.pack(fill="x", padx=2)
         saved_buttons.grid_columnconfigure(0, weight=1, uniform="save_actions")
         saved_buttons.grid_columnconfigure(1, weight=1, uniform="save_actions")
         self.saved_buttons_frame = saved_buttons  # Store reference for later state management
@@ -1073,6 +1090,7 @@ class Step2Frame(SidebarStepFrame):
             "Save",
             self._save_current_marked_image_button,
             "save",
+            state="disabled",
             tooltip="Save the current annotated image.",
         )
         self.saved_button.grid(row=0, column=0, sticky="ew", padx=(0, 2))
@@ -1082,6 +1100,7 @@ class Step2Frame(SidebarStepFrame):
             "Save all",
             self._save_all_batch_result_tabs_button,
             "save_all",
+            state="disabled",
             tooltip="Save every completed batch result.",
         )
         self.save_all_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
@@ -2135,7 +2154,13 @@ class Step2Frame(SidebarStepFrame):
         )
         self._set_control_enabled(
             getattr(self, "saved_button", None),
-            self._all_required_boundaries_complete(),
+            self._all_required_boundaries_complete()
+            and not getattr(self, "_segmenter_running", False),
+        )
+        self._set_control_enabled(
+            getattr(self, "save_all_button", None),
+            bool(getattr(self, "_batch_result_states", {}))
+            and not getattr(self, "_segmenter_running", False),
         )
 
         self._update_continue_to_step3_button_state()
@@ -2591,7 +2616,7 @@ class Step2Frame(SidebarStepFrame):
             set_state(self.segmentation_frame)
             self._segmentation_frame_controls_enabled = enabled
         self._update_batch_ai_button_state()
-        self._update_continue_to_step3_button_state()
+        self._update_boundary_action_buttons()
 
 
     def _on_fovea_x_entry_changed(self, *_):
@@ -4080,7 +4105,10 @@ class Step2Frame(SidebarStepFrame):
                         enable_widget(child)
                 enable_widget(self.saved_buttons_frame)
 
-        self._update_continue_to_step3_button_state()
+        # Re-apply semantic action states after the recursive frame toggle.
+        # The fixed footer is outside ``segmentation_frame``, and Save/Save
+        # all must still reflect boundary completion and open batch results.
+        self._update_boundary_action_buttons()
         
         if running:
             if hasattr(self, "segmenter_progress"):

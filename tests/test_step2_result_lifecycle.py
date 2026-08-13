@@ -56,11 +56,63 @@ class _ControlStub:
 
 
 class Step2ResultLifecycleTests(unittest.TestCase):
+    def test_fixed_boundary_lists_do_not_show_redundant_scrollbars(self):
+        source = inspect.getsource(Step2Frame._build_controls)
+        lists_start = source.index("self.boundary_incomplete_listbox = tk.Listbox")
+        lists_end = source.index("workflow_buttons = ttk.Frame", lists_start)
+        lists_source = source[lists_start:lists_end]
+
+        self.assertEqual(lists_source.count("height=6"), 2)
+        self.assertNotIn("ttk.Scrollbar", lists_source)
+        self.assertNotIn("yscrollcommand", lists_source)
+
+    def test_save_and_handoff_actions_are_in_a_fixed_sidebar_footer(self):
+        source = inspect.getsource(Step2Frame._build_controls)
+        footer_start = source.index("self.step_actions_footer = ttk.Frame")
+        actions_start = source.index("saved_buttons = ttk.Frame", footer_start)
+        actions_end = source.index("# help_section", actions_start)
+        footer_source = source[footer_start:actions_start]
+        actions_source = source[actions_start:actions_end]
+
+        self.assertIn("self.sidebar_shell,", footer_source)
+        self.assertIn("before=self.sidebar", footer_source)
+        self.assertIn("self.step_actions_footer,", actions_source)
+        self.assertNotIn("ttk.Frame(segmentation)", actions_source)
+
     def test_sidebar_omits_redundant_swap_button(self):
         source = inspect.getsource(Step2Frame._build_controls)
 
         self.assertNotIn("flip_sides_button", source)
         self.assertNotIn("Swap left / right sides", source)
+
+    def test_fixed_footer_actions_keep_their_semantic_states(self):
+        frame = Step2Frame.__new__(Step2Frame)
+        frame.active_boundary = None
+        frame._segmenter_running = False
+        frame._batch_result_states = {"tab": {}}
+        frame._completed_boundary_names = lambda: []
+        frame._incomplete_boundary_names = lambda: []
+        frame._has_clearable_boundary_markers = lambda: False
+        frame._all_required_boundaries_complete = lambda: True
+        frame.finish_boundary_btn = _ControlStub("disabled")
+        frame.revert_boundary_btn = _ControlStub("disabled")
+        frame.clear_all_traces_btn = _ControlStub("disabled")
+        frame.saved_button = _ControlStub("disabled")
+        frame.save_all_button = _ControlStub("disabled")
+        frame.continue_to_step3_button = _ControlStub("disabled")
+
+        frame._update_boundary_action_buttons()
+
+        self.assertEqual(frame.saved_button.state_value, "normal")
+        self.assertEqual(frame.save_all_button.state_value, "normal")
+        self.assertEqual(frame.continue_to_step3_button.state_value, "normal")
+
+        frame._segmenter_running = True
+        frame._update_boundary_action_buttons()
+
+        self.assertEqual(frame.saved_button.state_value, "disabled")
+        self.assertEqual(frame.save_all_button.state_value, "disabled")
+        self.assertEqual(frame.continue_to_step3_button.state_value, "disabled")
 
     def test_single_preview_stays_hidden_while_batch_folder_panel_is_open(self):
         frame = Step2Frame.__new__(Step2Frame)
