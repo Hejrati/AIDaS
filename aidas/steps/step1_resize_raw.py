@@ -340,9 +340,29 @@ class Step1Frame(SidebarStepFrame):
         #     side="right", expand=True, fill="x", padx=(4, 0)
         # )
 
-        ttk.Separator(self.ctrl, orient="horizontal").pack(fill="x", pady=(10, 6))
-        self.step_actions_frame = ttk.Frame(self.ctrl)
-        self.step_actions_frame.pack(fill="x", padx=2, pady=(0, 8))
+        # Keep the workflow actions outside the scrolling queue so they remain
+        # reachable at the minimum supported window height.  The sidebar itself
+        # continues to consume the expandable space above this fixed footer.
+        self.step_actions_footer = ttk.Frame(
+            self.sidebar_shell,
+            style="AIDaS.Sidebar.TFrame",
+        )
+        self.step_actions_footer.pack(
+            side="bottom",
+            fill="x",
+            padx=(LAYOUT.space_sm, LAYOUT.space_xs),
+            pady=(0, LAYOUT.space_sm),
+            before=self.sidebar,
+        )
+        ttk.Separator(self.step_actions_footer, orient="horizontal").pack(
+            fill="x",
+            pady=(LAYOUT.space_xs, 6),
+        )
+        self.step_actions_frame = ttk.Frame(
+            self.step_actions_footer,
+            style="AIDaS.Sidebar.TFrame",
+        )
+        self.step_actions_frame.pack(fill="x", padx=2)
         action_icon_size = 16
         self.save_all_btn_icon = load_ctk_image(
             self, "ic--baseline-save.png", size=action_icon_size

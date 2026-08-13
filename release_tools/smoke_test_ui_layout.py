@@ -288,6 +288,90 @@ def _assert_crop_split_button_geometry(step):
     )
 
 
+def _assert_step1_sidebar_actions_visible(step, width, height):
+    """Guard the fixed Step 1 footer and its actions at each window size."""
+
+    assert step.step_actions_footer.master is step.sidebar_shell, (
+        "Step 1 workflow actions are not attached to the fixed sidebar shell."
+    )
+    assert step.step_actions_frame.master is step.step_actions_footer
+    assert step.save_all_btn.master is step.step_actions_frame
+    assert step.batch_segment_cropped_btn.master is step.step_actions_frame
+
+    shell_left = step.sidebar_shell.winfo_rootx()
+    shell_top = step.sidebar_shell.winfo_rooty()
+    shell_right = shell_left + step.sidebar_shell.winfo_width()
+    shell_bottom = shell_top + step.sidebar_shell.winfo_height()
+    for name, widget in (
+        ("footer", step.step_actions_footer),
+        ("action row", step.step_actions_frame),
+        ("Save", step.save_all_btn),
+        ("Go to Step 2", step.batch_segment_cropped_btn),
+    ):
+        assert widget.winfo_ismapped(), (
+            f"Step 1 {name} is hidden at {width}x{height}."
+        )
+        widget_left = widget.winfo_rootx()
+        widget_top = widget.winfo_rooty()
+        widget_right = widget_left + widget.winfo_width()
+        widget_bottom = widget_top + widget.winfo_height()
+        assert (
+            widget_left >= shell_left - 1
+            and widget_top >= shell_top - 1
+            and widget_right <= shell_right + 1
+            and widget_bottom <= shell_bottom + 1
+        ), f"Step 1 {name} escapes the sidebar viewport at {width}x{height}."
+
+    scroll_bottom = (
+        step.sidebar.canvas.winfo_rooty() + step.sidebar.canvas.winfo_height()
+    )
+    assert scroll_bottom <= step.step_actions_footer.winfo_rooty(), (
+        f"Step 1 scrolling controls overlap the fixed actions at {width}x{height}."
+    )
+
+
+def _assert_step4_build_stack_visible(step, width, height):
+    """Guard the fixed Step 4 footer and Build stack action."""
+
+    assert step.sidebar_footer.master is step.sidebar_shell, (
+        "Step 4 Build stack footer is not attached to the fixed sidebar shell."
+    )
+    assert step.build_stacks_button.master is step.sidebar_footer
+
+    shell_left = step.sidebar_shell.winfo_rootx()
+    shell_top = step.sidebar_shell.winfo_rooty()
+    shell_right = shell_left + step.sidebar_shell.winfo_width()
+    shell_bottom = shell_top + step.sidebar_shell.winfo_height()
+    for name, widget in (
+        ("footer", step.sidebar_footer),
+        ("Build stack", step.build_stacks_button),
+    ):
+        assert widget.winfo_ismapped(), (
+            f"Step 4 {name} is hidden at {width}x{height}."
+        )
+        widget_left = widget.winfo_rootx()
+        widget_top = widget.winfo_rooty()
+        widget_right = widget_left + widget.winfo_width()
+        widget_bottom = widget_top + widget.winfo_height()
+        assert (
+            widget_left >= shell_left - 1
+            and widget_top >= shell_top - 1
+            and widget_right <= shell_right + 1
+            and widget_bottom <= shell_bottom + 1
+        ), f"Step 4 {name} escapes the sidebar viewport at {width}x{height}."
+
+    button = step.build_stacks_button
+    assert button.winfo_height() + 1 >= button.winfo_reqheight(), (
+        f"Step 4 Build stack is vertically clipped at {width}x{height}."
+    )
+    scroll_bottom = (
+        step.sidebar.canvas.winfo_rooty() + step.sidebar.canvas.winfo_height()
+    )
+    assert scroll_bottom <= step.sidebar_footer.winfo_rooty() + 1, (
+        f"Step 4 scrolling controls overlap Build stack at {width}x{height}."
+    )
+
+
 def main(interface_mode="Modern") -> int:
     preferences = _SmokePreferences(interface_mode)
     config_factory = mock.Mock(return_value=preferences)
@@ -525,6 +609,7 @@ def main(interface_mode="Modern") -> int:
                     step.sidebar.canvas.yview_moveto(0.0)
                 if step_number == 1:
                     _assert_crop_split_button_geometry(step)
+                    _assert_step1_sidebar_actions_visible(step, width, height)
                     assert (
                         step.content_status_bar.winfo_rootx()
                         == step.canvas_roi_toolbar.winfo_rootx()
@@ -564,9 +649,6 @@ def main(interface_mode="Modern") -> int:
                         button.master is step.canvas_toolbar
                         for button in action_buttons[2:]
                     ), "Step 1 processing actions are not in the top canvas toolbar."
-                    assert step.step_actions_frame.master is step.ctrl
-                    assert step.save_all_btn.master is step.step_actions_frame
-                    assert step.batch_segment_cropped_btn.master is step.step_actions_frame
                     aligned_controls = (
                         step.crop_split_frame,
                         step.undo_crop_btn,
@@ -599,6 +681,8 @@ def main(interface_mode="Modern") -> int:
                         button.master.master.master is step.canvas_roi_toolbar
                         for button in view_buttons
                     ), "Step 1 view choices are not in the bottom canvas toolbar."
+                if step_number == 4:
+                    _assert_step4_build_stack_visible(step, width, height)
                 results.append(
                     (
                         width,

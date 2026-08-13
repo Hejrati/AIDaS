@@ -1056,18 +1056,6 @@ class Step2Frame(SidebarStepFrame):
             command=self._on_save_orientation_changed,
         ).pack(anchor="w")
 
-        self.flip_sides_button = AppButton(
-            orientation,
-            text="Swap left / right sides",
-            variant="primary",
-            command=self._flip_image_sides,
-        )
-        HoverToolTip(
-            self.flip_sides_button,
-            "Swap the left/right side labels and use that assignment when saving.",
-        )
-        self.flip_sides_button.pack(fill="x", pady=(5, 1))
-
         saved_buttons = ttk.Frame(segmentation)
         saved_buttons.pack(fill="x", pady=(6, 0))
         saved_buttons.grid_columnconfigure(0, weight=1, uniform="save_actions")
@@ -1663,17 +1651,24 @@ class Step2Frame(SidebarStepFrame):
         prepared = getattr(self, "_pending_external_image", None)
         if prepared is None:
             return False
-        self._render_external_image(prepared)
-        return True
+        return bool(self._render_external_image(prepared))
 
     def _render_external_image(self, prepared):
         """Apply prepared external-image state and rebuild the editor once."""
 
+        if getattr(self, "batch_segmentation_panel", None) is not None:
+            # Notebook selection and Step 1 handoff events are both delivered
+            # through Tk's event queue.  If the batch chooser has already won
+            # that race, retain the crop instead of painting it below the
+            # chooser or replacing a hidden result editor's state.
+            self._pending_external_image = prepared
+            return False
         img, display_path, source_was_8bit = prepared
         self._pending_external_image = None
         self._input_analyze_template = None
         self._source_was_8bit = source_was_8bit
         self._show_image(img, display_path)
+        return True
 
     def _load_image_from_path(self, path):
         """Read an image file from disk and return a 2-D numpy array.
@@ -1725,6 +1720,18 @@ class Step2Frame(SidebarStepFrame):
         }
 
     def _show_single_image_canvas(self):
+        # The batch folder chooser and the editor share ``canvas_area``.  A
+        # deferred Step 1 image can finish rendering after the chooser opens;
+        # do not let that callback pack the cropped-image canvas beside (and
+        # sometimes over) the chooser's table and action buttons.  Preserve
+        # the hidden editor identity as well so closing the chooser can restore
+        # an existing result session unchanged.
+        if getattr(self, "batch_segmentation_panel", None) is not None:
+            try:
+                self.single_image_canvas.pack_forget()
+            except tk.TclError:
+                pass
+            return False
         notebook = getattr(self, "batch_results_notebook", None)
         if notebook is not None:
             notebook.pack_forget()
@@ -1732,6 +1739,7 @@ class Step2Frame(SidebarStepFrame):
         self._active_batch_result_tab = None
         if self.single_image_canvas.winfo_manager() != "pack":
             self.single_image_canvas.pack(fill="both", expand=True)
+        return True
 
     def _show_batch_results_canvas(self):
         self.single_image_canvas.pack_forget()
@@ -1756,10 +1764,11 @@ class Step2Frame(SidebarStepFrame):
             notify_output_folder: Propagate direct image-folder changes to Step 3.
                 Batch picker previews disable this until Step 2 outputs are saved.
         """
+        if not self._show_single_image_canvas():
+            return False
         # Any explicitly rendered image supersedes a crop that was queued
         # while this page was hidden.
         self._pending_external_image = None
-        self._show_single_image_canvas()
         self.current_file = path
         self.image_data = image
         self._last_status_mouse_sample = None
@@ -1788,6 +1797,7 @@ class Step2Frame(SidebarStepFrame):
         )
         if notify_output_folder:
             self._notify_output_folder_changed()
+        return True
 
     def _clear_image_display(self, status_message=None):
         """Clear the editor canvas and reset image-specific annotation state."""
@@ -3396,15 +3406,10 @@ class Step2Frame(SidebarStepFrame):
             self.image_info_var.set(f"AI batch results | {len(notebook.tabs())} image(s)")
             return
 
-        notebook.destroy()
-        self.batch_results_notebook = None
-        self._batch_result_canvases = []
-        self._batch_result_tab_canvases = {}
-        self._batch_result_states = {}
-        self._active_batch_result_tab = None
-        self._single_editor_state = None
-        self._show_single_image_canvas()
-        self._clear_image_display("All batch result images were saved and closed.")
+        self._finish_batch_results_session(
+            notebook,
+            "All batch result images were saved and closed.",
+        )
 
     def _save_all_batch_result_tabs_button(self):
         if getattr(self, "batch_results_notebook", None) is None or not self._batch_result_states:
@@ -4687,16 +4692,28 @@ class Step2Frame(SidebarStepFrame):
             return
 
         if not remaining_tabs:
+            self._finish_batch_results_session(
+                notebook,
+                "All batch result images saved or removed. No image is loaded.",
+            )
+
+    def _finish_batch_results_session(self, notebook, status_message):
+        """Return Step 2 to its reusable empty state after its last result closes."""
+        try:
             notebook.destroy()
-            if getattr(self, "batch_results_notebook", None) is notebook:
-                self.batch_results_notebook = None
-            self._batch_result_canvases = []
-            self._batch_result_tab_canvases = {}
-            self._batch_result_states = {}
-            self._active_batch_result_tab = None
-            self._single_editor_state = None
-            self._show_single_image_canvas()
-            self._clear_image_display("All batch result images saved or removed. No image is loaded.")
+        except tk.TclError:
+            pass
+        if getattr(self, "batch_results_notebook", None) is notebook:
+            self.batch_results_notebook = None
+        self._batch_result_canvases = []
+        self._batch_result_tab_canvases = {}
+        self._batch_result_states = {}
+        self._active_batch_result_tab = None
+        self._single_editor_state = None
+        self._clear_image_display(status_message)
+        # Clearing the editor intentionally disables annotation/save actions,
+        # but starting another batch must remain possible without restarting.
+        self._update_batch_ai_button_state()
 
     def _confirm_close_batch_result_tab(self, tab_key):
         state = self._batch_result_states.get(tab_key)

@@ -58,6 +58,7 @@ from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
+from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     SidebarStepFrame,
@@ -1811,6 +1812,7 @@ class Step4Frame(SidebarStepFrame):
         self.end_var = tk.StringVar(value="")
         self.confirm_button = None
         self.build_stacks_button = None
+        self.sidebar_footer = None
         self.roi_table = None
         self._auto_saving_roi = False
         # self.auto_advance_var = tk.BooleanVar(value=True)
@@ -1929,18 +1931,30 @@ class Step4Frame(SidebarStepFrame):
             entry.bind("<KP_Enter>", self._apply_entry_clicks)
             entry.bind("<FocusOut>", self._apply_entry_clicks_if_complete)
 
-        # 4. Build Stacks Button
-        # Change the parent from 'control_row' to 'roi_box'
-        # Use side="bottom" to anchor it to the bottom of the roi_box frame
+        # Keep the final action outside the scrolling cards.  Reserving a
+        # footer in the sidebar shell prevents the button's lower edge from
+        # being clipped at compact window heights or elevated display scales.
+        self.sidebar_footer = ctk.CTkFrame(
+            self.sidebar_shell,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        self.sidebar_footer.pack(
+            side="bottom",
+            fill="x",
+            padx=(LAYOUT.space_sm, LAYOUT.space_xs),
+            pady=(0, LAYOUT.space_sm),
+            before=self.sidebar,
+        )
         self.build_stacks_button = action_button(
-            roi_box,
+            self.sidebar_footer,
             self,
             "Build stack",
             self._build_stack_outputs,
             "stack",
             tooltip="Build output stacks after all ROIs are complete.",
         )
-        self.build_stacks_button.pack(side="bottom", fill="x", pady=(6, 2))
+        self.build_stacks_button.pack(fill="x")
         # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
         # stats = stats_section.body
         # ttk.Label(stats, textvariable=self.stats_var, wraplength=self.SIDEBAR_TEXT_WRAP, justify="left").pack(fill="x")
@@ -2442,10 +2456,12 @@ class Step4Frame(SidebarStepFrame):
         next_index = self.batch_roi_index + 1
         if next_index >= len(self.batch_roi_paths):
             self.status_var.set(
-                f"Batch ROI complete. Processed {len(self.batch_roi_paths)} folder(s); "
+                f"Processing complete. Processed {len(self.batch_roi_paths)} folder(s); "
                 f"skipped {self.batch_roi_skipped} already complete."
             )
-            messagebox.showinfo("Batch ROI", "All incomplete Step 4 folders in this batch are done.")
+            self._show_processing_complete(
+                "Every selected Step 4 folder in this batch is complete."
+            )
             return
 
         self.batch_roi_index = next_index
@@ -3358,19 +3374,38 @@ class Step4Frame(SidebarStepFrame):
             messagebox.showerror("Step 4", f"Could not build stack outputs.\n{exc}")
             return
 
-        self.status_var.set(f"Built stack outputs in {outdir}.")
+        self._finish_stack_build(outdir)
+
+    def _show_processing_complete(self, detail: str) -> None:
+        """Show the single terminal notification for a Step 4 run."""
+
         messagebox.showinfo(
-            "Step 4",
-            f"Built MAX_Stack.tif, {STEP4_RESULTS_FILENAME}, and ROI_to_move_stck.tif.",
+            "Processing Complete",
+            f"All processing is done.\n\n{detail}",
+            parent=self,
         )
+
+    def _finish_stack_build(self, outdir: Path) -> None:
+        """Advance a batch or notify once when Step 4 is fully complete."""
+
+        self.status_var.set(f"Built stack outputs in {outdir}.")
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._mark_active_batch_roi_complete()
-            if not self._select_next_incomplete_batch_roi_tab():
-                self.status_var.set("Batch ROI complete. All selected folder tabs are done.")
-                messagebox.showinfo("Batch ROI", "All selected Step 4 folders are done.")
+            if self._select_next_incomplete_batch_roi_tab():
+                return
+            self.status_var.set("Processing complete. All selected Step 4 folders are done.")
+            self._show_processing_complete(
+                "Every selected Step 4 folder is complete."
+            )
             return
         if self.batch_roi_paths and self.batch_roi_index >= 0:
             self._load_next_batch_roi()
+            return
+
+        self._show_processing_complete(
+            f"Created MAX_Stack.tif, {STEP4_RESULTS_FILENAME}, and "
+            f"ROI_to_move_stck.tif in:\n{outdir}"
+        )
 
 
 def main() -> None:
