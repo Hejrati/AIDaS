@@ -810,6 +810,7 @@ class Step2Frame(SidebarStepFrame):
         
         # ─ UI state flags ─
         self._segmenter_running = False  # True while AI segmentation is executing
+        self._batch_fovea_picker_active = False
         self._segmenter_progress_target = 0.0
         self._drawing_locked = False  # True if foveal center is locked (prevents other drawing)
         self._updating_fovea_entry = False  # Flag to avoid feedback loop when updating entry widget
@@ -1196,11 +1197,58 @@ class Step2Frame(SidebarStepFrame):
 
         self._open_step2_batch_segmentation_panel(folder)
 
-    def _open_step2_batch_segmentation_panel(self, root_dir, *, initial_rows=None):
-        self._close_step2_batch_segmentation_panel(restore_previous=False)
+    def _prepare_for_new_batch_session(self):
+        """Confirm and discard an open Step 2 batch before replacing it."""
+        if getattr(self, "_batch_fovea_picker_active", False):
+            messagebox.showinfo(
+                "Batch session in progress",
+                "Finish or Exit the current fovea selection before starting another batch.",
+                parent=self,
+            )
+            return False
+        if getattr(self, "_segmenter_running", False):
+            messagebox.showinfo(
+                "Please wait",
+                "Segmentation is already running.",
+                parent=self,
+            )
+            return False
 
-        if getattr(self, "_active_batch_result_tab", None):
-            self._sync_active_batch_result_state()
+        panel = getattr(self, "batch_segmentation_panel", None)
+        notebook = getattr(self, "batch_results_notebook", None)
+        has_results = notebook is not None or bool(
+            getattr(self, "_batch_result_states", {})
+        )
+        if panel is None and not has_results:
+            return True
+
+        replace = messagebox.askyesno(
+            "Start a new batch?",
+            "A Step 2 batch session is already open.\n\n"
+            "Opening a new batch will close the previous session and discard "
+            "its folder selection, all open segmentation results, and any "
+            "unsaved edits.\n\n"
+            "Close the previous session and continue?",
+            icon="warning",
+            default="no",
+            parent=self,
+        )
+        if not replace:
+            return False
+
+        if panel is not None:
+            self._close_step2_batch_segmentation_panel(restore_previous=False)
+        if has_results:
+            self._finish_batch_results_session(
+                notebook,
+                "Previous Step 2 batch session discarded.",
+            )
+        return True
+
+    def _open_step2_batch_segmentation_panel(self, root_dir, *, initial_rows=None):
+        if not self._prepare_for_new_batch_session():
+            return False
+
         try:
             self.single_image_canvas.pack_forget()
         except tk.TclError:
@@ -1225,6 +1273,7 @@ class Step2Frame(SidebarStepFrame):
         if initial_rows is None:
             self.status_var.set(f"Scanning batch segmentation root: {os.path.abspath(root_dir)}")
         self._update_batch_ai_button_state()
+        return True
 
     def _close_step2_batch_segmentation_panel(self, restore_previous=True):
         panel = getattr(self, "batch_segmentation_panel", None)
@@ -1507,15 +1556,16 @@ class Step2Frame(SidebarStepFrame):
             root_dir = os.path.commonpath(normalized_folders)
         except ValueError:
             root_dir = os.path.dirname(rows[0]["folder"])
-        self.status_var.set(
-            f"Received {len(rows)} cropped folder(s) from Step 1 for batch segmentation."
-        )
         # Reuse the normal confirmation panel so Step 1 handoffs expose the
         # same maximum-core selector as folder-scanned batches.
-        self._open_step2_batch_segmentation_panel(
+        opened = self._open_step2_batch_segmentation_panel(
             root_dir,
             initial_rows=rows,
         )
+        if opened is not False:
+            self.status_var.set(
+                f"Received {len(rows)} cropped folder(s) from Step 1 for batch segmentation."
+            )
 
     def _collect_folder_fovea_lines(self, image_paths):
         """Prompt for each image's fovea line and anatomical side assignment."""
@@ -1528,14 +1578,26 @@ class Step2Frame(SidebarStepFrame):
         
         # Disable batch controls to prevent duplicate triggers.
         if hasattr(self, "batch_ai_button"):
-            self.batch_ai_button.state(["disabled"])
+            self._set_control_enabled(self.batch_ai_button, False)
 
         # Create a temporary top toolbar to manage interactive fovea selection
         temp_frame = ttk.Frame(self.canvas_area, relief="solid", borderwidth=1)
         temp_frame.pack(side="top", fill="x", pady=(0, 4), before=self.image_canvas)
         
         prompt_label_var = tk.StringVar(value="")
-        ttk.Label(temp_frame, textvariable=prompt_label_var, font=("", 10, "bold"), padding=4).pack(side="left")
+        # Reserve the action cluster before laying out the flexible prompt.
+        # Packing the full path first lets its requested width consume the
+        # toolbar and can push Confirm, Skip, or Exit outside the viewport.
+        actions_frame = ttk.Frame(temp_frame)
+        actions_frame.pack(side="right", fill="y")
+        prompt_label = ttk.Label(
+            temp_frame,
+            textvariable=prompt_label_var,
+            font=("", 10, "bold"),
+            padding=4,
+            width=1,
+            anchor="w",
+        )
         
         def on_skip():
             next_var.set("skip")
@@ -1548,7 +1610,7 @@ class Step2Frame(SidebarStepFrame):
             
         cancel_icon = load_color_close_ctk_icon(self, size=20)
         btn_cancel = AppButton(
-            temp_frame,
+            actions_frame,
             text="Exit",
             variant="secondary",
             command=on_cancel,
@@ -1560,7 +1622,7 @@ class Step2Frame(SidebarStepFrame):
 
         skip_icon = load_ctk_image(self, "flat-color-icons--right.png", size=20)
         btn_skip = AppButton(
-            temp_frame,
+            actions_frame,
             text="Skip",
             variant="secondary",
             command=on_skip,
@@ -1577,7 +1639,7 @@ class Step2Frame(SidebarStepFrame):
             tint=COLOR_PAIRS["on_primary"],
         )
         btn_set = AppButton(
-            temp_frame,
+            actions_frame,
             text="Confirm",
             variant="success",
             command=on_set,
@@ -1587,14 +1649,20 @@ class Step2Frame(SidebarStepFrame):
         HoverToolTip(btn_set, "Confirm the foveal center for this image.")
         btn_set.pack(side="right", padx=4, pady=4)
 
+        # Pack the flexible label after every action has claimed its space.
+        prompt_label.pack(side="left", fill="x", expand=True)
+        prompt_tooltip = HoverToolTip(prompt_label, "")
+
         # Save current editor state to restore later if canceled (optional, but good practice)
         saved_state = self._capture_current_editor_state()
+        self._batch_fovea_picker_active = True
 
         try:
             for index, path in enumerate(image_paths, start=1):
                 name = os.path.basename(path)
                 msg = f"Select fovea {index}/{total}: {path}"
                 prompt_label_var.set(msg)
+                prompt_tooltip.text = msg
                 self.status_var.set(msg)
                 self.update_idletasks()
                 
@@ -1633,6 +1701,7 @@ class Step2Frame(SidebarStepFrame):
                     orientation_by_path[path] = self._selected_save_orientation()
                 
         finally:
+            self._batch_fovea_picker_active = False
             temp_frame.destroy()
             self._update_boundary_action_buttons()
             self._update_batch_ai_button_state()
@@ -4000,7 +4069,10 @@ class Step2Frame(SidebarStepFrame):
     def _batch_ai_button_enabled(self):
         if getattr(self, "batch_segmentation_panel", None) is not None:
             return False
-        return not self._segmenter_running
+        return not (
+            self._segmenter_running
+            or getattr(self, "_batch_fovea_picker_active", False)
+        )
 
     def _update_batch_ai_button_state(self):
         if not hasattr(self, "batch_ai_button"):
@@ -4047,7 +4119,7 @@ class Step2Frame(SidebarStepFrame):
             self._active_ai_using_gpu = False
         if running:
             if hasattr(self, "batch_ai_button"):
-                self.batch_ai_button.state(["disabled"])
+                self._set_control_enabled(self.batch_ai_button, False)
         else:
             self._update_batch_ai_button_state()
         
@@ -4727,10 +4799,11 @@ class Step2Frame(SidebarStepFrame):
 
     def _finish_batch_results_session(self, notebook, status_message):
         """Return Step 2 to its reusable empty state after its last result closes."""
-        try:
-            notebook.destroy()
-        except tk.TclError:
-            pass
+        if notebook is not None:
+            try:
+                notebook.destroy()
+            except tk.TclError:
+                pass
         if getattr(self, "batch_results_notebook", None) is notebook:
             self.batch_results_notebook = None
         self._batch_result_canvases = []
