@@ -290,6 +290,23 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertNotIn("btn_skip = action_button(", source)
         self.assertNotIn("btn_set = action_button(", source)
 
+    def test_fovea_prompt_reserves_buttons_before_the_long_path(self):
+        source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
+
+        actions_pack = source.index('actions_frame.pack(side="right", fill="y")')
+        prompt_pack = source.index(
+            'prompt_label.pack(side="left", fill="x", expand=True)'
+        )
+        self.assertLess(actions_pack, prompt_pack)
+        for button_name in ("btn_cancel", "btn_skip", "btn_set"):
+            button_start = source.index(f"{button_name} = AppButton(")
+            button_pack = source.index(f"{button_name}.pack(", button_start)
+            self.assertIn("actions_frame,", source[button_start:button_pack])
+            self.assertLess(button_pack, prompt_pack)
+        self.assertIn("width=1", source)
+        self.assertIn('anchor="w"', source)
+        self.assertIn("prompt_tooltip.text = msg", source)
+
     def test_step3_r_download_uses_the_download_action(self):
         source = inspect.getsource(RSetupWizard._render_page)
         start = source.index("self.r_auto_install_button = action_button(")

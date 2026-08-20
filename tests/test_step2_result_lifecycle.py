@@ -55,6 +55,35 @@ class _ControlStub:
         self.state_value = options["state"]
 
 
+class _TtkStateControlStub:
+    """Model ttk's distinct state option and state-token APIs."""
+
+    def __init__(self):
+        self.option_state = "normal"
+        self.disabled_token = False
+
+    def cget(self, option):
+        if option != "state":
+            raise KeyError(option)
+        return self.option_state
+
+    def configure(self, **options):
+        self.option_state = options["state"]
+        self.disabled_token = self.option_state == "disabled"
+
+    def state(self, statespec=None):
+        if statespec is None:
+            return ("disabled",) if self.disabled_token else ()
+        for state in statespec:
+            if state == "disabled":
+                self.disabled_token = True
+            elif state == "!disabled":
+                self.disabled_token = False
+
+    def is_disabled(self):
+        return self.disabled_token
+
+
 class Step2ResultLifecycleTests(unittest.TestCase):
     def test_fixed_boundary_lists_do_not_show_redundant_scrollbars(self):
         source = inspect.getsource(Step2Frame._build_controls)
@@ -113,6 +142,150 @@ class Step2ResultLifecycleTests(unittest.TestCase):
         self.assertEqual(frame.saved_button.state_value, "disabled")
         self.assertEqual(frame.save_all_button.state_value, "disabled")
         self.assertEqual(frame.continue_to_step3_button.state_value, "disabled")
+
+    def test_segmentation_completion_reenables_the_folder_selector(self):
+        frame = Step2Frame.__new__(Step2Frame)
+        frame._segmenter_running = False
+        frame._active_ai_core_limit = 0
+        frame._active_ai_using_gpu = False
+        frame.batch_segmentation_panel = None
+        frame.batch_ai_button = _TtkStateControlStub()
+        frame.image_data = object()
+        frame._update_boundary_action_buttons = mock.Mock()
+        frame._cancel_progress_animation = mock.Mock()
+        frame._sync_boundary_canvas_state = mock.Mock()
+
+        frame._set_segmentation_running(True)
+        self.assertTrue(frame.batch_ai_button.is_disabled())
+
+        frame._set_segmentation_running(False)
+        self.assertFalse(frame.batch_ai_button.is_disabled())
+        self.assertEqual(frame.batch_ai_button.option_state, "normal")
+
+    def test_fovea_exit_lock_uses_the_reversible_button_state_api(self):
+        source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
+
+        self.assertIn(
+            "self._set_control_enabled(self.batch_ai_button, False)",
+            source,
+        )
+        self.assertNotIn('self.batch_ai_button.state(["disabled"])', source)
+        finally_block = source[source.index("finally:") :]
+        self.assertIn("self._update_batch_ai_button_state()", finally_block)
+
+    def test_fovea_picker_keeps_the_folder_selector_disabled(self):
+        frame = Step2Frame.__new__(Step2Frame)
+        frame.batch_segmentation_panel = None
+        frame._segmenter_running = False
+        frame._batch_fovea_picker_active = True
+
+        self.assertFalse(frame._batch_ai_button_enabled())
+
+        frame._batch_fovea_picker_active = False
+        self.assertTrue(frame._batch_ai_button_enabled())
+
+    def _new_batch_guard_frame(self):
+        frame = Step2Frame.__new__(Step2Frame)
+        frame._segmenter_running = False
+        frame._batch_fovea_picker_active = False
+        frame.batch_segmentation_panel = None
+        frame.batch_results_notebook = None
+        frame._batch_result_states = {}
+        frame._close_step2_batch_segmentation_panel = mock.Mock()
+        frame._finish_batch_results_session = mock.Mock()
+        return frame
+
+    def test_new_batch_without_an_open_session_needs_no_confirmation(self):
+        frame = self._new_batch_guard_frame()
+
+        with mock.patch(
+            "aidas.steps.step2_annotate.messagebox.askyesno"
+        ) as confirm:
+            self.assertTrue(frame._prepare_for_new_batch_session())
+
+        confirm.assert_not_called()
+        frame._close_step2_batch_segmentation_panel.assert_not_called()
+        frame._finish_batch_results_session.assert_not_called()
+
+    def test_declining_new_batch_keeps_the_previous_session_untouched(self):
+        frame = self._new_batch_guard_frame()
+        notebook = _NotebookStub(tabs=("tab",))
+        states = {}
+        frame.batch_results_notebook = notebook
+        frame._batch_result_states = states
+
+        with mock.patch(
+            "aidas.steps.step2_annotate.messagebox.askyesno",
+            return_value=False,
+        ) as confirm:
+            opened = frame._prepare_for_new_batch_session()
+
+        self.assertFalse(opened)
+        self.assertIsNone(frame.batch_segmentation_panel)
+        self.assertIs(frame.batch_results_notebook, notebook)
+        self.assertIs(frame._batch_result_states, states)
+        frame._close_step2_batch_segmentation_panel.assert_not_called()
+        frame._finish_batch_results_session.assert_not_called()
+        _title, prompt = confirm.call_args.args
+        self.assertIn("close the previous session", prompt.lower())
+        self.assertIn("discard", prompt.lower())
+        self.assertEqual(confirm.call_args.kwargs["default"], "no")
+
+    def test_active_fovea_picker_refuses_a_second_batch(self):
+        frame = self._new_batch_guard_frame()
+        frame._batch_fovea_picker_active = True
+
+        with mock.patch(
+            "aidas.steps.step2_annotate.messagebox.showinfo"
+        ) as notice, mock.patch(
+            "aidas.steps.step2_annotate.messagebox.askyesno"
+        ) as confirm:
+            opened = frame._prepare_for_new_batch_session()
+
+        self.assertFalse(opened)
+        notice.assert_called_once()
+        confirm.assert_not_called()
+        frame._close_step2_batch_segmentation_panel.assert_not_called()
+        frame._finish_batch_results_session.assert_not_called()
+
+    def test_confirming_new_batch_discards_the_previous_session_in_order(self):
+        frame = self._new_batch_guard_frame()
+        frame.batch_segmentation_panel = object()
+        notebook = _NotebookStub(tabs=("tab",))
+        frame.batch_results_notebook = notebook
+        frame._batch_result_states = {"tab": {}}
+        calls = []
+        frame._close_step2_batch_segmentation_panel.side_effect = (
+            lambda **_kwargs: calls.append("panel")
+        )
+        frame._finish_batch_results_session.side_effect = (
+            lambda *_args: calls.append("results")
+        )
+
+        with mock.patch(
+            "aidas.steps.step2_annotate.messagebox.askyesno",
+            return_value=True,
+        ):
+            opened = frame._prepare_for_new_batch_session()
+
+        self.assertTrue(opened)
+        self.assertEqual(calls, ["panel", "results"])
+        frame._close_step2_batch_segmentation_panel.assert_called_once_with(
+            restore_previous=False
+        )
+        frame._finish_batch_results_session.assert_called_once_with(
+            notebook,
+            "Previous Step 2 batch session discarded.",
+        )
+
+    def test_new_batch_opener_stops_before_mutation_when_guard_is_declined(self):
+        frame = Step2Frame.__new__(Step2Frame)
+        frame._prepare_for_new_batch_session = mock.Mock(return_value=False)
+
+        opened = frame._open_step2_batch_segmentation_panel("new-root")
+
+        self.assertFalse(opened)
+        frame._prepare_for_new_batch_session.assert_called_once_with()
 
     def test_single_preview_stays_hidden_while_batch_folder_panel_is_open(self):
         frame = Step2Frame.__new__(Step2Frame)

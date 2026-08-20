@@ -46,6 +46,7 @@ import customtkinter as ctk
 import numpy as np
 from PIL import Image
 from PIL import ImageDraw
+from PIL import ImageFont
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
@@ -123,6 +124,7 @@ MATLAB_ISEZ_X_HALF_WIDTH = 40.0
 MATLAB_ISEZ_Y_LIMITS = (-20.0, 120.0)
 MATLAB_AXIS_LINE_WIDTH = 1
 MATLAB_DATA_LINE_WIDTH = 2
+MATLAB_AXIS_TICK_FONT_SIZE = 14
 IMAGEJ_PLOT_BOX = (126.0, 38.0, 876.0, 456.0)
 IMAGEJ_PLOT_BOX_ASPECT = (IMAGEJ_PLOT_BOX[3] - IMAGEJ_PLOT_BOX[1]) / (IMAGEJ_PLOT_BOX[2] - IMAGEJ_PLOT_BOX[0])
 
@@ -594,6 +596,7 @@ def make_isez_plot_image(result: ISezResult) -> Image.Image:
 
     image = Image.new("RGB", IMAGEJ_ISEZ_CANVAS_SIZE, "white")
     draw = ImageDraw.Draw(image)
+    tick_font = ImageFont.load_default(size=MATLAB_AXIS_TICK_FONT_SIZE)
     x0, y0, x1, y1 = IMAGEJ_PLOT_BOX
     x_min = result.center - MATLAB_ISEZ_X_HALF_WIDTH
     x_max = result.center + MATLAB_ISEZ_X_HALF_WIDTH
@@ -608,9 +611,23 @@ def make_isez_plot_image(result: ISezResult) -> Image.Image:
     for tick in np.linspace(x_min, x_max, 5):
         tx, _ = to_pixel(tick, y_min)
         draw.line((tx, y1, tx, y1 + 5), fill="black", width=MATLAB_AXIS_LINE_WIDTH)
+        draw.text(
+            (tx, y1 + 9),
+            f"{float(tick):g}",
+            fill="black",
+            font=tick_font,
+            anchor="mt",
+        )
     for tick in [-20, 0, 50, 100, 120]:
         _, ty = to_pixel(x_min, tick)
         draw.line((x0 - 5, ty, x0, ty), fill="black", width=MATLAB_AXIS_LINE_WIDTH)
+        draw.text(
+            (x0 - 10, ty),
+            str(tick),
+            fill="black",
+            font=tick_font,
+            anchor="rm",
+        )
 
     curve = [to_pixel(px, py) for px, py in zip(result.normalized_x, result.normalized_y)]
     curve = [(x, y) for x, y in curve if x0 - 2 <= x <= x1 + 2 and y0 - 2 <= y <= y1 + 2]
