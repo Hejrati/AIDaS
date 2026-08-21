@@ -1530,11 +1530,16 @@ class AIDaSApp(ctk.CTk):
             self.notebook,
             preferences=self.preferences,
             get_step2_core_usage=self._step2_core_usage,
+            on_continue_to_step4=self._on_step3_continue_to_step4,
         )
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
 
         self._set_splash_progress(91, "Preparing Step 4 - Analyze ISEZ...")
-        self.step4 = Step4Frame(self.notebook, preferences=self.preferences)
+        self.step4 = Step4Frame(
+            self.notebook,
+            preferences=self.preferences,
+            source_step=self.step3,
+        )
         self.notebook.add(self.step4, text="  Step 4 — Analyze ISEZ  ")
 
         self._set_splash_progress(97, "Finalizing the main window...")
@@ -2416,6 +2421,16 @@ class AIDaSApp(ctk.CTk):
         self.notebook.select(step3)
         self.update_idletasks()
         step3.open_batch_folders(folders)
+
+    def _on_step3_continue_to_step4(self, folders) -> None:
+        """Open Step 4 with every flattened result loaded in Step 3."""
+
+        step4 = getattr(self, "step4", None)
+        if step4 is None or not folders:
+            return
+        self.notebook.select(step4)
+        self.update_idletasks()
+        step4.open_batch_folders(folders)
 
     def _show_about(self) -> None:
         """Open one modal About window, or focus the existing one."""

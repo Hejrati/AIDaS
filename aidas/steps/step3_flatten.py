@@ -34,8 +34,10 @@ from aidas.utils.step3_image_utils import (
 )
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.r_script_library import discover_r_scripts, import_r_script, user_r_script_dir
+from aidas.ui.components import AppButton
 from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
 from aidas.ui.tabs import ClosableTabView
+from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     NativeNumericSpinbox,
@@ -43,6 +45,7 @@ from aidas.utils.ui_utils import (
     action_button,
     load_color_close_icon,
     load_action_icon,
+    load_ctk_image,
     resource_path,
 )
 
@@ -2622,10 +2625,17 @@ class Step3Frame(SidebarStepFrame):
         "done": (100, "R processing complete"),
     }
 
-    def __init__(self, parent, preferences=None, get_step2_core_usage=None):
+    def __init__(
+        self,
+        parent,
+        preferences=None,
+        get_step2_core_usage=None,
+        on_continue_to_step4=None,
+    ):
         super().__init__(parent)
         self.preferences = preferences
         self.get_step2_core_usage = get_step2_core_usage
+        self.on_continue_to_step4 = on_continue_to_step4
 
         self.current_sdb_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         self.output_sdb_dir = self.current_sdb_dir
@@ -2639,11 +2649,13 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_run_panel = None
         self.batch_results_notebook = None
         self.batch_result_folders = []
+        self.step4_result_folders = []
         self.batch_result_tab_states = {}
         self._active_batch_result_tab = None
         self.r_setup_button = None
         self.r_batch_button = None
         self.load_r_results_button = None
+        self.continue_to_step4_button = None
         self._busy = False
         self._r_cancel_event = threading.Event()
         self._r_process_lock = threading.Lock()
@@ -2725,6 +2737,41 @@ class Step3Frame(SidebarStepFrame):
             justify="left",
         ).pack(fill="both", expand=True)
 
+        # Keep the workflow handoff visible below the scrolling sidebar, as in
+        # Steps 1 and 2.
+        self.step_actions_footer = ttk.Frame(
+            self.sidebar_shell,
+            style="AIDaS.Sidebar.TFrame",
+        )
+        self.step_actions_footer.pack(
+            side="bottom",
+            fill="x",
+            padx=(LAYOUT.space_sm, LAYOUT.space_xs),
+            pady=(0, LAYOUT.space_sm),
+            before=self.sidebar,
+        )
+        ttk.Separator(self.step_actions_footer, orient="horizontal").pack(
+            fill="x",
+            pady=(LAYOUT.space_xs, 6),
+        )
+        self.continue_to_step4_button_icon = load_ctk_image(
+            self, "flat-color-icons--right.png", size=20
+        )
+        self.continue_to_step4_button = AppButton(
+            self.step_actions_footer,
+            text="Go to Step 4",
+            variant="success",
+            command=self._continue_to_step4,
+            state="disabled",
+            image=self.continue_to_step4_button_icon,
+            compound="left",
+        )
+        self.continue_to_step4_button.pack(fill="x", padx=2)
+        HoverToolTip(
+            self.continue_to_step4_button,
+            "Open all loaded or newly processed flattened files in Step 4.",
+        )
+
         self.plot_holder = ttk.Frame(self.content)
         self.plot_holder.pack(fill="both", expand=True)
         self._render()
@@ -2736,6 +2783,72 @@ class Step3Frame(SidebarStepFrame):
             self.r_batch_button.configure(state=state)
         if self.load_r_results_button is not None:
             self.load_r_results_button.configure(state=state)
+        self._update_continue_to_step4_button_state()
+
+    @staticmethod
+    def _normalize_step4_result_folders(folders):
+        """Return unique folders containing complete ``_flat_LIGHT`` pairs."""
+
+        normalized = []
+        seen = set()
+        for value in folders or ():
+            if not value:
+                continue
+            folder = Path(value).expanduser()
+            if folder.name.lower() in {"_flat_light.hdr", "_flat_light.img"}:
+                folder = folder.parent
+            try:
+                folder = folder.resolve()
+            except (OSError, RuntimeError):
+                continue
+            if not (
+                (folder / "_flat_LIGHT.hdr").is_file()
+                and (folder / "_flat_LIGHT.img").is_file()
+            ):
+                continue
+            key = os.path.normcase(str(folder))
+            if key in seen:
+                continue
+            seen.add(key)
+            normalized.append(folder)
+        return normalized
+
+    def _available_step4_result_folders(self):
+        """Return every valid flattened result from the latest load or R batch."""
+
+        return self._normalize_step4_result_folders(
+            getattr(self, "step4_result_folders", ())
+        )
+
+    def _update_continue_to_step4_button_state(self):
+        """Enable the handoff only when flattened Analyze files are ready."""
+
+        button = getattr(self, "continue_to_step4_button", None)
+        if button is None:
+            return
+        enabled = (
+            callable(getattr(self, "on_continue_to_step4", None))
+            and not getattr(self, "_busy", False)
+            and bool(self._available_step4_result_folders())
+        )
+        self._set_control_enabled(button, enabled)
+
+    def _continue_to_step4(self):
+        """Open all loaded or newly processed flattened folders in Step 4."""
+
+        folders = self._available_step4_result_folders()
+        if not folders:
+            messagebox.showwarning(
+                "No flattened files",
+                "Load Step 3 R results or finish an R batch before continuing to Step 4.",
+            )
+            self._update_continue_to_step4_button_state()
+            return
+        callback = getattr(self, "on_continue_to_step4", None)
+        if not callable(callback):
+            messagebox.showerror("Step 4 unavailable", "Step 4 analysis is unavailable.")
+            return
+        callback([str(folder) for folder in folders])
 
     def _open_r_setup_wizard(self, on_finish=None):
         if self._busy:
@@ -3444,6 +3557,7 @@ class Step3Frame(SidebarStepFrame):
         self.current_sdb_dir = str(folder)
         self.output_sdb_dir = str(folder)
         self.results = results
+        self.step4_result_folders = self._normalize_step4_result_folders([folder])
         self._load_original_light_for_preview(folder)
         self.progress_text_var.set("Loaded R results")
         self.view_var.set("DARK_MARKED_find_vertex")
@@ -3458,6 +3572,7 @@ class Step3Frame(SidebarStepFrame):
             self.info_var.set(self.info_var.get() + "\n\nLoader fallbacks:\n" + "\n".join(loader_errors))
         self.status_var.set(f"Loaded Step 3 R results from {folder}.")
         self._render()
+        self._update_continue_to_step4_button_state()
         return True
 
     def _load_result_png(self, filename):
@@ -4043,6 +4158,7 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_run_panel.pack(fill="both", expand=True)
         self._r_cancel_event.clear()
         self._busy = True
+        self.step4_result_folders = []
         self._active_r_core_allocation = workers
         self._active_r_folder_keys = {self._folder_key(folder) for folder in folders}
         self._set_process_buttons("disabled")
@@ -4629,6 +4745,16 @@ class Step3Frame(SidebarStepFrame):
                 for result in results
             )
         )
+        successful_folders = [
+            Path(result["folder"])
+            for result in results
+            if result["returncode"] == 0
+            and result.get("outcome", "completed") == "completed"
+        ]
+        self.step4_result_folders = self._normalize_step4_result_folders(
+            successful_folders
+        )
+        self._update_continue_to_step4_button_state()
 
         pending_restart = self._pending_batch_restart
         self._pending_batch_restart = None
@@ -4665,7 +4791,6 @@ class Step3Frame(SidebarStepFrame):
             self._close_r_batch_run_panel(render_previous=True)
             return
 
-        successful_folders = [Path(result["folder"]) for result in results if result["returncode"] == 0]
         if successful_folders:
             self._open_batch_r_result_tabs(successful_folders)
 

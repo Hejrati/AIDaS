@@ -27,6 +27,12 @@ def _completion_frame() -> Step4Frame:
 
 
 class Step4CompletionTests(unittest.TestCase):
+    def test_roi_table_stays_compact_enough_to_reveal_its_actions(self):
+        source = inspect.getsource(Step4Frame._build_ui)
+
+        self.assertEqual(Step4Frame.ROI_TABLE_VISIBLE_ROWS, 3)
+        self.assertIn("height=self.ROI_TABLE_VISIBLE_ROWS", source)
+
     def test_build_stack_action_uses_a_reserved_sidebar_footer(self):
         source = inspect.getsource(Step4Frame._build_ui)
         footer_start = source.index("self.sidebar_footer = ctk.CTkFrame")

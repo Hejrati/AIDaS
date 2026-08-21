@@ -378,13 +378,37 @@ def _assert_step2_sidebar_actions_visible(step, width, height):
     )
 
 
-def _assert_step4_build_stack_visible(step, width, height):
-    """Guard the fixed Step 4 footer and Build stack action."""
+def _assert_step4_sidebar_actions_visible(step, width, height):
+    """Guard every Step 4 sidebar action at supported window sizes."""
 
     assert step.sidebar_footer.master is step.sidebar_shell, (
         "Step 4 Build stack footer is not attached to the fixed sidebar shell."
     )
     assert step.build_stacks_button.master is step.sidebar_footer
+    assert int(step.roi_table.cget("height")) == step.ROI_TABLE_VISIBLE_ROWS
+    assert len(step.roi_table.get_children()) > step.ROI_TABLE_VISIBLE_ROWS
+
+    scroll_top = step.sidebar.canvas.winfo_rooty()
+    scroll_bottom = scroll_top + step.sidebar.canvas.winfo_height()
+    for name, widget in (
+        ("Select folders for ROI", step.batch_roi_button),
+        ("Previous", step.previous_roi_button),
+        ("Next", step.next_roi_button),
+        ("Apply", step.apply_button),
+        ("Clear", step.clear_button),
+    ):
+        assert widget.winfo_ismapped(), (
+            f"Step 4 {name} is hidden at {width}x{height}."
+        )
+        widget_top = widget.winfo_rooty()
+        widget_bottom = widget_top + widget.winfo_height()
+        assert scroll_top - 1 <= widget_top and widget_bottom <= scroll_bottom + 1, (
+            f"Step 4 {name} is outside the initial sidebar viewport at "
+            f"{width}x{height}."
+        )
+        assert widget.winfo_height() + 1 >= widget.winfo_reqheight(), (
+            f"Step 4 {name} is vertically clipped at {width}x{height}."
+        )
 
     shell_left = step.sidebar_shell.winfo_rootx()
     shell_top = step.sidebar_shell.winfo_rooty()
@@ -655,6 +679,7 @@ def main(interface_mode="Modern") -> int:
                         f"Step {step_number} cannot scroll to its lowest sidebar control."
                     )
                     step.sidebar.canvas.yview_moveto(0.0)
+                    app.update_idletasks()
                 if step_number == 1:
                     _assert_crop_split_button_geometry(step)
                     _assert_step1_sidebar_actions_visible(step, width, height)
@@ -732,7 +757,7 @@ def main(interface_mode="Modern") -> int:
                 if step_number == 2:
                     _assert_step2_sidebar_actions_visible(step, width, height)
                 if step_number == 4:
-                    _assert_step4_build_stack_visible(step, width, height)
+                    _assert_step4_sidebar_actions_visible(step, width, height)
                 if interface_mode == "Classic":
                     step.sidebar._show_scrollbar()
                     app.update_idletasks()

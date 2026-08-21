@@ -1782,6 +1782,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 class Step4Frame(SidebarStepFrame):
     """Step 4 tab UI for interactive ISez profile selection and output saving."""
 
+    ROI_TABLE_VISIBLE_ROWS = 3
+
     def __init__(self, parent, preferences=None, source_step=None):
         super().__init__(parent)
         self.preferences = preferences
@@ -1877,7 +1879,7 @@ class Step4Frame(SidebarStepFrame):
             columns=columns,
             show="headings",
             selectmode="browse",
-            height=10,
+            height=self.ROI_TABLE_VISIBLE_ROWS,
         )
         roi_yscroll = ttk.Scrollbar(list_frame, orient="vertical", command=self.roi_table.yview)
         roi_xscroll = ttk.Scrollbar(list_frame, orient="horizontal", command=self.roi_table.xview)
@@ -1896,20 +1898,26 @@ class Step4Frame(SidebarStepFrame):
 
         nav = ttk.Frame(roi_box)
         nav.pack(fill="x", pady=(6, 0))
-        action_button(
+        self.previous_roi_button = action_button(
             nav,
             self,
             "Previous",
             lambda: self._move_roi(-1),
             "previous",
-        ).pack(side="left", expand=True, fill="x", padx=(0, 2))
-        action_button(
+        )
+        self.previous_roi_button.pack(
+            side="left", expand=True, fill="x", padx=(0, 2)
+        )
+        self.next_roi_button = action_button(
             nav,
             self,
             "Next",
             lambda: self._move_roi(1),
             "next",
-        ).pack(side="right", expand=True, fill="x", padx=(2, 0))
+        )
+        self.next_roi_button.pack(
+            side="right", expand=True, fill="x", padx=(2, 0)
+        )
 
         # Create a SINGLE frame for the horizontal controls
         control_row = ttk.Frame(roi_box)
@@ -2116,6 +2124,52 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self._open_batch_roi_panel(Path(folder))
+
+    @staticmethod
+    def _step3_flat_light_paths(folders) -> list[Path]:
+        """Resolve an exact Step 3 folder list to unique Analyze inputs."""
+
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for value in folders or ():
+            if not value:
+                continue
+            source = Path(value).expanduser()
+            folder = (
+                source.parent
+                if source.name.lower() in {"_flat_light.hdr", "_flat_light.img"}
+                else source
+            )
+            try:
+                folder = folder.resolve()
+            except (OSError, RuntimeError):
+                continue
+            hdr_path = folder / "_flat_LIGHT.hdr"
+            img_path = folder / "_flat_LIGHT.img"
+            if not (hdr_path.is_file() and img_path.is_file()):
+                continue
+            key = os.path.normcase(str(hdr_path))
+            if key in seen:
+                continue
+            seen.add(key)
+            paths.append(hdr_path)
+        return paths
+
+    def open_batch_folders(self, folders) -> bool:
+        """Open only the flattened folders transferred directly from Step 3."""
+
+        paths = self._step3_flat_light_paths(folders)
+        if not paths:
+            messagebox.showwarning(
+                "No Step 4 inputs",
+                "None of the transferred folders contains both _flat_LIGHT.hdr and _flat_LIGHT.img.",
+            )
+            return False
+
+        self._start_batch_roi_from_rows(
+            [{"folder": path.parent, "flat_light": path} for path in paths]
+        )
+        return True
 
     def _open_batch_roi_panel(self, root_dir: Path) -> None:
         self._close_batch_roi_panel(restore_previous=False)

@@ -270,13 +270,17 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
     def test_workflow_handoff_buttons_share_the_success_variant(self):
         step1_source = inspect.getsource(Step1Frame._build_controls)
         step2_source = inspect.getsource(Step2Frame._build_controls)
+        step3_source = inspect.getsource(Step3Frame._build_ui)
 
         step1_handoff = step1_source[step1_source.index("self.batch_segment_cropped_btn = AppButton(") :]
         step2_handoff = step2_source[step2_source.index("self.continue_to_step3_button = AppButton(") :]
+        step3_handoff = step3_source[step3_source.index("self.continue_to_step4_button = AppButton(") :]
         self.assertIn('variant="success"', step1_handoff.split(".pack(", 1)[0])
         self.assertIn('variant="success"', step2_handoff.split(".grid(", 1)[0])
+        self.assertIn('variant="success"', step3_handoff.split(".pack(", 1)[0])
         self.assertIn('"flat-color-icons--right.png"', step1_source)
         self.assertIn('"flat-color-icons--right.png"', step2_source)
+        self.assertIn('"flat-color-icons--right.png"', step3_source)
 
     def test_fovea_prompt_uses_rounded_buttons_and_dpi_aware_icons(self):
         source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)

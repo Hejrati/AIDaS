@@ -2,7 +2,7 @@
 
 Features:
     - Display 8/16-bit grayscale images (auto-normalised for display)
-    - Zoom via mouse-wheel
+    - Zoom via mouse-wheel or touchpad scroll/pinch gesture
     - Pan via right-click drag (or scrollbars)
     - Interactive rectangle ROI via left-click drag
     - Interactive polyline tracing with saved overlays
@@ -32,6 +32,9 @@ class ImageCanvas(ttk.Frame):
 
     RESIZE_REDRAW_DEBOUNCE_MS = 100
     ZOOM_REDRAW_DEBOUNCE_MS = 16
+    ZOOM_STEP_FACTOR = 1.25
+    WINDOWS_WHEEL_DELTA = 120.0
+    MAX_WHEEL_ZOOM_STEPS = 4.0
 
     # ------------------------------------------------------------------ init
     def __init__(
@@ -72,6 +75,12 @@ class ImageCanvas(ttk.Frame):
         self._pending_zoom = None
         self._pending_zoom_focus = None
         self._zoom_redraw_after_id = None
+        try:
+            self._windowing_system = str(
+                self.tk.call("tk", "windowingsystem")
+            ).lower()
+        except tk.TclError:
+            self._windowing_system = ""
 
         # ROI — image-coordinate ints (x, y, w, h) or None
         self._roi = None
@@ -169,6 +178,12 @@ class ImageCanvas(ttk.Frame):
         self.canvas.bind("<MouseWheel>",      self._on_wheel)
         self.canvas.bind("<Button-4>",        self._on_wheel)
         self.canvas.bind("<Button-5>",        self._on_wheel)
+        # Windows touchpad pinch/stretch is exposed as Ctrl+wheel.  Explicit
+        # modifier bindings make that gesture win over generic class bindings
+        # while retaining ordinary wheel and two-finger-scroll zoom.
+        self.canvas.bind("<Control-MouseWheel>", self._on_wheel)
+        self.canvas.bind("<Control-Button-4>",   self._on_wheel)
+        self.canvas.bind("<Control-Button-5>",   self._on_wheel)
         self.canvas.bind("<Configure>",       self._on_canvas_resize)
         self.canvas.bind("<ButtonPress-1>",   self._on_press)
         self.canvas.bind("<B1-Motion>",       self._on_drag_motion)
@@ -1156,11 +1171,48 @@ class ImageCanvas(ttk.Frame):
         return abs(cx - line_x) <= max(8, self._scaled_line_width(4) * 2)
 
     # ---------------------------------------------------------- mouse events
-    def _on_wheel(self, event):
-        if event.num == 4 or getattr(event, "delta", 0) > 0:
-            factor = 1.25
+    @classmethod
+    def _wheel_zoom_steps(cls, event, windowing_system=""):
+        """Translate wheel/touchpad motion into bounded fractional zoom steps."""
+
+        button = getattr(event, "num", None)
+        if button == 4:
+            return 1.0
+        if button == 5:
+            return -1.0
+
+        try:
+            delta = float(getattr(event, "delta", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if delta == 0:
+            return 0.0
+
+        platform = str(windowing_system or "").lower()
+        if platform == "win32":
+            # A mouse-wheel notch is 120 on Windows, while precision
+            # touchpads emit smaller deltas.  Keeping the fraction makes a
+            # pinch or two-finger gesture smooth instead of jumping 25% for
+            # every high-resolution event.
+            steps = delta / cls.WINDOWS_WHEEL_DELTA
+        elif platform == "aqua":
+            # Tk reports small, already-normalized deltas on macOS.
+            steps = delta
+        elif abs(delta) >= cls.WINDOWS_WHEEL_DELTA:
+            steps = delta / cls.WINDOWS_WHEEL_DELTA
         else:
-            factor = 1 / 1.25
+            steps = 1.0 if delta > 0 else -1.0
+
+        return max(-cls.MAX_WHEEL_ZOOM_STEPS, min(cls.MAX_WHEEL_ZOOM_STEPS, steps))
+
+    def _on_wheel(self, event):
+        steps = self._wheel_zoom_steps(
+            event,
+            getattr(self, "_windowing_system", ""),
+        )
+        if steps == 0:
+            return "break"
+        factor = self.ZOOM_STEP_FACTOR ** steps
         base_zoom = self._pending_zoom if self._pending_zoom is not None else self._zoom
         self._queue_zoom(base_zoom * factor)
         return "break"
