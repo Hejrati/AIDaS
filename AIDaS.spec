@@ -49,6 +49,7 @@ required_runtime_imports = (
     "scipy",
     "PIL",
     "matplotlib",
+    "openpyxl",
     "pyreadr",
     "packaging",
     "truststore",

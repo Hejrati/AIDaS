@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import builtins
 import inspect
 from pathlib import Path
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -27,6 +30,55 @@ def _completion_frame() -> Step4Frame:
 
 
 class Step4CompletionTests(unittest.TestCase):
+    def test_step4_module_import_does_not_require_openpyxl(self):
+        project_root = Path(__file__).resolve().parents[1]
+        code = (
+            "import builtins\n"
+            "real_import = builtins.__import__\n"
+            "def blocked_import(name, *args, **kwargs):\n"
+            "    if name == 'openpyxl' or name.startswith('openpyxl.'):\n"
+            "        error = ModuleNotFoundError(\"No module named 'openpyxl'\")\n"
+            "        error.name = 'openpyxl'\n"
+            "        raise error\n"
+            "    return real_import(name, *args, **kwargs)\n"
+            "builtins.__import__ = blocked_import\n"
+            "from aidas.steps.step4_analyze_isez import Step4Frame\n"
+            "print(Step4Frame.__name__)\n"
+        )
+
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("Step4Frame", result.stdout)
+
+    def test_missing_compiler_dependency_does_not_crash_step4(self):
+        frame = object.__new__(Step4Frame)
+        frame._compiler_dialog = None
+        frame.status_var = _VariableStub()
+        real_import = builtins.__import__
+
+        def import_without_openpyxl(name, *args, **kwargs):
+            if name == "aidas.steps.step4_compiler_dialog":
+                error = ModuleNotFoundError("No module named 'openpyxl'")
+                error.name = "openpyxl"
+                raise error
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=import_without_openpyxl), mock.patch(
+            "aidas.steps.step4_analyze_isez.messagebox.showerror"
+        ) as showerror:
+            frame._open_compiler_dialog()
+
+        showerror.assert_called_once()
+        self.assertIn("openpyxl", showerror.call_args.args[1])
+        self.assertIn("unavailable", frame.status_var.value)
+
     def test_roi_table_stays_compact_enough_to_reveal_its_actions(self):
         source = inspect.getsource(Step4Frame._build_ui)
 

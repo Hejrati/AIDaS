@@ -10,6 +10,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
+from aidas.utils.ui_utils import HoverToolTip
 
 
 class AppButton(ctk.CTkButton):
@@ -532,6 +533,10 @@ class WorkflowHeader(ctk.CTkFrame):
             anchor="center",
         )
         self.help_button.pack(side="left")
+        self.help_tooltip = HoverToolTip(
+            self.help_button,
+            "Open the AIDaS workflow tutorial",
+        )
 
         self.navigation = WorkflowNavigation(
             self,

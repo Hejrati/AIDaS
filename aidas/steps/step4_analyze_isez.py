@@ -38,6 +38,7 @@ from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
+from typing import TYPE_CHECKING
 import zipfile
 from io import BytesIO
 from xml.sax.saxutils import escape
@@ -69,6 +70,9 @@ from aidas.utils.ui_utils import (
     load_color_close_ctk_icon,
     load_ctk_image,
 )
+
+if TYPE_CHECKING:
+    from aidas.steps.step4_compiler_dialog import Step4CompilerDialog
 
 
 MATLAB_ROI_LOW = 300
@@ -707,9 +711,10 @@ def write_imagej_results_xlsx(rows: list[dict[str, float]], path: str | os.PathL
     """Write the ImageJ-style Step 4 results workbook.
 
     ImageJ's Results table is tabular text internally; the old workflow saved
-    it as an Excel workbook. ``openpyxl`` is not a project dependency here, so
-    this writes the small XLSX package directly. The worksheet name is ``in``
-    and the column order follows the GT workbook from ``Examples/step4``.
+    it as an Excel workbook. This keeps the small measurement workbook writer
+    deterministic and independent from the separate multi-folder compiler.
+    The worksheet name is ``in`` and the column order follows the GT workbook
+    from ``Examples/step4``.
     """
 
     path = Path(path)
@@ -1808,6 +1813,7 @@ class Step4Frame(SidebarStepFrame):
         self._current_profile = None
         self._plot_activity_text = None
         self._profile_zoom_dialog = None
+        self._compiler_dialog = None
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
@@ -1846,7 +1852,10 @@ class Step4Frame(SidebarStepFrame):
             status_bar_content_margin=True,
         )
 
-        source_section = self.add_sidebar_section("Input", pady=(0, 5))
+        source_section = self.add_sidebar_section(
+            "Input",
+            pady=(0, LAYOUT.space_xs),
+        )
         source = source_section.body
         # Temporarily disable the file-open and Step 3 load buttons to prevent
         # loading files while the feature is disabled for maintenance/testing.
@@ -1859,7 +1868,26 @@ class Step4Frame(SidebarStepFrame):
             "folder",
             tooltip="Choose a parent folder. AIDaS will find eligible flattened images inside it.",
         )
-        self.batch_roi_button.pack(fill="x", pady=(6, 8))
+        self.batch_roi_button.pack(
+            fill="x",
+            pady=(0, LAYOUT.space_xs // 2),
+        )
+
+        self.compiler_button = action_button(
+            source,
+            self,
+            "Compile measurements…",
+            self._open_compiler_dialog,
+            "results",
+            tooltip=(
+                "Compile Step 4 measurements under an LE/RE parent folder "
+                "into one Excel workbook."
+            ),
+        )
+        self.compiler_button.pack(
+            fill="x",
+            pady=(0, LAYOUT.space_xs // 2),
+        )
 
         ttk.Label(
             source,
@@ -1867,9 +1895,14 @@ class Step4Frame(SidebarStepFrame):
             wraplength=self.SIDEBAR_TEXT_WRAP,
             style="AIDaS.Muted.TLabel",
             justify="left",
-        ).pack(fill="x", pady=(6, 0))
+        ).pack(fill="x")
 
-        roi_section = self.add_sidebar_section("ROIs", fill="both", expand=True, pady=(0, 5))
+        roi_section = self.add_sidebar_section(
+            "ROIs",
+            fill="both",
+            expand=True,
+            pady=(0, LAYOUT.space_xs),
+        )
         roi_box = roi_section.body
         list_frame = ttk.Frame(roi_box)
         list_frame.pack(fill="both", expand=True)
@@ -1897,7 +1930,9 @@ class Step4Frame(SidebarStepFrame):
         self.roi_table.bind("<<TreeviewSelect>>", self._on_roi_selected)
 
         nav = ttk.Frame(roi_box)
-        nav.pack(fill="x", pady=(6, 0))
+        nav.pack(fill="x", pady=(LAYOUT.space_xs // 2, 0))
+        nav.columnconfigure(0, weight=1, uniform="roi_navigation")
+        nav.columnconfigure(1, weight=1, uniform="roi_navigation")
         self.previous_roi_button = action_button(
             nav,
             self,
@@ -1905,8 +1940,11 @@ class Step4Frame(SidebarStepFrame):
             lambda: self._move_roi(-1),
             "previous",
         )
-        self.previous_roi_button.pack(
-            side="left", expand=True, fill="x", padx=(0, 2)
+        self.previous_roi_button.grid(
+            row=0,
+            column=0,
+            sticky="ew",
+            padx=(0, LAYOUT.space_xs // 2),
         )
         self.next_roi_button = action_button(
             nav,
@@ -1915,26 +1953,46 @@ class Step4Frame(SidebarStepFrame):
             lambda: self._move_roi(1),
             "next",
         )
-        self.next_roi_button.pack(
-            side="right", expand=True, fill="x", padx=(2, 0)
+        self.next_roi_button.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(LAYOUT.space_xs // 2, 0),
         )
 
-        # Create a SINGLE frame for the horizontal controls
         control_row = ttk.Frame(roi_box)
-        # Packs the row at the top (default) of the available space
-        control_row.pack(fill="x", pady=5) 
+        control_row.pack(fill="x", pady=(LAYOUT.space_xs // 2, 0))
+        control_row.columnconfigure(1, weight=1, uniform="roi_range_entry")
+        control_row.columnconfigure(3, weight=1, uniform="roi_range_entry")
 
-        # 1. Start Label & Entry
-        ttk.Label(control_row, text="Start").pack(side="left", padx=(0, 2))
+        ttk.Label(control_row, text="Start").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            padx=(0, LAYOUT.space_xs),
+        )
         self.start_entry = ttk.Entry(control_row, textvariable=self.start_var, width=8)
-        self.start_entry.pack(side="left", padx=(0, 10))
+        self.start_entry.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(0, LAYOUT.space_xs),
+        )
 
-        # 2. End Label & Entry
-        ttk.Label(control_row, text="End").pack(side="left", padx=(0, 2))
+        ttk.Label(control_row, text="End").grid(
+            row=0,
+            column=2,
+            sticky="w",
+            padx=(0, LAYOUT.space_xs),
+        )
         self.end_entry = ttk.Entry(control_row, textvariable=self.end_var, width=8)
-        self.end_entry.pack(side="left", padx=(0, 10))
+        self.end_entry.grid(
+            row=0,
+            column=3,
+            sticky="ew",
+            padx=(0, LAYOUT.space_xs),
+        )
 
-        # 3. Apply Button
         self.apply_button = icon_action_button(
             control_row,
             self,
@@ -1942,7 +2000,11 @@ class Step4Frame(SidebarStepFrame):
             "confirm",
             tooltip="Apply the start and end values",
         )
-        self.apply_button.pack(side="left", expand=False) 
+        self.apply_button.grid(
+            row=0,
+            column=4,
+            padx=(0, LAYOUT.space_xs),
+        )
         self.clear_button = icon_action_button(
             control_row,
             self,
@@ -1950,7 +2012,7 @@ class Step4Frame(SidebarStepFrame):
             "clear",
             tooltip="Clear the current start and end values",
         )
-        self.clear_button.pack(side="left", padx=(4, 0), expand=False)
+        self.clear_button.grid(row=0, column=5)
         for entry in (self.start_entry, self.end_entry):
             entry.bind("<Return>", self._apply_entry_clicks)
             entry.bind("<KP_Enter>", self._apply_entry_clicks)
@@ -2001,6 +2063,52 @@ class Step4Frame(SidebarStepFrame):
             self.input_dir_var.set(folder)
         if folder and not self._output_dir_user_selected:
             self.output_dir_var.set(folder)
+
+    def _open_compiler_dialog(self) -> None:
+        dialog = self._compiler_dialog
+        try:
+            if dialog is not None and dialog.winfo_exists():
+                dialog.deiconify()
+                dialog.lift()
+                dialog.focus_force()
+                return
+        except tk.TclError:
+            pass
+
+        try:
+            from aidas.steps.step4_compiler_dialog import Step4CompilerDialog
+        except ModuleNotFoundError as exc:
+            missing_module = str(exc.name or "")
+            if missing_module != "openpyxl" and not missing_module.startswith("openpyxl."):
+                raise
+            self.status_var.set("Measurement compiler unavailable: openpyxl is not installed.")
+            messagebox.showerror(
+                "Compiler dependency missing",
+                "The measurement compiler requires openpyxl.\n\n"
+                "Install the project requirements in the Python environment that launches AIDaS:\n\n"
+                'python -m pip install "openpyxl>=3.1,<4"',
+                parent=self,
+            )
+            return
+
+        initial_input = (
+            self.batch_roi_root
+            or self.input_dir_var.get()
+            or self._default_input_folder()
+        )
+        self._compiler_dialog = Step4CompilerDialog(
+            self,
+            initial_input=initial_input,
+            on_close=self._compiler_dialog_closed,
+            on_success=self._compiler_succeeded,
+        )
+
+    def _compiler_dialog_closed(self, dialog: Step4CompilerDialog) -> None:
+        if self._compiler_dialog is dialog:
+            self._compiler_dialog = None
+
+    def _compiler_succeeded(self, output_path: Path) -> None:
+        self.status_var.set(f"Compiled Step 4 measurements to {output_path}.")
 
     def _apply_aidas_theme(self) -> None:
         """Keep the scientific plots synchronized with the application mode."""

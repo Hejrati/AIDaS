@@ -47,6 +47,7 @@ from aidas.ui.theme import (
     refresh_native_widgets,
     set_interface_mode,
 )
+from aidas.ui.tutorial import TutorialDialog, tutorial_page_index_for_step
 from aidas.ui.title_bar import (
     cache_native_window_handle,
     create_custom_windows_title_bar,
@@ -1386,6 +1387,7 @@ class AIDaSApp(ctk.CTk):
         )
         self._about_dialog = None
         self._settings_dialog = None
+        self._tutorial_dialog = None
         self._set_app_icon()
 
         self._splash_started_at = time.monotonic()
@@ -1760,7 +1762,7 @@ class AIDaSApp(ctk.CTk):
             version=__version__,
             on_step_selected=self._select_workflow_step,
             on_settings_selected=self._show_settings,
-            on_help_selected=self._show_about,
+            on_help_selected=self._show_tutorial,
             logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
             settings_icon_path=self._resource_path(
                 os.path.join("assets", "iconify-fluent-color--settings-32.png")
@@ -1915,6 +1917,7 @@ class AIDaSApp(ctk.CTk):
             browse_sdb_command=self._menu_browse_sdb,
             check_updates_command=self.update_controller.check_now,
             about_command=self._show_about,
+            tutorial_command=self._show_tutorial,
             exit_command=self.destroy,
         )
 
@@ -1971,6 +1974,7 @@ class AIDaSApp(ctk.CTk):
                     settings_command=self._show_settings,
                     check_updates_command=self.update_controller.check_now,
                     about_command=self._show_about,
+                    tutorial_command=self._show_tutorial,
                     exit_command=self.destroy,
                 )
             else:
@@ -2446,6 +2450,30 @@ class AIDaSApp(ctk.CTk):
             self,
             interface_mode=self.interface_mode,
         )
+
+    def _show_tutorial(self) -> None:
+        """Open contextual help for the active workflow step."""
+
+        selected_step = self._selected_workflow_index()
+        dialog = self._tutorial_dialog
+        try:
+            if dialog is not None and dialog.winfo_exists():
+                dialog.show_step(selected_step)
+                dialog._schedule_modal_activation(delay_ms=1)
+                return
+        except tk.TclError:
+            pass
+
+        self._tutorial_dialog = TutorialDialog(
+            self,
+            initial_page=tutorial_page_index_for_step(selected_step),
+            on_step_selected=self._select_workflow_step,
+            on_close=self._tutorial_dialog_closed,
+        )
+
+    def _tutorial_dialog_closed(self, dialog: TutorialDialog) -> None:
+        if self._tutorial_dialog is dialog:
+            self._tutorial_dialog = None
 
     def _show_settings(self) -> None:
         """Open one settings window, or focus the existing instance."""

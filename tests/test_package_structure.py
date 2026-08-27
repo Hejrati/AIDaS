@@ -28,6 +28,7 @@ class PackageStructureTests(unittest.TestCase):
             "aidas.ui.tabs",
             "aidas.ui.theme",
             "aidas.ui.title_bar",
+            "aidas.ui.tutorial",
             "aidas.ui.windowing",
         )
         for module_name in modules:
@@ -116,6 +117,7 @@ class PackageStructureTests(unittest.TestCase):
         self.assertIn('"pytest",', spec_text)
         self.assertIn('"TkAgg"', spec_text)
         self.assertIn("onnxruntime-directml", requirements)
+        self.assertIn("openpyxl>=", requirements.lower())
         self.assertIn("truststore>=", requirements)
         self.assertIn("pyinstaller>=", requirements.lower())
         self.assertIn("pywin32-ctypes>=", requirements.lower())
@@ -129,6 +131,7 @@ class PackageStructureTests(unittest.TestCase):
             '"scipy"',
             '"PIL"',
             '"matplotlib"',
+            '"openpyxl"',
             '"pyreadr"',
             '"packaging"',
             '"truststore"',

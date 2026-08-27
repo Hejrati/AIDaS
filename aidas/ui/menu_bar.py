@@ -531,6 +531,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         interface_modes: Sequence[str] = (),
         current_interface: str = "Modern",
         set_interface_command: Callable[[str], None] | None = None,
+        tutorial_command: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(
             master,
@@ -551,6 +552,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         self._browse_sdb_command = browse_sdb_command
         self._check_updates_command = check_updates_command
         self._about_command = about_command
+        self._tutorial_command = tutorial_command
         self._exit_command = exit_command or master.winfo_toplevel().destroy
         self._popup: _PopupMenu | None = None
         self._popup_cache: dict[str, _PopupMenu] = {}
@@ -752,7 +754,17 @@ class ApplicationMenuBar(ctk.CTkFrame):
                     *appearance_items,
                 )
             return (_MenuItem("heading", "Appearance"), *appearance_items)
+        tutorial_command = getattr(self, "_tutorial_command", None)
+        tutorial_items = (
+            (
+                _MenuItem("command", "Workflow Tutorial...", tutorial_command),
+                _MenuItem("separator"),
+            )
+            if tutorial_command is not None
+            else ()
+        )
         return (
+            *tutorial_items,
             _MenuItem("command", "Check for Updates...", self._check_updates_command),
             _MenuItem("separator"),
             _MenuItem("command", "About", self._about_command),

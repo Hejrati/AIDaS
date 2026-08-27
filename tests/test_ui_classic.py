@@ -108,6 +108,7 @@ class ClassicApplicationMenuTests(unittest.TestCase):
             settings_command=callback("settings"),
             check_updates_command=callback("updates"),
             about_command=callback("about"),
+            tutorial_command=callback("tutorial"),
             exit_command=callback("exit"),
         )
 
@@ -134,7 +135,13 @@ class ClassicApplicationMenuTests(unittest.TestCase):
         )
         self.assertEqual(
             [item[1].get("label") for item in menu.help_menu.items],
-            ["Check for Updates...", None, "About"],
+            [
+                "Workflow Tutorial...",
+                None,
+                "Check for Updates...",
+                None,
+                "About",
+            ],
         )
         self.assertEqual(menu.current_interface, "Classic")
         self.assertEqual(menu.current_appearance, "Dark")
@@ -200,13 +207,21 @@ class ClassicApplicationMenuTests(unittest.TestCase):
             menu.file_menu.items[3],
             menu.help_menu.items[0],
             menu.help_menu.items[2],
+            menu.help_menu.items[4],
         )
         for _kind, options in command_items:
             options["command"]()
 
         self.assertEqual(
             self.calls,
-            [("browse",), ("settings",), ("exit",), ("updates",), ("about",)],
+            [
+                ("browse",),
+                ("settings",),
+                ("exit",),
+                ("tutorial",),
+                ("updates",),
+                ("about",),
+            ],
         )
 
     def test_programmatic_updates_do_not_invoke_callbacks(self):

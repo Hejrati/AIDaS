@@ -339,6 +339,7 @@ class MenuBarTests(unittest.TestCase):
         bar._appearance_modes = ("System", "Light", "Dark")
         bar._current_appearance = "Dark"
         bar._browse_sdb_command = lambda: calls.append("browse")
+        bar._tutorial_command = lambda: calls.append("tutorial")
         bar._check_updates_command = lambda: calls.append("updates")
         bar._about_command = lambda: calls.append("about")
         bar._exit_command = lambda: calls.append("exit")
@@ -351,9 +352,23 @@ class MenuBarTests(unittest.TestCase):
         file_items[2].command()
         help_items[0].command()
         help_items[2].command()
+        help_items[4].command()
         next(item for item in view_items if item.label == "Dark").command()
 
-        self.assertEqual(calls, ["browse", "exit", "updates", "about", "Dark"])
+        self.assertEqual(
+            calls,
+            ["browse", "exit", "tutorial", "updates", "about", "Dark"],
+        )
+        self.assertEqual(
+            [item.label for item in help_items],
+            [
+                "Workflow Tutorial...",
+                "",
+                "Check for Updates...",
+                "",
+                "About",
+            ],
+        )
         checked = [item.label for item in view_items if item.checked]
         self.assertEqual(checked, ["Dark"])
 

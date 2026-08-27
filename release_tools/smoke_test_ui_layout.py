@@ -392,6 +392,7 @@ def _assert_step4_sidebar_actions_visible(step, width, height):
     scroll_bottom = scroll_top + step.sidebar.canvas.winfo_height()
     for name, widget in (
         ("Select folders for ROI", step.batch_roi_button),
+        ("Compile measurements", step.compiler_button),
         ("Previous", step.previous_roi_button),
         ("Next", step.next_roi_button),
         ("Apply", step.apply_button),
@@ -442,6 +443,55 @@ def _assert_step4_sidebar_actions_visible(step, width, height):
     assert scroll_bottom <= step.sidebar_footer.winfo_rooty() + 1, (
         f"Step 4 scrolling controls overlap Build stack at {width}x{height}."
     )
+
+    previous = step.previous_roi_button
+    next_button = step.next_roi_button
+    navigation_row = previous.master
+    assert next_button.master is navigation_row
+    assert abs(previous.winfo_width() - next_button.winfo_width()) <= 1, (
+        "Step 4 Previous and Next buttons do not have equal widths."
+    )
+    navigation_gap = next_button.winfo_rootx() - (
+        previous.winfo_rootx() + previous.winfo_width()
+    )
+    assert abs(navigation_gap - LAYOUT.space_xs) <= 1, (
+        f"Step 4 navigation gap is {navigation_gap}px, not {LAYOUT.space_xs}px."
+    )
+    assert abs(previous.winfo_rootx() - navigation_row.winfo_rootx()) <= 1
+    assert abs(
+        next_button.winfo_rootx()
+        + next_button.winfo_width()
+        - navigation_row.winfo_rootx()
+        - navigation_row.winfo_width()
+    ) <= 1
+
+    boundary_row = step.start_entry.master
+    assert step.end_entry.master is boundary_row
+    boundary_controls = sorted(
+        boundary_row.winfo_children(),
+        key=lambda control: control.winfo_rootx(),
+    )
+    assert len(boundary_controls) == 6, (
+        "Step 4 boundary row must contain Start, End, Apply, and Clear controls."
+    )
+    assert abs(step.start_entry.winfo_width() - step.end_entry.winfo_width()) <= 1, (
+        "Step 4 Start and End fields do not have equal widths."
+    )
+    boundary_gaps = [
+        right.winfo_rootx() - (left.winfo_rootx() + left.winfo_width())
+        for left, right in zip(boundary_controls, boundary_controls[1:])
+    ]
+    assert all(abs(gap - LAYOUT.space_xs) <= 1 for gap in boundary_gaps), (
+        f"Step 4 boundary control gaps are not uniformly {LAYOUT.space_xs}px: "
+        f"{boundary_gaps}."
+    )
+    assert abs(boundary_controls[0].winfo_rootx() - boundary_row.winfo_rootx()) <= 1
+    assert abs(
+        boundary_controls[-1].winfo_rootx()
+        + boundary_controls[-1].winfo_width()
+        - boundary_row.winfo_rootx()
+        - boundary_row.winfo_width()
+    ) <= 1
 
 
 def main(interface_mode="Modern") -> int:

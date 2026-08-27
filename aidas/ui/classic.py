@@ -57,6 +57,7 @@ class ClassicApplicationMenu:
         check_updates_command: Callable[[], None],
         about_command: Callable[[], None],
         exit_command: Callable[[], None] | None = None,
+        tutorial_command: Callable[[], None] | None = None,
     ) -> None:
         self.master = master
         self.interface_modes = tuple(str(mode) for mode in interface_modes)
@@ -118,6 +119,12 @@ class ClassicApplicationMenu:
         self.view_menu.add_cascade(label="Interface", menu=self.interface_menu)
         self.menubar.add_cascade(label="View", menu=self.view_menu)
 
+        if tutorial_command is not None:
+            self.help_menu.add_command(
+                label="Workflow Tutorial...",
+                command=tutorial_command,
+            )
+            self.help_menu.add_separator()
         self.help_menu.add_command(
             label="Check for Updates...",
             command=check_updates_command,
