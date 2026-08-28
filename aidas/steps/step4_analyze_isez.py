@@ -126,6 +126,8 @@ IMAGEJ_WAND_POINT = (512, 179)
 IMAGEJ_RESULTS_DECIMALS = 3
 MATLAB_ISEZ_X_HALF_WIDTH = 40.0
 MATLAB_ISEZ_Y_LIMITS = (-20.0, 120.0)
+MATLAB_ISEZ_X_TICK_STEP = 10.0
+MATLAB_ISEZ_Y_TICK_STEP = 20.0
 MATLAB_AXIS_LINE_WIDTH = 1
 MATLAB_DATA_LINE_WIDTH = 2
 MATLAB_AXIS_TICK_FONT_SIZE = 14
@@ -612,7 +614,11 @@ def make_isez_plot_image(result: ISezResult) -> Image.Image:
         return x, y
 
     draw.rectangle((x0, y0, x1, y1), outline="black", width=MATLAB_AXIS_LINE_WIDTH)
-    for tick in np.linspace(x_min, x_max, 5):
+    for tick in np.arange(
+        x_min,
+        x_max + (MATLAB_ISEZ_X_TICK_STEP / 2.0),
+        MATLAB_ISEZ_X_TICK_STEP,
+    ):
         tx, _ = to_pixel(tick, y_min)
         draw.line((tx, y1, tx, y1 + 5), fill="black", width=MATLAB_AXIS_LINE_WIDTH)
         draw.text(
@@ -622,12 +628,16 @@ def make_isez_plot_image(result: ISezResult) -> Image.Image:
             font=tick_font,
             anchor="mt",
         )
-    for tick in [-20, 0, 50, 100, 120]:
+    for tick in np.arange(
+        y_min,
+        y_max + (MATLAB_ISEZ_Y_TICK_STEP / 2.0),
+        MATLAB_ISEZ_Y_TICK_STEP,
+    ):
         _, ty = to_pixel(x_min, tick)
         draw.line((x0 - 5, ty, x0, ty), fill="black", width=MATLAB_AXIS_LINE_WIDTH)
         draw.text(
             (x0 - 10, ty),
-            str(tick),
+            f"{float(tick):g}",
             fill="black",
             font=tick_font,
             anchor="rm",

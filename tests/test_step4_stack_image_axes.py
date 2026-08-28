@@ -34,8 +34,11 @@ class Step4StackImageAxesTests(unittest.TestCase):
         x_labels = [call.args[1] for call in text_calls if call.kwargs["anchor"] == "mt"]
         y_labels = [call.args[1] for call in text_calls if call.kwargs["anchor"] == "rm"]
 
-        self.assertEqual(x_labels, ["10.5", "30.5", "50.5", "70.5", "90.5"])
-        self.assertEqual(y_labels, ["-20", "0", "50", "100", "120"])
+        self.assertEqual(
+            x_labels,
+            ["10.5", "20.5", "30.5", "40.5", "50.5", "60.5", "70.5", "80.5", "90.5"],
+        )
+        self.assertEqual(y_labels, ["-20", "0", "20", "40", "60", "80", "100", "120"])
 
     def test_numeric_labels_render_in_the_saved_frame_margins(self):
         pixels = np.asarray(make_isez_plot_image(_result()).convert("L"))
