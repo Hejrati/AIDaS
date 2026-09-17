@@ -192,8 +192,8 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
     ),
     TutorialPage(
         key="step4",
-        navigation_label="Step 4 - Analyze",
-        title="Step 4 - Analyze ISez profiles and build measurements",
+        navigation_label="Step 4 - MCP/AR",
+        title="Step 4 - MCP/AR profile measurements",
         purpose=(
             "Step 4 measures the inner-segment ellipsoid zone across 20 peripheral "
             "ROIs and one foveal ROI, then reproduces the lab's MATLAB/ImageJ-style outputs."
@@ -211,15 +211,15 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "Use the Step 3 handoff or Select folders for ROI; the scanner selects complete _flat_LIGHT pairs and locks folders whose final outputs already exist.",
                 "Open a folder tab; Step 4 analyzes slice 0 of the flattened stack.",
                 "Select one of 21 ROIs from the table or overview grid: 20 peripheral 120-column bands plus the foveal ROI.",
-                "Click or enter the profile Start and End positions. AIDaS orders and clamps the values before applying the band bounds.",
+                "Click near the profile Start and End positions. AIDaS snaps each click to the minimum in a fixed ±6-sample window, saves the plot automatically, and advances to the next ROI.",
             ),
             (
                 "AIDaS calculates the rotated and rescaled ISez profile, saves a new two-point selection, and advances to the next ROI; clearing a result makes that ROI selectable again.",
-                "Review the overview plots and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Use the detail editor to revise a completed ROI; Apply changes commits it, while closing without applying discards it.",
+                "Review the grid previews and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. If a line is incorrect, click its grid preview, drag the Start or End line in the zoomed editor, and use Apply changes to commit the revision.",
             ),
             (
                 "When all 21 ROIs are complete, Build stack becomes available and marks the folder tab Done after a successful build.",
-                "The build writes ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder.",
+                "The build shows a wait message while writing ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder. A completed plot tab provides Open results folder and Restart this file actions.",
                 "Go to Step 5 opens the dedicated compiler and carries forward the current measurement root.",
             ),
         ),
@@ -373,7 +373,7 @@ class _WorkflowOverviewMap(ctk.CTkFrame):
             "accent_soft",
         ),
         (
-            "Analyze",
+            "MCP/AR",
             "Measure 21 ROIs and build the TIFF stacks and Excel measurements.",
             "success",
             "success_soft",

@@ -25,6 +25,11 @@ def _completion_frame() -> Step4Frame:
     frame._active_batch_roi_tab = None
     frame.batch_roi_paths = []
     frame.batch_roi_index = -1
+    frame._stack_building = False
+    frame._stack_build_complete = False
+    frame._show_processed_grid_notice = mock.Mock()
+    frame._update_build_stack_button_state = mock.Mock()
+    frame._update_continue_to_step5_button_state = mock.Mock()
     return frame
 
 
@@ -96,20 +101,55 @@ class Step4CompletionTests(unittest.TestCase):
         self.assertIn("self._finish_stack_build(outdir)", source)
         self.assertNotIn("messagebox.showinfo", source)
 
-    def test_standalone_build_shows_one_clear_completion_popup(self):
+    def test_standalone_build_shows_results_actions_in_the_grid(self):
+        frame = _completion_frame()
+        frame._show_processing_complete = mock.Mock()
+
+        frame._finish_stack_build(Path("output"))
+
+        output_dir = Path("output").resolve()
+        frame._show_processing_complete.assert_called_once_with(
+            mock.ANY,
+            output_dir=output_dir,
+        )
+        self.assertEqual(frame._last_results_dir, output_dir)
+        self.assertTrue(frame._stack_build_complete)
+
+    def test_open_results_action_opens_the_exact_results_directory(self):
         frame = _completion_frame()
 
-        with mock.patch(
-            "aidas.steps.step4_analyze_isez.messagebox.showinfo"
-        ) as showinfo:
-            frame._finish_stack_build(Path("output"))
+        with mock.patch("aidas.steps.step4_analyze_isez._open_directory") as open_directory:
+            frame._open_results_directory(Path("subject-results"))
 
-        showinfo.assert_called_once()
-        title, message = showinfo.call_args.args
-        self.assertEqual(title, "Processing Complete")
-        self.assertIn("All processing is done.", message)
-        self.assertIn("MAX_Stack.tif", message)
-        self.assertIs(showinfo.call_args.kwargs["parent"], frame)
+        open_directory.assert_called_once_with(Path("subject-results"))
+
+    def test_batch_results_folder_is_the_output_folder_not_batch_root(self):
+        frame = _completion_frame()
+        frame.batch_roi_root = Path("batch-root")
+        frame.batch_roi_notebook = object()
+        frame._active_batch_roi_tab = "tab-one"
+        frame._mark_active_batch_roi_complete = mock.Mock()
+        frame._select_next_incomplete_batch_roi_tab = mock.Mock(return_value=True)
+
+        frame._finish_stack_build(Path("batch-root") / "subject-results")
+
+        expected = (Path("batch-root") / "subject-results").resolve()
+        self.assertEqual(frame._last_results_dir, expected)
+        frame._show_processed_grid_notice.assert_called_once_with(expected)
+
+    def test_grid_notice_has_open_folder_and_restart_actions(self):
+        source = inspect.getsource(Step4Frame._show_grid_notice)
+
+        self.assertIn('text="Open results folder"', source)
+        self.assertIn('text="Restart this file"', source)
+
+    def test_stack_build_displays_wait_notice_before_creating_files(self):
+        source = inspect.getsource(Step4Frame._build_stack_outputs)
+
+        notice_position = source.index("self._show_stack_building_notice(outdir)")
+        save_position = source.index("outdir.mkdir")
+        self.assertLess(notice_position, save_position)
+        self.assertIn("Please wait", source)
 
     def test_batch_advances_without_a_per_folder_popup(self):
         frame = _completion_frame()
@@ -124,8 +164,9 @@ class Step4CompletionTests(unittest.TestCase):
         frame._mark_active_batch_roi_complete.assert_called_once_with()
         frame._select_next_incomplete_batch_roi_tab.assert_called_once_with()
         frame._show_processing_complete.assert_not_called()
+        frame._show_processed_grid_notice.assert_called_once_with(Path("first-output").resolve())
 
-    def test_final_batch_tab_shows_only_the_terminal_popup(self):
+    def test_final_batch_tab_keeps_the_processed_message_in_the_grid(self):
         frame = _completion_frame()
         frame.batch_roi_notebook = object()
         frame._active_batch_roi_tab = "tab-last"
@@ -135,9 +176,8 @@ class Step4CompletionTests(unittest.TestCase):
 
         frame._finish_stack_build(Path("last-output"))
 
-        frame._show_processing_complete.assert_called_once_with(
-            "Every selected Step 4 folder is complete."
-        )
+        frame._show_processing_complete.assert_not_called()
+        frame._show_processed_grid_notice.assert_called_once_with(Path("last-output").resolve())
         self.assertIn("Processing complete", frame.status_var.value)
 
     def test_legacy_batch_keeps_advancing_without_an_intermediate_popup(self):
@@ -162,7 +202,8 @@ class Step4CompletionTests(unittest.TestCase):
         frame._load_next_batch_roi()
 
         frame._show_processing_complete.assert_called_once_with(
-            "Every selected Step 4 folder in this batch is complete."
+            "Every selected Step 4 folder in this batch is complete.",
+            output_dir=None,
         )
         self.assertIn("Processing complete", frame.status_var.value)
 

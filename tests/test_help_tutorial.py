@@ -127,6 +127,7 @@ class TutorialContentTests(unittest.TestCase):
     def test_step4_copy_explains_all_rois_measurements_and_final_outputs(self):
         text = self._page_text("step4")
         for token in (
+            "MCP/AR",
             "21 ROIs",
             "Start",
             "End",
@@ -746,7 +747,7 @@ class WorkflowOverviewMapTests(unittest.TestCase):
     def test_overview_has_exactly_five_ordered_static_step_cards(self):
         self.assertEqual(
             [card[0] for card in _WorkflowOverviewMap.STEP_CARDS],
-            ["Load & Crop", "Segment", "Flatten", "Analyze", "Compile"],
+            ["Load & Crop", "Segment", "Flatten", "MCP/AR", "Compile"],
         )
         source = inspect.getsource(_WorkflowOverviewMap)
         self.assertNotIn("Pause animation", source)

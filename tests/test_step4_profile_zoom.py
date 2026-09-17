@@ -1,12 +1,16 @@
 import inspect
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import customtkinter as ctk
 import numpy as np
 
 from aidas.steps.step4_analyze_isez import (
+    Step4Frame,
     Step4ProfileZoomDialog,
     _focused_profile_limits,
+    _nearest_local_minimum,
     _nearest_profile_sample,
     _profile_selection_boundary,
     _profile_zoom_window_geometry,
@@ -39,6 +43,17 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertIn('"flat-color-icons--checkmark.png"', source)
         self.assertIn("load_color_close_ctk_icon(self, size=20)", source)
 
+    def test_zoom_dialog_drags_boundary_lines_without_radio_buttons(self):
+        init_source = inspect.getsource(Step4ProfileZoomDialog.__init__)
+        motion_source = inspect.getsource(Step4ProfileZoomDialog._on_motion)
+
+        self.assertNotIn("ttk.Radiobutton", init_source)
+        self.assertNotIn("boundary_var", init_source)
+        self.assertIn("Ellipse fitting measurements", init_source)
+        self.assertIn('mpl_connect("button_press_event", self._on_press)', init_source)
+        self.assertIn('mpl_connect("button_release_event", self._on_release)', init_source)
+        self.assertIn("_drag_boundary", motion_source)
+
     def test_focused_limits_add_margin_around_selection(self):
         self.assertEqual(_focused_profile_limits(100, 20, 40), (15, 45))
 
@@ -50,6 +65,115 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         profile = np.array([2.5, 4.25, 8.75, 16.0])
         self.assertEqual(_nearest_profile_sample(profile, 2.2), (2, 4.25))
         self.assertEqual(_nearest_profile_sample(profile, 99), (4, 16.0))
+
+    def test_click_snaps_to_the_minimum_in_a_fixed_nearby_window(self):
+        profile = np.array([9.0, 6.0, 4.0, 7.0, 2.0, 8.0, 5.0])
+
+        self.assertEqual(
+            _nearest_local_minimum(profile, 3.2, search_radius=2),
+            (5, 2.0),
+        )
+
+    def test_equal_nearby_minima_use_click_distance_then_lower_index(self):
+        profile = np.array([8.0, 1.0, 7.0, 1.0, 9.0])
+
+        self.assertEqual(
+            _nearest_local_minimum(profile, 3.0, search_radius=2),
+            (2, 1.0),
+        )
+
+    def test_main_profile_clicks_snap_and_queue_automatic_save(self):
+        profile = np.full(30, 10.0)
+        profile[4] = 2.0
+        profile[13] = 0.5
+        profile[23] = 1.0
+        frame = Step4Frame.__new__(Step4Frame)
+        frame.ax_roi_grid = object()
+        frame.ax_profile = object()
+        frame.image = object()
+        frame._current_profile = profile
+        frame.profile_clicks = []
+        frame.profile_status_var = mock.Mock()
+        frame._close_profile_zoom = mock.Mock()
+        frame._sync_entry_vars_from_clicks = mock.Mock()
+        frame._remember_current_roi_clicks = mock.Mock()
+        frame._render_current_roi = mock.Mock()
+        frame._auto_save_current_roi = mock.Mock()
+        frame.after_idle = mock.Mock()
+
+        def click(x_value):
+            frame._on_profile_click(
+                SimpleNamespace(inaxes=frame.ax_profile, xdata=x_value, button=1)
+            )
+
+        click(6.0)
+        click(22.0)
+
+        self.assertEqual(frame.profile_clicks, [5.0, 24.0])
+        self.assertEqual(frame._render_current_roi.call_count, 2)
+        frame._auto_save_current_roi.assert_not_called()
+        frame.after_idle.assert_called_once()
+        callback = frame.after_idle.call_args.args[0]
+        self.assertIs(callback, frame._auto_save_current_roi)
+
+        callback()
+
+        frame._auto_save_current_roi.assert_called_once_with()
+
+    def test_saving_uses_grid_animation_without_plot_overlays(self):
+        save_source = inspect.getsource(Step4Frame._save_current_roi)
+        data_source = inspect.getsource(Step4Frame._save_current_roi_data)
+        grid_source = inspect.getsource(Step4Frame._draw_roi_overview_grid)
+        zoom_apply_source = inspect.getsource(Step4ProfileZoomDialog._apply)
+
+        self.assertNotIn("_show_plot_activity", save_source)
+        self.assertNotIn('"Saving', save_source)
+        self.assertNotIn('"Saving', zoom_apply_source)
+        self.assertIn("self._start_roi_update_animation(roi.suffix)", data_source)
+        self.assertIn('palette["success_soft"] if updated else palette["axes"]', grid_source)
+        self.assertIn("facecolor=face", grid_source)
+
+    def test_dragged_boundary_snaps_to_local_minimum_on_release(self):
+        profile = np.full(20, 9.0)
+        profile[11] = 1.5
+        dialog = Step4ProfileZoomDialog.__new__(Step4ProfileZoomDialog)
+        dialog.profile = profile
+        dialog.ax = object()
+        dialog._drag_boundary = "end"
+        dialog._start = 4
+        dialog._end = 16
+        dialog.cursor_var = mock.Mock()
+        dialog.canvas = mock.Mock()
+        dialog._move_boundary = mock.Mock()
+
+        dialog._on_release(
+            SimpleNamespace(inaxes=dialog.ax, xdata=14.0)
+        )
+
+        dialog._move_boundary.assert_called_once_with(
+            "end",
+            12,
+            refresh_measurements=True,
+        )
+        self.assertIsNone(dialog._drag_boundary)
+        dialog.canvas.draw_idle.assert_called_once_with()
+
+    def test_end_click_save_uses_fast_path_and_advances_new_roi(self):
+        frame = Step4Frame.__new__(Step4Frame)
+        frame._auto_saving_roi = False
+        frame.image = object()
+        frame.profile_clicks = [5.0, 24.0]
+        frame.completed = {}
+        frame._current_roi_suffix = mock.Mock(return_value="01")
+        frame._save_current_roi = mock.Mock(return_value=True)
+
+        frame._auto_save_current_roi()
+
+        frame._save_current_roi.assert_called_once_with(
+            auto_advance=True,
+            apply_entry_values=False,
+        )
+        self.assertFalse(frame._auto_saving_roi)
 
     def test_selected_boundary_uses_straight_line_between_endpoint_values(self):
         profile = np.array([2.0, 6.0, 10.0, 4.0, 8.0])

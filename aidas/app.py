@@ -1559,14 +1559,14 @@ class AIDaSApp(ctk.CTk):
         )
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
 
-        self._set_splash_progress(91, "Preparing Step 4 - Analyze ISEZ...")
+        self._set_splash_progress(91, "Preparing Step 4 - MCP/AR...")
         self.step4 = Step4Frame(
             self.notebook,
             preferences=self.preferences,
             source_step=self.step3,
             on_continue_to_step5=self._on_step4_continue_to_step5,
         )
-        self.notebook.add(self.step4, text="  Step 4 — Analyze ISEZ  ")
+        self.notebook.add(self.step4, text="  Step 4 — MCP/AR  ")
 
         self._set_splash_progress(96, "Preparing Step 5 - Compile Results...")
         self.step5 = Step5Frame(

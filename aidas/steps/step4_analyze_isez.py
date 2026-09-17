@@ -1,4 +1,4 @@
-"""Step 4 - Analyze ISez.
+"""Step 4 - MCP/AR.
 
 This module is intentionally a close translation of the lab's original Step 4
 workflow:
@@ -34,6 +34,8 @@ from dataclasses import dataclass
 import threading
 import math
 import os
+import subprocess
+import sys
 from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
@@ -74,6 +76,7 @@ MATLAB_ROI_LOW = 300
 MATLAB_ROI_HIGH = 450
 MATLAB_ROI_TOP_LINE = 450
 MATLAB_A_LIMIT = 1.0
+PROFILE_LOCAL_MINIMUM_RADIUS = 6
 
 
 def _plot_palette() -> dict[str, str]:
@@ -89,6 +92,7 @@ def _plot_palette() -> dict[str, str]:
         "line": COLORS.text,
         "primary": COLORS.primary,
         "success": COLORS.success,
+        "success_soft": COLORS.success_soft,
         "warning": COLORS.warning,
         "warning_soft": COLORS.warning_soft,
         "danger": COLORS.danger,
@@ -138,6 +142,21 @@ STEP4_OUTPUT_GROUPS = (
     ("ROI_to_move_stck.tif", "ROI_to_move_stck.tiff"),
     (STEP4_RESULTS_FILENAME, "Results.xlsx", "Results_org.xlsx"),
 )
+
+
+def _open_directory(path: str | os.PathLike) -> Path:
+    """Open an existing directory in the platform file manager."""
+
+    folder = Path(path).expanduser().resolve()
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Results directory does not exist: {folder}")
+    if os.name == "nt":
+        os.startfile(str(folder))
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", str(folder)])
+    else:
+        subprocess.Popen(["xdg-open", str(folder)])
+    return folder
 
 
 @dataclass(frozen=True)
@@ -317,6 +336,49 @@ def _nearest_profile_sample(profile: np.ndarray, x_value: float | int) -> tuple[
     if values.size < 1:
         raise ValueError("A profile must contain at least one value.")
     sample = _clamp_profile_index(x_value, values.size)
+    return sample, float(values[sample - 1])
+
+
+def _nearest_local_minimum(
+    profile: np.ndarray,
+    x_value: float | int,
+    *,
+    search_radius: int = PROFILE_LOCAL_MINIMUM_RADIUS,
+) -> tuple[int, float]:
+    """Return the deterministic minimum near a clicked 1-based sample.
+
+    The search window is fixed so the same profile and click always produce the
+    same boundary. If equal minima exist, the sample closest to the click wins;
+    a remaining tie is resolved toward the lower sample index.
+    """
+
+    values = np.asarray(profile, dtype=np.float64).reshape(-1)
+    if values.size < 1:
+        raise ValueError("A profile must contain at least one value.")
+    try:
+        clicked = float(x_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("A profile click must be numeric.") from exc
+    if not np.isfinite(clicked):
+        raise ValueError("A profile click must be finite.")
+
+    clicked = max(1.0, min(clicked, float(values.size)))
+    center = _clamp_profile_index(clicked, values.size)
+    radius = max(0, int(search_radius))
+    first = max(1, center - radius)
+    last = min(values.size, center + radius)
+    window = values[first - 1:last]
+    finite_offsets = np.flatnonzero(np.isfinite(window))
+    if finite_offsets.size == 0:
+        raise ValueError("No finite profile values were found near that click.")
+
+    minimum = float(np.min(window[finite_offsets]))
+    candidates = [
+        first + int(offset)
+        for offset in finite_offsets
+        if float(window[offset]) == minimum
+    ]
+    sample = min(candidates, key=lambda candidate: (abs(candidate - clicked), candidate))
     return sample, float(values[sample - 1])
 
 
@@ -1372,7 +1434,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._on_apply_callback = on_apply
         self._on_close_callback = on_close
         self._closing = False
-        self._saving_text = None
+        self._drag_boundary = None
         self._start, self._end = _updated_profile_bounds(
             start,
             end,
@@ -1394,9 +1456,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _event: self.close())
 
-        self.boundary_var = tk.StringVar(value="start")
         self.selection_var = tk.StringVar()
-        self.cursor_var = tk.StringVar(value="Move over the curve to inspect an exact value.")
+        self.cursor_var = tk.StringVar(value="Drag a boundary line, or hover to inspect an exact value.")
         self.apply_status_var = tk.StringVar(value="")
         self.measurement_vars = {
             name: tk.StringVar(value="--") for name in RESULTS_HEADERS[1:]
@@ -1408,8 +1469,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         ttk.Label(
             instructions,
             text=(
-                "Hover for an exact sample and intensity. Choose Start or End, then click the curve "
-                "to move that boundary."
+                "Drag the blue Start or red End line directly across the plot. On release, the line "
+                f"snaps to the minimum within ±{PROFILE_LOCAL_MINIMUM_RADIUS} samples."
             ),
             justify="left",
             wraplength=860,
@@ -1417,12 +1478,10 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 
         editor = ttk.Frame(self, padding=(10, 0, 10, 5))
         editor.pack(fill="x")
-        ttk.Label(editor, text="Boundary to revise:").pack(side="left", padx=(0, 6))
-        ttk.Radiobutton(editor, text="Start", value="start", variable=self.boundary_var).pack(side="left")
-        ttk.Radiobutton(editor, text="End", value="end", variable=self.boundary_var).pack(side="left", padx=(6, 14))
+        ttk.Label(editor, text="Current boundaries:").pack(side="left", padx=(0, 6))
         ttk.Label(editor, textvariable=self.selection_var).pack(side="left")
 
-        measurements = ttk.LabelFrame(self, text="Live shape measurements", padding=(8, 4, 8, 7))
+        measurements = ttk.LabelFrame(self, text="Ellipse fitting measurements", padding=(8, 4, 8, 7))
         measurements.pack(fill="x", padx=10, pady=(0, 5))
         for column, name in enumerate(RESULTS_HEADERS[1:]):
             measurements.columnconfigure(column, weight=1, uniform="step4_measurement")
@@ -1489,7 +1548,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._refresh_measurements()
         self._motion_cid = self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         self._leave_cid = self.canvas.mpl_connect("axes_leave_event", self._on_axes_leave)
-        self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
+        self._press_cid = self.canvas.mpl_connect("button_press_event", self._on_press)
+        self._release_cid = self.canvas.mpl_connect("button_release_event", self._on_release)
 
         self._size_and_center_on_active_screen()
         self.after_idle(self._focus_window)
@@ -1569,6 +1629,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             color=palette["primary"],
             linewidth=1.8,
             label="Start",
+            picker=7,
             zorder=4,
         )
         self._end_line = self.ax.axvline(
@@ -1576,6 +1637,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             color=palette["danger"],
             linewidth=1.8,
             label="End",
+            picker=7,
             zorder=4,
         )
         self._crosshair_x = self.ax.axvline(
@@ -1678,6 +1740,20 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._hover_annotation.set_visible(visible)
 
     def _on_motion(self, event) -> None:
+        if self._drag_boundary is not None:
+            if event.inaxes is not self.ax or event.xdata is None:
+                return
+            sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
+            self._move_boundary(self._drag_boundary, sample, refresh_measurements=False)
+            self.cursor_var.set(
+                f"Moving {self._drag_boundary.title()} — release to snap to a local minimum"
+            )
+            try:
+                self.canvas.get_tk_widget().configure(cursor="sb_h_double_arrow")
+            except tk.TclError:
+                pass
+            self.canvas.draw_idle()
+            return
         if event.inaxes is not self.ax or event.xdata is None:
             self._on_axes_leave(event)
             return
@@ -1696,30 +1772,62 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._hover_annotation.set_position((-12, 12) if sample > midpoint else (12, 12))
         self._hover_annotation.set_horizontalalignment("right" if sample > midpoint else "left")
         self._set_crosshair_visible(True)
-        self.cursor_var.set(f"Position {sample}    Intensity {self._format_intensity(intensity)}")
+        hovered_boundary = self._boundary_at_event(event)
+        if hovered_boundary is None:
+            self.cursor_var.set(
+                f"Position {sample}    Intensity {self._format_intensity(intensity)}"
+            )
+            cursor = "crosshair"
+        else:
+            self.cursor_var.set(f"Drag the {hovered_boundary.title()} boundary line")
+            cursor = "sb_h_double_arrow"
         try:
-            self.canvas.get_tk_widget().configure(cursor="crosshair")
+            self.canvas.get_tk_widget().configure(cursor=cursor)
         except tk.TclError:
             pass
         self.canvas.draw_idle()
 
     def _on_axes_leave(self, _event) -> None:
+        if self._drag_boundary is not None:
+            return
         self._set_crosshair_visible(False)
-        self.cursor_var.set("Move over the curve to inspect an exact value.")
+        self.cursor_var.set("Drag a boundary line, or hover to inspect an exact value.")
         try:
             self.canvas.get_tk_widget().configure(cursor="")
         except tk.TclError:
             pass
         self.canvas.draw_idle()
 
-    def _on_click(self, event) -> None:
-        if event.inaxes is not self.ax or event.xdata is None or event.button != 1:
-            return
-        sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
+    def _boundary_at_event(self, event, *, tolerance_pixels: float = 9.0) -> str | None:
+        if event.inaxes is not self.ax or event.xdata is None:
+            return None
+        event_x = getattr(event, "x", None)
+        if event_x is None:
+            distances = {
+                "start": abs(float(event.xdata) - self._start),
+                "end": abs(float(event.xdata) - self._end),
+            }
+            tolerance = max(1.5, (self._view_right - self._view_left) * 0.02)
+        else:
+            distances = {
+                "start": abs(float(event_x) - float(self.ax.transData.transform((self._start, 0.0))[0])),
+                "end": abs(float(event_x) - float(self.ax.transData.transform((self._end, 0.0))[0])),
+            }
+            tolerance = float(tolerance_pixels)
+        boundary = min(distances, key=distances.get)
+        return boundary if distances[boundary] <= tolerance else None
+
+    def _move_boundary(
+        self,
+        boundary: str,
+        sample: float | int,
+        *,
+        refresh_measurements: bool,
+    ) -> None:
         self._start, self._end = _updated_profile_bounds(
             self._start,
             self._end,
-            boundary=self.boundary_var.get(),
+            boundary=boundary,
             sample=sample,
             n_points=self.profile.size,
         )
@@ -1727,56 +1835,52 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._end_line.set_xdata([self._end, self._end])
         self._update_closed_boundary()
         self._update_selection_label()
-        self._refresh_measurements()
-        self.apply_status_var.set("Unsaved change")
+        if refresh_measurements:
+            self._refresh_measurements()
+            self.apply_status_var.set("Unsaved change")
+
+    def _on_press(self, event) -> None:
+        if getattr(event, "button", None) != 1:
+            return
+        boundary = self._boundary_at_event(event)
+        if boundary is None:
+            return
+        self._drag_boundary = boundary
+        self._set_crosshair_visible(False)
+        self.cursor_var.set(f"Dragging {boundary.title()} boundary")
+        try:
+            self.canvas.get_tk_widget().configure(cursor="sb_h_double_arrow")
+        except tk.TclError:
+            pass
+
+    def _on_release(self, event) -> None:
+        boundary = self._drag_boundary
+        if boundary is None:
+            return
+        self._drag_boundary = None
+        current = self._start if boundary == "start" else self._end
+        x_value = event.xdata if event.inaxes is self.ax and event.xdata is not None else current
+        sample, intensity = _nearest_local_minimum(self.profile, x_value)
+        self._move_boundary(boundary, sample, refresh_measurements=True)
+        self.cursor_var.set(
+            f"{boundary.title()} snapped to local minimum {sample} "
+            f"({self._format_intensity(intensity)})"
+        )
+        try:
+            self.canvas.get_tk_widget().configure(cursor="")
+        except tk.TclError:
+            pass
         self.canvas.draw_idle()
 
     def _apply(self) -> None:
-        self._set_saving(True)
+        self.apply_button.state(["disabled"])
         saved = False
         try:
             saved = bool(self._on_apply_callback(self.roi_index, self._start, self._end))
         finally:
-            self._set_saving(False)
+            self.apply_button.state(["!disabled"])
         if saved:
             self.apply_status_var.set("Changes applied")
-
-    def _set_saving(self, saving: bool) -> None:
-        if saving:
-            self.apply_button.state(["disabled"])
-            self.apply_status_var.set("Saving...")
-            palette = _plot_palette()
-            self._saving_text = self.ax.text(
-                0.5,
-                0.5,
-                "Saving...",
-                ha="center",
-                va="center",
-                transform=self.ax.transAxes,
-                fontsize=16,
-                weight="bold",
-                color=palette["warning"],
-                bbox={
-                    "boxstyle": "round,pad=0.55",
-                    "facecolor": palette["warning_soft"],
-                    "edgecolor": palette["warning"],
-                    "linewidth": 1.4,
-                    "alpha": 0.96,
-                },
-                zorder=20,
-            )
-            self.canvas.draw()
-            self.update_idletasks()
-            return
-
-        self.apply_button.state(["!disabled"])
-        if self._saving_text is not None:
-            try:
-                self._saving_text.remove()
-            except ValueError:
-                pass
-            self._saving_text = None
-        self.canvas.draw_idle()
 
     def close(self) -> None:
         if self._closing:
@@ -1823,8 +1927,10 @@ class Step4Frame(SidebarStepFrame):
         self.ax_profile = None
         self.ax_roi_grid = None
         self._current_profile = None
-        self._plot_activity_text = None
         self._profile_zoom_dialog = None
+        self._last_results_dir = None
+        self._stack_building = False
+        self._stack_build_complete = False
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
@@ -1842,7 +1948,9 @@ class Step4Frame(SidebarStepFrame):
         self.output_dir_var = tk.StringVar(value=self._default_input_folder())
         self.image_label_var = tk.StringVar(value="No image loaded")
         self.status_var = tk.StringVar(value="Ready - load a flattened OCT image to begin.")
-        self.profile_status_var = tk.StringVar(value="Click start and end on the profile canvas.")
+        self.profile_status_var = tk.StringVar(
+            value="Click near the start and end minima on the profile canvas."
+        )
         self.stats_var = tk.StringVar(value="")
         self.start_var = tk.StringVar(value="")
         self.end_var = tk.StringVar(value="")
@@ -1993,7 +2101,7 @@ class Step4Frame(SidebarStepFrame):
             self,
             self._apply_entry_clicks,
             "confirm",
-            tooltip="Apply the start and end values",
+            tooltip="Confirm the current local-minimum line",
         )
         self.apply_button.grid(
             row=0,
@@ -2129,6 +2237,160 @@ class Step4Frame(SidebarStepFrame):
         row = getattr(self, "confirm_row", None)
         if row is not None and not row.winfo_manager():
             row.pack(fill="x", pady=(6, 0))
+
+    def _hide_grid_notice(self, holder=None) -> None:
+        """Remove the notice layered over one plot grid, if present."""
+
+        holder = holder or getattr(self, "plot_holder", None)
+        if holder is None:
+            return
+        notice = getattr(holder, "_step4_grid_notice", None)
+        if notice is None:
+            return
+        progress = getattr(notice, "_step4_progress", None)
+        if progress is not None:
+            try:
+                progress.stop()
+            except tk.TclError:
+                pass
+        try:
+            notice.destroy()
+        except tk.TclError:
+            pass
+        holder._step4_grid_notice = None
+
+    def _show_grid_notice(
+        self,
+        title: str,
+        message: str,
+        *,
+        output_dir: Path | None = None,
+        busy: bool = False,
+    ):
+        """Layer a processing or completion card over the active plot grid."""
+
+        holder = getattr(self, "plot_holder", None)
+        if holder is None:
+            return None
+        self._hide_grid_notice(holder)
+        notice = ctk.CTkFrame(
+            holder,
+            width=470,
+            corner_radius=14,
+            border_width=1,
+            fg_color=COLOR_PAIRS["surface_elevated"],
+            border_color=COLOR_PAIRS["border_strong"],
+        )
+        notice.place(relx=0.5, rely=0.32, anchor="center")
+        holder._step4_grid_notice = notice
+
+        ctk.CTkLabel(
+            notice,
+            text=title,
+            text_color=COLOR_PAIRS["success"] if output_dir is not None else COLOR_PAIRS["text"],
+            font=ctk.CTkFont(size=17, weight="bold"),
+        ).pack(fill="x", padx=24, pady=(20, 6))
+        ctk.CTkLabel(
+            notice,
+            text=message,
+            justify="center",
+            wraplength=420,
+            text_color=COLOR_PAIRS["text"],
+        ).pack(fill="x", padx=24, pady=(0, 14))
+
+        if busy:
+            progress = ctk.CTkProgressBar(notice, mode="indeterminate", width=300)
+            progress.pack(padx=24, pady=(0, 20))
+            progress.start()
+            notice._step4_progress = progress
+        elif output_dir is not None:
+            actions = ctk.CTkFrame(notice, fg_color="transparent")
+            actions.pack(fill="x", padx=24, pady=(0, 20))
+            actions.grid_columnconfigure((0, 1), weight=1, uniform="result_actions")
+            AppButton(
+                actions,
+                text="Open results folder",
+                variant="primary",
+                command=lambda folder=Path(output_dir): self._open_results_directory(folder),
+            ).grid(row=0, column=0, sticky="ew", padx=(0, 5))
+            AppButton(
+                actions,
+                text="Restart this file",
+                variant="secondary",
+                command=self._restart_current_file,
+            ).grid(row=0, column=1, sticky="ew", padx=(5, 0))
+
+        notice.lift()
+        return notice
+
+    def _show_stack_building_notice(self, outdir: Path) -> None:
+        self._show_grid_notice(
+            "Building stack and saving results",
+            f"Please wait while AIDaS creates the final files in:\n{outdir}",
+            busy=True,
+        )
+
+    def _show_processed_grid_notice(self, outdir: Path, *, detail: str | None = None) -> None:
+        outdir = Path(outdir)
+        message = detail or (
+            "This file has been processed successfully. You can open its results "
+            "folder or restart it to revise the ROI selections."
+        )
+        self._show_grid_notice(
+            "File processed",
+            f"{message}\n\nSaved results:\n{outdir}",
+            output_dir=outdir,
+        )
+
+    def _open_results_directory(self, output_dir: str | os.PathLike | None = None) -> None:
+        """Open the exact folder containing the active file's Step 4 outputs."""
+
+        folder_value = output_dir or getattr(self, "_last_results_dir", None)
+        if not folder_value:
+            messagebox.showerror(
+                "Open Results Folder",
+                "The saved-results folder is not available.",
+                parent=self,
+            )
+            return
+        try:
+            _open_directory(Path(folder_value))
+        except Exception as exc:
+            messagebox.showerror(
+                "Open Results Folder",
+                f"Could not open the saved-results folder.\n\n{exc}",
+                parent=self,
+            )
+
+    def _restart_current_file(self) -> None:
+        """Clear the active file's ROI state so it can be processed again."""
+
+        self._hide_grid_notice()
+        self._close_profile_zoom()
+        self._cancel_roi_update_animations(redraw=False)
+        self._stack_build_complete = False
+        self.completed.clear()
+        self.roi_clicks.clear()
+        self.profile_clicks.clear()
+        self.current_roi_idx = 0
+        self.start_var.set("")
+        self.end_var.set("")
+
+        tab_key = getattr(self, "_active_batch_roi_tab", None)
+        if tab_key:
+            state = self.batch_roi_tab_states.get(tab_key)
+            if state is not None:
+                state["complete"] = False
+        self._sync_active_batch_roi_state()
+        self._refresh_roi_list()
+        self._select_roi_in_list()
+        if self.image is not None:
+            self._render_current_roi()
+        self._update_active_batch_roi_tab_progress()
+        self._update_build_stack_button_state()
+        self._update_continue_to_step5_button_state()
+        filename = self.current_path.name if self.current_path is not None else "file"
+        self.status_var.set(f"Restarted {filename}. Select the ROI lines again.")
 
     def _set_batch_folder_label(self, folder: Path | None) -> None:
         if folder is None:
@@ -2275,6 +2537,7 @@ class Step4Frame(SidebarStepFrame):
                 child.destroy()
             except tk.TclError:
                 pass
+        self._stack_build_complete = False
         self.plot_holder = self.plot_container
         self.figure = None
         self.ax_profile = None
@@ -2329,6 +2592,7 @@ class Step4Frame(SidebarStepFrame):
         self.ax_roi_grid = None
         self.empty_placeholder = None
         self._current_profile = None
+        self._stack_build_complete = False
         self.batch_roi_tab_states = {}
         self._active_batch_roi_tab = None
 
@@ -2474,6 +2738,7 @@ class Step4Frame(SidebarStepFrame):
         if state is None:
             return
         self._active_batch_roi_tab = tab_key
+        self._stack_build_complete = bool(state.get("complete"))
         self._refresh_batch_roi_tab_labels(
             tab_id
             for tab_id in (previous_tab_key, tab_key)
@@ -2517,6 +2782,7 @@ class Step4Frame(SidebarStepFrame):
         self.current_roi_idx = int(state.get("current_roi_idx") or 0)
         self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
         self.profile_clicks = list((state.get("profile_clicks") or [])[:2])
+        self._stack_build_complete = bool(state.get("complete"))
 
         self.input_dir_var.set(str(self.current_path.parent))
         if not self._output_dir_user_selected:
@@ -2534,7 +2800,9 @@ class Step4Frame(SidebarStepFrame):
             if self._current_profile is not None:
                 self._update_profile_status(self._current_profile)
             self._update_confirm_button_state()
-        self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
+        self.status_var.set(
+            f"Loaded {self.current_path}. Click near the start/end minima on the profile."
+        )
         return True
 
     def _close_batch_roi_tab(self, notebook, tab) -> None:
@@ -2618,7 +2886,8 @@ class Step4Frame(SidebarStepFrame):
                 f"skipped {self.batch_roi_skipped} already complete."
             )
             self._show_processing_complete(
-                "Every selected Step 4 folder in this batch is complete."
+                "Every selected Step 4 folder in this batch is complete.",
+                output_dir=getattr(self, "_last_results_dir", None),
             )
             return
 
@@ -2632,6 +2901,8 @@ class Step4Frame(SidebarStepFrame):
     def _load_path(self, path: str | os.PathLike, *, restore_state: dict | None = None) -> None:
         self._close_profile_zoom()
         self._cancel_roi_update_animations(redraw=False)
+        self._hide_grid_notice()
+        self._stack_build_complete = bool((restore_state or {}).get("complete"))
         try:
             volume = load_oct_volume(path)
         except Exception as exc:
@@ -2678,7 +2949,9 @@ class Step4Frame(SidebarStepFrame):
                 f"{self.current_path.name}\nusing slice 0 of {volume.shape[0]} slice(s), "
                 f"{volume.shape[2]} x {volume.shape[1]}, {volume.dtype}"
             )
-        self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
+        self.status_var.set(
+            f"Loaded {self.current_path}. Click near the start/end minima on the profile."
+        )
         self._update_continue_to_step5_button_state()
 
     def _set_slice_zero(self, *, render: bool = True) -> None:
@@ -2791,6 +3064,7 @@ class Step4Frame(SidebarStepFrame):
 
     def _render_empty_canvas(self) -> None:
         self._close_profile_zoom()
+        self._hide_grid_notice()
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
             self.canvas = None
@@ -2970,16 +3244,15 @@ class Step4Frame(SidebarStepFrame):
             row = 2 - (index // 7)
             active = index == self.current_roi_idx
             updated = index < len(self.rois) and self.rois[index].suffix in self._flashing_updated_rois
-            edge = palette["warning"] if updated else (
-                palette["text"] if active else palette["grid"]
-            )
-            width = 2.0 if updated else (1.2 if active else 0.6)
+            face = palette["success_soft"] if updated else palette["axes"]
+            edge = palette["text"] if active else palette["grid"]
+            width = 1.2 if active else 0.6
             ax.add_patch(
                 Rectangle(
                     (col, row),
                     1,
                     1,
-                    facecolor=palette["axes"],
+                    facecolor=face,
                     edgecolor=edge,
                     linewidth=width,
                 )
@@ -2997,19 +3270,17 @@ class Step4Frame(SidebarStepFrame):
                 ha="left",
                 va="top",
                 fontsize=7,
-                color=palette["warning"] if updated else palette["text"],
-                weight="bold" if updated else "normal",
+                color=palette["text"],
+                weight="normal",
             )
             ax.text(
                 col + 0.96,
                 row + 0.94,
-                "\u21bb" if updated else ("\u2713" if done else "x"),
+                "\u2713" if done else "x",
                 ha="right",
                 va="top",
                 fontsize=7,
-                color=palette["warning"] if updated else (
-                    palette["success"] if done else palette["danger"]
-                ),
+                color=palette["success"] if done else palette["danger"],
                 weight="bold",
             )
 
@@ -3076,7 +3347,7 @@ class Step4Frame(SidebarStepFrame):
             self._redraw_roi_update_flash()
 
     def _start_roi_update_animation(self, suffix: str) -> None:
-        """Briefly pulse an updated ROI cell, then restore normal styling."""
+        """Briefly pulse a saved ROI cell's background, then restore it."""
         self._cancel_roi_update_animation(suffix, redraw=False)
         flashes_remaining = 8
 
@@ -3107,22 +3378,51 @@ class Step4Frame(SidebarStepFrame):
         if event.inaxes is self.ax_roi_grid:
             self._select_roi_from_grid_click(event)
             return
-        if event.inaxes is not self.ax_profile or event.xdata is None:
+        if (
+            event.inaxes is not self.ax_profile
+            or event.xdata is None
+            or getattr(event, "button", 1) != 1
+        ):
             return
-        if self.image is None:
+        if self.image is None or self._current_profile is None:
             return
 
         self._close_profile_zoom()
-        click = float(event.xdata)
+        click, intensity = _nearest_local_minimum(self._current_profile, event.xdata)
         if len(self.profile_clicks) >= 2:
-            self.profile_clicks = [click]
+            start, end = sorted(self.profile_clicks[:2])
+            boundary = (
+                "start"
+                if abs(float(event.xdata) - start) <= abs(float(event.xdata) - end)
+                else "end"
+            )
+            start, end = _updated_profile_bounds(
+                start,
+                end,
+                boundary=boundary,
+                sample=click,
+                n_points=self._current_profile.size,
+            )
+            self.profile_clicks = [float(start), float(end)]
+            selection_action = f"{boundary.title()} corrected"
         else:
-            self.profile_clicks.append(click)
+            self.profile_clicks.append(float(click))
+            if len(self.profile_clicks) == 2:
+                self.profile_clicks.sort()
+            selection_action = "Start selected" if len(self.profile_clicks) == 1 else "End selected"
 
         self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
-        self._render_current_roi()
-        if len(self.profile_clicks) >= 2:
+        if len(self.profile_clicks) == 1:
+            self._render_current_roi()
+            self.profile_status_var.set(
+                f"{selection_action}: local minimum {click} ({intensity:.4f}). "
+                "Click near the end minimum."
+            )
+        else:
+            # Render the snapped End line before yielding back to Tk. The idle
+            # save runs immediately afterward and advances to the next ROI.
+            self._render_current_roi()
             self.after_idle(self._auto_save_current_roi)
 
     def _profile_zoom_closed(self, dialog) -> None:
@@ -3138,46 +3438,6 @@ class Step4Frame(SidebarStepFrame):
             dialog.close()
         except tk.TclError:
             pass
-
-    def _show_plot_activity(self, message: str = "Saving...") -> None:
-        self._hide_plot_activity(redraw=False)
-        if self.figure is None or self.canvas is None:
-            return
-        palette = _plot_palette()
-        self._plot_activity_text = self.figure.text(
-            0.51,
-            0.22,
-            message,
-            ha="center",
-            va="center",
-            fontsize=14,
-            weight="bold",
-            color=palette["warning"],
-            bbox={
-                "boxstyle": "round,pad=0.55",
-                "facecolor": palette["warning_soft"],
-                "edgecolor": palette["warning"],
-                "linewidth": 1.4,
-                "alpha": 0.96,
-            },
-            zorder=100,
-        )
-        self.canvas.draw()
-        try:
-            self.canvas.get_tk_widget().update_idletasks()
-        except tk.TclError:
-            pass
-
-    def _hide_plot_activity(self, *, redraw: bool = True) -> None:
-        activity_text = getattr(self, "_plot_activity_text", None)
-        self._plot_activity_text = None
-        if activity_text is not None:
-            try:
-                activity_text.remove()
-            except ValueError:
-                pass
-        if redraw and self.canvas is not None:
-            self.canvas.draw_idle()
 
     def _open_profile_zoom(self, index: int) -> None:
         if self.image is None or index != self.current_roi_idx:
@@ -3195,7 +3455,6 @@ class Step4Frame(SidebarStepFrame):
         result = self._roi_overview_result(index)
         if result is None:
             return
-        self._show_plot_activity("Saving...")
         error = None
         try:
             profile = intensity_profile(self.image, self.rois[index])
@@ -3216,8 +3475,6 @@ class Step4Frame(SidebarStepFrame):
         except Exception as exc:
             self._profile_zoom_dialog = None
             error = exc
-        finally:
-            self._hide_plot_activity()
         if error is not None:
             messagebox.showerror("Profile Detail", f"Could not open the detailed profile.\n{error}", parent=self)
 
@@ -3368,7 +3625,11 @@ class Step4Frame(SidebarStepFrame):
     def _update_build_stack_button_state(self) -> None:
         if self.build_stacks_button is None:
             return
-        if self._all_rois_completed():
+        if (
+            self._all_rois_completed()
+            and not getattr(self, "_stack_building", False)
+            and not getattr(self, "_stack_build_complete", False)
+        ):
             self.build_stacks_button.state(["!disabled"])
         else:
             self.build_stacks_button.state(["disabled"])
@@ -3396,7 +3657,7 @@ class Step4Frame(SidebarStepFrame):
         outdir = Path(self.output_dir_var.get() or ".")
         results_file = outdir / STEP4_RESULTS_FILENAME
         stack_file = outdir / "MAX_Stack.tif"
-        if results_file.exists() and stack_file.exists():
+        if getattr(self, "_stack_build_complete", False) and results_file.exists() and stack_file.exists():
             button.state(["!disabled"])
         else:
             button.state(["disabled"])
@@ -3412,14 +3673,19 @@ class Step4Frame(SidebarStepFrame):
             # New ROIs retain the quick auto-advance workflow.  When revising
             # an existing ROI, stay on it so the user can verify the updated
             # plot and measurement row.
-            self._save_current_roi(auto_advance=not replacing_completed_roi)
+            self._save_current_roi(
+                auto_advance=not replacing_completed_roi,
+                apply_entry_values=False,
+            )
         finally:
             self._auto_saving_roi = False
 
     def _update_profile_status(self, profile: np.ndarray) -> None:
         roi = self.rois[self.current_roi_idx]
         if len(self.profile_clicks) < 2:
-            self.profile_status_var.set(f"ROI {roi.suffix}: click start and end on the profile.")
+            self.profile_status_var.set(
+                f"ROI {roi.suffix}: click near the start and end minima on the profile."
+            )
             self.stats_var.set("")
             return
 
@@ -3435,8 +3701,8 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self.profile_status_var.set(
-            f"ROI {roi.suffix}: selected {start}-{end}; adjusted {adj_start}-{adj_end}. "
-            "Review or edit, then confirm."
+            f"ROI {roi.suffix}: local-minimum bounds {start}-{end}; adjusted {adj_start}-{adj_end}. "
+            "Saving automatically; revise any incorrect line from its grid preview."
         )
         self.stats_var.set(
             f"center: {(start + end) / 2.0:.1f}\n"
@@ -3445,25 +3711,35 @@ class Step4Frame(SidebarStepFrame):
             f"scale min/max: {float(data['min_intensity']):.3f} / {float(data['max_intensity']):.3f}"
         )
 
-    def _save_current_roi(self, *, auto_advance: bool, build_after: bool = False) -> bool:
+    def _save_current_roi(
+        self,
+        *,
+        auto_advance: bool,
+        build_after: bool = False,
+        apply_entry_values: bool = True,
+    ) -> bool:
         if self.image is None:
             messagebox.showwarning("Step 4", "Load an OCT image first.")
             return False
-        self._apply_entry_clicks(show_errors=False, auto_save=False, close_profile_zoom=False)
+        if apply_entry_values:
+            self._apply_entry_clicks(
+                show_errors=False,
+                auto_save=False,
+                close_profile_zoom=False,
+            )
         if len(self.profile_clicks) < 2:
-            messagebox.showwarning("Step 4", "Click or enter both start and end profile positions.")
+            messagebox.showwarning(
+                "Step 4",
+                "Click near both local minima (or enter both positions), then confirm the line.",
+            )
             return False
 
         roi = self.rois[self.current_roi_idx]
-        self._show_plot_activity(f"Saving ROI {roi.suffix}...")
-        try:
-            return self._save_current_roi_data(
-                roi,
-                auto_advance=auto_advance,
-                build_after=build_after,
-            )
-        finally:
-            self._hide_plot_activity()
+        return self._save_current_roi_data(
+            roi,
+            auto_advance=auto_advance,
+            build_after=build_after,
+        )
 
     def _save_current_roi_data(
         self,
@@ -3483,14 +3759,17 @@ class Step4Frame(SidebarStepFrame):
             self.completed[roi.suffix] = result
             self.roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
         except Exception as exc:
-            messagebox.showerror("Step 4", f"Could not save ROI {roi.suffix}.\n{exc}")
+            messagebox.showerror(
+                "Step 4",
+                f"Could not save ROI {roi.suffix}.\n{exc}\n\n"
+                "Click again near the appropriate local minimum and confirm the line.",
+            )
             return False
 
         self._refresh_roi_list()
         action = "Updated" if replacing_completed_roi else "Confirmed"
         self.status_var.set(f"{action} ROI {roi.suffix}.")
-        if replacing_completed_roi:
-            self._start_roi_update_animation(roi.suffix)
+        self._start_roi_update_animation(roi.suffix)
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._sync_active_batch_roi_state()
             self._update_active_batch_roi_tab_progress()
@@ -3515,6 +3794,9 @@ class Step4Frame(SidebarStepFrame):
         return True
 
     def _build_stack_outputs(self) -> None:
+        if getattr(self, "_stack_building", False):
+            self.status_var.set("Stack creation is already running. Please wait.")
+            return
         if not self.completed:
             messagebox.showwarning("Step 4", "Save at least one ROI before building stack outputs.")
             return
@@ -3529,7 +3811,16 @@ class Step4Frame(SidebarStepFrame):
             return
 
         ordered = [self.completed[roi.suffix] for roi in self.rois if roi.suffix in self.completed]
-        outdir = Path(self.output_dir_var.get() or ".")
+        outdir = Path(self.output_dir_var.get() or ".").expanduser().resolve()
+        self._stack_building = True
+        self._stack_build_complete = False
+        self._update_build_stack_button_state()
+        self.status_var.set("Building stack and saving final result files. Please wait...")
+        self._show_stack_building_notice(outdir)
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
         try:
             outdir.mkdir(parents=True, exist_ok=True)
 
@@ -3558,48 +3849,60 @@ class Step4Frame(SidebarStepFrame):
                 outdir / STEP4_RESULTS_FILENAME,
             )
         except Exception as exc:
+            self._hide_grid_notice()
+            self.status_var.set("Could not build stack outputs.")
             messagebox.showerror("Step 4", f"Could not build stack outputs.\n{exc}")
             return
+        finally:
+            self._stack_building = False
+            self._update_build_stack_button_state()
 
         self._finish_stack_build(outdir)
 
-    def _show_processing_complete(self, detail: str) -> None:
-        """Show the single terminal notification for a Step 4 run."""
+    def _show_processing_complete(
+        self,
+        detail: str,
+        *,
+        output_dir: str | os.PathLike | None = None,
+    ) -> None:
+        """Show terminal status and actions inside the active plot grid."""
 
-        messagebox.showinfo(
-            "Processing Complete",
-            f"All processing is done.\n\n{detail}",
-            parent=self,
-        )
+        folder_value = output_dir or getattr(self, "_last_results_dir", None)
+        if folder_value is not None:
+            self._show_processed_grid_notice(Path(folder_value), detail=detail)
 
     def _finish_stack_build(self, outdir: Path) -> None:
         """Advance a batch or notify once when Step 4 is fully complete."""
 
+        outdir = Path(outdir).expanduser().resolve()
+        self._last_results_dir = outdir
+        self._stack_build_complete = True
         self.status_var.set(f"Built stack outputs in {outdir}.")
+        self._update_build_stack_button_state()
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
+            self._show_processed_grid_notice(outdir)
             self._mark_active_batch_roi_complete()
             if self._select_next_incomplete_batch_roi_tab():
                 return
             self.status_var.set("Processing complete. All selected Step 4 folders are done.")
-            self._show_processing_complete(
-                "Every selected Step 4 folder is complete."
-            )
             self._update_continue_to_step5_button_state()
             return
         if self.batch_roi_paths and self.batch_roi_index >= 0:
+            self._show_processed_grid_notice(outdir)
             self._load_next_batch_roi()
             return
 
         self._show_processing_complete(
             f"Created MAX_Stack.tif, {STEP4_RESULTS_FILENAME}, and "
-            f"ROI_to_move_stck.tif in:\n{outdir}"
+            f"ROI_to_move_stck.tif in:\n{outdir}",
+            output_dir=self._last_results_dir,
         )
         self._update_continue_to_step5_button_state()
 
 
 def main() -> None:
     root = tk.Tk()
-    root.title("AIDaS Step 4 - Analyze ISez")
+    root.title("AIDaS Step 4 - MCP/AR")
     root.geometry("1200x800")
     frame = Step4Frame(root)
     frame.pack(fill="both", expand=True)

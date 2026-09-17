@@ -550,7 +550,7 @@ class WorkflowNavigationTests(unittest.TestCase):
                 "1  Load & Crop",
                 "2  Segment",
                 "3  Flatten",
-                "4  Analyze",
+                "4  MCP/AR",
                 "5  Compile",
             ),
         )
@@ -585,7 +585,7 @@ class WorkflowNavigationTests(unittest.TestCase):
         )
 
         strip.workflow_progress_label.configure.assert_called_once_with(
-            text="Step 4 of 5: Analyze"
+            text="Step 4 of 5: MCP/AR"
         )
 
     def test_header_keeps_only_settings_and_help_shortcuts_at_top_right(self):

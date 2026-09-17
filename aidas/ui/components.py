@@ -384,7 +384,7 @@ class WorkflowHeader(ctk.CTkFrame):
         "1  Load & Crop",
         "2  Segment",
         "3  Flatten",
-        "4  Analyze",
+        "4  MCP/AR",
         "5  Compile",
     )
 
@@ -644,7 +644,7 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         "1  Load & Crop",
         "2  Segment",
         "3  Flatten",
-        "4  Analyze",
+        "4  MCP/AR",
         "5  Compile",
     )
 
