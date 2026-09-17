@@ -100,6 +100,8 @@ LIGHT_SOURCE_BASENAME = "Light"
 SAVE_ORIENTATION_TEMPORAL_TO_NASAL = "temporal_to_nasal"
 SAVE_ORIENTATION_NASAL_TO_TEMPORAL = "nasal_to_temporal"
 DEFAULT_SAVE_ORIENTATION = SAVE_ORIENTATION_TEMPORAL_TO_NASAL
+IMAGE_SIDE_TEMPORAL = "temporal"
+IMAGE_SIDE_NASAL = "nasal"
 IMG_DEFAULT_DIR = os.path.expanduser("~/Desktop")
 SUPPORTED_IMAGE_FILETYPES = [
     ("Analyze image", "*.img"),
@@ -859,7 +861,11 @@ class Step2Frame(SidebarStepFrame):
         self._active_batch_result_tab = None
         self._single_editor_state = None
         self._last_status_mouse_sample = None
-        self.save_orientation_var = tk.StringVar(value=DEFAULT_SAVE_ORIENTATION)
+        # Saving still needs an internal direction so the unchanged and mirrored
+        # volumes land in the correct folders.  The user no longer edits that
+        # implementation detail directly; it is derived from the required
+        # Temporal/Nasal choice in the pre-segmentation prompt.
+        self._current_save_orientation = DEFAULT_SAVE_ORIENTATION
 
         self.image_canvas = ImageCanvas(
             self.canvas_area,
@@ -869,7 +875,6 @@ class Step2Frame(SidebarStepFrame):
             on_zoom_change=self._on_canvas_zoom_changed,
         )
         self.single_image_canvas = self.image_canvas
-        self._apply_side_labels_to_canvas(self.image_canvas)
         self.image_canvas.enable_line(False)
         self.image_canvas.enable_roi(False)
         self.image_canvas.enable_vertical_line(False)
@@ -1034,23 +1039,6 @@ class Step2Frame(SidebarStepFrame):
         fovea_action_row.pack(fill="x", pady=(2, 0))
 
         self._set_fovea_controls_enabled(False)
-
-        orientation = ttk.LabelFrame(segmentation, text="Image Sides and Saving", padding=3)
-        orientation.pack(fill="x", pady=(6, 0))
-        ttk.Radiobutton(
-            orientation,
-            text="Left: Temporal  |  Right: Nasal",
-            variable=self.save_orientation_var,
-            value=SAVE_ORIENTATION_TEMPORAL_TO_NASAL,
-            command=self._on_save_orientation_changed,
-        ).pack(anchor="w")
-        ttk.Radiobutton(
-            orientation,
-            text="Left: Nasal  |  Right: Temporal",
-            variable=self.save_orientation_var,
-            value=SAVE_ORIENTATION_NASAL_TO_TEMPORAL,
-            command=self._on_save_orientation_changed,
-        ).pack(anchor="w")
 
         # Reserve the final workflow actions in the non-scrolling sidebar
         # shell.  The Segmentation card is taller than the compact Modern
@@ -1383,15 +1371,10 @@ class Step2Frame(SidebarStepFrame):
             self.status_var.set("AI batch segmentation cancelled before running.")
             return
 
-        image_paths = [path for path in image_paths if path in manual_fovea_by_path]
-        if not image_paths:
-            self.status_var.set("AI batch segmentation cancelled: all images were skipped.")
-            return
-
         self._run_aidas_batch_segmentation(
             image_paths=image_paths,
             manual_fovea_by_path=manual_fovea_by_path,
-            manual_orientation_by_path=getattr(self, "_collected_orientation_by_path", None),
+            image_side_by_path=getattr(self, "_collected_image_side_by_path", None),
             core_limit=self._normalized_shared_core_limit(core_limit),
         )
 
@@ -1568,10 +1551,15 @@ class Step2Frame(SidebarStepFrame):
             )
 
     def _collect_folder_fovea_lines(self, image_paths):
-        """Prompt for each image's fovea line and anatomical side assignment."""
+        """Collect the two required inputs for every image, in order.
+
+        Each image must have its fovea confirmed before the Temporal/Nasal
+        choice is shown.  There is deliberately no skip or preselected side,
+        so neither input can be accepted accidentally.
+        """
         fovea_by_path = {}
-        orientation_by_path = {}
-        self._collected_orientation_by_path = orientation_by_path
+        image_side_by_path = {}
+        self._collected_image_side_by_path = image_side_by_path
         total = len(image_paths)
 
         next_var = tk.StringVar(value="")
@@ -1587,7 +1575,7 @@ class Step2Frame(SidebarStepFrame):
         prompt_label_var = tk.StringVar(value="")
         # Reserve the action cluster before laying out the flexible prompt.
         # Packing the full path first lets its requested width consume the
-        # toolbar and can push Confirm, Skip, or Exit outside the viewport.
+        # toolbar and can push the required actions outside the viewport.
         actions_frame = ttk.Frame(temp_frame)
         actions_frame.pack(side="right", fill="y")
         prompt_label = ttk.Label(
@@ -1599,11 +1587,28 @@ class Step2Frame(SidebarStepFrame):
             anchor="w",
         )
         
-        def on_skip():
-            next_var.set("skip")
+        def on_confirm_fovea():
+            try:
+                x_val = int(float(self.fovea_x_entry_var.get()))
+            except (TypeError, ValueError):
+                messagebox.showwarning(
+                    "Fovea required",
+                    "Specify the fovea before continuing.",
+                )
+                return
+            if self.image_data is None or not 0 <= x_val < self.image_data.shape[1]:
+                messagebox.showwarning(
+                    "Fovea required",
+                    "Place the fovea line within the image before continuing.",
+                )
+                return
+            self._ensure_fovea_line(x_val)
+            next_var.set("fovea")
 
-        def on_set():
-            next_var.set("set")
+        def on_choose_side(side):
+            if side not in {IMAGE_SIDE_TEMPORAL, IMAGE_SIDE_NASAL}:
+                return
+            next_var.set(side)
             
         def on_cancel():
             next_var.set("cancel")
@@ -1620,18 +1625,6 @@ class Step2Frame(SidebarStepFrame):
         HoverToolTip(btn_cancel, "Exit batch segmentation.")
         btn_cancel.pack(side="right", padx=4, pady=4)
 
-        skip_icon = load_ctk_image(self, "flat-color-icons--right.png", size=20)
-        btn_skip = AppButton(
-            actions_frame,
-            text="Skip",
-            variant="secondary",
-            command=on_skip,
-            image=skip_icon,
-            compound="left",
-        )
-        HoverToolTip(btn_skip, "Skip this image without setting a foveal center.")
-        btn_skip.pack(side="right", padx=4, pady=4)
-
         confirm_icon = load_ctk_image(
             self,
             "flat-color-icons--checkmark.png",
@@ -1640,69 +1633,210 @@ class Step2Frame(SidebarStepFrame):
         )
         btn_set = AppButton(
             actions_frame,
-            text="Confirm",
+            text="Confirm fovea",
             variant="success",
-            command=on_set,
+            command=on_confirm_fovea,
             image=confirm_icon,
             compound="left",
         )
         HoverToolTip(btn_set, "Confirm the foveal center for this image.")
         btn_set.pack(side="right", padx=4, pady=4)
 
+        overlay_frame = tk.Frame(self.image_canvas.canvas, bg="#333333", padx=15, pady=15, highlightthickness=2, highlightbackground="#555555")
+        
+        ttk.Label(
+            overlay_frame, 
+            text="Is the LEFT side of the image Nasal or Temporal?", 
+            foreground="white", 
+            background="#333333", 
+            font=("", 11, "bold")
+        ).pack(side="top", pady=(0, 10))
+        
+        btn_box = tk.Frame(overlay_frame, bg="#333333")
+        btn_box.pack(side="top")
+        
+        btn_nasal_overlay = AppButton(
+            btn_box,
+            text="Nasal",
+            variant="success",
+            bg_color="#333333",
+            command=lambda: on_choose_side(IMAGE_SIDE_NASAL),
+        )
+        HoverToolTip(btn_nasal_overlay, "Identify the left side as nasal.")
+        btn_nasal_overlay.pack(side="left", padx=5)
+
+        btn_temporal_overlay = AppButton(
+            btn_box,
+            text="Temporal",
+            variant="success",
+            bg_color="#333333",
+            command=lambda: on_choose_side(IMAGE_SIDE_TEMPORAL),
+        )
+        HoverToolTip(btn_temporal_overlay, "Identify the left side as temporal.")
+        btn_temporal_overlay.pack(side="right", padx=5)
+
+        def _update_overlay_position(event=None):
+            if not getattr(self, "_batch_fovea_picker_active", False) or not overlay_frame.winfo_exists():
+                return
+            if btn_set.winfo_ismapped():
+                return
+            
+            overlay_frame.place_forget()
+            if self.image_data is not None:
+                h = self.image_data.shape[0]
+                lx, ly = self.image_canvas._i2c(0, h / 2)
+                top_y = self.image_canvas._i2c(0, 0)[1]
+                bottom_y = self.image_canvas._i2c(0, h)[1]
+                
+                canvas_w = max(400, self.image_canvas.canvas.winfo_width())
+                canvas_h = max(300, self.image_canvas.canvas.winfo_height())
+                
+                self.image_canvas.canvas.delete("side_indicator")
+                
+                radius = 6
+                self.image_canvas.canvas.create_oval(
+                    lx - radius, ly - radius, lx + radius, ly + radius,
+                    fill="#ef4444", outline="white", width=2, tags=("side_indicator",)
+                )
+                
+                popup_height = 100
+                popup_width = 340
+                
+                safe_lx = max(20, min(lx + 20, canvas_w - popup_width - 20))
+                
+                if top_y > popup_height + 20:
+                    # Space ABOVE the image
+                    popup_y = top_y - 10
+                    anchor = "sw"
+                    arrow_start = (lx + 3, ly - 5)
+                    arrow_end = (safe_lx + 40, popup_y)
+                elif canvas_h - bottom_y > popup_height + 20:
+                    # Space BELOW the image
+                    popup_y = bottom_y + 10
+                    anchor = "nw"
+                    arrow_start = (lx + 3, ly + 5)
+                    arrow_end = (safe_lx + 40, popup_y)
+                else:
+                    # No space outside, put it near the top of the canvas
+                    popup_y = 20
+                    anchor = "nw"
+                    arrow_start = (lx + 3, ly - 5)
+                    arrow_end = (safe_lx, popup_y + 40)
+                
+                self.image_canvas.canvas.create_line(
+                    arrow_start[0], arrow_start[1], arrow_end[0], arrow_end[1],
+                    fill="#ef4444", width=3, arrow="last", arrowshape=(10, 12, 4), tags=("side_indicator",)
+                )
+                
+                self.image_canvas.canvas.create_window(
+                    safe_lx, popup_y, window=overlay_frame, anchor=anchor, tags=("side_indicator",)
+                )
+            else:
+                self.image_canvas.canvas.delete("side_indicator")
+                overlay_frame.place(relx=0.05, rely=0.5, anchor="w")
+
+        original_zoom_cb = self.image_canvas._cb_zoom
+        def _hooked_zoom_cb(zoom):
+            if original_zoom_cb:
+                original_zoom_cb(zoom)
+            self.after(10, _update_overlay_position)
+        self.image_canvas._cb_zoom = _hooked_zoom_cb
+
+        bind_id = self.image_canvas.canvas.bind("<Configure>", lambda e: self.after(150, _update_overlay_position), add="+")
+
+        def show_fovea_stage(index, path):
+            overlay_frame.place_forget()
+            self.image_canvas.canvas.delete("side_indicator")
+            btn_set.pack(side="right", padx=4, pady=4)
+            msg = f"Step 1 of 2 - Specify fovea ({index}/{total}): {path}"
+            prompt_label_var.set(msg)
+            prompt_tooltip.text = msg
+            self.status_var.set(msg)
+
+        def show_side_stage(index, path):
+            btn_set.pack_forget()
+            
+            _update_overlay_position()
+
+            msg = (
+                f"Step 2 of 2 - Specify whether the image is Temporal or Nasal "
+                f"({index}/{total}): {path}"
+            )
+            prompt_label_var.set(msg)
+            prompt_tooltip.text = msg
+            self.status_var.set(msg)
+
         # Pack the flexible label after every action has claimed its space.
         prompt_label.pack(side="left", fill="x", expand=True)
         prompt_tooltip = HoverToolTip(prompt_label, "")
 
-        # Save current editor state to restore later if canceled (optional, but good practice)
-        saved_state = self._capture_current_editor_state()
         self._batch_fovea_picker_active = True
 
         try:
             for index, path in enumerate(image_paths, start=1):
-                name = os.path.basename(path)
-                msg = f"Select fovea {index}/{total}: {path}"
-                prompt_label_var.set(msg)
-                prompt_tooltip.text = msg
-                self.status_var.set(msg)
+                show_fovea_stage(index, path)
                 self.update_idletasks()
                 
                 try:
                     image_data = self._load_image_from_path(path)
                 except (OSError, ValueError, RuntimeError) as exc:
-                    messagebox.showwarning(
-                        "Fovea picker skipped",
-                        f"Could not open this image for fovea selection:\n{path}\n\n{exc}",
+                    messagebox.showerror(
+                        "Image could not be prepared",
+                        f"Could not open this image for segmentation:\n{path}\n\n{exc}",
                     )
-                    self._clear_image_display("Image skipped. No image is loaded.")
-                    continue
+                    self._clear_image_display("Segmentation cancelled. No image is loaded.")
+                    image_side_by_path.clear()
+                    return None
 
                 # The fovea picker is an intermediate batch view. Step 3 only
                 # needs to hear about folders after Step 2 saves its outputs.
                 self._show_image(image_data, path, notify_output_folder=False)
 
+                next_var.set("")
                 self.wait_variable(next_var)
-                
                 action = next_var.get()
                 if action == "cancel":
-                    orientation_by_path.clear()
-                    self._clear_image_display("All Images skipped. No image is loaded.")
+                    image_side_by_path.clear()
+                    self._clear_image_display("Segmentation cancelled. No image is loaded.")
                     return None
-                elif action == "skip":
-                    # Do not add it to fovea_by_path, which explicitly drops it from the batch list
-                    self._clear_image_display("Image skipped. No image is loaded.")
-                    continue
-                else:  # "set"
-                    # Read whatever they left in the entry
-                    try:
-                        x_val = int(float(self.fovea_x_entry_var.get()))
-                    except ValueError:
-                        x_val = None
-                    fovea_by_path[path] = x_val
-                    orientation_by_path[path] = self._selected_save_orientation()
+
+                # The callback validates and normalizes the fovea before it can
+                # release this wait. Lock it while the side is being chosen.
+                x_val = int(self.fovea_x)
+                self._set_drawing_locked(True)
+                show_side_stage(index, path)
+                self.update_idletasks()
+
+                next_var.set("")
+                self.wait_variable(next_var)
+                side = next_var.get()
+                if side == "cancel":
+                    image_side_by_path.clear()
+                    self._clear_image_display("Segmentation cancelled. No image is loaded.")
+                    return None
+                if side not in {IMAGE_SIDE_TEMPORAL, IMAGE_SIDE_NASAL}:
+                    messagebox.showerror(
+                        "Image side required",
+                        "Choose Temporal or Nasal before continuing.",
+                    )
+                    image_side_by_path.clear()
+                    return None
+
+                fovea_by_path[path] = x_val
+                image_side_by_path[path] = side
                 
         finally:
             self._batch_fovea_picker_active = False
             temp_frame.destroy()
+            if overlay_frame.winfo_exists():
+                overlay_frame.destroy()
+            if hasattr(self, "image_canvas") and getattr(self.image_canvas, "canvas", None):
+                self.image_canvas.canvas.delete("side_indicator")
+                self.image_canvas._cb_zoom = original_zoom_cb
+                try:
+                    self.image_canvas.canvas.unbind("<Configure>", bind_id)
+                except Exception:
+                    pass
             self._update_boundary_action_buttons()
             self._update_batch_ai_button_state()
 
@@ -1866,7 +2000,6 @@ class Step2Frame(SidebarStepFrame):
         self.fovea_x = None
 
         self.image_canvas.set_image(image)
-        self._apply_side_labels_to_canvas(self.image_canvas)
         self.image_canvas.enable_roi(False)
 
         filename = os.path.basename(path) if path and path != "Step 1 output" else "Step 1 output"
@@ -2029,8 +2162,7 @@ class Step2Frame(SidebarStepFrame):
         self._source_was_8bit = bool(state.get("source_was_8bit", False))
         orientation = self._selected_save_orientation(state.get("save_orientation"))
         state["save_orientation"] = orientation
-        self.save_orientation_var.set(orientation)
-        self._apply_side_labels_to_canvas(canvas, orientation)
+        self._current_save_orientation = orientation
         self.active_boundary = None
 
         self.image_canvas.enable_roi(False)
@@ -2927,47 +3059,31 @@ class Step2Frame(SidebarStepFrame):
         return DEFAULT_SAVE_ORIENTATION
 
     def _selected_save_orientation(self, orientation=None):
-        """Return the selected save orientation, falling back to the default."""
+        """Return the internal save direction derived from the image side."""
         if orientation is None:
-            orientation = self.save_orientation_var.get()
+            orientation = getattr(
+                self,
+                "_current_save_orientation",
+                DEFAULT_SAVE_ORIENTATION,
+            )
         return self._normalized_save_orientation(orientation)
 
-    def _side_labels_for_orientation(self, orientation=None):
-        orientation = self._selected_save_orientation(orientation)
-        if orientation == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
-            return "Nasal", "Temporal"
-        return "Temporal", "Nasal"
+    @staticmethod
+    def _save_orientation_for_image_side(side):
+        """Map the explicit image-side answer to the existing save geometry."""
+        if side == IMAGE_SIDE_TEMPORAL:
+            return SAVE_ORIENTATION_NASAL_TO_TEMPORAL
+        if side == IMAGE_SIDE_NASAL:
+            return SAVE_ORIENTATION_TEMPORAL_TO_NASAL
+        raise ValueError(f"Unknown image side: {side!r}")
 
-    def _apply_side_labels_to_canvas(self, canvas=None, orientation=None):
-        canvas = canvas or getattr(self, "image_canvas", None)
-        if canvas is not None:
-            canvas.set_side_labels(
-                *self._side_labels_for_orientation(orientation),
-                on_flip=self._flip_image_sides,
-            )
-
-    def _on_save_orientation_changed(self):
-        """Refresh labels and retain the side choice with the active image."""
-        orientation = self._selected_save_orientation()
-        self._apply_side_labels_to_canvas(orientation=orientation)
-        tab_key = getattr(self, "_active_batch_result_tab", None)
-        state = self._batch_result_states.get(tab_key) if tab_key else None
-        if state is not None:
-            state["save_orientation"] = orientation
-
-    def _flip_image_sides(self):
-        """Swap Temporal/Nasal labels and the corresponding save assignment."""
-        if self._selected_save_orientation() == SAVE_ORIENTATION_TEMPORAL_TO_NASAL:
-            orientation = SAVE_ORIENTATION_NASAL_TO_TEMPORAL
-        else:
-            orientation = SAVE_ORIENTATION_TEMPORAL_TO_NASAL
-        self.save_orientation_var.set(orientation)
-        self._on_save_orientation_changed()
+    def _image_side_for_save_orientation(self, orientation=None):
+        if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+            return IMAGE_SIDE_TEMPORAL
+        return IMAGE_SIDE_NASAL
 
     def _save_orientation_label(self, orientation=None):
-        if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
-            return "Nasal -> Temporal"
-        return "Temporal -> Nasal"
+        return self._image_side_for_save_orientation(orientation).title()
 
     def _orient_volume_for_single_save(self, volume, orientation=None):
         """Apply the selected orientation to a single saved Analyze volume."""
@@ -4251,7 +4367,7 @@ class Step2Frame(SidebarStepFrame):
         self,
         image_paths=None,
         manual_fovea_by_path=None,
-        manual_orientation_by_path=None,
+        image_side_by_path=None,
         core_limit=None,
     ):
         """Run AI_ForAIDAS predictions for multiple images and preview them in tabs."""
@@ -4296,14 +4412,32 @@ class Step2Frame(SidebarStepFrame):
                 self._image_pair_key(path): (None if x is None else int(x))
                 for path, x in manual_fovea_by_path.items()
             }
+        missing_fovea_paths = [
+            path
+            for path in image_paths
+            if manual_fovea_by_key is None
+            or manual_fovea_by_key.get(self._image_pair_key(path)) is None
+        ]
+        if missing_fovea_paths:
+            messagebox.showerror(
+                "Fovea required",
+                "The fovea must be specified for every image before segmentation.",
+            )
+            return
 
-        default_orientation = self._selected_save_orientation()
         orientation_by_key = {
-            self._image_pair_key(path): self._selected_save_orientation(orientation)
-            for path, orientation in (manual_orientation_by_path or {}).items()
+            self._image_pair_key(path): self._save_orientation_for_image_side(side)
+            for path, side in (image_side_by_path or {}).items()
         }
-        for path in image_paths:
-            orientation_by_key.setdefault(self._image_pair_key(path), default_orientation)
+        missing_side_paths = [
+            path for path in image_paths if self._image_pair_key(path) not in orientation_by_key
+        ]
+        if missing_side_paths:
+            messagebox.showerror(
+                "Image side required",
+                "Every image must be identified as Temporal or Nasal before segmentation.",
+            )
+            return
 
         provider_name = "auto"
         device_id = 0
@@ -4360,7 +4494,7 @@ class Step2Frame(SidebarStepFrame):
             "AIDaS Step 2 AI_ForAIDAS Batch Segmentation",
             f"Boundary model: {model_path}",
             f"Manual fovea lines: {'yes' if manual_fovea_by_key is not None else 'no'}",
-            "Anatomical side assignments: per image",
+            "Temporal/Nasal image side: explicitly confirmed per image",
             f"Requested provider: {provider_name}",
             f"DirectML adapter: {device_id}",
             f"Software fallback core limit: {core_limit}",
@@ -4458,7 +4592,6 @@ class Step2Frame(SidebarStepFrame):
                             ),
                         )
                         fovea_x = None
-                        manual_fovea = manual_fovea_by_key is not None
                         if manual_fovea_by_key is not None:
                             fovea_x = manual_fovea_by_key.get(self._image_pair_key(path))
                         if fovea_x is not None:
@@ -4487,9 +4620,9 @@ class Step2Frame(SidebarStepFrame):
                         log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
                         if fovea_x is not None:
                             log_lines.append(f"  Fovea x (manual): {int(fovea_x)}")
-                        elif manual_fovea:
-                            log_lines.append("  Fovea x: skipped by user")
-                        log_lines.append(f"  Sides: {self._save_orientation_label(orientation)}")
+                        log_lines.append(
+                            f"  Image side: {self._save_orientation_label(orientation)}"
+                        )
                     except Exception as exc:
                         failures.append({"input": path, "error": str(exc)})
                         log_lines.append(f"FAILED: {path}")
@@ -4637,7 +4770,6 @@ class Step2Frame(SidebarStepFrame):
             try:
                 data, _template, _source_was_8bit = self._read_image_for_annotation(input_path)
                 orientation = self._selected_save_orientation(item.get("save_orientation"))
-                self._apply_side_labels_to_canvas(canvas, orientation)
                 canvas.set_image(data)
                 traces = item.get("traces")
                 if traces is None:

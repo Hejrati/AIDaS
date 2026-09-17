@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import builtins
 import inspect
 from pathlib import Path
 import subprocess
@@ -57,27 +56,23 @@ class Step4CompletionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("Step4Frame", result.stdout)
 
-    def test_missing_compiler_dependency_does_not_crash_step4(self):
+    def test_step4_no_longer_owns_the_measurement_compiler(self):
+        source = inspect.getsource(Step4Frame._build_ui)
+
+        self.assertNotIn("Compile measurements", source)
+        self.assertNotIn("compiler_button", source)
+        self.assertIn('text="Go to Step 5"', source)
+
+    def test_step4_handoff_opens_step5_with_the_batch_root(self):
         frame = object.__new__(Step4Frame)
-        frame._compiler_dialog = None
-        frame.status_var = _VariableStub()
-        real_import = builtins.__import__
+        frame.batch_roi_root = Path("measurement-root")
+        frame.output_dir_var = mock.Mock()
+        frame.input_dir_var = mock.Mock()
+        frame.on_continue_to_step5 = mock.Mock()
 
-        def import_without_openpyxl(name, *args, **kwargs):
-            if name == "aidas.steps.step4_compiler_dialog":
-                error = ModuleNotFoundError("No module named 'openpyxl'")
-                error.name = "openpyxl"
-                raise error
-            return real_import(name, *args, **kwargs)
+        frame._continue_to_step5()
 
-        with mock.patch("builtins.__import__", side_effect=import_without_openpyxl), mock.patch(
-            "aidas.steps.step4_analyze_isez.messagebox.showerror"
-        ) as showerror:
-            frame._open_compiler_dialog()
-
-        showerror.assert_called_once()
-        self.assertIn("openpyxl", showerror.call_args.args[1])
-        self.assertIn("unavailable", frame.status_var.value)
+        frame.on_continue_to_step5.assert_called_once_with(Path("measurement-root"))
 
     def test_roi_table_stays_compact_enough_to_reveal_its_actions(self):
         source = inspect.getsource(Step4Frame._build_ui)

@@ -376,7 +376,7 @@ class Step1Frame(SidebarStepFrame):
             image=self.save_all_btn_icon,
             compound="left",
         )
-        self.save_all_btn.pack(side="left", fill="x", expand=True, padx=(0, 3))
+        self.save_all_btn.pack(fill="x")
         HoverToolTip(
             self.save_all_btn,
             "Save IMG and HDR beside the source SDB image, then open the next SDB",
@@ -394,9 +394,7 @@ class Step1Frame(SidebarStepFrame):
             image=self.batch_segment_cropped_btn_icon,
             compound="left",
         )
-        self.batch_segment_cropped_btn.pack(
-            side="left", fill="x", expand=True, padx=(3, 0)
-        )
+        self.batch_segment_cropped_btn.pack(fill="x", pady=(4, 0))
         HoverToolTip(
             self.batch_segment_cropped_btn,
             "Open folders with saved Light outputs in Step 2 batch segmentation",

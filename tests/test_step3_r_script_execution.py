@@ -183,7 +183,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 with event_lock:
                     events.append((stage, action, folder.name))
 
-            def fake_run(command, cwd, _env, _timeout, _on_line):
+            def fake_run(command, cwd, _env, _on_line):
                 folder = Path(cwd)
                 is_output = "-e" in command
                 if not is_output:
@@ -220,7 +220,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 Path("output.R"),
                 folders,
                 workers=2,
-                timeout_seconds=60,
             )
 
             self.assertLess(
@@ -255,7 +254,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 with event_lock:
                     events.append((stage, action, folder.name))
 
-            def fake_run(command, cwd, _env, _timeout, _on_line):
+            def fake_run(command, cwd, _env, _on_line):
                 folder = Path(cwd)
                 is_output = "-e" in command
                 if not is_output:
@@ -293,7 +292,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 Path("output.R"),
                 folders,
                 workers=2,
-                timeout_seconds=60,
                 output_mode="sequential",
             )
 
@@ -324,7 +322,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             main_barrier = threading.Barrier(2)
             output_folders = []
 
-            def fake_run(command, cwd, _env, _timeout, _on_line):
+            def fake_run(command, cwd, _env, _on_line):
                 folder = Path(cwd)
                 if "-e" not in command:
                     main_barrier.wait(timeout=3)
@@ -342,7 +340,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 Path("output.R"),
                 folders,
                 workers=2,
-                timeout_seconds=60,
                 output_mode="sequential",
             )
 
@@ -361,7 +358,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             main_barrier = threading.Barrier(3)
             output_folders = []
 
-            def fake_run(command, cwd, _env, _timeout, _on_line):
+            def fake_run(command, cwd, _env, _on_line):
                 folder = Path(cwd)
                 if "-e" not in command:
                     main_barrier.wait(timeout=3)
@@ -380,7 +377,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 Path("output.R"),
                 folders,
                 workers=3,
-                timeout_seconds=60,
                 output_mode="sequential",
             )
 
@@ -431,7 +427,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Step 3 inputs must all have the same"):
             Step3Frame._validate_input_stack_shapes(invalid)
 
-    def test_silent_process_is_stopped_when_timeout_expires(self):
+    def test_silent_process_can_finish_without_an_automatic_timeout(self):
         frame = self._make_frame()
         process = _BlockingProcess()
         popen_options = {}
@@ -440,20 +436,24 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             popen_options.update(kwargs)
             return process
 
-        with mock.patch("aidas.steps.step3_flatten.subprocess.Popen", side_effect=fake_popen), mock.patch(
-            "aidas.steps.step3_flatten.time.monotonic", side_effect=(0.0, 2.0)
-        ):
+        def finish_process():
+            process.returncode = 0
+            process.stopped.set()
+
+        completion = threading.Timer(0.01, finish_process)
+        completion.start()
+        with mock.patch("aidas.steps.step3_flatten.subprocess.Popen", side_effect=fake_popen):
             returncode, error, outcome = frame._run_supervised_r_command(
                 ["Rscript.exe", "silent.R"],
                 ".",
                 {},
-                1,
                 lambda _line: None,
             )
+        completion.join()
 
-        self.assertEqual(returncode, 124)
-        self.assertEqual(outcome, "timed_out")
-        self.assertIn("timeout", error)
+        self.assertEqual(returncode, 0)
+        self.assertEqual(outcome, "completed")
+        self.assertEqual(error, "")
         self.assertIs(popen_options["stdin"], subprocess.DEVNULL)
         if os.name == "nt":
             self.assertTrue(
@@ -472,7 +472,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 ["Rscript.exe", "interactive.R"],
                 ".",
                 {},
-                60,
                 lambda _line: None,
             )
 
@@ -491,7 +490,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 ["Rscript.exe", "bad.R"],
                 ".",
                 {},
-                60,
                 lines.append,
             )
 
@@ -521,8 +519,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             )
             panel.workers_var = mock.Mock()
             panel.workers_var.get.return_value = 2
-            panel.timeout_var = mock.Mock()
-            panel.timeout_var.get.return_value = 5
             panel.output_mode_var = mock.Mock()
             panel.output_mode_var.get.return_value = "sequential"
             panel._max_worker_count = lambda _ready_count: 2
@@ -534,7 +530,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 2,
                 main_script,
                 output_script,
-                300,
                 output_mode="sequential",
             )
 
@@ -554,7 +549,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
                 Path("output.R"),
                 folders,
                 workers=2,
-                timeout_seconds=60,
             )
 
         self.assertEqual([result["folder"] for result in finished], folders)
@@ -590,7 +584,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             2,
             Path("main.R"),
             Path("output.R"),
-            60,
             output_mode="sequential",
         )
 
@@ -605,7 +598,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         panel.workers = 2
         panel.main_script_path = Path("main.R")
         panel.output_script_path = Path("output.R")
-        panel.timeout_seconds = 60
         panel.output_mode = "sequential"
         panel.restart_button = mock.Mock()
         panel.stop_button = mock.Mock()
@@ -619,20 +611,15 @@ class Step3RScriptExecutionTests(unittest.TestCase):
 
         call = panel.step_frame._restart_batch_r_runs.call_args
         self.assertEqual(
-            call.args[:5],
+            call.args,
             (
                 panel.folders,
                 2,
                 Path("main.R"),
                 Path("output.R"),
-                60,
             ),
         )
-        forwarded_mode = call.kwargs.get(
-            "output_mode",
-            call.args[5] if len(call.args) > 5 else None,
-        )
-        self.assertEqual(forwarded_mode, "sequential")
+        self.assertEqual(call.kwargs["output_mode"], "sequential")
 
     def test_completed_batch_starts_pending_restart_without_an_event_loop_gap(self):
         restart = (
@@ -640,7 +627,6 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             2,
             Path("main.R"),
             Path("output.R"),
-            60,
             "sequential",
         )
         panel = mock.Mock()

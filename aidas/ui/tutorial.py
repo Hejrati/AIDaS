@@ -1,4 +1,4 @@
-"""In-app tutorial for the four-stage AIDaS processing workflow."""
+"""In-app tutorial for the five-stage AIDaS processing workflow."""
 
 from __future__ import annotations
 
@@ -58,17 +58,16 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         navigation_label="Workflow overview",
         title="From raw OCT scans to ISez measurements",
         purpose=(
-            "AIDaS keeps selected subject folder(s) moving through four connected stages. "
+            "AIDaS keeps selected subject folder(s) moving through five connected stages. "
             "Each handoff opens the exact folders completed by the previous step, "
             "while every stage can also scan a parent folder when work is resumed later."
         ),
         input_summary="Nested subject folders containing raw .sdb OCT scans",
-        function_summary="Crop, annotate, flatten, then quantify retinal profiles",
-        output_summary="Analyze images, diagnostic plots, ROI stacks, and Excel measurements",
+        function_summary="Crop, segment, flatten, analyze, then compile measurements",
+        output_summary="Analyze images, diagnostics, ROI stacks, and one compiled Excel workbook",
         completion_check=(
-            "The workflow is complete when every selected Step 4 folder contains "
-            "ROI_to_move_stck.tif, MAX_Stack.tif, and a measurement workbook. New "
-            "runs write rr_MCPAR.xlsx; legacy Results.xlsx workbooks are also recognized."
+            "The workflow is complete when Step 5 has combined the selected Step 3 "
+            "and Step 4 measurements into LE_RE_rrMCPAR_ELMRPE_ONL.xlsx."
         ),
         tips=(
             "Use the green progress rows, completed lists, tab counters, and status bars to see what is ready at each stage.",
@@ -115,25 +114,25 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
     ),
     TutorialPage(
         key="step2",
-        navigation_label="Step 2 - Annotate",
-        title="Step 2 - Segment, review, and annotate retinal boundaries",
+        navigation_label="Step 2 - Segment",
+        title="Step 2 - Segment retinal boundaries",
         purpose=(
             "Step 2 identifies the six retinal layer boundaries and foveal center "
             "required by flattening. AI supplies a starting trace; every result remains editable."
         ),
         input_summary="Step 1 Light Analyze pairs, loaded from selected folders",
-        function_summary="Predict or trace six boundaries, set the fovea, and assign image sides",
+        function_summary="Confirm the fovea, identify the image as temporal or nasal, and review six boundaries",
         output_summary="Nasal and temporal folders containing 16-bit Light and 8-bit Light_MARKED pairs",
         completion_check=(
-            "All six boundaries and the foveal line have been reviewed, the side "
-            "orientation is correct, and each nasal/temporal folder contains Light and Light_MARKED Analyze pairs."
+            "All six boundaries and the foveal line have been reviewed, the image side "
+            "is correct, and each nasal/temporal folder contains Light and Light_MARKED Analyze pairs."
         ),
         stage_points=(
             (
                 "Use the Step 1 handoff or Select folders to segment, then review the discovered Light images and choose the ready rows.",
                 "Folders that already contain Light_MARKED are identified and skipped.",
-                "For each image, drag the foveal line or enter Center X.",
-                "Choose the exact side layout—Left: Temporal | Right: Nasal or Left: Nasal | Right: Temporal—and Confirm. Skip omits the image; Exit cancels the batch.",
+                "For each image, first drag the foveal line or enter Center X, then choose Confirm fovea.",
+                "Next identify the image as Temporal or Nasal. Both prompts are required; Exit cancels the batch.",
             ),
             (
                 "After the final confirmation, AIDaS runs AI segmentation using a compatible DirectML GPU or the displayed shared CPU-core budget.",
@@ -141,7 +140,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             ),
             (
                 "Save or Save all commits the reviewed results; unsaved AI results and edits exist only in the open review tabs.",
-                "AIDaS creates nasal and temporal child folders with normalized two-slice, 2133-pixel-wide 16-bit Light and 8-bit Light_MARKED pairs, mirrored according to the selected orientation.",
+                "AIDaS creates nasal and temporal child folders with normalized two-slice, 2133-pixel-wide 16-bit Light and 8-bit Light_MARKED pairs, mirrored according to the selected image side.",
                 "Go to Step 3 preflights, saves, and hands the completed nasal and temporal folders to the R batch review.",
             ),
         ),
@@ -173,11 +172,11 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "If required, run Set up R and packages; the workflow requires R 3.3.1 with the bundled AnalyzeFMRI and RNiftyReg dependencies.",
                 "Use the Step 2 handoff or Select folders to flatten.",
                 "AIDaS verifies matching readable 16-bit Light and 8-bit Light_MARKED pairs with identical slice, height, and width dimensions; folders with existing RData are locked and skipped.",
-                "Select ready folders, set Batch size and the per-script timeout (240 minutes by default), and choose Parallel or Sequential execution. The core limit is shared with active Step 2 CPU work.",
+                "Select ready folders, set Batch size, and choose Parallel or Sequential execution. R scripts run without an automatic timeout, and the core limit is shared with active Step 2 CPU work.",
             ),
             (
-                "Run selected folders and follow each folder’s progress and log. Stop terminates active R process trees and cancels queued folders; failed or timed-out folders remain identified.",
-                "Review DARK_MARKED_find_vertex and _tissueBorders__DARK in the result tabs, or use Load R results to reopen a completed folder.",
+                "Run selected folders and follow each folder’s progress and log. Stop terminates active R process trees and cancels queued folders; failed and cancelled folders remain identified.",
+                "Review temporal and nasal vertex and tissue-border images together in the results grid; click any image for a zoomed view, or use Load R results to reopen a completed folder.",
             ),
             (
                 "Each valid result contains a complete _flat_LIGHT.hdr and _flat_LIGHT.img Analyze pair.",
@@ -221,7 +220,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             (
                 "When all 21 ROIs are complete, Build stack becomes available and marks the folder tab Done after a successful build.",
                 "The build writes ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder.",
-                "Optional Compile measurements combines LE/RE rrMCP/AR results with Step 3 ELM-RPE and ONL exports in LE_RE_rrMCPAR_ELMRPE_ONL.xlsx.",
+                "Go to Step 5 opens the dedicated compiler and carries forward the current measurement root.",
             ),
         ),
         tips=(
@@ -230,6 +229,44 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             "The folder scanner also accepts legacy Results.xlsx or Results_org.xlsx as the measurement workbook when deciding that earlier work is complete.",
         ),
         step_index=3,
+    ),
+    TutorialPage(
+        key="step5",
+        navigation_label="Step 5 - Compile",
+        title="Step 5 - Compile all measurements and results",
+        purpose=(
+            "Step 5 combines measurements produced throughout the workflow into "
+            "one workbook for downstream review and analysis."
+        ),
+        input_summary="An LE/RE parent tree containing Step 3 text exports and Step 4 workbooks",
+        function_summary="Validate result folders and compile rrMCP/AR, ELM-RPE, and ONL measurements",
+        output_summary="LE_RE_rrMCPAR_ELMRPE_ONL.xlsx",
+        completion_check=(
+            "The compiler reaches 100%, the log reports a saved workbook, and the "
+            "selected output path contains LE_RE_rrMCPAR_ELMRPE_ONL.xlsx."
+        ),
+        stage_points=(
+            (
+                "Use the Step 4 handoff or browse to the parent folder containing LE and RE subject folders.",
+                "Review the compiled workbook path and choose a different .xlsx destination if needed.",
+                "Choose whether to include the fovea RPEtoOLM row in the ELM-RPE sheet.",
+                "Select Compile all measurements to start the final workflow step.",
+            ),
+            (
+                "AIDaS discovers current rr_MCPAR.xlsx and compatible legacy workbooks, then reads the Step 3 ELM-RPE and ONL exports.",
+                "Follow the overall progress bar and compiler log; inputs stay locked while compilation is running.",
+            ),
+            (
+                "The compiler creates the rrMCP-AR, ELM-RPE, and ONL workbook sheets.",
+                "The completed workbook is saved at the selected output path.",
+                "A 100% progress value and completion message confirm that the five-step workflow is finished.",
+            ),
+        ),
+        tips=(
+            "Select the common parent above the LE and RE trees rather than an individual subject folder.",
+            "The compiler accepts both current rr_MCPAR.xlsx outputs and recognized legacy result names.",
+        ),
+        step_index=4,
     ),
 )
 
@@ -313,7 +350,7 @@ def _pipeline_animation_state(elapsed_ms: float) -> _PipelineAnimationState:
 
 
 class _WorkflowOverviewMap(ctk.CTkFrame):
-    """Static responsive map of the four AIDaS workflow steps."""
+    """Static responsive map of the five AIDaS workflow steps."""
 
     TWO_COLUMN_BREAKPOINT = 480
     STEP_CARDS = (
@@ -324,7 +361,7 @@ class _WorkflowOverviewMap(ctk.CTkFrame):
             "primary_soft",
         ),
         (
-            "Annotate",
+            "Segment",
             "Place the fovea and six boundaries, then save nasal and temporal Light_MARKED.",
             "warning",
             "warning_soft",
@@ -340,6 +377,12 @@ class _WorkflowOverviewMap(ctk.CTkFrame):
             "Measure 21 ROIs and build the TIFF stacks and Excel measurements.",
             "success",
             "success_soft",
+        ),
+        (
+            "Compile",
+            "Combine rrMCP/AR, ELM-RPE, and ONL measurements into one workbook.",
+            "primary",
+            "primary_soft",
         ),
     )
 
@@ -424,7 +467,7 @@ class _WorkflowOverviewMap(ctk.CTkFrame):
         self.set_available_width(available_width)
 
     def set_available_width(self, logical_width: int) -> None:
-        """Lay out four step cards without introducing horizontal overflow."""
+        """Lay out workflow step cards without introducing horizontal overflow."""
 
         logical_width = max(220, int(logical_width))
         if logical_width == self._available_width:
@@ -2308,7 +2351,7 @@ class TutorialDialog(ctk.CTkToplevel):
         if page.key == "overview":
             self._section_title(
                 self.page_host,
-                "Four-step workflow",
+                "Five-step workflow",
                 pady=(12, 5),
             )
             self._render_flow(self.page_host, page)

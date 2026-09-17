@@ -30,7 +30,7 @@ from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
 from aidas.ui.classic import build_classic_application_menu
-from aidas.ui.components import AppButton, AppStatusBar, WorkflowHeader
+from aidas.ui.components import AppButton, AppStatusBar, WorkflowHeader, WorkflowProgressStrip
 from aidas.ui.menu_bar import ApplicationMenuBar
 from aidas.ui.splash import SplashWindow
 from aidas.ui.theme import (
@@ -1445,6 +1445,26 @@ class AIDaSApp(ctk.CTk):
         self._set_splash_progress(42, "Loading Step 4 analysis tools...")
         from aidas.steps.step4_analyze_isez import Step4Frame
 
+        self._set_splash_progress(48, "Loading Step 5 compiler...")
+        from aidas.steps.step5_compile import Step5Frame
+
+        self._set_splash_progress(50, "Loading preferences...")
+        self.preferences = Config()
+        self.interface_mode = set_interface_mode(
+            self.preferences.get("interface_mode", "Modern"),
+            redraw=False,
+        )
+        self.requested_interface_mode = self.interface_mode
+        self._set_splash_progress(54, "Applying the interface theme...")
+        self.style = ttk.Style(self)
+        self.appearance_mode = normalize_appearance_mode(
+            self.preferences.get("appearance_mode", self.preferences.get("theme", "System"))
+        )
+        apply_appearance_mode(
+            "Light" if self.interface_mode == "Classic" else self.appearance_mode,
+            root=self,
+        )
+
         self._set_splash_progress(50, "Loading preferences...")
         self.preferences = Config()
         self.interface_mode = set_interface_mode(
@@ -1497,9 +1517,12 @@ class AIDaSApp(ctk.CTk):
         self.header = None
         self.status_bar = None
         self.status = None
+        self.progress_strip = None
         self._modern_header_cache = None
         self._modern_status_bar_cache = None
+        self._progress_strip_cache = None
         self._build_workflow_header()
+        self._build_progress_strip()
         self._build_status_surface(f"AIDaS v{__version__} — ready")
 
         self.notebook = ttk.Notebook(self, style="AIDaS.TNotebook")
@@ -1515,7 +1538,7 @@ class AIDaSApp(ctk.CTk):
         )
         self.notebook.add(self.step1, text="  Step 1 — Load, Resize & Crop  ")
 
-        self._set_splash_progress(74, "Preparing Step 2 - Annotate and Segment...")
+        self._set_splash_progress(74, "Preparing Step 2 - Segment...")
         self.step2 = Step2Frame(
             self.notebook,
             preferences=self.preferences,
@@ -1525,7 +1548,7 @@ class AIDaSApp(ctk.CTk):
             is_step3_folder_active=self._is_step3_folder_active,
             get_step3_core_usage=self._step3_core_usage,
         )
-        self.notebook.add(self.step2, text="  Step 2 — Annotate and Segment  ")
+        self.notebook.add(self.step2, text="  Step 2 — Segment  ")
 
         self._set_splash_progress(83, "Preparing Step 3 - Flatten Retina...")
         self.step3 = Step3Frame(
@@ -1541,10 +1564,19 @@ class AIDaSApp(ctk.CTk):
             self.notebook,
             preferences=self.preferences,
             source_step=self.step3,
+            on_continue_to_step5=self._on_step4_continue_to_step5,
         )
         self.notebook.add(self.step4, text="  Step 4 — Analyze ISEZ  ")
 
-        self._set_splash_progress(97, "Finalizing the main window...")
+        self._set_splash_progress(96, "Preparing Step 5 - Compile Results...")
+        self.step5 = Step5Frame(
+            self.notebook,
+            preferences=self.preferences,
+            source_step=self.step4,
+        )
+        self.notebook.add(self.step5, text="  Step 5 — Compile Results  ")
+
+        self._set_splash_progress(98, "Finalizing the main window...")
         if self.interface_mode == "Classic":
             # Build the reusable Modern-only surfaces while the startup splash
             # is already present.  A user's first Classic -> Modern selection
@@ -1553,6 +1585,8 @@ class AIDaSApp(ctk.CTk):
             self._prime_modern_shell_cache()
         if self.header is not None:
             self.header.select_step(0)
+        if getattr(self, "progress_strip", None) is not None:
+            self.progress_strip.select_step(0)
         refresh_native_widgets(self)
         self._queue_interface_widget_refresh(include_splash=True)
         self._last_effective_appearance = ctk.get_appearance_mode()
@@ -1792,6 +1826,24 @@ class AIDaSApp(ctk.CTk):
         self._pack_shell_surface(header, side="top")
         return header
 
+    def _build_progress_strip(self):
+        """Create the global progress indicator strip for both interfaces."""
+        
+        cached = self.__dict__.get("_progress_strip_cache")
+        try:
+            if cached is not None and cached.winfo_exists():
+                self.progress_strip = cached
+                self._pack_shell_surface(cached, side="top")
+                return cached
+        except (AttributeError, tk.TclError):
+            self._progress_strip_cache = None
+            
+        progress_strip = WorkflowProgressStrip(self)
+        self.progress_strip = progress_strip
+        self._progress_strip_cache = progress_strip
+        self._pack_shell_surface(progress_strip, side="top")
+        return progress_strip
+
     def _build_status_surface(self, text: str):
         """Create the status presentation for the active interface."""
 
@@ -1853,6 +1905,16 @@ class AIDaSApp(ctk.CTk):
             except tk.TclError:
                 pass
         self.header = None
+
+    def _destroy_progress_strip(self) -> None:
+        progress_strip = self.__dict__.get("progress_strip")
+        if progress_strip is not None:
+            try:
+                progress_strip.pack_forget()
+                self._progress_strip_cache = progress_strip
+            except tk.TclError:
+                pass
+        self.progress_strip = None
 
     def _destroy_application_menus(self) -> None:
         """Remove both menu implementations and all of their root bindings."""
@@ -2056,16 +2118,29 @@ class AIDaSApp(ctk.CTk):
                 header.select_step(selected_index)
             except (tk.TclError, TypeError, ValueError):
                 pass
+                
+        progress_strip = getattr(self, "progress_strip", None)
+        if progress_strip is not None:
+            try:
+                progress_strip.select_step(selected_index)
+            except (tk.TclError, TypeError, ValueError):
+                pass
 
         step2 = getattr(self, "step2", None)
-        if step2 is None:
-            return
-        try:
-            step2_selected = selected_index == notebook.index(step2)
-        except (tk.TclError, TypeError, ValueError):
-            return
-        if step2_selected:
-            step2.render_pending_external_image()
+        if step2 is not None:
+            try:
+                if selected_index == notebook.index(step2):
+                    step2.render_pending_external_image()
+            except (tk.TclError, TypeError, ValueError):
+                pass
+
+        step5 = self.__dict__.get("step5")
+        if step5 is not None:
+            try:
+                if selected_index == notebook.index(step5):
+                    step5.on_show()
+            except (tk.TclError, TypeError, ValueError):
+                pass
 
     def _watch_system_appearance(self) -> None:
         """Keep retained ttk/native widgets synced with OS appearance changes."""
@@ -2096,6 +2171,9 @@ class AIDaSApp(ctk.CTk):
             setup_panel = getattr(step3, "r_setup_panel", None)
             if setup_panel is not None and getattr(setup_panel, "busy", False):
                 return "Step 3 R or package setup is still running."
+        step5 = self.__dict__.get("step5")
+        if step5 is not None and getattr(step5, "_running", False):
+            return "Step 5 measurement compilation is still running."
         return None
 
     def _queue_update_install(self, installer_path) -> None:
@@ -2224,6 +2302,7 @@ class AIDaSApp(ctk.CTk):
 
             self._destroy_application_menus()
             self._destroy_workflow_header()
+            self._destroy_progress_strip()
             self._destroy_status_surface()
 
             self.interface_mode = set_interface_mode(selected, redraw=False)
@@ -2243,6 +2322,7 @@ class AIDaSApp(ctk.CTk):
                 self._install_modern_title_bar()
             self._build_menu()
             self._build_workflow_header()
+            self._build_progress_strip()
             self._build_status_surface(status_text)
 
             notebook = self.__dict__.get("notebook")
@@ -2253,6 +2333,8 @@ class AIDaSApp(ctk.CTk):
                     pass
             if self.header is not None:
                 self.header.select_step(selected_index)
+            if getattr(self, "progress_strip", None) is not None:
+                self.progress_strip.select_step(selected_index)
 
             self._sync_settings_interface_controls()
             step3 = self.__dict__.get("step3")
@@ -2299,6 +2381,7 @@ class AIDaSApp(ctk.CTk):
             try:
                 self._destroy_application_menus()
                 self._destroy_workflow_header()
+                self._destroy_progress_strip()
                 self._destroy_status_surface()
                 if previous == "Classic":
                     self._restore_native_title_bar()
@@ -2318,6 +2401,7 @@ class AIDaSApp(ctk.CTk):
                     self._install_modern_title_bar()
                 self._build_menu()
                 self._build_workflow_header()
+                self._build_progress_strip()
                 self._build_status_surface(status_text)
                 notebook = self.__dict__.get("notebook")
                 if notebook is not None:
@@ -2435,6 +2519,17 @@ class AIDaSApp(ctk.CTk):
         self.notebook.select(step4)
         self.update_idletasks()
         step4.open_batch_folders(folders)
+
+    def _on_step4_continue_to_step5(self, folder=None) -> None:
+        """Open the dedicated compiler and prefill its measurement root."""
+
+        step5 = self.__dict__.get("step5")
+        if step5 is None:
+            return
+        self.notebook.select(step5)
+        self.update_idletasks()
+        if folder:
+            step5.set_input_folder(folder)
 
     def _show_about(self) -> None:
         """Open one modal About window, or focus the existing one."""

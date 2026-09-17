@@ -60,6 +60,7 @@ class InterfacePreferenceTests(unittest.TestCase):
         app.step2 = object()
         app.step3 = SimpleNamespace(refresh_appearance=mock.Mock())
         app.step4 = object()
+        app.step5 = object()
         app.update_idletasks = mock.Mock()
         app.winfo_width = mock.Mock(return_value=1000)
         app.winfo_height = mock.Mock(return_value=700)
@@ -81,7 +82,7 @@ class InterfacePreferenceTests(unittest.TestCase):
 
     def test_selecting_classic_switches_live_without_rebuilding_workflows(self):
         app = self._app_stub()
-        retained = (app.notebook, app.step1, app.step2, app.step3, app.step4)
+        retained = (app.notebook, app.step1, app.step2, app.step3, app.step4, app.step5)
 
         with (
             mock.patch("aidas.app.logical_window_size", return_value=(1000, 700)),
@@ -107,7 +108,7 @@ class InterfacePreferenceTests(unittest.TestCase):
         reassert.assert_called_once_with(app, 1000, 700)
         self.assertEqual(
             retained,
-            (app.notebook, app.step1, app.step2, app.step3, app.step4),
+            (app.notebook, app.step1, app.step2, app.step3, app.step4, app.step5),
         )
         self.assertEqual(app.notebook.selected, 2)
         app._install_modern_title_bar.assert_not_called()
@@ -141,7 +142,7 @@ class InterfacePreferenceTests(unittest.TestCase):
 
     def test_shell_build_failure_restores_previous_mode_without_persisting(self):
         app = self._app_stub()
-        retained = (app.notebook, app.step1, app.step2, app.step3, app.step4)
+        retained = (app.notebook, app.step1, app.step2, app.step3, app.step4, app.step5)
         app._build_menu.side_effect = [RuntimeError("menu failed"), None]
 
         with (
@@ -163,7 +164,7 @@ class InterfacePreferenceTests(unittest.TestCase):
         self.assertEqual(app.preferences.saved, [])
         self.assertEqual(
             retained,
-            (app.notebook, app.step1, app.step2, app.step3, app.step4),
+            (app.notebook, app.step1, app.step2, app.step3, app.step4, app.step5),
         )
         app._install_modern_title_bar.assert_called_once_with()
         self.assertIn("was not applied", app._set_status_message.call_args.args[0])

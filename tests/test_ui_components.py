@@ -18,7 +18,8 @@ from aidas.steps.step3_flatten import (
     Step3Frame,
 )
 from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel, Step4Frame
-from aidas.ui.components import AppButton, AppSplitButton, WorkflowHeader, WorkflowNavigation
+from aidas.steps.step5_compile import Step5Frame
+from aidas.ui.components import AppButton, AppSplitButton, WorkflowHeader, WorkflowNavigation, WorkflowProgressStrip
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
 from aidas.utils.ui_utils import (
     ACTION_ICON_FILES,
@@ -231,11 +232,25 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("pale_colored", conversion_source)
         self.assertIn("self._render()", refresh_source)
 
-    def test_step3_view_changes_do_not_refresh_the_tutorial(self):
-        source = inspect.getsource(Step3Frame._on_view_selected)
+    def test_step3_results_use_a_clickable_temporal_nasal_grid(self):
+        ui_source = inspect.getsource(Step3Frame._build_ui)
+        grid_source = inspect.getsource(Step3Frame._render_result_grid)
+        preview_source = inspect.getsource(Step3Frame._display_preview_image)
 
-        self.assertIn("elif self.results is not None:", source)
-        self.assertNotIn("else:\n            self._render()", source)
+        self.assertNotIn('text="View"', ui_source)
+        self.assertIn("RESULT_SIDE_ORDER", grid_source)
+        self.assertIn("RESULT_IMAGE_ROWS", grid_source)
+        self.assertIn("_open_result_zoom", grid_source)
+        self.assertIn("height=max(1, event.height * len(groups))", grid_source)
+        self.assertIn('uniform="result-image-row"', grid_source)
+        self.assertIn("image_host.pack_propagate(False)", grid_source)
+        self.assertIn('label.bind("<Button-1>"', preview_source)
+
+    def test_step3_batch_selector_omits_redundant_top_description(self):
+        source = inspect.getsource(RBatchSelectionPanel._build_ui)
+
+        self.assertNotIn("AIDaS will search the selected folder", source)
+        self.assertNotIn("Review the nasal and temporal folders", source)
 
     def test_step1_reset_uses_configurable_sdb_defaults(self):
         source = inspect.getsource(Step1Frame._set_default_import_params)
@@ -285,14 +300,18 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
     def test_fovea_prompt_uses_rounded_buttons_and_dpi_aware_icons(self):
         source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
 
-        self.assertEqual(source.count("= AppButton("), 3)
+        self.assertEqual(source.count("= AppButton("), 4)
         self.assertIn('variant="success"', source)
         self.assertIn('tint=COLOR_PAIRS["on_primary"]', source)
-        self.assertEqual(source.count("load_ctk_image("), 2)
+        self.assertEqual(source.count("load_ctk_image("), 1)
         self.assertIn("load_color_close_ctk_icon(self, size=20)", source)
         self.assertNotIn("btn_cancel = action_button(", source)
         self.assertNotIn("btn_skip = action_button(", source)
         self.assertNotIn("btn_set = action_button(", source)
+        self.assertNotIn("btn_skip", source)
+        self.assertIn('text="Confirm fovea"', source)
+        self.assertIn('text="Temporal"', source)
+        self.assertIn('text="Nasal"', source)
 
     def test_fovea_prompt_reserves_buttons_before_the_long_path(self):
         source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
@@ -302,7 +321,7 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
             'prompt_label.pack(side="left", fill="x", expand=True)'
         )
         self.assertLess(actions_pack, prompt_pack)
-        for button_name in ("btn_cancel", "btn_skip", "btn_set"):
+        for button_name in ("btn_cancel", "btn_set", "btn_temporal", "btn_nasal"):
             button_start = source.index(f"{button_name} = AppButton(")
             button_pack = source.index(f"{button_name}.pack(", button_start)
             self.assertIn("actions_frame,", source[button_start:button_pack])
@@ -310,6 +329,17 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("width=1", source)
         self.assertIn('anchor="w"', source)
         self.assertIn("prompt_tooltip.text = msg", source)
+
+    def test_fovea_and_side_prompts_are_required_in_sequence(self):
+        source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
+
+        fovea_wait = source.index("self.wait_variable(next_var)")
+        side_prompt = source.index("show_side_stage(index, path)", fovea_wait)
+        side_wait = source.index("self.wait_variable(next_var)", fovea_wait + 1)
+        self.assertLess(fovea_wait, side_prompt)
+        self.assertLess(side_prompt, side_wait)
+        self.assertNotIn('next_var.set("skip")', source)
+        self.assertIn("if side not in {IMAGE_SIDE_TEMPORAL, IMAGE_SIDE_NASAL}", source)
 
     def test_step3_r_download_uses_the_download_action(self):
         source = inspect.getsource(RSetupWizard._render_page)
@@ -322,10 +352,10 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
     def test_step3_batch_limits_use_large_numeric_steppers_and_core_wording(self):
         source = inspect.getsource(RBatchSelectionPanel._build_ui)
 
-        self.assertEqual(source.count("NativeNumericSpinbox("), 2)
+        self.assertEqual(source.count("NativeNumericSpinbox("), 1)
         self.assertNotIn("ttk.Spinbox(", source)
         self.assertIn('text="Batch size:"', source)
-        self.assertIn('text="Timeout per script (min):"', source)
+        self.assertNotIn('text="Timeout per script (min):"', source)
 
     def test_step2_exposes_the_maximum_fallback_core_limit(self):
         source = inspect.getsource(Step2BatchSegmentationSelectionPanel._build_ui)
@@ -492,8 +522,13 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("status_bar_content_margin=True", source)
         self.assertLess(source.index("self.status_var ="), source.index("self.build_standard_layout("))
 
-    def test_step2_step3_and_step4_status_bars_align_to_their_content_margins(self):
-        for builder in (Step2Frame.__init__, Step3Frame._build_ui, Step4Frame._build_ui):
+    def test_workflow_status_bars_align_to_their_content_margins(self):
+        for builder in (
+            Step2Frame.__init__,
+            Step3Frame._build_ui,
+            Step4Frame._build_ui,
+            Step5Frame._build_ui,
+        ):
             with self.subTest(builder=builder.__qualname__):
                 source = inspect.getsource(builder)
                 self.assertIn("status_bar_content_margin=True", source)
@@ -508,6 +543,51 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
 
 
 class WorkflowNavigationTests(unittest.TestCase):
+    def test_header_names_all_five_workflow_steps(self):
+        self.assertEqual(
+            WorkflowHeader.DEFAULT_STEPS,
+            (
+                "1  Load & Crop",
+                "2  Segment",
+                "3  Flatten",
+                "4  Analyze",
+                "5  Compile",
+            ),
+        )
+
+    def test_header_progress_reports_current_total_and_remaining_steps(self):
+        strip = WorkflowProgressStrip.__new__(WorkflowProgressStrip)
+        strip._step_labels = WorkflowProgressStrip.DEFAULT_STEPS
+        strip.circles = [mock.Mock() for _ in range(len(strip._step_labels))]
+        strip.workflow_progress_label = mock.Mock()
+
+        strip.select_step(3)
+
+        # Finished step (0, 1, 2)
+        strip.circles[0].update_state.assert_called_with(
+            fill_color=COLOR_PAIRS["success"],
+            text_color=COLOR_PAIRS["on_primary"],
+            text="✓"
+        )
+        
+        # Active step (3)
+        strip.circles[3].update_state.assert_called_with(
+            fill_color=COLOR_PAIRS["primary"],
+            text_color=COLOR_PAIRS["on_primary"],
+            text="4"
+        )
+        
+        # Upcoming step (4)
+        strip.circles[4].update_state.assert_called_with(
+            fill_color=COLOR_PAIRS["surface_subtle"],
+            text_color=COLOR_PAIRS["muted_text"],
+            text="5"
+        )
+
+        strip.workflow_progress_label.configure.assert_called_once_with(
+            text="Step 4 of 5: Analyze"
+        )
+
     def test_header_keeps_only_settings_and_help_shortcuts_at_top_right(self):
         source = inspect.getsource(WorkflowHeader.__init__)
 

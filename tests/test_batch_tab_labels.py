@@ -11,16 +11,16 @@ class BatchTabLabelTests(unittest.TestCase):
     def test_step2_title_does_not_embed_a_close_character(self):
         self.assertEqual(Step2Frame._batch_result_tab_text("test1"), "test1")
 
-    def test_step3_title_does_not_embed_a_close_character(self):
-        step = object.__new__(Step3Frame)
-        step.batch_results_notebook = None
-
-        self.assertEqual(
-            step._batch_result_tab_text(
-                {"folder": "test1", "base_label": "1. test1"},
-            ),
-            "1. test1",
+    def test_step3_groups_temporal_and_nasal_results_by_subject(self):
+        groups = Step3Frame._group_result_folders(
+            ["test1/temporal", "test1/nasal"],
         )
+
+        self.assertEqual(len(groups), 1)
+        self.assertTrue(groups[0]["sided"])
+        self.assertEqual(groups[0]["label"], "test1")
+        self.assertEqual(groups[0]["folders"]["temporal"].name, "temporal")
+        self.assertEqual(groups[0]["folders"]["nasal"].name, "nasal")
 
     def test_step4_progress_title_leaves_close_control_to_component(self):
         step = object.__new__(Step4Frame)

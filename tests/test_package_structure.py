@@ -97,8 +97,10 @@ class PackageStructureTests(unittest.TestCase):
             )
         ]
 
-        for source in step_sources:
-            self.assertIn("ClosableTabView", source)
+        self.assertIn("ClosableTabView", step_sources[0])
+        self.assertNotIn("ClosableTabView", step_sources[1])
+        self.assertIn("_render_result_grid", step_sources[1])
+        self.assertIn("ClosableTabView", step_sources[2])
         self.assertNotIn("ttk.Notebook(self.canvas_area)", step_sources[0])
         self.assertNotIn("Step3Batch.TNotebook", step_sources[1])
         self.assertNotIn("Step4Batch.TNotebook", step_sources[2])

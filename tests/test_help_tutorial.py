@@ -28,15 +28,15 @@ class TutorialContentTests(unittest.TestCase):
     def test_tutorial_has_overview_and_one_ordered_page_per_workflow_step(self):
         self.assertEqual(
             [page.key for page in TUTORIAL_PAGES],
-            ["overview", "step1", "step2", "step3", "step4"],
+            ["overview", "step1", "step2", "step3", "step4", "step5"],
         )
         self.assertEqual(
             [page.step_index for page in TUTORIAL_PAGES],
-            [None, 0, 1, 2, 3],
+            [None, 0, 1, 2, 3, 4],
         )
         self.assertEqual(
-            [tutorial_page_index_for_step(index) for index in range(4)],
-            [1, 2, 3, 4],
+            [tutorial_page_index_for_step(index) for index in range(5)],
+            [1, 2, 3, 4, 5],
         )
         self.assertEqual(tutorial_page_index_for_step(99), 0)
         self.assertEqual(tutorial_page_index_for_step("not-a-step"), 0)
@@ -84,6 +84,10 @@ class TutorialContentTests(unittest.TestCase):
                 self.assertIn(token, text)
 
     def test_step2_copy_names_every_required_boundary_and_output(self):
+        page = next(page for page in TUTORIAL_PAGES if page.key == "step2")
+        self.assertEqual(page.navigation_label, "Step 2 - Segment")
+        self.assertNotIn("Annotate", page.title)
+
         text = self._page_text("step2")
         for token in (
             "RNFL-Vitreous",
@@ -108,7 +112,7 @@ class TutorialContentTests(unittest.TestCase):
             "8-bit Light_MARKED",
             "16-bit Light",
             "Batch size",
-            "240 minutes",
+            "without an automatic timeout",
             "Parallel",
             "Sequential",
             "_flat_LIGHT.hdr",
@@ -138,6 +142,21 @@ class TutorialContentTests(unittest.TestCase):
             "rr_MCPAR.xlsx",
             "slice 0",
             "Apply changes",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, text)
+
+    def test_step5_copy_explains_final_compilation(self):
+        text = self._page_text("step5")
+        for token in (
+            "LE",
+            "RE",
+            "rrMCP/AR",
+            "ELM-RPE",
+            "ONL",
+            "Compile all measurements",
+            "LE_RE_rrMCPAR_ELMRPE_ONL.xlsx",
+            "100%",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, text)
@@ -230,7 +249,9 @@ class TutorialNavigationTests(unittest.TestCase):
 
         self.assertEqual(dialog.current_page.key, "step3")
         dialog._render_page.assert_called_once_with(dialog.current_page)
-        dialog.page_indicator.configure.assert_called_once_with(text="  4 of 5  ")
+        dialog.page_indicator.configure.assert_called_once_with(
+            text=f"  4 of {len(TUTORIAL_PAGES)}  "
+        )
         dialog.back_button.configure.assert_called_once_with(state="normal")
         dialog.next_button.configure.assert_called_once_with(state="normal")
         dialog.open_step_button.configure.assert_called_once_with(text="Open Step 3")
@@ -722,10 +743,10 @@ class WorkflowPipelineTests(unittest.TestCase):
 
 
 class WorkflowOverviewMapTests(unittest.TestCase):
-    def test_overview_has_exactly_four_ordered_static_step_cards(self):
+    def test_overview_has_exactly_five_ordered_static_step_cards(self):
         self.assertEqual(
             [card[0] for card in _WorkflowOverviewMap.STEP_CARDS],
-            ["Load & Crop", "Annotate", "Flatten", "Analyze"],
+            ["Load & Crop", "Segment", "Flatten", "Analyze", "Compile"],
         )
         source = inspect.getsource(_WorkflowOverviewMap)
         self.assertNotIn("Pause animation", source)
@@ -736,8 +757,8 @@ class WorkflowOverviewMapTests(unittest.TestCase):
         overview = _WorkflowOverviewMap.__new__(_WorkflowOverviewMap)
         overview._layout = None
         overview._available_width = None
-        overview._cards = [mock.Mock() for _index in range(4)]
-        overview._summary_labels = [mock.Mock() for _index in range(4)]
+        overview._cards = [mock.Mock() for _index in range(5)]
+        overview._summary_labels = [mock.Mock() for _index in range(5)]
         overview.card_host = mock.Mock()
 
         overview.set_available_width(600)
@@ -745,11 +766,11 @@ class WorkflowOverviewMapTests(unittest.TestCase):
         self.assertEqual(overview._layout, "grid")
         self.assertEqual(
             [card.grid.call_args.kwargs["row"] for card in overview._cards],
-            [0, 0, 1, 1],
+            [0, 0, 1, 1, 2],
         )
         self.assertEqual(
             [card.grid.call_args.kwargs["column"] for card in overview._cards],
-            [0, 1, 0, 1],
+            [0, 1, 0, 1, 0],
         )
 
         for card in overview._cards:
@@ -759,7 +780,7 @@ class WorkflowOverviewMapTests(unittest.TestCase):
         self.assertEqual(overview._layout, "vertical")
         self.assertEqual(
             [card.grid.call_args.kwargs["row"] for card in overview._cards],
-            [0, 1, 2, 3],
+            [0, 1, 2, 3, 4],
         )
         self.assertTrue(
             all(card.grid.call_args.kwargs["column"] == 0 for card in overview._cards)
@@ -818,7 +839,7 @@ class WorkflowOverviewMapTests(unittest.TestCase):
 
     def test_detailed_pages_have_no_duplicate_constant_process_list(self):
         source = inspect.getsource(TutorialDialog._render_page)
-        self.assertIn('"Four-step workflow"', source)
+        self.assertIn('"Five-step workflow"', source)
         self.assertNotIn("Process at a glance", source)
         self.assertNotIn("How to use this step", source)
         self.assertNotIn("_render_process", inspect.getsource(TutorialDialog))

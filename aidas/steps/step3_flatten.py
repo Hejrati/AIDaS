@@ -1,4 +1,4 @@
-﻿"""Step 3 - batch OCT flattening with the original R workflow."""
+"""Step 3 - batch OCT flattening with the original R workflow."""
 
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ from aidas.utils.log_paths import app_log_dir
 from aidas.utils.r_script_library import discover_r_scripts, import_r_script, user_r_script_dir
 from aidas.ui.components import AppButton
 from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
-from aidas.ui.tabs import ClosableTabView
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
@@ -1501,7 +1500,6 @@ class RBatchSelectionTable(ttk.Frame):
         "Running output R script",
         "Completed",
         "Cancelled",
-        "Timed out",
         "Failed",
     )
     # Kept as the complete public set for callers/tests that need to verify that
@@ -1938,25 +1936,9 @@ class RBatchSelectionPanel(ttk.Frame):
         wrapper.pack(fill="both", expand=True)
 
         ttk.Label(wrapper, text="Batch R Script Processing", font=("", 12, "bold")).pack(anchor="w")
-        if self.input_folders is None:
-            instructions = (
-                "AIDaS will search the selected folder and subfolders for Light.img and Light_MARKED.img. "
-                "Folders containing existing RData are shown as skipped and will not be processed."
-            )
-        else:
-            instructions = (
-                "Review the nasal and temporal folders saved in Step 2, select the folders to process, "
-                "and press Start to run the selected R scripts. Folders containing existing RData are skipped."
-            )
-        ttk.Label(
-            wrapper,
-            text=instructions,
-            wraplength=760,
-            justify="left",
-        ).pack(anchor="w", pady=(4, 10))
 
         top = ttk.Frame(wrapper)
-        top.pack(fill="x", pady=(0, 8))
+        top.pack(fill="x", pady=(6, 8))
         self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
         ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(
             side="left",
@@ -2001,16 +1983,6 @@ class RBatchSelectionPanel(ttk.Frame):
         self.workers_spin.pack(side="left", padx=(6, 12))
         self.worker_limit_var = tk.StringVar(value=self._worker_limit_text(max_workers))
         ttk.Label(settings_row, textvariable=self.worker_limit_var, style="AIDaS.Muted.TLabel").pack(side="left")
-        ttk.Label(settings_row, text="Timeout per script (min):").pack(side="left", padx=(12, 0))
-        self.timeout_var = tk.IntVar(value=self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES)
-        self.timeout_spin = NativeNumericSpinbox(
-            settings_row,
-            textvariable=self.timeout_var,
-            minimum=1,
-            maximum=10080,
-            width=7,
-        )
-        self.timeout_spin.pack(side="left", padx=(6, 12))
         self.workers_spin.configure(state="disabled")
 
         mode_row = ttk.Frame(run_box)
@@ -2211,11 +2183,6 @@ class RBatchSelectionPanel(ttk.Frame):
             workers = max(1, int(self.workers_var.get()))
         except (TypeError, ValueError, tk.TclError):
             workers = 1
-        try:
-            timeout_minutes = max(1, min(10080, int(self.timeout_var.get())))
-        except (TypeError, ValueError, tk.TclError):
-            timeout_minutes = self.step_frame.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES
-        self.timeout_var.set(timeout_minutes)
         workers = min(workers, max_workers)
         self.workers_var.set(workers)
         output_mode = self.step_frame._normalize_r_output_mode(self.output_mode_var.get())
@@ -2224,13 +2191,11 @@ class RBatchSelectionPanel(ttk.Frame):
             workers,
             main_script_path,
             output_script_path,
-            timeout_minutes * 60,
             output_mode=output_mode,
         )
 
     def _cancel(self):
         self.step_frame._close_r_batch_panel(render_previous=True)
-
 
 class RBatchRunPanel(ttk.Frame):
     """Embedded progress panel for concurrent folder-level R script runs."""
@@ -2243,7 +2208,6 @@ class RBatchRunPanel(ttk.Frame):
         workers,
         main_script_path,
         output_script_path,
-        timeout_seconds,
         output_mode="parallel",
     ):
         super().__init__(parent)
@@ -2252,7 +2216,6 @@ class RBatchRunPanel(ttk.Frame):
         self.workers = workers
         self.main_script_path = Path(main_script_path)
         self.output_script_path = Path(output_script_path)
-        self.timeout_seconds = max(1, int(timeout_seconds))
         self.output_mode = self.step_frame._normalize_r_output_mode(output_mode)
         self.row_by_folder = {}
         self.step_states_by_folder = {}
@@ -2413,7 +2376,7 @@ class RBatchRunPanel(ttk.Frame):
             if status == "Completed":
                 self._finish_current_step(folder, "Done")
                 self._append_step(folder, "Completed", "Done")
-            elif status in {"Failed", "Cancelled", "Timed out"}:
+            elif status in {"Failed", "Cancelled"}:
                 self._finish_current_step(folder, status)
             else:
                 self._start_step(folder, status)
@@ -2464,8 +2427,7 @@ class RBatchRunPanel(ttk.Frame):
             self.workers,
             self.main_script_path,
             self.output_script_path,
-            self.timeout_seconds,
-            self.output_mode,
+            output_mode=self.output_mode,
         )
 
     def _close(self):
@@ -2547,6 +2509,63 @@ class RBatchRunPanel(ttk.Frame):
             pass
 
 
+class Step3ResultZoomDialog(tk.Toplevel):
+    """Resizable close-up viewer for one Step 3 diagnostic image."""
+
+    def __init__(self, owner, image, title):
+        super().__init__(owner)
+        self.withdraw()
+        self.title(title)
+        self.minsize(640, 480)
+        self.geometry("1000x700")
+        self.transient(owner.winfo_toplevel())
+        self._source_image = image.convert("RGB")
+        self._photo = None
+
+        body = ttk.Frame(self, padding=(10, 10, 10, 6))
+        body.pack(fill="both", expand=True)
+        self.image_label = tk.Label(
+            body,
+            bg=resolve_color(COLOR_PAIRS["surface"]),
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        self.image_label.pack(fill="both", expand=True)
+        self.image_label.bind("<Configure>", self._redraw, add="+")
+
+        footer = ttk.Frame(self, padding=(10, 0, 10, 10))
+        footer.pack(fill="x")
+        ttk.Button(footer, text="Close", command=self.destroy).pack(side="right")
+
+        self.bind("<Escape>", lambda _event: self.destroy(), add="+")
+        self.protocol("WM_DELETE_WINDOW", self.destroy)
+        self.deiconify()
+        self.lift()
+        self.after_idle(self._redraw)
+
+    def _redraw(self, _event=None):
+        try:
+            width = max(1, self.image_label.winfo_width())
+            height = max(1, self.image_label.winfo_height())
+        except tk.TclError:
+            return
+        if width <= 1 or height <= 1:
+            return
+        background = resolve_color(COLOR_PAIRS["surface"])
+        fitted = ImageOps.contain(
+            self._source_image,
+            (width, height),
+            Image.Resampling.LANCZOS,
+        )
+        canvas = Image.new("RGB", (width, height), background)
+        canvas.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
+        self._photo = ImageTk.PhotoImage(canvas)
+        try:
+            self.image_label.configure(image=self._photo, bg=background)
+        except tk.TclError:
+            pass
+
+
 class Step3Frame(SidebarStepFrame):
     """Step 3 tab UI for R setup and batch OCT flattening."""
     TUTORIAL_IMAGE_NAME = "step3_tutorial.png"
@@ -2560,9 +2579,13 @@ class Step3Frame(SidebarStepFrame):
         ("Light_MARKED", ("Light_MARKED", "LIGHT_MARKED"), "Light_MARKED.hdr/.img", 8),
         ("LIGHT", ("LIGHT", "Light"), "LIGHT.hdr/.img", 16),
     )
+    RESULT_IMAGE_ROWS = (
+        ("Vertex", "DARK_MARKED_find_vertex.png"),
+        ("Tissue", "_tissueBorders__DARK.png"),
+    )
+    RESULT_SIDE_ORDER = ("temporal", "nasal")
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
     R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
-    DEFAULT_R_SCRIPT_TIMEOUT_MINUTES = 240
     R_OUTPUT_MODE_PARALLEL = "parallel"
     R_OUTPUT_MODE_SEQUENTIAL = "sequential"
     R_REQUIRED_VERSION = "3.3.1"
@@ -2647,11 +2670,10 @@ class Step3Frame(SidebarStepFrame):
         self.r_setup_panel = None
         self.r_batch_panel = None
         self.r_batch_run_panel = None
-        self.batch_results_notebook = None
+        self.batch_results_grid = None
         self.batch_result_folders = []
         self.step4_result_folders = []
-        self.batch_result_tab_states = {}
-        self._active_batch_result_tab = None
+        self._result_zoom_dialog = None
         self.r_setup_button = None
         self.r_batch_button = None
         self.load_r_results_button = None
@@ -2666,7 +2688,6 @@ class Step3Frame(SidebarStepFrame):
         self._pending_batch_folders = None
         self.r_package_library_path = None if self.preferences is None else self.preferences.get("r_package_library_path")
 
-        self.view_var = tk.StringVar(value="DARK_MARKED_find_vertex")
         self.status_var = tk.StringVar(value="Ready - use batch Step 3 R processing.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
@@ -2712,18 +2733,6 @@ class Step3Frame(SidebarStepFrame):
             tooltip="Open a folder containing completed Step 3 results.",
         )
         self.load_r_results_button.pack(fill="x", pady=2)
-
-        ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(6, 4))
-
-        ttk.Label(process, text="View").pack(anchor="w", pady=(6, 2))
-        view_combo = ttk.Combobox(
-            process,
-            textvariable=self.view_var,
-            values=["DARK_MARKED_find_vertex", "_tissueBorders__DARK"],
-            state="readonly",
-        )
-        view_combo.pack(fill="x", pady=2)
-        view_combo.bind("<<ComboboxSelected>>", lambda _: self._on_view_selected())
 
         ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(8, 4))
         progress_text_frame = ttk.Frame(process, height=44)
@@ -3560,7 +3569,6 @@ class Step3Frame(SidebarStepFrame):
         self.step4_result_folders = self._normalize_step4_result_folders([folder])
         self._load_original_light_for_preview(folder)
         self.progress_text_var.set("Loaded R results")
-        self.view_var.set("DARK_MARKED_find_vertex")
         self.info_var.set(
             f"flattened_dark: {results['flattened_dark'].shape}\n"
             f"flattened_light: {results['flattened_light'].shape}\n"
@@ -3700,7 +3708,6 @@ class Step3Frame(SidebarStepFrame):
     def _reset_to_tutorial_state(self):
         self.results = None
         self.original_light_volume = None
-        self.view_var.set("DARK_MARKED_find_vertex")
         self.progress_text_var.set("Idle")
         self._render()
 
@@ -3774,6 +3781,13 @@ class Step3Frame(SidebarStepFrame):
         return self._folder_key(folder) in getattr(self, "_active_r_folder_keys", set())
 
     def _clear_plot_holder(self):
+        zoom_dialog = getattr(self, "_result_zoom_dialog", None)
+        if zoom_dialog is not None:
+            try:
+                zoom_dialog.destroy()
+            except tk.TclError:
+                pass
+            self._result_zoom_dialog = None
         if self.canvas is not None:
             try:
                 widget = self.canvas.get_tk_widget() if hasattr(self.canvas, "get_tk_widget") else self.canvas
@@ -3787,10 +3801,8 @@ class Step3Frame(SidebarStepFrame):
         self._preview_photo = None
         self.r_batch_panel = None
         self.r_batch_run_panel = None
-        self.batch_results_notebook = None
+        self.batch_results_grid = None
         self.batch_result_folders = []
-        self.batch_result_tab_states = {}
-        self._active_batch_result_tab = None
 
     def _open_r_batch_scanner(self):
         if self._busy:
@@ -3981,7 +3993,6 @@ class Step3Frame(SidebarStepFrame):
         workers,
         main_script_path,
         output_script_path,
-        timeout_seconds,
         output_mode="parallel",
     ):
         restart = (
@@ -3989,7 +4000,6 @@ class Step3Frame(SidebarStepFrame):
             int(workers),
             Path(main_script_path),
             Path(output_script_path),
-            int(timeout_seconds),
             self._normalize_r_output_mode(output_mode),
         )
         if self._busy:
@@ -4000,7 +4010,7 @@ class Step3Frame(SidebarStepFrame):
         self._pending_batch_restart = None
         self._start_batch_r_runs(*restart, allow_existing_rdata=True)
 
-    def _run_supervised_r_command(self, command, cwd, env, timeout_seconds, on_line):
+    def _run_supervised_r_command(self, command, cwd, env, on_line):
         popen_options = {
             "cwd": cwd,
             "stdin": subprocess.DEVNULL,
@@ -4041,8 +4051,6 @@ class Step3Frame(SidebarStepFrame):
 
         reader = threading.Thread(target=read_output, daemon=True)
         reader.start()
-        timeout_seconds = max(1, int(timeout_seconds))
-        deadline = time.monotonic() + timeout_seconds
         stop_reason = None
         output_complete = False
 
@@ -4050,9 +4058,6 @@ class Step3Frame(SidebarStepFrame):
             while True:
                 if self._r_cancel_event.is_set():
                     stop_reason = "cancelled"
-                    break
-                if time.monotonic() >= deadline:
-                    stop_reason = "timed_out"
                     break
                 if output_complete:
                     if not self._process_is_running(process):
@@ -4086,9 +4091,7 @@ class Step3Frame(SidebarStepFrame):
                         break
                     if item is not sentinel:
                         on_line(item)
-                if stop_reason == "cancelled":
-                    return 130, "Cancelled by user.", stop_reason
-                return 124, f"R script exceeded the {timeout_seconds}-second timeout.", stop_reason
+                return 130, "Cancelled by user.", stop_reason
 
             try:
                 returncode = process.wait()
@@ -4104,7 +4107,6 @@ class Step3Frame(SidebarStepFrame):
         workers,
         main_script_path=None,
         output_script_path=None,
-        timeout_seconds=None,
         output_mode="parallel",
         allow_existing_rdata=False,
     ):
@@ -4114,10 +4116,6 @@ class Step3Frame(SidebarStepFrame):
             return
         if self._busy:
             return
-        timeout_seconds = max(
-            1,
-            int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
-        )
         main_script_path = (
             Path(main_script_path) if main_script_path is not None else self._selected_r_script_path("main")
         )
@@ -4152,7 +4150,6 @@ class Step3Frame(SidebarStepFrame):
             workers,
             main_script_path,
             output_script_path,
-            timeout_seconds,
             output_mode,
         )
         self.r_batch_run_panel.pack(fill="both", expand=True)
@@ -4180,7 +4177,6 @@ class Step3Frame(SidebarStepFrame):
                 output_script_path,
                 folders,
                 workers,
-                timeout_seconds,
                 bool(allow_existing_rdata),
                 output_mode,
             ),
@@ -4245,7 +4241,6 @@ class Step3Frame(SidebarStepFrame):
         main_script_path,
         r_config,
         batch_folder=None,
-        timeout_seconds=None,
         r_thread_limit=None,
     ):
         folder = Path(batch_folder or r_config["input_dir"])
@@ -4269,10 +4264,6 @@ class Step3Frame(SidebarStepFrame):
         main_cmd = self._build_r_run_command(rscript_path, main_script_path, script_args)
         env = self._r_run_env_for_config(r_config, r_thread_limit)
         output_lines = []
-        timeout_seconds = max(
-            1,
-            int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
-        )
 
         self.after(
             0,
@@ -4303,7 +4294,6 @@ class Step3Frame(SidebarStepFrame):
             main_cmd,
             r_config["input_dir"],
             env,
-            timeout_seconds,
             handle_line,
         )
         return {
@@ -4322,7 +4312,6 @@ class Step3Frame(SidebarStepFrame):
         r_config,
         prior_result,
         batch_folder=None,
-        timeout_seconds=None,
         r_thread_limit=None,
     ):
         folder = Path(batch_folder or r_config["input_dir"])
@@ -4345,10 +4334,6 @@ class Step3Frame(SidebarStepFrame):
         output_lines = [prior_result.get("stdout", "")]
         output_lines.append(f"\n--- Output script: {Path(output_script_path).name} ---\n")
         env = self._r_run_env_for_config(r_config, r_thread_limit)
-        timeout_seconds = max(
-            1,
-            int(timeout_seconds or (self.DEFAULT_R_SCRIPT_TIMEOUT_MINUTES * 60)),
-        )
 
         self.after(
             0,
@@ -4363,7 +4348,6 @@ class Step3Frame(SidebarStepFrame):
             output_cmd,
             r_config["output_dir"],
             env,
-            timeout_seconds,
             output_lines.append,
         )
         return {
@@ -4420,8 +4404,6 @@ class Step3Frame(SidebarStepFrame):
             outcome_label = (
                 "Cancelled"
                 if outcome == "cancelled"
-                else "Timed out"
-                if outcome == "timed_out"
                 else "Failed"
             )
             self.after(
@@ -4451,7 +4433,6 @@ class Step3Frame(SidebarStepFrame):
         output_script_path,
         r_config,
         batch_folder=None,
-        timeout_seconds=None,
         r_thread_limit=None,
     ):
         main_result = self._run_main_r_script_for_config(
@@ -4459,7 +4440,6 @@ class Step3Frame(SidebarStepFrame):
             main_script_path,
             r_config,
             batch_folder=batch_folder,
-            timeout_seconds=timeout_seconds,
             r_thread_limit=r_thread_limit,
         )
         if main_result["returncode"] != 0:
@@ -4474,7 +4454,6 @@ class Step3Frame(SidebarStepFrame):
             r_config,
             main_result,
             batch_folder=batch_folder,
-            timeout_seconds=timeout_seconds,
             r_thread_limit=r_thread_limit,
         )
         return self._finalize_r_script_result(
@@ -4490,7 +4469,6 @@ class Step3Frame(SidebarStepFrame):
         output_script_path,
         folders,
         workers,
-        timeout_seconds,
         allow_existing_rdata=False,
         output_mode="parallel",
     ):
@@ -4519,7 +4497,6 @@ class Step3Frame(SidebarStepFrame):
             status = {
                 "completed": "Completed",
                 "cancelled": "Cancelled",
-                "timed_out": "Timed out",
                 "failed": "Failed",
             }.get(outcome, "Failed")
             self.after(
@@ -4551,7 +4528,6 @@ class Step3Frame(SidebarStepFrame):
                     main_script_path,
                     r_config,
                     batch_folder=folder,
-                    timeout_seconds=timeout_seconds,
                     r_thread_limit=main_thread_limit,
                 )
             except Exception as exc:
@@ -4578,7 +4554,6 @@ class Step3Frame(SidebarStepFrame):
                     output_script_path,
                     r_config,
                     batch_folder=folder,
-                    timeout_seconds=timeout_seconds,
                     r_thread_limit=main_thread_limit,
                 )
             except Exception as exc:
@@ -4593,7 +4568,6 @@ class Step3Frame(SidebarStepFrame):
                     r_config,
                     main_result,
                     batch_folder=folder,
-                    timeout_seconds=timeout_seconds,
                     r_thread_limit=output_thread_limit,
                 )
                 return self._finalize_r_script_result(
@@ -4725,12 +4699,11 @@ class Step3Frame(SidebarStepFrame):
         ]
         success = outcomes.count("completed")
         cancelled = outcomes.count("cancelled")
-        timed_out = outcomes.count("timed_out")
         failed = outcomes.count("failed")
         self.progress_text_var.set("Batch completed")
         summary = (
             f"Batch complete: {success} succeeded, {failed} failed, "
-            f"{timed_out} timed out, {cancelled} cancelled."
+            f"{cancelled} cancelled."
         )
         self.status_var.set(summary)
         if panel is not None:
@@ -4818,7 +4791,7 @@ class Step3Frame(SidebarStepFrame):
     def _tutorial_asset_path(self):
         return self._resource_path(Path("assets") / self.TUTORIAL_IMAGE_NAME)
 
-    def _display_preview_image(self, image, background="#ffffff", parent=None):
+    def _display_preview_image(self, image, background="#ffffff", parent=None, on_click=None):
         parent = self.plot_holder if parent is None else parent
         label = tk.Label(parent, bg=background, borderwidth=0, highlightthickness=0)
         label.pack(fill="both", expand=True)
@@ -4844,148 +4817,228 @@ class Step3Frame(SidebarStepFrame):
                 return
 
         label.bind("<Configure>", redraw, add="+")
+        if on_click is not None:
+            label.configure(cursor="hand2", takefocus=True)
+            label.bind("<Button-1>", lambda _event: on_click(), add="+")
+            label.bind("<Return>", lambda _event: on_click(), add="+")
+            label.bind("<space>", lambda _event: on_click(), add="+")
         if parent is self.plot_holder:
             self.canvas = label
         self.after(0, redraw)
-
-    def _batch_result_tab_name_limit(self):
-        notebook = self.batch_results_notebook
-        if notebook is None:
-            return 18
-        try:
-            tab_count = max(1, len(notebook.tabs()))
-            width = max(260, notebook.winfo_width())
-        except tk.TclError:
-            return 18
-        per_tab = max(70, width // tab_count)
-        return max(6, min(18, (per_tab - 54) // 7))
-
-    @staticmethod
-    def _compact_batch_result_name(name, limit):
-        name = str(name or "Folder")
-        if len(name) <= limit:
-            return name
-        if limit <= 3:
-            return name[:limit]
-        return f"{name[: limit - 3]}..."
-
-    def _batch_result_tab_text(self, state, *, active=False):
-        folder = Path(state.get("folder") or "")
-        raw_label = state.get("base_label") or folder.name or str(folder)
-        if ". " in raw_label:
-            prefix, name = raw_label.split(". ", 1)
-            tab_name = name if active else self._compact_batch_result_name(name, self._batch_result_tab_name_limit())
-            label = f"{prefix}. {tab_name}"
-        else:
-            label = raw_label if active else self._compact_batch_result_name(raw_label, self._batch_result_tab_name_limit())
         return label
 
-    def _refresh_batch_result_tab_labels(self):
-        notebook = self.batch_results_notebook
-        if notebook is None:
-            return
-        for tab_id in notebook.tabs():
-            try:
-                tab_key = str(notebook.nametowidget(tab_id))
-            except tk.TclError:
+    @classmethod
+    def _group_result_folders(cls, folders):
+        """Group result folders by subject while preserving the input order."""
+
+        groups = {}
+        order = []
+        for value in folders or ():
+            path = Path(value).expanduser()
+            side = path.name.casefold()
+            has_side_children = any((path / name).is_dir() for name in cls.RESULT_SIDE_ORDER)
+
+            if side in cls.RESULT_SIDE_ORDER:
+                root = path.parent
+                key = ("sides", os.path.normcase(os.path.abspath(os.fspath(root))))
+                if key not in groups:
+                    groups[key] = {
+                        "label": root.name or str(root),
+                        "root": root,
+                        "folders": {},
+                        "sided": True,
+                    }
+                    order.append(key)
+                groups[key]["folders"][side] = path
                 continue
-            state = self.batch_result_tab_states.get(tab_key)
-            if state is None:
+
+            if has_side_children:
+                root = path
+                key = ("sides", os.path.normcase(os.path.abspath(os.fspath(root))))
+                if key not in groups:
+                    groups[key] = {
+                        "label": root.name or str(root),
+                        "root": root,
+                        "folders": {},
+                        "sided": True,
+                    }
+                    order.append(key)
+                for side_name in cls.RESULT_SIDE_ORDER:
+                    groups[key]["folders"][side_name] = root / side_name
                 continue
+
+            key = ("folder", os.path.normcase(os.path.abspath(os.fspath(path))))
+            if key not in groups:
+                groups[key] = {
+                    "label": path.name or str(path),
+                    "root": path,
+                    "folders": {"result": path},
+                    "sided": False,
+                }
+                order.append(key)
+
+        result = []
+        for key in order:
+            group = groups[key]
+            if group["sided"]:
+                for side_name in cls.RESULT_SIDE_ORDER:
+                    group["folders"].setdefault(side_name, group["root"] / side_name)
+            result.append(group)
+        return result
+
+    def _load_result_preview(self, folder, filename):
+        try:
+            return self._load_result_png_from_folder(folder, filename)
+        except Exception as exc:
+            return _placeholder_image(
+                f"Could not load {filename}:\n{exc}",
+                size=(1200, 700),
+                title=filename,
+            )
+
+    def _open_result_zoom(self, image, title):
+        current = getattr(self, "_result_zoom_dialog", None)
+        if current is not None:
             try:
-                notebook.tab(tab_id, text=self._batch_result_tab_text(state, active=tab_key == self._active_batch_result_tab))
+                current.destroy()
             except tk.TclError:
                 pass
-
-    def _on_batch_result_tab_changed(self, _notebook, tab):
-        self._active_batch_result_tab = str(tab)
-        self._refresh_batch_result_tab_labels()
-
-    def _close_batch_result_tab(self, notebook, tab):
-        tab_key = str(tab)
-        state = self.batch_result_tab_states.pop(tab_key, None)
-        if state is not None:
-            folder = Path(state["folder"])
-            self.batch_result_folders = [item for item in self.batch_result_folders if Path(item) != folder]
-        try:
-            notebook.forget(tab)
-        except tk.TclError:
-            return
-        if tab_key == self._active_batch_result_tab:
-            self._active_batch_result_tab = None
-            tabs = notebook.tabs()
-            if tabs:
-                notebook.select(tabs[0])
-            else:
-                self.batch_results_notebook = None
-                self.batch_result_folders = []
-                self._render()
+        self._result_zoom_dialog = Step3ResultZoomDialog(self, image, title)
 
     @staticmethod
-    def _result_png_name_for_view(view):
-        if view == "DARK_MARKED_find_vertex":
-            return "DARK_MARKED_find_vertex.png"
-        if view == "_tissueBorders__DARK":
-            return "_tissueBorders__DARK.png"
-        return None
+    def _bind_result_grid_mousewheel(widget, canvas):
+        def scroll(event):
+            if getattr(event, "num", None) == 4:
+                direction = -1
+            elif getattr(event, "num", None) == 5:
+                direction = 1
+            else:
+                direction = -1 if event.delta > 0 else 1
+            canvas.yview_scroll(direction * 3, "units")
+            return "break"
 
-    def _render_result_image_for_folder(self, parent, folder):
-        view = self.view_var.get()
-        filename = self._result_png_name_for_view(view)
-        if filename is None:
-            image = _placeholder_image(
-                f"Unknown Step 3 view:\n{view}",
-                size=(1600, 1000),
-                title="Step 3 Results",
+        widget.bind("<MouseWheel>", scroll, add="+")
+        widget.bind("<Button-4>", scroll, add="+")
+        widget.bind("<Button-5>", scroll, add="+")
+        for child in widget.winfo_children():
+            Step3Frame._bind_result_grid_mousewheel(child, canvas)
+
+    def _render_result_grid(self, folders):
+        folders = [Path(folder) for folder in folders]
+        groups = self._group_result_folders(folders)
+        if not groups:
+            return
+
+        self._clear_plot_holder()
+        self.batch_result_folders = folders
+
+        viewport = ttk.Frame(self.plot_holder)
+        viewport.pack(fill="both", expand=True)
+        viewport.rowconfigure(0, weight=1)
+        viewport.columnconfigure(0, weight=1)
+
+        background = resolve_color(COLOR_PAIRS["surface"])
+        canvas = tk.Canvas(
+            viewport,
+            bg=background,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        grid = ttk.Frame(canvas, padding=(12, 8, 12, 12))
+        window_id = canvas.create_window((0, 0), window=grid, anchor="nw")
+        grid.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+            add="+",
+        )
+
+        def resize_grid(event):
+            # Give each subject one complete viewport. Its four diagnostics can
+            # then stay visible together, while additional subjects scroll as
+            # full, consistently sized result pages.
+            canvas.itemconfigure(
+                window_id,
+                width=event.width,
+                height=max(1, event.height * len(groups)),
             )
-        else:
-            try:
-                image = self._load_result_png_from_folder(folder, filename)
-            except Exception as exc:
-                image = _placeholder_image(
-                    f"Could not load {filename}:\n{exc}",
-                    size=(1600, 1000),
-                    title=filename,
-                )
-        self._display_preview_image(image, parent=parent)
+
+        canvas.bind(
+            "<Configure>",
+            resize_grid,
+            add="+",
+        )
+
+        for group_index, group in enumerate(groups):
+            subject = ttk.LabelFrame(grid, text=group["label"], padding=(10, 6, 10, 10))
+            subject.grid(row=group_index, column=0, sticky="nsew", pady=(0, 10))
+            grid.rowconfigure(group_index, weight=1, uniform="result-subject")
+            subject.columnconfigure(0, minsize=72)
+
+            if group["sided"]:
+                columns = [
+                    (side_name.title(), group["folders"][side_name])
+                    for side_name in self.RESULT_SIDE_ORDER
+                ]
+            else:
+                columns = [("Result", group["folders"]["result"])]
+
+            for column_index, (column_title, _folder) in enumerate(columns, start=1):
+                subject.columnconfigure(column_index, weight=1, uniform="result-side")
+                ttk.Label(
+                    subject,
+                    text=column_title,
+                    anchor="center",
+                    font=("", 10, "bold"),
+                ).grid(row=0, column=column_index, sticky="ew", padx=5, pady=(0, 4))
+
+            for row_index, (result_title, filename) in enumerate(self.RESULT_IMAGE_ROWS, start=1):
+                subject.rowconfigure(row_index, weight=1, uniform="result-image-row")
+                ttk.Label(
+                    subject,
+                    text=result_title,
+                    anchor="e",
+                    font=("", 10, "bold"),
+                ).grid(row=row_index, column=0, sticky="e", padx=(0, 6))
+                for column_index, (column_title, folder) in enumerate(columns, start=1):
+                    image = self._load_result_preview(folder, filename)
+                    zoom_title = f"{group['label']} — {column_title} — {result_title}"
+                    image_host = ttk.Frame(subject)
+                    image_host.grid(
+                        row=row_index,
+                        column=column_index,
+                        sticky="nsew",
+                        padx=5,
+                        pady=5,
+                    )
+                    image_host.pack_propagate(False)
+                    preview = self._display_preview_image(
+                        image,
+                        background=background,
+                        parent=image_host,
+                        on_click=lambda image=image, title=zoom_title: self._open_result_zoom(
+                            image,
+                            title,
+                        ),
+                    )
+                    HoverToolTip(preview, f"Open {zoom_title} in a zoomed view.")
+
+        grid.columnconfigure(0, weight=1)
+        self.canvas = canvas
+        self.batch_results_grid = grid
+        self._bind_result_grid_mousewheel(grid, canvas)
 
     def _open_batch_r_result_tabs(self, folders):
+        """Display completed batch results in the shared diagnostic grid."""
+
         folders = [Path(folder) for folder in folders]
         if not folders:
             return
-        self._clear_plot_holder()
-        self.batch_result_folders = folders
-        self.batch_result_tab_states = {}
-        self._active_batch_result_tab = None
-        notebook = ClosableTabView(
-            self.plot_holder,
-            command=self._on_batch_result_tab_changed,
-            close_command=self._close_batch_result_tab,
-        )
-        notebook.pack(fill="both", expand=True)
-        notebook.bind(
-            "<Configure>",
-            lambda _event: self._refresh_batch_result_tab_labels(),
-            add="+",
-        )
-        self.batch_results_notebook = notebook
-
-        for index, folder in enumerate(folders, start=1):
-            state = {
-                "folder": folder,
-                "base_label": f"{index}. {folder.name or folder}",
-            }
-            frame = notebook.add(text=self._batch_result_tab_text(state))
-            tab_key = str(frame)
-            self.batch_result_tab_states[tab_key] = state
-            ttk.Label(frame, text=str(folder), anchor="w", padding=4).pack(fill="x")
-            image_host = ttk.Frame(frame)
-            image_host.pack(fill="both", expand=True)
-            self._render_result_image_for_folder(image_host, folder)
-
-        first_tab = notebook.tabs()[0] if notebook.tabs() else None
-        if first_tab:
-            notebook.select(first_tab)
+        self._render_result_grid(folders)
 
         self.current_sdb_dir = str(folders[0])
         self.output_sdb_dir = str(folders[0])
@@ -4993,12 +5046,6 @@ class Step3Frame(SidebarStepFrame):
         self.original_light_volume = None
         self.status_var.set(f"Opened Step 3 results for {len(folders)} folder(s).")
         self.info_var.set("Batch Step 3 R results opened:\n" + "\n".join(str(folder) for folder in folders))
-
-    def _on_view_selected(self):
-        if self.batch_result_folders:
-            self._open_batch_r_result_tabs(self.batch_result_folders)
-        elif self.results is not None:
-            self._render()
 
     def _render_tutorial(self):
         tutorial_path = self._tutorial_asset_path()
@@ -5068,13 +5115,13 @@ class Step3Frame(SidebarStepFrame):
     def refresh_appearance(self):
         """Redraw theme-dependent tutorial content without closing active work."""
 
-        panels = (
-            self.r_setup_panel,
-            self.r_batch_panel,
-            self.r_batch_run_panel,
-            self.batch_results_notebook,
-        )
-        if self.results is None and not self.batch_result_folders and not any(panels):
+        if self.batch_result_folders:
+            self._render_result_grid(self.batch_result_folders)
+            return
+        panels = (self.r_setup_panel, self.r_batch_panel, self.r_batch_run_panel)
+        if self.results is None and not any(panels):
+            self._render()
+        elif self.results is not None:
             self._render()
 
     def _result_info_text(self):
@@ -5088,44 +5135,13 @@ class Step3Frame(SidebarStepFrame):
         )
 
     def _render(self):
-        view = self.view_var.get()
-        self._clear_plot_holder()
-
         if self.results is None:
+            self._clear_plot_holder()
             self._render_tutorial()
             return
-
-        if view == "DARK_MARKED_find_vertex":
-            try:
-                image = self._load_result_png("DARK_MARKED_find_vertex.png")
-                self.status_var.set("Showing DARK_MARKED_find_vertex.png.")
-            except Exception as exc:
-                image = _placeholder_image(
-                    f"Could not load DARK_MARKED_find_vertex.png:\n{exc}",
-                    size=(1600, 1000),
-                    title="DARK_MARKED_find_vertex.png",
-                )
-                self.status_var.set("Could not load DARK_MARKED_find_vertex.png.")
-        elif view == "_tissueBorders__DARK":
-            try:
-                image = self._load_result_png("_tissueBorders__DARK.png")
-                self.status_var.set("Showing _tissueBorders__DARK.png.")
-            except Exception as exc:
-                image = _placeholder_image(
-                    f"Could not load _tissueBorders__DARK.png:\n{exc}",
-                    size=(1600, 1000),
-                    title="_tissueBorders__DARK.png",
-                )
-                self.status_var.set("Could not load _tissueBorders__DARK.png.")
-        else:
-            image = _placeholder_image(
-                f"Unknown Step 3 view:\n{view}",
-                size=(1600, 1000),
-                title="Step 3 Results",
-            )
-            self.status_var.set("Unknown Step 3 results view.")
-
-        self._display_preview_image(image)
+        folder = Path(self.output_sdb_dir or self.current_sdb_dir)
+        self._render_result_grid([folder])
+        self.status_var.set("Showing all available Step 3 diagnostic images.")
         self.info_var.set(self._result_info_text())
 
     def _tutorial_info_text(self):

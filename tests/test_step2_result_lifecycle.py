@@ -108,11 +108,14 @@ class Step2ResultLifecycleTests(unittest.TestCase):
         self.assertIn("self.step_actions_footer,", actions_source)
         self.assertNotIn("ttk.Frame(segmentation)", actions_source)
 
-    def test_sidebar_omits_redundant_swap_button(self):
+    def test_sidebar_omits_legacy_manual_orientation_controls(self):
         source = inspect.getsource(Step2Frame._build_controls)
 
         self.assertNotIn("flip_sides_button", source)
         self.assertNotIn("Swap left / right sides", source)
+        self.assertNotIn("Image Sides and Saving", source)
+        self.assertNotIn("Left: Temporal", source)
+        self.assertNotIn("Left: Nasal", source)
 
     def test_fixed_footer_actions_keep_their_semantic_states(self):
         frame = Step2Frame.__new__(Step2Frame)

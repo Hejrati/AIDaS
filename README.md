@@ -296,7 +296,7 @@ aidas/
 |-- canvas/                Reusable image display and annotation canvas
 |-- core/                  Preferences and single-instance lifecycle
 |-- services/              Update discovery, download, installation, and update UI
-|-- steps/                 The four OCT workflow screens
+|-- steps/                 The five OCT workflow screens
 |-- ui/                    Centralized theme, appearance, and shared UI components
 `-- utils/                 Shared filesystem, image, I/O, logging, and UI helpers
 ```
@@ -304,12 +304,12 @@ aidas/
 The **View > Interface** menu and **Settings > General** let users choose
 **Modern** or **Classic**. **System**, **Light**, and **Dark** remain in that
 same interface menu and are enabled only while Modern is selected. Classic
-restores the native title/menu bars, visible four-step tabs, compact status bar,
+restores the native title/menu bars, visible five-step tabs, compact status bar,
 flat controls, and the original fixed-light v2 palette; the saved Modern
 appearance is retained while Classic is active. Interface changes take effect
-immediately without reconstructing the active Step 1–4 workflow objects.
+immediately without reconstructing the active Step 1–5 workflow objects.
 
-Both modes instantiate the same Step 1–4 classes and callbacks. Shared colors,
+Both modes instantiate the same Step 1–5 classes and callbacks. Shared colors,
 spacing, typography, and component styling live under `aidas/ui/`, so visual
 changes remain separate from workflow backends. Keep new UI styling in that
 package and reuse its components throughout the application.
@@ -374,14 +374,14 @@ a separate button for adding user versions. Added scripts are copied to the
 user's persistent AIDaS script library for reuse in later sessions.
 
 Batch Step 3 runs each R process without interactive standard input. The batch
-selection panel provides a configurable per-script timeout (240 minutes by
-default) and a second-script schedule. The first script always runs across
-folders in parallel using **Batch Size**. In the default parallel mode, each
-worker starts the second script as soon as its folder finishes the first script.
-In sequential mode, all first-script jobs finish before the second script runs
-for one folder at a time. The progress panel provides **Cancel Batch**. Timed-out
-and cancelled R process trees are stopped, reported separately from script
-failures, and retained in the Step 3 logs.
+selection panel provides a second-script schedule. The first script always runs
+across folders in parallel using **Batch Size**. In the default parallel mode,
+each worker starts the second script as soon as its folder finishes the first
+script. In sequential mode, all first-script jobs finish before the second
+script runs for one folder at a time. R scripts do not have an automatic
+timeout. The progress panel provides **Cancel Batch**, which stops active R
+process trees and identifies cancelled folders separately from script failures.
+Run details are retained in the Step 3 logs.
 
 Step 2 model segmentation remains available while a Step 3 R batch is running.
 The two steps share the logical cores available to the AIDaS process: every

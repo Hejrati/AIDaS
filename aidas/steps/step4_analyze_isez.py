@@ -38,7 +38,6 @@ from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
-from typing import TYPE_CHECKING
 import zipfile
 from io import BytesIO
 from xml.sax.saxutils import escape
@@ -70,10 +69,6 @@ from aidas.utils.ui_utils import (
     load_color_close_ctk_icon,
     load_ctk_image,
 )
-
-if TYPE_CHECKING:
-    from aidas.steps.step4_compiler_dialog import Step4CompilerDialog
-
 
 MATLAB_ROI_LOW = 300
 MATLAB_ROI_HIGH = 450
@@ -1799,10 +1794,17 @@ class Step4Frame(SidebarStepFrame):
 
     ROI_TABLE_VISIBLE_ROWS = 3
 
-    def __init__(self, parent, preferences=None, source_step=None):
+    def __init__(
+        self,
+        parent,
+        preferences=None,
+        source_step=None,
+        on_continue_to_step5=None,
+    ):
         super().__init__(parent)
         self.preferences = preferences
         self.source_step = source_step
+        self.on_continue_to_step5 = on_continue_to_step5
 
         self.rois = default_isez_rois()
         self.volume = None
@@ -1823,7 +1825,6 @@ class Step4Frame(SidebarStepFrame):
         self._current_profile = None
         self._plot_activity_text = None
         self._profile_zoom_dialog = None
-        self._compiler_dialog = None
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
@@ -1879,22 +1880,6 @@ class Step4Frame(SidebarStepFrame):
             tooltip="Choose a parent folder. AIDaS will find eligible flattened images inside it.",
         )
         self.batch_roi_button.pack(
-            fill="x",
-            pady=(0, LAYOUT.space_xs // 2),
-        )
-
-        self.compiler_button = action_button(
-            source,
-            self,
-            "Compile measurements…",
-            self._open_compiler_dialog,
-            "results",
-            tooltip=(
-                "Compile Step 4 measurements under an LE/RE parent folder "
-                "into one Excel workbook."
-            ),
-        )
-        self.compiler_button.pack(
             fill="x",
             pady=(0, LAYOUT.space_xs // 2),
         )
@@ -2052,6 +2037,21 @@ class Step4Frame(SidebarStepFrame):
             tooltip="Build output stacks after all ROIs are complete.",
         )
         self.build_stacks_button.pack(fill="x")
+        self.continue_to_step5_button_icon = load_ctk_image(
+            self,
+            "flat-color-icons--right.png",
+            size=20,
+        )
+        self.continue_to_step5_button = AppButton(
+            self.sidebar_footer,
+            text="Go to Step 5",
+            variant="success",
+            command=self._continue_to_step5,
+            state="disabled",
+            image=self.continue_to_step5_button_icon,
+            compound="left",
+        )
+        self.continue_to_step5_button.pack(fill="x", pady=(4, 0))
         # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
         # stats = stats_section.body
         # ttk.Label(stats, textvariable=self.stats_var, wraplength=self.SIDEBAR_TEXT_WRAP, justify="left").pack(fill="x")
@@ -2074,51 +2074,20 @@ class Step4Frame(SidebarStepFrame):
         if folder and not self._output_dir_user_selected:
             self.output_dir_var.set(folder)
 
-    def _open_compiler_dialog(self) -> None:
-        dialog = self._compiler_dialog
-        try:
-            if dialog is not None and dialog.winfo_exists():
-                dialog.deiconify()
-                dialog.lift()
-                dialog.focus_force()
-                return
-        except tk.TclError:
-            pass
+    def _continue_to_step5(self) -> None:
+        """Open the dedicated compiler with the best available parent folder."""
 
-        try:
-            from aidas.steps.step4_compiler_dialog import Step4CompilerDialog
-        except ModuleNotFoundError as exc:
-            missing_module = str(exc.name or "")
-            if missing_module != "openpyxl" and not missing_module.startswith("openpyxl."):
-                raise
-            self.status_var.set("Measurement compiler unavailable: openpyxl is not installed.")
-            messagebox.showerror(
-                "Compiler dependency missing",
-                "The measurement compiler requires openpyxl.\n\n"
-                "Install the project requirements in the Python environment that launches AIDaS:\n\n"
-                'python -m pip install "openpyxl>=3.1,<4"',
-                parent=self,
-            )
+        callback = self.on_continue_to_step5
+        if callback is None:
+            messagebox.showerror("Step 5 unavailable", "Step 5 compilation is unavailable.")
             return
-
-        initial_input = (
+        folder = (
             self.batch_roi_root
+            or self.output_dir_var.get()
             or self.input_dir_var.get()
             or self._default_input_folder()
         )
-        self._compiler_dialog = Step4CompilerDialog(
-            self,
-            initial_input=initial_input,
-            on_close=self._compiler_dialog_closed,
-            on_success=self._compiler_succeeded,
-        )
-
-    def _compiler_dialog_closed(self, dialog: Step4CompilerDialog) -> None:
-        if self._compiler_dialog is dialog:
-            self._compiler_dialog = None
-
-    def _compiler_succeeded(self, output_path: Path) -> None:
-        self.status_var.set(f"Compiled Step 4 measurements to {output_path}.")
+        callback(folder)
 
     def _apply_aidas_theme(self) -> None:
         """Keep the scientific plots synchronized with the application mode."""
@@ -2710,6 +2679,7 @@ class Step4Frame(SidebarStepFrame):
                 f"{volume.shape[2]} x {volume.shape[1]}, {volume.dtype}"
             )
         self.status_var.set(f"Loaded {self.current_path}. Click start/end on the profile.")
+        self._update_continue_to_step5_button_state()
 
     def _set_slice_zero(self, *, render: bool = True) -> None:
         if self.volume is None:
@@ -3403,6 +3373,34 @@ class Step4Frame(SidebarStepFrame):
         else:
             self.build_stacks_button.state(["disabled"])
 
+    def _update_continue_to_step5_button_state(self, force_enable: bool = False) -> None:
+        button = getattr(self, "continue_to_step5_button", None)
+        if button is None:
+            return
+        if force_enable:
+            button.state(["!disabled"])
+            return
+
+        # In batch mode, wait until all tabs are marked complete.
+        if self.batch_roi_notebook is not None:
+            all_complete = bool(self.batch_roi_tab_states) and all(
+                state.get("complete", False) for state in self.batch_roi_tab_states.values()
+            )
+            if all_complete:
+                button.state(["!disabled"])
+            else:
+                button.state(["disabled"])
+            return
+
+        # In single folder mode, we dynamically check for outputs.
+        outdir = Path(self.output_dir_var.get() or ".")
+        results_file = outdir / STEP4_RESULTS_FILENAME
+        stack_file = outdir / "MAX_Stack.tif"
+        if results_file.exists() and stack_file.exists():
+            button.state(["!disabled"])
+        else:
+            button.state(["disabled"])
+
     def _auto_save_current_roi(self) -> None:
         if self._auto_saving_roi or self.image is None:
             return
@@ -3586,6 +3584,7 @@ class Step4Frame(SidebarStepFrame):
             self._show_processing_complete(
                 "Every selected Step 4 folder is complete."
             )
+            self._update_continue_to_step5_button_state()
             return
         if self.batch_roi_paths and self.batch_roi_index >= 0:
             self._load_next_batch_roi()
@@ -3595,6 +3594,7 @@ class Step4Frame(SidebarStepFrame):
             f"Created MAX_Stack.tif, {STEP4_RESULTS_FILENAME}, and "
             f"ROI_to_move_stck.tif in:\n{outdir}"
         )
+        self._update_continue_to_step5_button_state()
 
 
 def main() -> None:

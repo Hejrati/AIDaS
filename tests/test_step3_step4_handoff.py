@@ -124,7 +124,6 @@ class Step3Step4HandoffTests(unittest.TestCase):
             frame._render = lambda: None
             frame._update_continue_to_step4_button_state = lambda: None
             frame.progress_text_var = _Var()
-            frame.view_var = _Var()
             frame.info_var = _Var()
             frame.status_var = _Var()
 
