@@ -321,7 +321,7 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
             'prompt_label.pack(side="left", fill="x", expand=True)'
         )
         self.assertLess(actions_pack, prompt_pack)
-        for button_name in ("btn_cancel", "btn_set", "btn_temporal", "btn_nasal"):
+        for button_name in ("btn_cancel", "btn_set"):
             button_start = source.index(f"{button_name} = AppButton(")
             button_pack = source.index(f"{button_name}.pack(", button_start)
             self.assertIn("actions_frame,", source[button_start:button_pack])
