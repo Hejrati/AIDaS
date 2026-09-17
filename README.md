@@ -70,6 +70,48 @@ segmentation, where results open in tabs named for their source folders.
 Optional sidecar files (if available):
 - `.hdr` files with matching names
 
+## Step 4 MCP/AR Automatic ROI Detection
+
+Step 4 can automatically process the first 20 intensity profiles with
+**Auto-detect ROIs 1-20**. **ROI 21 is deliberately excluded** because its
+profile shape differs from the bell-shaped profiles and must always be selected
+manually.
+The detector uses the anatomical ranges supplied for this workflow rather than
+copying one pair of lines to every plot:
+
+- Start is searched in samples **70-90**.
+- End is searched in samples **90-110**.
+- A maximum must occur strictly between Start and End.
+- Sample positions remain 1-based to match the original MATLAB workflow.
+
+For each profile, AIDaS performs these deterministic steps:
+
+1. Replace non-finite samples by linear interpolation.
+2. Smooth the profile with a nine-sample, degree-2 Savitzky-Golay filter.
+3. Enumerate local-minimum candidates in the Start and End ranges. The lowest
+   sample in a range is retained as a fallback for a flat or boundary minimum.
+4. For every valid Start/End pair, locate the strongest internal maximum and
+   measure its height above the straight baseline joining the two minima.
+5. Fit a quadratic to the selected segment. Its curvature must be negative,
+   its vertex must lie inside the selection, and its coefficient of
+   determination must be at least `R² = 0.55`.
+6. Calculate a confidence score from baseline prominence (32%), rise from the
+   Start minimum (16%), fall to the End minimum (16%), quadratic fit (26%), and
+   strict-local-minimum evidence (10%). The automatic acceptance threshold is
+   66%.
+7. Compare the detected Start and End positions from ROIs 1-20 with their robust
+   medians. A boundary outside three scaled median absolute deviations, with a
+   minimum tolerance of six samples, is treated as an outlier.
+
+High-confidence detections are saved in memory and shown with green checkmarks.
+Low-confidence, invalid, or cross-ROI outlier detections are shown as amber
+`!` cells and are not considered complete. ROI 21 is always shown for manual
+review unless it was already confirmed before automatic detection. Click an amber cell to open its
+zoomed profile, drag either boundary line, and apply the correction. **Build
+stack** remains disabled until every amber result has been reviewed. The final
+TIFF stacks and `rr_MCPAR.xlsx` are still written only when **Build stack** is
+pressed.
+
 ## 6. Run the App (From Source)
 From the project root:
 

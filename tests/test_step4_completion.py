@@ -85,6 +85,27 @@ class Step4CompletionTests(unittest.TestCase):
         self.assertEqual(Step4Frame.ROI_TABLE_VISIBLE_ROWS, 3)
         self.assertIn("height=self.ROI_TABLE_VISIBLE_ROWS", source)
 
+    def test_roi_navigation_places_described_erase_action_between_previous_and_next(self):
+        source = inspect.getsource(Step4Frame._build_ui)
+        previous = source.index("self.previous_roi_button = action_button")
+        erase = source.index("self.clear_button = action_button")
+        next_button = source.index("self.next_roi_button = action_button")
+
+        self.assertLess(previous, erase)
+        self.assertLess(erase, next_button)
+        self.assertIn('"Erase"', source[erase:next_button])
+        self.assertIn("Erase the current ROI selection and saved result", source[erase:next_button])
+        self.assertIn("column=1", source[erase:next_button])
+        self.assertIn("column=2", source[next_button:])
+
+    def test_main_roi_controls_do_not_show_start_end_entries_or_confirm_button(self):
+        source = inspect.getsource(Step4Frame._build_ui)
+
+        self.assertNotIn("self.start_entry", source)
+        self.assertNotIn("self.end_entry", source)
+        self.assertNotIn("self.apply_button", source)
+        self.assertNotIn("control_row", source)
+
     def test_build_stack_action_uses_a_reserved_sidebar_footer(self):
         source = inspect.getsource(Step4Frame._build_ui)
         footer_start = source.index("self.sidebar_footer = ctk.CTkFrame")
@@ -94,6 +115,13 @@ class Step4CompletionTests(unittest.TestCase):
         self.assertIn("before=self.sidebar", source[footer_start:button_start])
         self.assertIn("self.sidebar_footer", source[button_start:button_end])
         self.assertNotIn("roi_box", source[button_start:button_end])
+
+    def test_auto_detect_uses_the_process_icon_and_explains_roi_21(self):
+        source = inspect.getsource(Step4Frame._build_ui)
+
+        self.assertIn('"flat-color-icons--process.png"', source)
+        self.assertIn("image=self.auto_detect_button_icon", source)
+        self.assertIn("ROI 21 remains manual", source)
 
     def test_stack_build_routes_all_success_notifications_through_one_finisher(self):
         source = inspect.getsource(Step4Frame._build_stack_outputs)

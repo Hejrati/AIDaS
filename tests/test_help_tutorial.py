@@ -143,6 +143,8 @@ class TutorialContentTests(unittest.TestCase):
             "rr_MCPAR.xlsx",
             "slice 0",
             "Apply changes",
+            "Auto-detect ROIs 1-20",
+            "ROI 21",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, text)

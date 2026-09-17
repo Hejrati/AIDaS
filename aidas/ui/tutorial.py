@@ -199,7 +199,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             "ROIs and one foveal ROI, then reproduces the lab's MATLAB/ImageJ-style outputs."
         ),
         input_summary="Completed Step 3 _flat_LIGHT Analyze pairs, using slice 0",
-        function_summary="Select profile bounds for 21 ROIs and calculate shape measurements",
+        function_summary="Automatically detect or manually revise profile bounds for 21 ROIs and calculate shape measurements",
         output_summary="ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx",
         completion_check=(
             "Every selected folder tab is marked Done and contains "
@@ -211,11 +211,11 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "Use the Step 3 handoff or Select folders for ROI; the scanner selects complete _flat_LIGHT pairs and locks folders whose final outputs already exist.",
                 "Open a folder tab; Step 4 analyzes slice 0 of the flattened stack.",
                 "Select one of 21 ROIs from the table or overview grid: 20 peripheral 120-column bands plus the foveal ROI.",
-                "Click near the profile Start and End positions. AIDaS snaps each click to the minimum in a fixed ±6-sample window, saves the plot automatically, and advances to the next ROI.",
+                "Use Auto-detect ROIs 1-20 to propose Start positions in 70-90 and End positions in 90-110. ROI 21 has a different shape and always requires manual Start and End selection. Manual clicks snap within a fixed ±6-sample window.",
             ),
             (
-                "AIDaS calculates the rotated and rescaled ISez profile, saves a new two-point selection, and advances to the next ROI; clearing a result makes that ROI selectable again.",
-                "Review the grid previews and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. If a line is incorrect, click its grid preview, drag the Start or End line in the zoomed editor, and use Apply changes to commit the revision.",
+                "For ROIs 1-20, automatic detection smooths each profile with a degree-2 Savitzky-Golay filter, finds two minima around an internal maximum, validates peak prominence and quadratic fit, and checks agreement across those ROIs. High-confidence results are accepted; ROI 21 and other amber ! cells require review.",
+                "Review the grid previews and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, drag the Start or End line in the zoomed editor, and use Apply changes to confirm it.",
             ),
             (
                 "When all 21 ROIs are complete, Build stack becomes available and marks the folder tab Done after a successful build.",
@@ -225,6 +225,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         ),
         tips=(
             "Build stack remains disabled until every one of the 21 ROI rows is complete.",
+            "Automatic detection never processes ROI 21 or silently accepts a low-confidence curve; every manual or uncertain ROI remains amber until you confirm it.",
             "Revising a completed ROI updates its measurements without advancing, so the change can be verified immediately.",
             "The folder scanner also accepts legacy Results.xlsx or Results_org.xlsx as the measurement workbook when deciding that earlier work is complete.",
         ),

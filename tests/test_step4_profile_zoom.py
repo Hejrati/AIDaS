@@ -130,7 +130,8 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertNotIn('"Saving', save_source)
         self.assertNotIn('"Saving', zoom_apply_source)
         self.assertIn("self._start_roi_update_animation(roi.suffix)", data_source)
-        self.assertIn('palette["success_soft"] if updated else palette["axes"]', grid_source)
+        self.assertIn('face = palette["success_soft"]', grid_source)
+        self.assertIn('face = palette["warning_soft"]', grid_source)
         self.assertIn("facecolor=face", grid_source)
 
     def test_dragged_boundary_snaps_to_local_minimum_on_release(self):

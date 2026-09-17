@@ -30,7 +30,7 @@ stored in ``ROI_to_move_stck.tif``.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import threading
 import math
 import os
@@ -67,7 +67,6 @@ from aidas.utils.ui_utils import (
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
-    icon_action_button,
     load_color_close_ctk_icon,
     load_ctk_image,
 )
@@ -77,6 +76,14 @@ MATLAB_ROI_HIGH = 450
 MATLAB_ROI_TOP_LINE = 450
 MATLAB_A_LIMIT = 1.0
 PROFILE_LOCAL_MINIMUM_RADIUS = 6
+AUTO_START_RANGE = (70, 90)
+AUTO_END_RANGE = (90, 110)
+AUTO_SMOOTH_WINDOW = 9
+AUTO_POLYNOMIAL_ORDER = 2
+AUTO_CONFIDENCE_THRESHOLD = 0.66
+AUTO_MIN_QUADRATIC_R2 = 0.55
+AUTO_CONSISTENCY_MIN_TOLERANCE = 6.0
+AUTO_MANUAL_ONLY_ROI_INDEX = 20
 
 
 def _plot_palette() -> dict[str, str]:
@@ -171,6 +178,20 @@ class ISezROI:
     right: int
     low: int = MATLAB_ROI_LOW
     high: int = MATLAB_ROI_HIGH
+
+
+@dataclass(frozen=True)
+class ProfileBoundaryDetection:
+    """Automatic Start/Peak/End detection for one intensity profile."""
+
+    start: int
+    peak: int
+    end: int
+    confidence: float
+    accepted: bool
+    prominence: float
+    quadratic_r2: float
+    reason: str
 
 
 @dataclass
@@ -380,6 +401,259 @@ def _nearest_local_minimum(
     ]
     sample = min(candidates, key=lambda candidate: (abs(candidate - clicked), candidate))
     return sample, float(values[sample - 1])
+
+
+def _profile_local_minima(values: np.ndarray, first: int, last: int) -> list[tuple[int, bool]]:
+    """Return deterministic 1-based minimum candidates inside a search range."""
+
+    n_points = int(values.size)
+    first = max(1, min(int(first), n_points))
+    last = max(first, min(int(last), n_points))
+    candidates: list[tuple[int, bool]] = []
+    for sample in range(first, last + 1):
+        index = sample - 1
+        left = values[index - 1] if index > 0 else np.inf
+        right = values[index + 1] if index + 1 < n_points else np.inf
+        current = values[index]
+        is_local = current <= left and current <= right and (current < left or current < right)
+        if is_local:
+            candidates.append((sample, True))
+
+    window = values[first - 1:last]
+    fallback = first + int(np.argmin(window))
+    if all(sample != fallback for sample, _strict in candidates):
+        candidates.append((fallback, False))
+    return sorted(candidates)
+
+
+def _quadratic_bell_fit(
+    values: np.ndarray,
+    start: int,
+    end: int,
+) -> tuple[float, bool]:
+    """Return quadratic R² and whether its downward vertex is inside the bounds."""
+
+    segment = np.asarray(values[start - 1:end], dtype=np.float64)
+    if segment.size < 5:
+        return 0.0, False
+    x_values = np.arange(start, end + 1, dtype=np.float64)
+    centered_x = x_values - float(np.mean(x_values))
+    coefficients = np.polyfit(centered_x, segment, 2)
+    predicted = np.polyval(coefficients, centered_x)
+    residual_sum = float(np.sum((segment - predicted) ** 2))
+    total_sum = float(np.sum((segment - float(np.mean(segment))) ** 2))
+    r_squared = 0.0 if total_sum <= np.finfo(float).eps else 1.0 - residual_sum / total_sum
+    curvature, linear = float(coefficients[0]), float(coefficients[1])
+    if curvature >= 0.0 or abs(curvature) <= np.finfo(float).eps:
+        return max(0.0, min(1.0, r_squared)), False
+    vertex = float(np.mean(x_values)) - linear / (2.0 * curvature)
+    valid_vertex = start + 1 <= vertex <= end - 1
+    return max(0.0, min(1.0, r_squared)), valid_vertex
+
+
+def detect_profile_boundaries(
+    profile: np.ndarray,
+    *,
+    start_range: tuple[int, int] = AUTO_START_RANGE,
+    end_range: tuple[int, int] = AUTO_END_RANGE,
+    confidence_threshold: float = AUTO_CONFIDENCE_THRESHOLD,
+) -> ProfileBoundaryDetection:
+    """Detect a bell-shaped peak bounded by two minima in constrained ranges.
+
+    Values use MATLAB-compatible 1-based sample positions. A quadratic
+    Savitzky-Golay smoother suppresses small fluctuations without moving a
+    broad peak. Candidate minimum pairs are scored by peak prominence,
+    left/right rise, quadratic fit, and whether both endpoints are strict local
+    minima. Low-confidence detections are returned for review, never discarded.
+    """
+
+    values = np.asarray(profile, dtype=np.float64).reshape(-1)
+    if values.size < 5:
+        raise ValueError("The profile is too short for automatic boundary detection.")
+    finite = np.isfinite(values)
+    if np.count_nonzero(finite) < 5:
+        raise ValueError("The profile has too few finite values for automatic detection.")
+    if not np.all(finite):
+        samples = np.arange(values.size, dtype=np.float64)
+        values = np.interp(samples, samples[finite], values[finite])
+
+    start_first = max(1, int(start_range[0]))
+    start_last = min(values.size, int(start_range[1]))
+    end_first = max(1, int(end_range[0]))
+    end_last = min(values.size, int(end_range[1]))
+    if start_first > start_last or end_first > end_last:
+        raise ValueError(
+            f"The profile does not contain the required Start {start_range} and End {end_range} ranges."
+        )
+
+    from scipy.signal import savgol_filter
+
+    window = min(AUTO_SMOOTH_WINDOW, values.size if values.size % 2 else values.size - 1)
+    minimum_window = AUTO_POLYNOMIAL_ORDER + 2
+    if minimum_window % 2 == 0:
+        minimum_window += 1
+    window = max(minimum_window, window)
+    smoothed = np.asarray(
+        savgol_filter(values, window_length=window, polyorder=AUTO_POLYNOMIAL_ORDER, mode="interp"),
+        dtype=np.float64,
+    )
+
+    residual = values - smoothed
+    residual_center = float(np.median(residual))
+    noise = 1.4826 * float(np.median(np.abs(residual - residual_center)))
+    search_first = max(1, min(start_first, end_first))
+    search_last = min(values.size, max(start_last, end_last))
+    search_values = smoothed[search_first - 1:search_last]
+    low, high = np.percentile(search_values, [5.0, 95.0])
+    signal_scale = max(float(high - low), np.finfo(float).eps)
+    noise = max(noise, signal_scale * 1e-6, np.finfo(float).eps)
+
+    start_candidates = _profile_local_minima(smoothed, start_first, start_last)
+    end_candidates = _profile_local_minima(smoothed, end_first, end_last)
+    best: ProfileBoundaryDetection | None = None
+    best_rank: tuple[float, float, float, int, int] | None = None
+
+    for start, start_is_local in start_candidates:
+        for end, end_is_local in end_candidates:
+            if end - start < 5:
+                continue
+            segment = smoothed[start - 1:end]
+            peak = start + int(np.argmax(segment))
+            if peak <= start or peak >= end:
+                continue
+
+            start_value = float(smoothed[start - 1])
+            peak_value = float(smoothed[peak - 1])
+            end_value = float(smoothed[end - 1])
+            fraction = (peak - start) / float(end - start)
+            baseline_at_peak = start_value + fraction * (end_value - start_value)
+            prominence = peak_value - baseline_at_peak
+            left_rise = peak_value - start_value
+            right_rise = peak_value - end_value
+            quadratic_r2, valid_quadratic = _quadratic_bell_fit(smoothed, start, end)
+
+            prominence_score = min(
+                1.0,
+                max(0.0, prominence) / max(signal_scale * 0.16, noise * 4.0),
+            )
+            left_score = min(1.0, max(0.0, left_rise) / max(signal_scale * 0.18, noise * 2.5))
+            right_score = min(1.0, max(0.0, right_rise) / max(signal_scale * 0.18, noise * 2.5))
+            minimum_score = (float(start_is_local) + float(end_is_local)) / 2.0
+            quadratic_score = quadratic_r2 if valid_quadratic else 0.0
+            confidence = (
+                0.32 * prominence_score
+                + 0.16 * left_score
+                + 0.16 * right_score
+                + 0.26 * quadratic_score
+                + 0.10 * minimum_score
+            )
+
+            prominence_floor = max(signal_scale * 0.04, noise * 2.0)
+            side_floor = max(signal_scale * 0.02, noise)
+            shape_valid = (
+                peak >= start + 2
+                and peak <= end - 2
+                and prominence > prominence_floor
+                and left_rise > side_floor
+                and right_rise > side_floor
+                and valid_quadratic
+                and quadratic_r2 >= AUTO_MIN_QUADRATIC_R2
+            )
+            accepted = shape_valid and confidence >= float(confidence_threshold)
+            if not valid_quadratic:
+                reason = "quadratic fit is not a downward bell with an internal maximum"
+            elif quadratic_r2 < AUTO_MIN_QUADRATIC_R2:
+                reason = f"quadratic fit is weak (R²={quadratic_r2:.2f})"
+            elif prominence <= prominence_floor:
+                reason = "peak prominence is too weak relative to profile noise"
+            elif left_rise <= side_floor or right_rise <= side_floor:
+                reason = "the maximum is not clearly surrounded by two minima"
+            elif confidence < float(confidence_threshold):
+                reason = f"confidence {confidence:.0%} is below the acceptance threshold"
+            else:
+                reason = "accepted"
+
+            detection = ProfileBoundaryDetection(
+                start=start,
+                peak=peak,
+                end=end,
+                confidence=max(0.0, min(1.0, confidence)),
+                accepted=accepted,
+                prominence=float(prominence),
+                quadratic_r2=quadratic_r2,
+                reason=reason,
+            )
+            preferred_distance = abs(start - 80) + abs(end - 100)
+            rank = (
+                float(confidence),
+                float(prominence_score),
+                float(quadratic_score),
+                -preferred_distance,
+                -start,
+            )
+            if best is None or rank > best_rank:
+                best = detection
+                best_rank = rank
+
+    if best is None:
+        start = start_first + int(np.argmin(smoothed[start_first - 1:start_last]))
+        end = end_first + int(np.argmin(smoothed[end_first - 1:end_last]))
+        if end <= start:
+            end = min(values.size, max(start + 1, end_last))
+        peak = start + int(np.argmax(smoothed[start - 1:end]))
+        return ProfileBoundaryDetection(
+            start=start,
+            peak=peak,
+            end=end,
+            confidence=0.0,
+            accepted=False,
+            prominence=0.0,
+            quadratic_r2=0.0,
+            reason="no valid minimum-maximum-minimum sequence was found",
+        )
+    return best
+
+
+def apply_profile_detection_consistency(
+    detections: list[ProfileBoundaryDetection],
+) -> list[ProfileBoundaryDetection]:
+    """Reject boundary outliers using robust agreement across all ROI profiles."""
+
+    if len(detections) < 3:
+        return list(detections)
+    reference = [item for item in detections if item.accepted]
+    if len(reference) < 3:
+        reference = list(detections)
+    starts = np.asarray([item.start for item in reference], dtype=np.float64)
+    ends = np.asarray([item.end for item in reference], dtype=np.float64)
+    median_start = float(np.median(starts))
+    median_end = float(np.median(ends))
+    start_mad = 1.4826 * float(np.median(np.abs(starts - median_start)))
+    end_mad = 1.4826 * float(np.median(np.abs(ends - median_end)))
+    start_tolerance = max(AUTO_CONSISTENCY_MIN_TOLERANCE, 3.0 * start_mad)
+    end_tolerance = max(AUTO_CONSISTENCY_MIN_TOLERANCE, 3.0 * end_mad)
+
+    consistent: list[ProfileBoundaryDetection] = []
+    for item in detections:
+        start_deviation = abs(item.start - median_start)
+        end_deviation = abs(item.end - median_end)
+        agrees = start_deviation <= start_tolerance and end_deviation <= end_tolerance
+        if agrees:
+            consistent.append(item)
+        else:
+            reason = (
+                f"boundaries {item.start}-{item.end} disagree with the 21-ROI consensus "
+                f"near {median_start:.0f}-{median_end:.0f}"
+            )
+            consistent.append(
+                replace(
+                    item,
+                    confidence=max(0.0, item.confidence * 0.65),
+                    accepted=False,
+                    reason=reason,
+                )
+            )
+    return consistent
 
 
 def _profile_selection_boundary(
@@ -1917,6 +2191,7 @@ class Step4Frame(SidebarStepFrame):
         self.current_stem = "_flat_LIGHT"
         self.current_roi_idx = 0
         self.completed: dict[str, ISezResult] = {}
+        self.auto_detection_reviews: dict[str, ProfileBoundaryDetection | str] = {}
         self._flashing_updated_rois: set[str] = set()
         self._roi_update_animation_jobs: dict[str, str] = {}
         self.roi_clicks: dict[str, list[float]] = {}
@@ -1955,10 +2230,12 @@ class Step4Frame(SidebarStepFrame):
         self.start_var = tk.StringVar(value="")
         self.end_var = tk.StringVar(value="")
         self.confirm_button = None
+        self.auto_detect_button = None
         self.build_stacks_button = None
         self.sidebar_footer = None
         self.roi_table = None
         self._auto_saving_roi = False
+        self._auto_detecting = False
         # self.auto_advance_var = tk.BooleanVar(value=True)
 
         self._build_ui()
@@ -2036,6 +2313,7 @@ class Step4Frame(SidebarStepFrame):
         nav.pack(fill="x", pady=(LAYOUT.space_xs // 2, 0))
         nav.columnconfigure(0, weight=1, uniform="roi_navigation")
         nav.columnconfigure(1, weight=1, uniform="roi_navigation")
+        nav.columnconfigure(2, weight=1, uniform="roi_navigation")
         self.previous_roi_button = action_button(
             nav,
             self,
@@ -2049,6 +2327,20 @@ class Step4Frame(SidebarStepFrame):
             sticky="ew",
             padx=(0, LAYOUT.space_xs // 2),
         )
+        self.clear_button = action_button(
+            nav,
+            self,
+            "Erase",
+            self._clear_clicks,
+            "clear",
+            tooltip="Erase the current ROI selection and saved result so it can be selected again.",
+        )
+        self.clear_button.grid(
+            row=0,
+            column=1,
+            sticky="ew",
+            padx=(LAYOUT.space_xs // 2, LAYOUT.space_xs // 2),
+        )
         self.next_roi_button = action_button(
             nav,
             self,
@@ -2058,68 +2350,10 @@ class Step4Frame(SidebarStepFrame):
         )
         self.next_roi_button.grid(
             row=0,
-            column=1,
+            column=2,
             sticky="ew",
             padx=(LAYOUT.space_xs // 2, 0),
         )
-
-        control_row = ttk.Frame(roi_box)
-        control_row.pack(fill="x", pady=(LAYOUT.space_xs // 2, 0))
-        control_row.columnconfigure(1, weight=1, uniform="roi_range_entry")
-        control_row.columnconfigure(3, weight=1, uniform="roi_range_entry")
-
-        ttk.Label(control_row, text="Start").grid(
-            row=0,
-            column=0,
-            sticky="w",
-            padx=(0, LAYOUT.space_xs),
-        )
-        self.start_entry = ttk.Entry(control_row, textvariable=self.start_var, width=8)
-        self.start_entry.grid(
-            row=0,
-            column=1,
-            sticky="ew",
-            padx=(0, LAYOUT.space_xs),
-        )
-
-        ttk.Label(control_row, text="End").grid(
-            row=0,
-            column=2,
-            sticky="w",
-            padx=(0, LAYOUT.space_xs),
-        )
-        self.end_entry = ttk.Entry(control_row, textvariable=self.end_var, width=8)
-        self.end_entry.grid(
-            row=0,
-            column=3,
-            sticky="ew",
-            padx=(0, LAYOUT.space_xs),
-        )
-
-        self.apply_button = icon_action_button(
-            control_row,
-            self,
-            self._apply_entry_clicks,
-            "confirm",
-            tooltip="Confirm the current local-minimum line",
-        )
-        self.apply_button.grid(
-            row=0,
-            column=4,
-            padx=(0, LAYOUT.space_xs),
-        )
-        self.clear_button = icon_action_button(
-            control_row,
-            self,
-            self._clear_clicks,
-            "clear",
-            tooltip="Clear the current start and end values",
-        )
-        self.clear_button.grid(row=0, column=5)
-        for entry in (self.start_entry, self.end_entry):
-            entry.bind("<Return>", self._apply_entry_clicks)
-            entry.bind("<KP_Enter>", self._apply_entry_clicks)
-            entry.bind("<FocusOut>", self._apply_entry_clicks_if_complete)
 
         # Keep the final action outside the scrolling cards.  Reserving a
         # footer in the sidebar shell prevents the button's lower edge from
@@ -2136,6 +2370,25 @@ class Step4Frame(SidebarStepFrame):
             pady=(0, LAYOUT.space_sm),
             before=self.sidebar,
         )
+        self.auto_detect_button_icon = load_ctk_image(
+            self,
+            "flat-color-icons--process.png",
+            size=20,
+        )
+        self.auto_detect_button = AppButton(
+            self.sidebar_footer,
+            text="Auto-detect ROIs 1-20",
+            variant="primary",
+            command=self._auto_detect_all_rois,
+            state="disabled",
+            image=self.auto_detect_button_icon,
+            compound="left",
+        )
+        HoverToolTip(
+            self.auto_detect_button,
+            "Automatically detect the Start and End minima for ROIs 1-20; ROI 21 remains manual.",
+        )
+        self.auto_detect_button.pack(fill="x", pady=(0, 4))
         self.build_stacks_button = action_button(
             self.sidebar_footer,
             self,
@@ -2370,6 +2623,7 @@ class Step4Frame(SidebarStepFrame):
         self._cancel_roi_update_animations(redraw=False)
         self._stack_build_complete = False
         self.completed.clear()
+        self.auto_detection_reviews.clear()
         self.roi_clicks.clear()
         self.profile_clicks.clear()
         self.current_roi_idx = 0
@@ -2617,6 +2871,7 @@ class Step4Frame(SidebarStepFrame):
                 "base_label": f"{idx}. {folder.name}",
                 "loaded": False,
                 "completed": {},
+                "auto_detection_reviews": {},
                 "roi_clicks": {},
                 "current_roi_idx": 0,
                 "profile_clicks": [],
@@ -2713,6 +2968,7 @@ class Step4Frame(SidebarStepFrame):
         if state is None:
             return
         state["completed"] = dict(self.completed)
+        state["auto_detection_reviews"] = dict(getattr(self, "auto_detection_reviews", {}))
         state["roi_clicks"] = {key: list(value) for key, value in self.roi_clicks.items()}
         state["current_roi_idx"] = int(self.current_roi_idx)
         state["profile_clicks"] = list(self.profile_clicks[:2])
@@ -2778,6 +3034,7 @@ class Step4Frame(SidebarStepFrame):
         self.empty_placeholder = state.get("empty_placeholder")
         self._current_profile = state.get("current_profile")
         self.completed = dict(state.get("completed") or {})
+        self.auto_detection_reviews = dict(state.get("auto_detection_reviews") or {})
         self.roi_clicks = {key: list(value) for key, value in (state.get("roi_clicks") or {}).items()}
         self.current_roi_idx = int(state.get("current_roi_idx") or 0)
         self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
@@ -2918,6 +3175,7 @@ class Step4Frame(SidebarStepFrame):
             self.output_dir_var.set(str(self.current_path.parent))
 
         self.completed.clear()
+        self.auto_detection_reviews.clear()
         self.roi_clicks.clear()
         self.current_roi_idx = 0
         self.profile_clicks.clear()
@@ -2926,6 +3184,7 @@ class Step4Frame(SidebarStepFrame):
         self._select_roi_in_list()
         if restore_state is not None:
             self.completed = dict(restore_state.get("completed") or {})
+            self.auto_detection_reviews = dict(restore_state.get("auto_detection_reviews") or {})
             self.roi_clicks = {key: list(value) for key, value in (restore_state.get("roi_clicks") or {}).items()}
             self.current_roi_idx = int(restore_state.get("current_roi_idx") or 0)
             self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
@@ -2961,6 +3220,7 @@ class Step4Frame(SidebarStepFrame):
         self.image = np.asarray(self.volume[0])
         self.profile_clicks.clear()
         self.roi_clicks.clear()
+        self.auto_detection_reviews.clear()
         self.start_var.set("")
         self.end_var.set("")
         self.completed.clear()
@@ -3053,11 +3313,13 @@ class Step4Frame(SidebarStepFrame):
             return
         self.roi_table.delete(*self.roi_table.get_children(""))
         for index, roi in enumerate(self.rois):
+            needs_review = roi.suffix in getattr(self, "auto_detection_reviews", {})
+            roi_label = f"{roi.suffix} !" if needs_review else roi.suffix
             self.roi_table.insert(
                 "",
                 "end",
                 iid=str(index),
-                values=(roi.suffix, *self._roi_metric_values(roi)),
+                values=(roi_label, *self._roi_metric_values(roi)),
             )
         self._select_roi_in_list()
         self._update_build_stack_button_state()
@@ -3243,8 +3505,15 @@ class Step4Frame(SidebarStepFrame):
             col = index % 7
             row = 2 - (index // 7)
             active = index == self.current_roi_idx
-            updated = index < len(self.rois) and self.rois[index].suffix in self._flashing_updated_rois
-            face = palette["success_soft"] if updated else palette["axes"]
+            suffix = self.rois[index].suffix if index < len(self.rois) else ""
+            updated = suffix in self._flashing_updated_rois
+            needs_review = suffix in getattr(self, "auto_detection_reviews", {})
+            if updated:
+                face = palette["success_soft"]
+            elif needs_review:
+                face = palette["warning_soft"]
+            else:
+                face = palette["axes"]
             edge = palette["text"] if active else palette["grid"]
             width = 1.2 if active else 0.6
             ax.add_patch(
@@ -3263,6 +3532,10 @@ class Step4Frame(SidebarStepFrame):
 
             roi = self.rois[index]
             done = roi.suffix in self.completed
+            status_symbol = "\u2713" if done else ("!" if needs_review else "x")
+            status_color = (
+                palette["success"] if done else (palette["warning"] if needs_review else palette["danger"])
+            )
             ax.text(
                 col + 0.04,
                 row + 0.94,
@@ -3276,11 +3549,11 @@ class Step4Frame(SidebarStepFrame):
             ax.text(
                 col + 0.96,
                 row + 0.94,
-                "\u2713" if done else "x",
+                status_symbol,
                 ha="right",
                 va="top",
                 fontsize=7,
-                color=palette["success"] if done else palette["danger"],
+                color=status_color,
                 weight="bold",
             )
 
@@ -3598,6 +3871,7 @@ class Step4Frame(SidebarStepFrame):
         self.profile_clicks.clear()
         self.roi_clicks.pop(suffix, None)
         self.completed.pop(suffix, None)
+        self.auto_detection_reviews.pop(suffix, None)
         self.start_var.set("")
         self.end_var.set("")
         self._refresh_roi_list()
@@ -3608,6 +3882,19 @@ class Step4Frame(SidebarStepFrame):
 
     def _update_confirm_button_state(self) -> None:
         self._update_clear_button_state()
+        self._update_auto_detect_button_state()
+
+    def _update_auto_detect_button_state(self) -> None:
+        button = getattr(self, "auto_detect_button", None)
+        if button is None:
+            return
+        enabled = (
+            self.image is not None
+            and not getattr(self, "_stack_building", False)
+            and not getattr(self, "_stack_build_complete", False)
+            and not getattr(self, "_auto_detecting", False)
+        )
+        button.state(["!disabled"] if enabled else ["disabled"])
 
     def _update_clear_button_state(self) -> None:
         enabled = bool(self.profile_clicks) and self.image is not None
@@ -3662,6 +3949,136 @@ class Step4Frame(SidebarStepFrame):
         else:
             button.state(["disabled"])
 
+    def _auto_detect_all_rois(self) -> None:
+        """Detect and save high-confidence boundaries for every unconfirmed ROI."""
+
+        if self.image is None:
+            messagebox.showwarning("MCP/AR", "Load a flattened OCT image first.", parent=self)
+            return
+        if getattr(self, "_auto_detecting", False):
+            return
+
+        self._close_profile_zoom()
+        self._cancel_roi_update_animations(redraw=False)
+        self._auto_detecting = True
+        self._stack_build_complete = False
+        self._update_auto_detect_button_state()
+        self.status_var.set("Automatically detecting bell-shaped boundaries for ROIs 1-20. Please wait...")
+        self._show_grid_notice(
+            "Detecting ROI boundaries 1-20",
+            "Please wait while AIDaS finds and validates the bell-shaped curve in profiles 1-20. ROI 21 remains manual.",
+            busy=True,
+        )
+        try:
+            self.update_idletasks()
+        except tk.TclError:
+            pass
+
+        detections_by_index: dict[int, ProfileBoundaryDetection] = {}
+        detection_errors: dict[int, str] = {}
+        try:
+            for index, roi in enumerate(self.rois):
+                if index == AUTO_MANUAL_ONLY_ROI_INDEX:
+                    continue
+                try:
+                    profile = intensity_profile(self.image, roi)
+                    detections_by_index[index] = detect_profile_boundaries(profile)
+                except Exception as exc:
+                    detection_errors[index] = str(exc)
+
+            ordered_indexes = sorted(detections_by_index)
+            consistent = apply_profile_detection_consistency(
+                [detections_by_index[index] for index in ordered_indexes]
+            )
+            detections_by_index = dict(zip(ordered_indexes, consistent))
+
+            self.auto_detection_reviews.clear()
+            review_count = 0
+            for index, roi in enumerate(self.rois):
+                if roi.suffix in self.completed:
+                    continue
+                if index == AUTO_MANUAL_ONLY_ROI_INDEX:
+                    self.auto_detection_reviews[roi.suffix] = (
+                        "ROI 21 uses a different profile shape and must be selected manually"
+                    )
+                    review_count += 1
+                    continue
+                detection = detections_by_index.get(index)
+                if detection is None:
+                    self.roi_clicks.pop(roi.suffix, None)
+                    self.auto_detection_reviews[roi.suffix] = detection_errors.get(
+                        index,
+                        "automatic detection failed",
+                    )
+                    review_count += 1
+                    continue
+
+                self.roi_clicks[roi.suffix] = [float(detection.start), float(detection.end)]
+                if not detection.accepted:
+                    self.auto_detection_reviews[roi.suffix] = detection
+                    review_count += 1
+                    continue
+
+                try:
+                    result = analyze_and_save_roi(
+                        self.image,
+                        roi,
+                        start_click=detection.start,
+                        end_click=detection.end,
+                    )
+                except Exception as exc:
+                    self.auto_detection_reviews[roi.suffix] = replace(
+                        detection,
+                        accepted=False,
+                        reason=f"measurement failed: {exc}",
+                    )
+                    review_count += 1
+                    continue
+                self.completed[roi.suffix] = result
+                self.roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
+
+            review_indexes = [
+                index
+                for index, roi in enumerate(self.rois)
+                if roi.suffix in self.auto_detection_reviews
+            ]
+            if review_indexes:
+                self.current_roi_idx = review_indexes[0]
+            elif self.completed:
+                self.current_roi_idx = 0
+            self._load_current_roi_clicks()
+            self._hide_grid_notice()
+            self._refresh_roi_list()
+            self._select_roi_in_list()
+            self._render_current_roi()
+            if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
+                self._sync_active_batch_roi_state()
+                self._update_active_batch_roi_tab_progress()
+
+            completed_count = len(self.completed)
+            if review_count:
+                self.status_var.set(
+                    f"Automatic detection accepted {completed_count}/{len(self.rois)} ROI(s). "
+                    f"{review_count} amber ! ROI(s) need review; ROI 21 is always manual."
+                )
+            else:
+                self.status_var.set(
+                    f"Automatic detection accepted all {completed_count} ROI(s). "
+                    "Review the grid, then build the stack."
+                )
+        except Exception as exc:
+            self.status_var.set("Automatic ROI detection could not be completed.")
+            messagebox.showerror(
+                "Automatic MCP/AR detection",
+                f"Could not finish automatic ROI detection.\n\n{exc}",
+                parent=self,
+            )
+        finally:
+            self._hide_grid_notice()
+            self._auto_detecting = False
+            self._update_auto_detect_button_state()
+            self._update_build_stack_button_state()
+
     def _auto_save_current_roi(self) -> None:
         if self._auto_saving_roi or self.image is None:
             return
@@ -3700,10 +4117,19 @@ class Step4Frame(SidebarStepFrame):
             self.profile_status_var.set(str(exc))
             return
 
-        self.profile_status_var.set(
-            f"ROI {roi.suffix}: local-minimum bounds {start}-{end}; adjusted {adj_start}-{adj_end}. "
-            "Saving automatically; revise any incorrect line from its grid preview."
-        )
+        review = getattr(self, "auto_detection_reviews", {}).get(roi.suffix)
+        if review is not None:
+            confidence = getattr(review, "confidence", 0.0)
+            reason = getattr(review, "reason", str(review))
+            self.profile_status_var.set(
+                f"ROI {roi.suffix}: automatic bounds {start}-{end} need review "
+                f"(confidence {confidence:.0%}). {reason}. Drag a line in the grid detail or click a boundary to confirm."
+            )
+        else:
+            self.profile_status_var.set(
+                f"ROI {roi.suffix}: local-minimum bounds {start}-{end}; adjusted {adj_start}-{adj_end}. "
+                "Saving automatically; revise any incorrect line from its grid preview."
+            )
         self.stats_var.set(
             f"center: {(start + end) / 2.0:.1f}\n"
             f"slope: {slope:.4f}\n"
@@ -3758,6 +4184,7 @@ class Step4Frame(SidebarStepFrame):
             )
             self.completed[roi.suffix] = result
             self.roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
+            self.auto_detection_reviews.pop(roi.suffix, None)
         except Exception as exc:
             messagebox.showerror(
                 "Step 4",
@@ -3815,6 +4242,7 @@ class Step4Frame(SidebarStepFrame):
         self._stack_building = True
         self._stack_build_complete = False
         self._update_build_stack_button_state()
+        self._update_auto_detect_button_state()
         self.status_var.set("Building stack and saving final result files. Please wait...")
         self._show_stack_building_notice(outdir)
         try:
@@ -3856,6 +4284,7 @@ class Step4Frame(SidebarStepFrame):
         finally:
             self._stack_building = False
             self._update_build_stack_button_state()
+            self._update_auto_detect_button_state()
 
         self._finish_stack_build(outdir)
 
@@ -3879,6 +4308,7 @@ class Step4Frame(SidebarStepFrame):
         self._stack_build_complete = True
         self.status_var.set(f"Built stack outputs in {outdir}.")
         self._update_build_stack_button_state()
+        self._update_auto_detect_button_state()
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._show_processed_grid_notice(outdir)
             self._mark_active_batch_roi_complete()
