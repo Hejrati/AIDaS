@@ -2104,8 +2104,12 @@ class AIDaSApp(ctk.CTk):
     def _on_workflow_tab_changed(self, _event=None) -> None:
         """Synchronize navigation and render deferred work for the active step."""
 
-        notebook = getattr(self, "notebook", None)
-        header = getattr(self, "header", None)
+        # Tk defines ``__getattr__`` by delegating to ``self.tk``. During
+        # startup, teardown, and isolated tests, that interpreter attribute may
+        # not exist yet; normal ``getattr`` can then recurse indefinitely.
+        # Optional root-owned widgets must therefore be read from ``__dict__``.
+        notebook = self.__dict__.get("notebook")
+        header = self.__dict__.get("header")
         if notebook is None:
             return
         try:
@@ -2119,14 +2123,14 @@ class AIDaSApp(ctk.CTk):
             except (tk.TclError, TypeError, ValueError):
                 pass
                 
-        progress_strip = getattr(self, "progress_strip", None)
+        progress_strip = self.__dict__.get("progress_strip")
         if progress_strip is not None:
             try:
                 progress_strip.select_step(selected_index)
             except (tk.TclError, TypeError, ValueError):
                 pass
 
-        step2 = getattr(self, "step2", None)
+        step2 = self.__dict__.get("step2")
         if step2 is not None:
             try:
                 if selected_index == notebook.index(step2):
@@ -2331,10 +2335,12 @@ class AIDaSApp(ctk.CTk):
                     notebook.select(selected_index)
                 except (tk.TclError, TypeError, ValueError):
                     pass
-            if self.header is not None:
-                self.header.select_step(selected_index)
-            if getattr(self, "progress_strip", None) is not None:
-                self.progress_strip.select_step(selected_index)
+            header = self.__dict__.get("header")
+            if header is not None:
+                header.select_step(selected_index)
+            progress_strip = self.__dict__.get("progress_strip")
+            if progress_strip is not None:
+                progress_strip.select_step(selected_index)
 
             self._sync_settings_interface_controls()
             step3 = self.__dict__.get("step3")
@@ -2406,8 +2412,9 @@ class AIDaSApp(ctk.CTk):
                 notebook = self.__dict__.get("notebook")
                 if notebook is not None:
                     notebook.select(selected_index)
-                if self.header is not None:
-                    self.header.select_step(selected_index)
+                header = self.__dict__.get("header")
+                if header is not None:
+                    header.select_step(selected_index)
                 self._queue_interface_widget_refresh()
             except Exception:
                 self.interface_mode = previous
