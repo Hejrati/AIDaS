@@ -227,6 +227,18 @@ class ISezResult:
     baseline_y: np.ndarray
 
 
+@dataclass
+class AutoDetectionRunResult:
+    """Thread-safe data returned by one automatic ROI detection run."""
+
+    completed: dict[str, ISezResult]
+    reviews: dict[str, ProfileBoundaryDetection | str]
+    roi_clicks: dict[str, list[float]]
+    removed_clicks: set[str]
+    review_count: int
+    current_roi_idx: int
+
+
 def default_isez_rois() -> list[ISezROI]:
     """Return the 20 peripheral ROIs plus the fovea ROI from the MATLAB file."""
 
@@ -2241,6 +2253,7 @@ class Step4Frame(SidebarStepFrame):
     """Step 4 tab UI for interactive ISez profile selection and output saving."""
 
     ROI_TABLE_VISIBLE_ROWS = 3
+    BACKGROUND_POLL_MS = 40
 
     def __init__(
         self,
@@ -2276,6 +2289,8 @@ class Step4Frame(SidebarStepFrame):
         self._last_results_dir = None
         self._stack_building = False
         self._stack_build_complete = False
+        self._auto_detection_events = None
+        self._stack_build_events = None
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
@@ -2587,6 +2602,10 @@ class Step4Frame(SidebarStepFrame):
             except tk.TclError:
                 pass
         try:
+            notice.grab_release()
+        except tk.TclError:
+            pass
+        try:
             notice.destroy()
         except tk.TclError:
             pass
@@ -2632,10 +2651,25 @@ class Step4Frame(SidebarStepFrame):
         ).pack(fill="x", padx=24, pady=(0, 14))
 
         if busy:
-            progress = ctk.CTkProgressBar(notice, mode="indeterminate", width=300)
+            progress = ctk.CTkProgressBar(
+                notice,
+                mode="indeterminate",
+                width=300,
+                height=8,
+                indeterminate_speed=0.9,
+                fg_color=COLOR_PAIRS["border_strong"],
+                progress_color=COLOR_PAIRS["primary"],
+            )
             progress.pack(padx=24, pady=(0, 20))
             progress.start()
             notice._step4_progress = progress
+            # Keep the file/tab state stable while a background worker uses
+            # its snapshot. The local grab still lets Tk process animation and
+            # polling callbacks, but blocks workflow clicks until completion.
+            try:
+                notice.grab_set()
+            except tk.TclError:
+                pass
         elif output_dir is not None:
             actions = ctk.CTkFrame(notice, fg_color="transparent")
             actions.pack(fill="x", padx=24, pady=(0, 20))
@@ -4179,8 +4213,184 @@ class Step4Frame(SidebarStepFrame):
                 STEP4_AUTO_DETECTION_DEFAULTS
             )
 
+    @staticmethod
+    def _start_background_worker(worker) -> None:
+        """Run non-Tk work without blocking progress animation callbacks."""
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _compute_auto_detection_run(
+        image: np.ndarray,
+        rois: list[ISezROI],
+        completed_suffixes: set[str],
+        parameters: dict[str, int | float],
+    ) -> AutoDetectionRunResult:
+        """Compute one detection run without reading or updating Tk widgets."""
+
+        detections_by_index: dict[int, ProfileBoundaryDetection] = {}
+        detection_errors: dict[int, str] = {}
+        for index, roi in enumerate(rois):
+            if index == AUTO_MANUAL_ONLY_ROI_INDEX:
+                continue
+            try:
+                profile = intensity_profile(image, roi)
+                detections_by_index[index] = detect_profile_boundaries(
+                    profile,
+                    start_range=(
+                        parameters["step4_auto_start_min"],
+                        parameters["step4_auto_start_max"],
+                    ),
+                    end_range=(
+                        parameters["step4_auto_end_min"],
+                        parameters["step4_auto_end_max"],
+                    ),
+                    smoothing_window=parameters["step4_auto_savgol_window"],
+                    confidence_threshold=(
+                        parameters["step4_auto_confidence_percent"] / 100.0
+                    ),
+                    minimum_quadratic_r2=parameters[
+                        "step4_auto_min_quadratic_r2"
+                    ],
+                )
+            except Exception as exc:
+                detection_errors[index] = str(exc)
+
+        ordered_indexes = sorted(detections_by_index)
+        consistent = apply_profile_detection_consistency(
+            [detections_by_index[index] for index in ordered_indexes],
+            minimum_tolerance=parameters["step4_auto_consistency_tolerance"],
+        )
+        detections_by_index = dict(zip(ordered_indexes, consistent))
+
+        completed: dict[str, ISezResult] = {}
+        reviews: dict[str, ProfileBoundaryDetection | str] = {}
+        roi_clicks: dict[str, list[float]] = {}
+        removed_clicks: set[str] = set()
+        review_count = 0
+        for index, roi in enumerate(rois):
+            if roi.suffix in completed_suffixes:
+                continue
+            if index == AUTO_MANUAL_ONLY_ROI_INDEX:
+                reviews[roi.suffix] = (
+                    "ROI 21 uses a different profile shape and must be selected manually"
+                )
+                review_count += 1
+                continue
+            detection = detections_by_index.get(index)
+            if detection is None:
+                removed_clicks.add(roi.suffix)
+                reviews[roi.suffix] = detection_errors.get(
+                    index,
+                    "automatic detection failed",
+                )
+                review_count += 1
+                continue
+
+            roi_clicks[roi.suffix] = [float(detection.start), float(detection.end)]
+            if not detection.accepted:
+                reviews[roi.suffix] = detection
+                review_count += 1
+                continue
+
+            try:
+                result = analyze_and_save_roi(
+                    image,
+                    roi,
+                    start_click=detection.start,
+                    end_click=detection.end,
+                )
+            except Exception as exc:
+                reviews[roi.suffix] = replace(
+                    detection,
+                    accepted=False,
+                    reason=f"measurement failed: {exc}",
+                )
+                review_count += 1
+                continue
+            completed[roi.suffix] = result
+            roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
+
+        review_indexes = [
+            index for index, roi in enumerate(rois) if roi.suffix in reviews
+        ]
+        current_roi_idx = review_indexes[0] if review_indexes else 0
+        return AutoDetectionRunResult(
+            completed=completed,
+            reviews=reviews,
+            roi_clicks=roi_clicks,
+            removed_clicks=removed_clicks,
+            review_count=review_count,
+            current_roi_idx=current_roi_idx,
+        )
+
+    def _apply_auto_detection_run(self, result: AutoDetectionRunResult) -> None:
+        """Apply worker results and redraw Step 4 on Tk's owning thread."""
+
+        self.auto_detection_reviews.clear()
+        self.auto_detection_reviews.update(result.reviews)
+        for suffix in result.removed_clicks:
+            self.roi_clicks.pop(suffix, None)
+        self.roi_clicks.update(result.roi_clicks)
+        self.completed.update(result.completed)
+        self.current_roi_idx = result.current_roi_idx
+        self._load_current_roi_clicks()
+        self._refresh_roi_list()
+        self._select_roi_in_list()
+        self._render_current_roi()
+        if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
+            self._sync_active_batch_roi_state()
+            self._update_active_batch_roi_tab_progress()
+
+        completed_count = len(self.completed)
+        if result.review_count:
+            self.status_var.set(
+                f"Automatic detection accepted {completed_count}/{len(self.rois)} ROI(s). "
+                f"{result.review_count} amber ! ROI(s) need review; ROI 21 is always manual."
+            )
+        else:
+            self.status_var.set(
+                f"Automatic detection accepted all {completed_count} ROI(s). "
+                "Review the grid, then build the stack."
+            )
+
+    def _poll_auto_detection_events(self, events) -> None:
+        """Finish an auto-detection worker while keeping Tk operations local."""
+
+        if events is not getattr(self, "_auto_detection_events", None):
+            return
+        try:
+            kind, payload = events.get_nowait()
+        except queue.Empty:
+            try:
+                self.after(
+                    self.BACKGROUND_POLL_MS,
+                    lambda: self._poll_auto_detection_events(events),
+                )
+            except tk.TclError:
+                pass
+            return
+
+        self._auto_detection_events = None
+        try:
+            if kind == "error":
+                raise payload
+            self._apply_auto_detection_run(payload)
+        except Exception as exc:
+            self.status_var.set("Automatic ROI detection could not be completed.")
+            messagebox.showerror(
+                "Automatic MCP/AR detection",
+                f"Could not finish automatic ROI detection.\n\n{exc}",
+                parent=self,
+            )
+        finally:
+            self._hide_grid_notice()
+            self._auto_detecting = False
+            self._update_auto_detect_button_state()
+            self._update_build_stack_button_state()
+
     def _auto_detect_all_rois(self) -> None:
-        """Detect and save high-confidence boundaries for every unconfirmed ROI."""
+        """Detect and save high-confidence boundaries without blocking Tk."""
 
         if self.image is None:
             messagebox.showwarning("MCP/AR", "Load a flattened OCT image first.", parent=self)
@@ -4199,136 +4409,35 @@ class Step4Frame(SidebarStepFrame):
             "Please wait while AIDaS finds and validates the bell-shaped curve in profiles 1-20. ROI 21 remains manual.",
             busy=True,
         )
+
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._auto_detection_events = events
+        image = self.image
+        rois = list(self.rois)
+        completed_suffixes = set(self.completed)
+        parameters = self._auto_detection_parameters()
+
+        def worker() -> None:
+            try:
+                result = self._compute_auto_detection_run(
+                    image,
+                    rois,
+                    completed_suffixes,
+                    parameters,
+                )
+            except Exception as exc:
+                events.put(("error", exc))
+            else:
+                events.put(("done", result))
+
+        self._start_background_worker(worker)
         try:
-            self.update_idletasks()
+            self.after(
+                self.BACKGROUND_POLL_MS,
+                lambda: self._poll_auto_detection_events(events),
+            )
         except tk.TclError:
             pass
-
-        detections_by_index: dict[int, ProfileBoundaryDetection] = {}
-        detection_errors: dict[int, str] = {}
-        parameters = self._auto_detection_parameters()
-        try:
-            for index, roi in enumerate(self.rois):
-                if index == AUTO_MANUAL_ONLY_ROI_INDEX:
-                    continue
-                try:
-                    profile = intensity_profile(self.image, roi)
-                    detections_by_index[index] = detect_profile_boundaries(
-                        profile,
-                        start_range=(
-                            parameters["step4_auto_start_min"],
-                            parameters["step4_auto_start_max"],
-                        ),
-                        end_range=(
-                            parameters["step4_auto_end_min"],
-                            parameters["step4_auto_end_max"],
-                        ),
-                        smoothing_window=parameters["step4_auto_savgol_window"],
-                        confidence_threshold=(
-                            parameters["step4_auto_confidence_percent"] / 100.0
-                        ),
-                        minimum_quadratic_r2=parameters[
-                            "step4_auto_min_quadratic_r2"
-                        ],
-                    )
-                except Exception as exc:
-                    detection_errors[index] = str(exc)
-
-            ordered_indexes = sorted(detections_by_index)
-            consistent = apply_profile_detection_consistency(
-                [detections_by_index[index] for index in ordered_indexes],
-                minimum_tolerance=parameters[
-                    "step4_auto_consistency_tolerance"
-                ],
-            )
-            detections_by_index = dict(zip(ordered_indexes, consistent))
-
-            self.auto_detection_reviews.clear()
-            review_count = 0
-            for index, roi in enumerate(self.rois):
-                if roi.suffix in self.completed:
-                    continue
-                if index == AUTO_MANUAL_ONLY_ROI_INDEX:
-                    self.auto_detection_reviews[roi.suffix] = (
-                        "ROI 21 uses a different profile shape and must be selected manually"
-                    )
-                    review_count += 1
-                    continue
-                detection = detections_by_index.get(index)
-                if detection is None:
-                    self.roi_clicks.pop(roi.suffix, None)
-                    self.auto_detection_reviews[roi.suffix] = detection_errors.get(
-                        index,
-                        "automatic detection failed",
-                    )
-                    review_count += 1
-                    continue
-
-                self.roi_clicks[roi.suffix] = [float(detection.start), float(detection.end)]
-                if not detection.accepted:
-                    self.auto_detection_reviews[roi.suffix] = detection
-                    review_count += 1
-                    continue
-
-                try:
-                    result = analyze_and_save_roi(
-                        self.image,
-                        roi,
-                        start_click=detection.start,
-                        end_click=detection.end,
-                    )
-                except Exception as exc:
-                    self.auto_detection_reviews[roi.suffix] = replace(
-                        detection,
-                        accepted=False,
-                        reason=f"measurement failed: {exc}",
-                    )
-                    review_count += 1
-                    continue
-                self.completed[roi.suffix] = result
-                self.roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
-
-            review_indexes = [
-                index
-                for index, roi in enumerate(self.rois)
-                if roi.suffix in self.auto_detection_reviews
-            ]
-            if review_indexes:
-                self.current_roi_idx = review_indexes[0]
-            elif self.completed:
-                self.current_roi_idx = 0
-            self._load_current_roi_clicks()
-            self._hide_grid_notice()
-            self._refresh_roi_list()
-            self._select_roi_in_list()
-            self._render_current_roi()
-            if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
-                self._sync_active_batch_roi_state()
-                self._update_active_batch_roi_tab_progress()
-
-            completed_count = len(self.completed)
-            if review_count:
-                self.status_var.set(
-                    f"Automatic detection accepted {completed_count}/{len(self.rois)} ROI(s). "
-                    f"{review_count} amber ! ROI(s) need review; ROI 21 is always manual."
-                )
-            else:
-                self.status_var.set(
-                    f"Automatic detection accepted all {completed_count} ROI(s). "
-                    "Review the grid, then build the stack."
-                )
-        except Exception as exc:
-            self.status_var.set("Automatic ROI detection could not be completed.")
-            messagebox.showerror(
-                "Automatic MCP/AR detection",
-                f"Could not finish automatic ROI detection.\n\n{exc}",
-                parent=self,
-            )
-        finally:
-            self._hide_grid_notice()
-            self._auto_detecting = False
-            self._update_auto_detect_button_state()
-            self._update_build_stack_button_state()
 
     def _auto_save_current_roi(self) -> None:
         if self._auto_saving_roi or self.image is None:
@@ -4471,6 +4580,72 @@ class Step4Frame(SidebarStepFrame):
             self._update_build_stack_button_state()
         return True
 
+    @staticmethod
+    def _write_stack_output_files(
+        image: np.ndarray,
+        ordered: list[ISezResult],
+        outdir: Path,
+    ) -> None:
+        """Create all Step 4 result files without touching Tk widgets."""
+
+        outdir.mkdir(parents=True, exist_ok=True)
+
+        # ImageJ macro equivalent:
+        # open *_ISez_*.png -> run("Images to Stack") ->
+        # saveAs("Tiff", "ROI_to_move_stck.tif").
+        # We render the plot frames in memory because this workflow does not
+        # save the intermediate MATLAB PNG files.
+        isez_images = [make_isez_plot_image(result) for result in ordered]
+        if isez_images:
+            isez_images[0].save(
+                outdir / "ROI_to_move_stck.tif",
+                save_all=True,
+                append_images=isez_images[1:],
+            )
+
+        # MATLAB produced one ROI-overlay JPG per ROI, then the ImageJ macro
+        # stacked the original image plus those JPGs and ran a max projection.
+        max_projection = max_stack_projection_image(
+            image,
+            [result.roi for result in ordered],
+        )
+        Image.fromarray(max_projection).save(outdir / "MAX_Stack.tif")
+
+        # ImageJ macro equivalent:
+        # setTool("wand"); doWand(512, 179); run("Measure") per slice.
+        write_imagej_results_xlsx(
+            [imagej_shape_measurements_from_frame(item) for item in isez_images],
+            outdir / STEP4_RESULTS_FILENAME,
+        )
+
+    def _poll_stack_build_events(self, events, outdir: Path) -> None:
+        """Finish file creation on Tk's thread while animation stays active."""
+
+        if events is not getattr(self, "_stack_build_events", None):
+            return
+        try:
+            kind, payload = events.get_nowait()
+        except queue.Empty:
+            try:
+                self.after(
+                    self.BACKGROUND_POLL_MS,
+                    lambda: self._poll_stack_build_events(events, outdir),
+                )
+            except tk.TclError:
+                pass
+            return
+
+        self._stack_build_events = None
+        self._stack_building = False
+        self._update_build_stack_button_state()
+        self._update_auto_detect_button_state()
+        if kind == "error":
+            self._hide_grid_notice()
+            self.status_var.set("Could not build stack outputs.")
+            messagebox.showerror("Step 4", f"Could not build stack outputs.\n{payload}")
+            return
+        self._finish_stack_build(outdir)
+
     def _build_stack_outputs(self) -> None:
         if getattr(self, "_stack_building", False):
             self.status_var.set("Stack creation is already running. Please wait.")
@@ -4496,48 +4671,27 @@ class Step4Frame(SidebarStepFrame):
         self._update_auto_detect_button_state()
         self.status_var.set("Building stack and saving final result files. Please wait...")
         self._show_stack_building_notice(outdir)
+
+        events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._stack_build_events = events
+        image = self.image
+
+        def worker() -> None:
+            try:
+                self._write_stack_output_files(image, ordered, outdir)
+            except Exception as exc:
+                events.put(("error", exc))
+            else:
+                events.put(("done", None))
+
+        self._start_background_worker(worker)
         try:
-            self.update_idletasks()
+            self.after(
+                self.BACKGROUND_POLL_MS,
+                lambda: self._poll_stack_build_events(events, outdir),
+            )
         except tk.TclError:
             pass
-        try:
-            outdir.mkdir(parents=True, exist_ok=True)
-
-            # ImageJ macro equivalent:
-            # open *_ISez_*.png -> run("Images to Stack") ->
-            # saveAs("Tiff", "ROI_to_move_stck.tif").
-            # We render the plot frames in memory because this workflow does
-            # not save the intermediate MATLAB PNG files.
-            isez_images = [make_isez_plot_image(result) for result in ordered]
-            if isez_images:
-                isez_images[0].save(outdir / "ROI_to_move_stck.tif", save_all=True, append_images=isez_images[1:])
-
-            # MATLAB produced one ROI-overlay JPG per ROI, then the ImageJ macro
-            # stacked the original image plus those JPGs and ran a max
-            # projection before saving MAX_Stack.tif. The app does not apply
-            # extra ROI image processing here.
-            max_projection = max_stack_projection_image(self.image, [result.roi for result in ordered])
-            Image.fromarray(max_projection).save(outdir / "MAX_Stack.tif")
-
-            # ImageJ macro equivalent:
-            # setTool("wand"); doWand(512, 179); run("Measure") per slice.
-            # The workbook is created here, after the stack button, not during
-            # individual ROI confirmation.
-            write_imagej_results_xlsx(
-                [imagej_shape_measurements_from_frame(image) for image in isez_images],
-                outdir / STEP4_RESULTS_FILENAME,
-            )
-        except Exception as exc:
-            self._hide_grid_notice()
-            self.status_var.set("Could not build stack outputs.")
-            messagebox.showerror("Step 4", f"Could not build stack outputs.\n{exc}")
-            return
-        finally:
-            self._stack_building = False
-            self._update_build_stack_button_state()
-            self._update_auto_detect_button_state()
-
-        self._finish_stack_build(outdir)
 
     def _show_processing_complete(
         self,

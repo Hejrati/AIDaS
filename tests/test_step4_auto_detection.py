@@ -129,6 +129,8 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         frame._refresh_roi_list = mock.Mock()
         frame._select_roi_in_list = mock.Mock()
         frame._render_current_roi = mock.Mock()
+        frame._start_background_worker = lambda worker: worker()
+        frame.after = lambda _delay, callback: callback()
         custom_parameters = dict(STEP4_AUTO_DETECTION_DEFAULTS)
         custom_parameters.update(
             step4_auto_start_min=72,
@@ -203,6 +205,8 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         frame._refresh_roi_list = mock.Mock()
         frame._select_roi_in_list = mock.Mock()
         frame._render_current_roi = mock.Mock()
+        frame._start_background_worker = lambda worker: worker()
+        frame.after = lambda _delay, callback: callback()
 
         detection = _detection(78, 100)
         saved = SimpleNamespace(start=78, end=100)

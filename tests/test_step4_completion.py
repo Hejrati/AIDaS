@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+import queue
 import subprocess
 import sys
 import unittest
@@ -164,7 +165,7 @@ class Step4CompletionTests(unittest.TestCase):
         self.assertIn("ROI 21 remains manual", source)
 
     def test_stack_build_routes_all_success_notifications_through_one_finisher(self):
-        source = inspect.getsource(Step4Frame._build_stack_outputs)
+        source = inspect.getsource(Step4Frame._poll_stack_build_events)
 
         self.assertIn("self._finish_stack_build(outdir)", source)
         self.assertNotIn("messagebox.showinfo", source)
@@ -333,12 +334,47 @@ class Step4CompletionTests(unittest.TestCase):
         frame.continue_to_step5_button.state.assert_called_once_with(["disabled"])
 
     def test_stack_build_displays_wait_notice_before_creating_files(self):
-        source = inspect.getsource(Step4Frame._build_stack_outputs)
+        start_source = inspect.getsource(Step4Frame._build_stack_outputs)
+        worker_source = inspect.getsource(Step4Frame._write_stack_output_files)
 
-        notice_position = source.index("self._show_stack_building_notice(outdir)")
-        save_position = source.index("outdir.mkdir")
-        self.assertLess(notice_position, save_position)
-        self.assertIn("Please wait", source)
+        notice_position = start_source.index("self._show_stack_building_notice(outdir)")
+        worker_position = start_source.index("self._start_background_worker(worker)")
+        self.assertLess(notice_position, worker_position)
+        self.assertIn("Please wait", start_source)
+        self.assertIn("outdir.mkdir", worker_source)
+
+    def test_busy_notice_uses_a_running_back_and_forth_indicator(self):
+        source = inspect.getsource(Step4Frame._show_grid_notice)
+
+        self.assertIn('mode="indeterminate"', source)
+        self.assertIn("indeterminate_speed=0.9", source)
+        self.assertIn("progress.start()", source)
+        self.assertIn("notice.grab_set()", source)
+
+    def test_detection_and_file_saving_leave_tk_work_on_polling_callbacks(self):
+        detection_source = inspect.getsource(Step4Frame._auto_detect_all_rois)
+        stack_source = inspect.getsource(Step4Frame._build_stack_outputs)
+
+        for source in (detection_source, stack_source):
+            self.assertIn("self._start_background_worker(worker)", source)
+            self.assertIn("self.after(", source)
+            self.assertNotIn("self.update_idletasks()", source)
+
+    def test_completed_stack_worker_is_finished_by_the_tk_poll_callback(self):
+        frame = _completion_frame()
+        events = queue.Queue()
+        events.put(("done", None))
+        frame._stack_build_events = events
+        frame._stack_building = True
+        frame._finish_stack_build = mock.Mock()
+        frame._update_auto_detect_button_state = mock.Mock()
+
+        frame._poll_stack_build_events(events, Path("output"))
+
+        self.assertFalse(frame._stack_building)
+        frame._finish_stack_build.assert_called_once_with(Path("output"))
+        frame._update_build_stack_button_state.assert_called_once_with()
+        frame._update_auto_detect_button_state.assert_called_once_with()
 
     def test_batch_stays_on_completed_tab_and_shows_navigation_popup(self):
         frame = _completion_frame()
