@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 import tkinter as tk
 
+import numpy as np
+
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.utils.ui_utils import NativeNumericSpinbox
 
@@ -43,7 +45,40 @@ class _VariableStub:
         self.value = value
 
 
+class _ImageCanvasStub:
+    def __init__(self):
+        self.image = np.zeros((20, 30), dtype=np.uint16)
+
+    def get_image(self):
+        return self.image
+
+    def get_zoom(self):
+        return 0.5
+
+
 class Step1RedrawStateTests(unittest.TestCase):
+    def test_mouse_status_updates_are_throttled_and_use_latest_sample(self):
+        frame = Step1Frame.__new__(Step1Frame)
+        frame._pending_mouse_status = None
+        frame._mouse_status_after_id = None
+        frame.image_canvas = _ImageCanvasStub()
+        frame.status_var = _VariableStub("")
+        scheduled = []
+        frame.after = lambda delay, callback: scheduled.append((delay, callback)) or "after#1"
+
+        frame._on_mouse_moved(1, 2, 3)
+        frame._on_mouse_moved(10, 11, 12)
+
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0][0], Step1Frame.MOUSE_STATUS_INTERVAL_MS)
+        self.assertEqual(frame.status_var.value, "")
+
+        scheduled[0][1]()
+
+        self.assertIn("(10, 11)  val=12", frame.status_var.value)
+        self.assertIsNone(frame._pending_mouse_status)
+        self.assertIsNone(frame._mouse_status_after_id)
+
     def test_control_state_update_is_idempotent(self):
         control = _ControlStub("normal")
 

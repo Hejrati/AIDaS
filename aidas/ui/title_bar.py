@@ -15,7 +15,6 @@ from ctypes import wintypes
 from pathlib import Path
 import sys
 import tkinter as tk
-import threading
 import time
 from typing import Protocol
 
@@ -205,16 +204,6 @@ class _WindowsAPI:
         )
         self._set_window_pos.restype = ctypes.c_bool
 
-        # Frame changes are issued from a short-lived helper thread so
-        # SWP_ASYNCWINDOWPOS always posts to Tk's owning queue.  This separate
-        # WinDLL binding releases the GIL while the native call is in flight;
-        # the PyDLL binding above remains appropriate for calls made directly
-        # on Tk's owner thread.
-        frame_user32 = ctypes.WinDLL("user32", use_last_error=True)
-        self._frame_set_window_pos = frame_user32.SetWindowPos
-        self._frame_set_window_pos.argtypes = self._set_window_pos.argtypes
-        self._frame_set_window_pos.restype = ctypes.c_bool
-
         self._release_capture = user32.ReleaseCapture
         self._release_capture.argtypes = ()
         self._release_capture.restype = ctypes.c_bool
@@ -301,49 +290,28 @@ class _WindowsAPI:
         return self.get_style(handle) == (int(style) & 0xFFFFFFFF)
 
     def refresh_frame(self, handle: int) -> bool:
-        # Adding/removing a non-client frame synchronously from Tk's owning
-        # Python thread re-enters _tkinter through WM_NCCALCSIZE/Configure and
-        # can hit CPython with no restorable thread state.  A short-lived
-        # worker plus SWP_ASYNCWINDOWPOS asks Windows to post the operation to
-        # the owning UI queue instead.  Tk then handles it through its normal
-        # event-loop boundary, where Python callbacks have a valid state.
-        result: list[bool] = []
-
-        def apply() -> None:
-            try:
-                result.append(
-                    bool(
-                        self._frame_set_window_pos(
-                            handle,
-                            None,
-                            0,
-                            0,
-                            0,
-                            0,
-                            _SWP_NOMOVE
-                            | _SWP_NOSIZE
-                            | _SWP_NOZORDER
-                            | _SWP_NOACTIVATE
-                            | _SWP_FRAMECHANGED
-                            | _SWP_ASYNCWINDOWPOS,
-                        )
-                    )
+        # SWP_ASYNCWINDOWPOS posts the frame update to the window's owning
+        # queue and returns immediately.  Calling it directly avoids blocking
+        # Tk on a helper-thread join while Windows dispatches frame messages.
+        try:
+            return bool(
+                self._set_window_pos(
+                    handle,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    _SWP_NOMOVE
+                    | _SWP_NOSIZE
+                    | _SWP_NOZORDER
+                    | _SWP_NOACTIVATE
+                    | _SWP_FRAMECHANGED
+                    | _SWP_ASYNCWINDOWPOS,
                 )
-            except Exception:
-                result.append(False)
-
-        worker = threading.Thread(
-            target=apply,
-            name="AIDaS-WindowFrameRefresh",
-            daemon=True,
-        )
-        worker.start()
-        # SWP_ASYNCWINDOWPOS returns after Windows has accepted the request;
-        # there is no native operation left running after this join.  Callers
-        # separately confirm the resulting non-client insets on Tk's event
-        # loop before removing any fallback window controls.
-        worker.join()
-        return bool(result and result[0])
+            )
+        except Exception:
+            return False
 
     def frame_insets(self, handle: int) -> tuple[int, int, int, int] | None:
         """Return physical left/top/right/bottom non-client frame insets."""

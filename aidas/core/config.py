@@ -1,9 +1,74 @@
 """Configuration and preferences management for AIDaS."""
 
 import json
+import math
 import os
 from pathlib import Path
 import tempfile
+
+
+STEP4_AUTO_DETECTION_DEFAULTS = {
+    "step4_auto_start_min": 70,
+    "step4_auto_start_max": 90,
+    "step4_auto_end_min": 90,
+    "step4_auto_end_max": 110,
+    "step4_auto_savgol_window": 9,
+    "step4_auto_confidence_percent": 66.0,
+    "step4_auto_min_quadratic_r2": 0.55,
+    "step4_auto_consistency_tolerance": 6.0,
+}
+
+
+def validate_step4_auto_detection_preferences(values):
+    """Parse and validate the user-tunable Step 4 auto-detection settings."""
+
+    try:
+        parsed = {
+            "step4_auto_start_min": int(values["step4_auto_start_min"]),
+            "step4_auto_start_max": int(values["step4_auto_start_max"]),
+            "step4_auto_end_min": int(values["step4_auto_end_min"]),
+            "step4_auto_end_max": int(values["step4_auto_end_max"]),
+            "step4_auto_savgol_window": int(values["step4_auto_savgol_window"]),
+            "step4_auto_confidence_percent": float(
+                values["step4_auto_confidence_percent"]
+            ),
+            "step4_auto_min_quadratic_r2": float(
+                values["step4_auto_min_quadratic_r2"]
+            ),
+            "step4_auto_consistency_tolerance": float(
+                values["step4_auto_consistency_tolerance"]
+            ),
+        }
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Every auto-detection parameter must be numeric.") from exc
+
+    start_min = parsed["step4_auto_start_min"]
+    start_max = parsed["step4_auto_start_max"]
+    end_min = parsed["step4_auto_end_min"]
+    end_max = parsed["step4_auto_end_max"]
+    window = parsed["step4_auto_savgol_window"]
+    confidence = parsed["step4_auto_confidence_percent"]
+    minimum_r2 = parsed["step4_auto_min_quadratic_r2"]
+    tolerance = parsed["step4_auto_consistency_tolerance"]
+
+    if not all(math.isfinite(value) for value in (confidence, minimum_r2, tolerance)):
+        raise ValueError("Confidence, R-squared, and tolerance values must be finite numbers.")
+
+    if start_min < 1 or start_max < start_min:
+        raise ValueError("The start search range must contain positive samples in ascending order.")
+    if end_min < 1 or end_max < end_min:
+        raise ValueError("The end search range must contain positive samples in ascending order.")
+    if start_min >= end_max:
+        raise ValueError("The start search range must begin before the end search range finishes.")
+    if window < 3 or window % 2 == 0:
+        raise ValueError("The Savitzky-Golay window length must be an odd integer of 3 or greater.")
+    if not 0.0 <= confidence <= 100.0:
+        raise ValueError("The acceptance confidence must be between 0% and 100%.")
+    if not 0.0 <= minimum_r2 <= 1.0:
+        raise ValueError("The minimum quadratic R-squared value must be between 0 and 1.")
+    if tolerance < 0.0:
+        raise ValueError("The consistency tolerance must be zero samples or greater.")
+    return parsed
 
 
 class Config:
@@ -32,6 +97,7 @@ class Config:
         "r_output_script_path": "",
         "check_for_updates": True,
         "last_successful_update_check": 0,
+        **STEP4_AUTO_DETECTION_DEFAULTS,
     }
     
     def __init__(self):
@@ -72,6 +138,37 @@ class Config:
                     loaded = json.load(f)
                 if isinstance(loaded, dict):
                     prefs.update(loaded)
+                    if (
+                        "step4_auto_confidence_percent" not in loaded
+                        and "step4_auto_confidence" in loaded
+                    ):
+                        try:
+                            legacy_confidence = float(
+                                loaded["step4_auto_confidence"]
+                            )
+                        except (TypeError, ValueError):
+                            pass
+                        else:
+                            prefs["step4_auto_confidence_percent"] = (
+                                legacy_confidence * 100.0
+                                if 0.0 <= legacy_confidence <= 1.0
+                                else legacy_confidence
+                            )
+                    if (
+                        "step4_auto_consistency_tolerance" not in loaded
+                        and "step4_auto_consistency_tolerance_percent" in loaded
+                    ):
+                        prefs["step4_auto_consistency_tolerance"] = loaded[
+                            "step4_auto_consistency_tolerance_percent"
+                        ]
+                    # Polynomial order is fixed at degree 2. Confidence is a
+                    # percentage, while consistency is measured in samples.
+                    for obsolete_key in (
+                        "step4_auto_savgol_polyorder",
+                        "step4_auto_confidence",
+                        "step4_auto_consistency_tolerance_percent",
+                    ):
+                        prefs.pop(obsolete_key, None)
             except (json.JSONDecodeError, OSError):
                 pass
         return prefs

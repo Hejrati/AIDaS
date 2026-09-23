@@ -11,7 +11,6 @@ import os
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-import customtkinter as ctk
 import numpy as np
 
 from aidas.canvas.image_canvas import ImageCanvas
@@ -52,6 +51,8 @@ class Step1Frame(SidebarStepFrame):
     - output saving (Analyze HDR/IMG pairs),
     - image interaction (zoom/pan/inspection).
     """
+
+    MOUSE_STATUS_INTERVAL_MS = 50
 
     def __init__(
         self,
@@ -107,6 +108,8 @@ class Step1Frame(SidebarStepFrame):
         self._cropped_sdb_files = set()
         self._saved_output_directories = set()
         self._sdb_directory_selection_locked = False
+        self._pending_mouse_status = None
+        self._mouse_status_after_id = None
 
         # ----- layout -----
         self.build_standard_layout()
@@ -1685,13 +1688,33 @@ class Step1Frame(SidebarStepFrame):
         self._update_image_status()
 
     def _on_mouse_moved(self, ix, iy, val):
-        """Update status with cursor position/value for current image.
+        """Coalesce high-frequency cursor samples into periodic UI updates.
 
         Args:
             ix: X coordinate in image space.
             iy: Y coordinate in image space.
             val: Pixel value at `(ix, iy)`.
         """
+        self._pending_mouse_status = (ix, iy, val)
+        if self._mouse_status_after_id is not None:
+            return
+        try:
+            self._mouse_status_after_id = self.after(
+                self.MOUSE_STATUS_INTERVAL_MS,
+                self._flush_mouse_status,
+            )
+        except tk.TclError:
+            self._mouse_status_after_id = None
+
+    def _flush_mouse_status(self):
+        """Render only the most recent queued mouse-position sample."""
+
+        self._mouse_status_after_id = None
+        sample = self._pending_mouse_status
+        self._pending_mouse_status = None
+        if sample is None:
+            return
+        ix, iy, val = sample
         img = self.image_canvas.get_image()
         if img is None:
             return

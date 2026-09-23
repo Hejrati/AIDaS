@@ -210,9 +210,68 @@ class Step4CompletionTests(unittest.TestCase):
 
         self.assertIn('text="Open results folder"', source)
         self.assertIn('text="Restart this file"', source)
-        self.assertIn('text=f"Go to Step 5 ({completed}/{total} completed)"', source)
-        self.assertIn("command=self._continue_to_step5", source)
+        self.assertIn("self._completion_notice_button_action()", source)
+        self.assertIn("command=button_command", source)
         self.assertNotIn("_step4_completion_label", source)
+
+    def test_completion_notice_goes_to_next_tab_while_batch_is_incomplete(self):
+        frame = object.__new__(Step4Frame)
+        frame.batch_roi_notebook = object()
+        frame.batch_roi_tab_states = {
+            "complete": {"complete": True},
+            "pending": {"complete": False},
+        }
+
+        text, command, enabled = frame._completion_notice_button_action()
+
+        self.assertEqual(text, "Go to next tab (1/2 completed)")
+        self.assertEqual(command, frame._go_to_next_batch_roi_tab)
+        self.assertTrue(enabled)
+
+    def test_completion_notice_goes_to_step5_when_batch_is_complete(self):
+        frame = object.__new__(Step4Frame)
+        frame.on_continue_to_step5 = mock.Mock()
+        frame.batch_roi_notebook = object()
+        frame.batch_roi_tab_states = {
+            "first": {"complete": True},
+            "last": {"complete": True},
+        }
+
+        text, command, enabled = frame._completion_notice_button_action()
+
+        self.assertEqual(text, "Go to Step 5 (2/2 completed)")
+        self.assertEqual(command, frame._continue_to_step5)
+        self.assertTrue(enabled)
+
+    def test_retained_completion_notice_refreshes_its_label_and_command(self):
+        frame = object.__new__(Step4Frame)
+        frame.on_continue_to_step5 = mock.Mock()
+        frame.batch_roi_notebook = object()
+        frame.batch_roi_tab_states = {
+            "complete": {"complete": True},
+            "pending": {"complete": False},
+        }
+        button = mock.Mock()
+        notice = mock.Mock(_step4_continue_button=button)
+        frame.plot_holder = mock.Mock(_step4_grid_notice=notice)
+
+        frame._refresh_completion_notice_progress()
+
+        button.configure.assert_called_once_with(
+            text="Go to next tab (1/2 completed)",
+            command=frame._go_to_next_batch_roi_tab,
+        )
+        button.state.assert_called_once_with(["!disabled"])
+
+        button.reset_mock()
+        frame.batch_roi_tab_states["pending"]["complete"] = True
+        frame._refresh_completion_notice_progress()
+
+        button.configure.assert_called_once_with(
+            text="Go to Step 5 (2/2 completed)",
+            command=frame._continue_to_step5,
+        )
+        button.state.assert_called_once_with(["!disabled"])
 
     def test_completion_step5_action_waits_for_every_batch_tab(self):
         frame = object.__new__(Step4Frame)
@@ -281,10 +340,15 @@ class Step4CompletionTests(unittest.TestCase):
         self.assertLess(notice_position, save_position)
         self.assertIn("Please wait", source)
 
-    def test_batch_advances_without_a_per_folder_popup(self):
+    def test_batch_stays_on_completed_tab_and_shows_navigation_popup(self):
         frame = _completion_frame()
         frame.batch_roi_notebook = object()
         frame._active_batch_roi_tab = "tab-one"
+        frame.on_continue_to_step5 = mock.Mock()
+        frame.batch_roi_tab_states = {
+            "tab-one": {"complete": True},
+            "tab-two": {"complete": False},
+        }
         frame._mark_active_batch_roi_complete = mock.Mock()
         frame._select_next_incomplete_batch_roi_tab = mock.Mock(return_value=True)
         frame._show_processing_complete = mock.Mock()
@@ -292,14 +356,26 @@ class Step4CompletionTests(unittest.TestCase):
         frame._finish_stack_build(Path("first-output"))
 
         frame._mark_active_batch_roi_complete.assert_called_once_with()
-        frame._select_next_incomplete_batch_roi_tab.assert_called_once_with()
+        frame._select_next_incomplete_batch_roi_tab.assert_not_called()
         frame._show_processing_complete.assert_not_called()
         frame._show_processed_grid_notice.assert_called_once_with(Path("first-output").resolve())
+        self.assertIn("Go to next tab", frame.status_var.value)
+
+    def test_completion_popup_next_tab_action_selects_only_after_click(self):
+        frame = object.__new__(Step4Frame)
+        frame._select_next_incomplete_batch_roi_tab = mock.Mock(return_value=True)
+        frame._refresh_completion_notice_progress = mock.Mock()
+
+        frame._go_to_next_batch_roi_tab()
+
+        frame._select_next_incomplete_batch_roi_tab.assert_called_once_with()
+        frame._refresh_completion_notice_progress.assert_not_called()
 
     def test_final_batch_tab_keeps_the_processed_message_in_the_grid(self):
         frame = _completion_frame()
         frame.batch_roi_notebook = object()
         frame._active_batch_roi_tab = "tab-last"
+        frame.batch_roi_tab_states = {"tab-last": {"complete": True}}
         frame._mark_active_batch_roi_complete = mock.Mock()
         frame._select_next_incomplete_batch_roi_tab = mock.Mock(return_value=False)
         frame._show_processing_complete = mock.Mock()

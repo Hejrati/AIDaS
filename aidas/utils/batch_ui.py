@@ -250,8 +250,7 @@ class BatchTable(ttk.Frame):
 
     def _table_content_height(self):
         try:
-            self.table_inner.update_idletasks()
-            return int(self.table_inner.grid_bbox()[3])
+            return int(self.table_inner.winfo_reqheight())
         except tk.TclError:
             return 0
 

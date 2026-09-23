@@ -295,7 +295,7 @@ def make_light2_from_light(light_path: PathLike | None, required_col: int) -> st
     try:
         write_tsv_rows(output_path, cleaned)
         return output_path
-    except PermissionError:
+    except OSError:
         return path
 
 
@@ -417,7 +417,7 @@ def find_subject_folders(root_folder: PathLike) -> dict[str, dict[str, str]]:
 
     subject_folders: dict[str, dict[str, str]] = {"LE": {}, "RE": {}, "UNKNOWN": {}}
     for directory, _subdirectories, _filenames in os.walk(os.fspath(root_folder)):
-        match = re.match(r"^(\d{1,3})(?:_|\b)", os.path.basename(directory))
+        match = re.match(r"^(\d+)(?:_|\b)", os.path.basename(directory))
         if not match:
             continue
         subject_id = match.group(1).zfill(3)
@@ -458,7 +458,7 @@ def write_eye_block(
     row = ID_ROW_START
     included = 0
     skipped = 0
-    for subject_id in sorted(subject_folders_for_eye):
+    for subject_id in sorted(subject_folders_for_eye, key=int):
         subject_path = subject_folders_for_eye[subject_id]
         try:
             if measure_name == "rrMCP-AR":
@@ -606,8 +606,8 @@ def compile_step4_results(
     emit("Scanning for LE and RE subject folders...")
     report_progress(0, 1, "Scanning input folders...")
     subject_folders = find_subject_folders(root)
-    le_ids = tuple(sorted(subject_folders.get("LE", {})))
-    re_ids = tuple(sorted(subject_folders.get("RE", {})))
+    le_ids = tuple(sorted(subject_folders.get("LE", {}), key=int))
+    re_ids = tuple(sorted(subject_folders.get("RE", {}), key=int))
     emit(f"LE subject(s) found: {', '.join(le_ids) or '(none)'}")
     emit(f"RE subject(s) found: {', '.join(re_ids) or '(none)'}\n")
     if not le_ids and not re_ids:
@@ -667,7 +667,7 @@ def compile_step4_results(
             measure_summaries.append(MeasureCompilation(measure_name, included, skipped))
             emit(f"{measure_name}: included {included}, skipped {skipped}")
 
-        workbook._sheets = [workbook[name] for name in SHEET_NAMES] + [log_worksheet]
+        workbook.move_sheet(log_worksheet, offset=len(workbook.worksheets) - 1)
         for cell in log_worksheet[1]:
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center")

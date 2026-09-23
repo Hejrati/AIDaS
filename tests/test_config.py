@@ -6,7 +6,11 @@ import tempfile
 import unittest
 from unittest import mock
 
-from aidas.core.config import Config
+from aidas.core.config import (
+    Config,
+    STEP4_AUTO_DETECTION_DEFAULTS,
+    validate_step4_auto_detection_preferences,
+)
 
 
 class ConfigPersistenceTests(unittest.TestCase):
@@ -55,6 +59,8 @@ class ConfigPersistenceTests(unittest.TestCase):
                 self.assertEqual(config.get("r_output_script_path"), "")
                 self.assertEqual(config.get("custom_future_setting"), "keep me")
                 self.assertTrue(config.get("check_for_updates"))
+                for key, value in STEP4_AUTO_DETECTION_DEFAULTS.items():
+                    self.assertEqual(config.get(key), value)
                 config.set("last_successful_update_check", 123)
 
             saved = json.loads(config_file.read_text(encoding="utf-8"))
@@ -63,6 +69,51 @@ class ConfigPersistenceTests(unittest.TestCase):
             self.assertEqual(saved["custom_future_setting"], "keep me")
             self.assertEqual(saved["last_successful_update_check"], 123)
             self.assertEqual(list(config_dir.glob("*.tmp")), [])
+
+    def test_step4_auto_detection_preferences_are_parsed_and_validated(self):
+        values = {key: str(value) for key, value in STEP4_AUTO_DETECTION_DEFAULTS.items()}
+        values["step4_auto_savgol_window"] = "11"
+        values["step4_auto_confidence_percent"] = "72"
+
+        parsed = validate_step4_auto_detection_preferences(values)
+
+        self.assertEqual(parsed["step4_auto_savgol_window"], 11)
+        self.assertEqual(parsed["step4_auto_confidence_percent"], 72.0)
+
+    def test_step4_auto_detection_rejects_even_smoothing_window(self):
+        values = dict(STEP4_AUTO_DETECTION_DEFAULTS)
+        values["step4_auto_savgol_window"] = 8
+
+        with self.assertRaisesRegex(ValueError, "odd integer"):
+            validate_step4_auto_detection_preferences(values)
+
+    def test_legacy_auto_detection_values_migrate_to_current_units(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir) / ".aidas"
+            config_dir.mkdir()
+            config_file = config_dir / "preferences.json"
+            config_file.write_text(
+                json.dumps(
+                    {
+                        "step4_auto_savgol_polyorder": 4,
+                        "step4_auto_confidence": 0.72,
+                        "step4_auto_consistency_tolerance_percent": 8.0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file
+            ):
+                config = Config()
+
+            self.assertEqual(config.get("step4_auto_confidence_percent"), 72.0)
+            self.assertEqual(
+                config.get("step4_auto_consistency_tolerance"),
+                8.0,
+            )
+            self.assertNotIn("step4_auto_savgol_polyorder", config.prefs)
 
 
 if __name__ == "__main__":

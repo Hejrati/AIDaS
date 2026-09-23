@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import errno
 import os
-import tempfile
 from pathlib import Path
 from typing import IO
 
@@ -66,12 +65,18 @@ class SingleInstanceGuard:
     def _acquire_posix_lock(self) -> bool:
         import fcntl
 
-        lock_path = Path(tempfile.gettempdir()) / self.POSIX_LOCK_NAME
-        lock_file = lock_path.open("a+", encoding="utf-8")
+        # Keep the POSIX lock private to the current user's config directory.
+        # A shared /tmp filename can be left owned by another user and make a
+        # later open fail before flock has a chance to report contention.
+        lock_dir = Path.home() / ".aidas"
         try:
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_path = lock_dir / self.POSIX_LOCK_NAME
+            lock_file = lock_path.open("a+", encoding="utf-8")
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            lock_file.close()
+            if "lock_file" in locals():
+                lock_file.close()
             if exc.errno in (errno.EACCES, errno.EAGAIN):
                 return False
             raise

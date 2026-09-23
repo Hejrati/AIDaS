@@ -18,7 +18,11 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 from aidas import __version__
-from aidas.core.config import Config
+from aidas.core.config import (
+    Config,
+    STEP4_AUTO_DETECTION_DEFAULTS,
+    validate_step4_auto_detection_preferences,
+)
 from aidas.core.display import (
     centered_decorated_position,
     centered_position,
@@ -67,6 +71,7 @@ from aidas.ui.windowing import (
 )
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
+    HoverToolTip,
     action_button,
     apply_app_icon_to,
     load_color_close_ctk_icon,
@@ -431,6 +436,48 @@ class SettingsDialog(ctk.CTkToplevel):
         ("main", "Main processing script"),
         ("output", "Output processing script"),
     )
+    AUTO_DETECTION_FIELDS = (
+        (
+            "step4_auto_start_min",
+            "Start point minimum threshold",
+            "Minimum allowed profile position for the detected start point.",
+        ),
+        (
+            "step4_auto_start_max",
+            "Start point maximum threshold",
+            "Maximum allowed profile position for the detected start point.",
+        ),
+        (
+            "step4_auto_end_min",
+            "End point minimum threshold",
+            "Minimum allowed profile position for the detected end point.",
+        ),
+        (
+            "step4_auto_end_max",
+            "End point maximum threshold",
+            "Maximum allowed profile position for the detected end point.",
+        ),
+        (
+            "step4_auto_savgol_window",
+            "Smoothing window (samples)",
+            "Number of neighboring samples used by the fixed degree-2 Savitzky-Golay filter. A larger odd number smooths more but can hide narrow features.",
+        ),
+        (
+            "step4_auto_confidence_percent",
+            "Acceptance confidence (%)",
+            "Minimum score required to accept an ROI automatically. Higher percentages send more ROIs for manual review; the default is 66%.",
+        ),
+        (
+            "step4_auto_min_quadratic_r2",
+            "Minimum bell-fit R-squared",
+            "Minimum quadratic fit quality for the profile to count as a bell shape. Values closer to 1 require a cleaner bell.",
+        ),
+        (
+            "step4_auto_consistency_tolerance",
+            "Consistency tolerance (samples)",
+            "Allowed boundary deviation from the median across ROIs, measured in samples. Larger values permit more variation before manual review.",
+        ),
+    )
 
     def __init__(
         self,
@@ -474,6 +521,13 @@ class SettingsDialog(ctk.CTkToplevel):
         self._script_status_vars = {
             "main": tk.StringVar(master=self),
             "output": tk.StringVar(master=self),
+        }
+        self.auto_detection_vars = {
+            key: tk.StringVar(
+                master=self,
+                value=self._settings_number_text(preferences.get(key, default)),
+            )
+            for key, default in STEP4_AUTO_DETECTION_DEFAULTS.items()
         }
 
         if self._classic_settings:
@@ -613,7 +667,39 @@ class SettingsDialog(ctk.CTkToplevel):
             anchor="w",
         ).pack(side="left")
 
-        r_environment = self._settings_section("R environment", row=3)
+        auto_detection = self._settings_section(
+            "Step 4 auto-detect ROI (Savitzky-Golay)",
+            row=3,
+        )
+        ctk.CTkLabel(
+            auto_detection,
+            text="Configure smoothing, start/end thresholds, and review criteria. Hover ⓘ for help.",
+            anchor="w",
+            text_color=COLOR_PAIRS["muted_text"],
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
+        for row, (key, label, help_text) in enumerate(
+            self.AUTO_DETECTION_FIELDS,
+            start=1,
+        ):
+            entry = ctk.CTkEntry(
+                auto_detection,
+                textvariable=self.auto_detection_vars[key],
+                width=140,
+                height=32,
+                justify="right",
+                fg_color=COLOR_PAIRS["surface_elevated"],
+                border_color=COLOR_PAIRS["border_strong"],
+                text_color=COLOR_PAIRS["text"],
+            )
+            self._labeled_control(
+                auto_detection,
+                row,
+                label,
+                entry,
+                help_text=help_text,
+            )
+
+        r_environment = self._settings_section("R environment", row=4)
         ctk.CTkLabel(
             r_environment,
             text=f"Install or verify R {step3.R_REQUIRED_VERSION} and all required packages.",
@@ -628,7 +714,7 @@ class SettingsDialog(ctk.CTkToplevel):
             width=230,
         ).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 12))
 
-        scripts = self._settings_section("Step 3 R scripts", row=4)
+        scripts = self._settings_section("Step 3 R scripts", row=5)
         ctk.CTkLabel(
             scripts,
             text="Choose each active script from its list, then click Apply.",
@@ -686,6 +772,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self.footer.pack(fill="x", padx=16, pady=(0, 14))
         self.apply_status_var = tk.StringVar(master=self, value="")
         for variable in self.sdb_default_vars.values():
+            variable.trace_add("write", self._mark_dirty)
+        for variable in self.auto_detection_vars.values():
             variable.trace_add("write", self._mark_dirty)
         ctk.CTkLabel(
             self.footer,
@@ -872,6 +960,42 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._mark_dirty,
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 2))
 
+        auto_detection = ttk.LabelFrame(
+            content,
+            text="Step 4 auto-detect ROI (Savitzky-Golay)",
+            padding=10,
+        )
+        auto_detection.pack(fill="x", pady=(0, 10))
+        auto_detection.columnconfigure(1, weight=1)
+        ttk.Label(
+            auto_detection,
+            text="Configure smoothing, start/end thresholds, and review criteria. Hover ⓘ for help.",
+            style="AIDaS.Muted.TLabel",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        for row, (key, label, help_text) in enumerate(
+            self.AUTO_DETECTION_FIELDS,
+            start=1,
+        ):
+            label_holder = ttk.Frame(auto_detection)
+            label_holder.grid(row=row, column=0, sticky="w", pady=4)
+            ttk.Label(label_holder, text=label).pack(side="left")
+            help_label = ttk.Label(
+                label_holder,
+                text="  ⓘ",
+                cursor="hand2",
+                style="AIDaS.Muted.TLabel",
+            )
+            help_label.pack(side="left")
+            HoverToolTip(help_label, help_text)
+            entry = ttk.Entry(
+                auto_detection,
+                textvariable=self.auto_detection_vars[key],
+                width=18,
+                justify="right",
+            )
+            entry.grid(row=row, column=1, sticky="e", pady=4)
+            HoverToolTip(entry, help_text)
+
         r_environment = ttk.LabelFrame(content, text="R environment", padding=10)
         r_environment.pack(fill="x", pady=(0, 10))
         ttk.Label(
@@ -955,6 +1079,8 @@ class SettingsDialog(ctk.CTkToplevel):
         ).pack(side="right", padx=(0, 8))
         for variable in self.sdb_default_vars.values():
             variable.trace_add("write", self._mark_dirty)
+        for variable in self.auto_detection_vars.values():
+            variable.trace_add("write", self._mark_dirty)
         self._sync_interface_controls(interface_mode, appearance_mode)
 
     def _settings_section(self, title, *, row):
@@ -984,13 +1110,34 @@ class SettingsDialog(ctk.CTkToplevel):
         return body
 
     @staticmethod
-    def _labeled_control(parent, row, label, control):
+    def _settings_number_text(value):
+        """Keep whole-number settings readable while preserving decimals."""
+
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    @staticmethod
+    def _labeled_control(parent, row, label, control, *, help_text=None):
+        label_holder = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+        label_holder.grid(row=row, column=0, sticky="w", padx=(14, 18), pady=6)
         ctk.CTkLabel(
-            parent,
+            label_holder,
             text=label,
             anchor="w",
             text_color=COLOR_PAIRS["text"],
-        ).grid(row=row, column=0, sticky="w", padx=(14, 18), pady=6)
+        ).pack(side="left")
+        if help_text:
+            help_label = ctk.CTkLabel(
+                label_holder,
+                text="  ⓘ",
+                width=24,
+                cursor="hand2",
+                text_color=COLOR_PAIRS["muted_text"],
+            )
+            help_label.pack(side="left")
+            HoverToolTip(help_label, help_text)
+            HoverToolTip(control, help_text)
         control.grid(row=row, column=1, sticky="e", padx=(0, 14), pady=6)
 
     def _mark_dirty(self, *_args) -> None:
@@ -1106,6 +1253,22 @@ class SettingsDialog(ctk.CTkToplevel):
             return None
         return width, height, offset, bool(self.sdb_little_endian_var.get())
 
+    def _validated_auto_detection_settings(self):
+        variables = getattr(self, "auto_detection_vars", None)
+        if not variables:
+            return {}
+        try:
+            return validate_step4_auto_detection_preferences(
+                {key: variable.get() for key, variable in variables.items()}
+            )
+        except ValueError as exc:
+            messagebox.showerror(
+                "Step 4 Auto-detect Settings",
+                str(exc),
+                parent=self,
+            )
+            return None
+
     @staticmethod
     def _compact_script_name(name, limit=48):
         name = str(name)
@@ -1197,6 +1360,9 @@ class SettingsDialog(ctk.CTkToplevel):
         sdb_defaults = self._validated_sdb_defaults()
         if sdb_defaults is None:
             return
+        auto_detection_settings = self._validated_auto_detection_settings()
+        if auto_detection_settings is None:
+            return
         selected_scripts = {}
         for role, _label in self.SCRIPT_ROLES:
             choice = self._script_by_label[role].get(self._script_vars[role].get())
@@ -1228,6 +1394,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self._preferences.set("sdb_raw_height", height)
         self._preferences.set("sdb_raw_offset", offset)
         self._preferences.set("sdb_little_endian", little_endian)
+        for key, value in auto_detection_settings.items():
+            self._preferences.set(key, value)
         self._step1.set_sdb_parameter_defaults(
             width=width,
             height=height,
@@ -1453,23 +1621,6 @@ class AIDaSApp(ctk.CTk):
 
         self._set_splash_progress(48, "Loading Step 5 compiler...")
         from aidas.steps.step5_compile import Step5Frame
-
-        self._set_splash_progress(50, "Loading preferences...")
-        self.preferences = Config()
-        self.interface_mode = set_interface_mode(
-            self.preferences.get("interface_mode", "Modern"),
-            redraw=False,
-        )
-        self.requested_interface_mode = self.interface_mode
-        self._set_splash_progress(54, "Applying the interface theme...")
-        self.style = ttk.Style(self)
-        self.appearance_mode = normalize_appearance_mode(
-            self.preferences.get("appearance_mode", self.preferences.get("theme", "System"))
-        )
-        apply_appearance_mode(
-            "Light" if self.interface_mode == "Classic" else self.appearance_mode,
-            root=self,
-        )
 
         self._set_splash_progress(50, "Loading preferences...")
         self.preferences = Config()

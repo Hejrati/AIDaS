@@ -31,6 +31,7 @@ stored in ``ROI_to_move_stck.tif``.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import queue
 import threading
 import math
 import os
@@ -54,6 +55,10 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
 
+from aidas.core.config import (
+    STEP4_AUTO_DETECTION_DEFAULTS,
+    validate_step4_auto_detection_preferences,
+)
 from aidas.core.display import centered_position, work_area_bounds
 from aidas.ui.components import AppButton
 from aidas.ui.tabs import ClosableTabView
@@ -76,13 +81,23 @@ MATLAB_ROI_HIGH = 450
 MATLAB_ROI_TOP_LINE = 450
 MATLAB_A_LIMIT = 1.0
 PROFILE_LOCAL_MINIMUM_RADIUS = 6
-AUTO_START_RANGE = (70, 90)
-AUTO_END_RANGE = (90, 110)
-AUTO_SMOOTH_WINDOW = 9
+AUTO_START_RANGE = (
+    STEP4_AUTO_DETECTION_DEFAULTS["step4_auto_start_min"],
+    STEP4_AUTO_DETECTION_DEFAULTS["step4_auto_start_max"],
+)
+AUTO_END_RANGE = (
+    STEP4_AUTO_DETECTION_DEFAULTS["step4_auto_end_min"],
+    STEP4_AUTO_DETECTION_DEFAULTS["step4_auto_end_max"],
+)
+AUTO_SMOOTH_WINDOW = STEP4_AUTO_DETECTION_DEFAULTS["step4_auto_savgol_window"]
 AUTO_POLYNOMIAL_ORDER = 2
-AUTO_CONFIDENCE_THRESHOLD = 0.66
-AUTO_MIN_QUADRATIC_R2 = 0.55
-AUTO_CONSISTENCY_MIN_TOLERANCE = 6.0
+AUTO_CONFIDENCE_THRESHOLD = (
+    STEP4_AUTO_DETECTION_DEFAULTS["step4_auto_confidence_percent"] / 100.0
+)
+AUTO_MIN_QUADRATIC_R2 = STEP4_AUTO_DETECTION_DEFAULTS["step4_auto_min_quadratic_r2"]
+AUTO_CONSISTENCY_MIN_TOLERANCE = STEP4_AUTO_DETECTION_DEFAULTS[
+    "step4_auto_consistency_tolerance"
+]
 AUTO_MANUAL_ONLY_ROI_INDEX = 20
 
 
@@ -456,7 +471,9 @@ def detect_profile_boundaries(
     *,
     start_range: tuple[int, int] = AUTO_START_RANGE,
     end_range: tuple[int, int] = AUTO_END_RANGE,
+    smoothing_window: int = AUTO_SMOOTH_WINDOW,
     confidence_threshold: float = AUTO_CONFIDENCE_THRESHOLD,
+    minimum_quadratic_r2: float = AUTO_MIN_QUADRATIC_R2,
 ) -> ProfileBoundaryDetection:
     """Detect a bell-shaped peak bounded by two minima in constrained ranges.
 
@@ -488,13 +505,18 @@ def detect_profile_boundaries(
 
     from scipy.signal import savgol_filter
 
-    window = min(AUTO_SMOOTH_WINDOW, values.size if values.size % 2 else values.size - 1)
-    minimum_window = AUTO_POLYNOMIAL_ORDER + 2
-    if minimum_window % 2 == 0:
-        minimum_window += 1
-    window = max(minimum_window, window)
+    requested_window = int(smoothing_window)
+    if requested_window < 3 or requested_window % 2 == 0:
+        raise ValueError("The Savitzky-Golay window length must be an odd integer of 3 or greater.")
+    largest_window = values.size if values.size % 2 else values.size - 1
+    window = min(requested_window, largest_window)
     smoothed = np.asarray(
-        savgol_filter(values, window_length=window, polyorder=AUTO_POLYNOMIAL_ORDER, mode="interp"),
+        savgol_filter(
+            values,
+            window_length=window,
+            polyorder=AUTO_POLYNOMIAL_ORDER,
+            mode="interp",
+        ),
         dtype=np.float64,
     )
 
@@ -557,12 +579,12 @@ def detect_profile_boundaries(
                 and left_rise > side_floor
                 and right_rise > side_floor
                 and valid_quadratic
-                and quadratic_r2 >= AUTO_MIN_QUADRATIC_R2
+                and quadratic_r2 >= float(minimum_quadratic_r2)
             )
             accepted = shape_valid and confidence >= float(confidence_threshold)
             if not valid_quadratic:
                 reason = "quadratic fit is not a downward bell with an internal maximum"
-            elif quadratic_r2 < AUTO_MIN_QUADRATIC_R2:
+            elif quadratic_r2 < float(minimum_quadratic_r2):
                 reason = f"quadratic fit is weak (R²={quadratic_r2:.2f})"
             elif prominence <= prominence_floor:
                 reason = "peak prominence is too weak relative to profile noise"
@@ -616,8 +638,10 @@ def detect_profile_boundaries(
 
 def apply_profile_detection_consistency(
     detections: list[ProfileBoundaryDetection],
+    *,
+    minimum_tolerance: float = AUTO_CONSISTENCY_MIN_TOLERANCE,
 ) -> list[ProfileBoundaryDetection]:
-    """Reject boundary outliers using robust agreement across all ROI profiles."""
+    """Reject boundary outliers using robust agreement and sample tolerance."""
 
     if len(detections) < 3:
         return list(detections)
@@ -630,8 +654,9 @@ def apply_profile_detection_consistency(
     median_end = float(np.median(ends))
     start_mad = 1.4826 * float(np.median(np.abs(starts - median_start)))
     end_mad = 1.4826 * float(np.median(np.abs(ends - median_end)))
-    start_tolerance = max(AUTO_CONSISTENCY_MIN_TOLERANCE, 3.0 * start_mad)
-    end_tolerance = max(AUTO_CONSISTENCY_MIN_TOLERANCE, 3.0 * end_mad)
+    minimum_tolerance = max(0.0, float(minimum_tolerance))
+    start_tolerance = max(minimum_tolerance, 3.0 * start_mad)
+    end_tolerance = max(minimum_tolerance, 3.0 * end_mad)
 
     consistent: list[ProfileBoundaryDetection] = []
     for item in detections:
@@ -1547,12 +1572,15 @@ class Step4BatchROITable(ttk.Frame):
 class Step4BatchROISelectionPanel(ttk.Frame):
     """Embedded panel for selecting Step 4 ROI folders to process."""
 
+    SCAN_POLL_MS = 50
+
     def __init__(self, step_frame, parent, root_dir):
         super().__init__(parent)
         self.step_frame = step_frame
         self.root_dir = Path(root_dir)
         self.table = None
         self.rows = []
+        self._scan_events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._build_ui()
         self._start_scan()
 
@@ -1601,14 +1629,36 @@ class Step4BatchROISelectionPanel(ttk.Frame):
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning Step 4 ROI folders under {self.root_dir}...")
         threading.Thread(target=self._scan_worker, daemon=True).start()
+        self.after(self.SCAN_POLL_MS, self._poll_scan_events)
 
     def _scan_worker(self):
         try:
             rows, scanned, skipped, access_errors = self.step_frame._scan_batch_roi_folders(self.root_dir)
         except Exception as exc:
-            self.after(0, lambda exc=exc: self._scan_failed(exc))
+            self._scan_events.put(("error", exc))
             return
-        self.after(0, lambda: self._scan_done(rows, scanned, skipped, access_errors))
+        self._scan_events.put(
+            ("done", (rows, scanned, skipped, access_errors))
+        )
+
+    def _poll_scan_events(self):
+        """Deliver scan results on Tk's owning thread."""
+
+        try:
+            kind, payload = self._scan_events.get_nowait()
+        except queue.Empty:
+            try:
+                if self.winfo_exists():
+                    self.after(self.SCAN_POLL_MS, self._poll_scan_events)
+            except tk.TclError:
+                pass
+            return
+
+        if kind == "error":
+            self._scan_failed(payload)
+            return
+        rows, scanned, skipped, access_errors = payload
+        self._scan_done(rows, scanned, skipped, access_errors)
 
     def _scan_failed(self, exc):
         if not self.winfo_exists():
@@ -2602,13 +2652,15 @@ class Step4Frame(SidebarStepFrame):
                 variant="secondary",
                 command=self._restart_current_file,
             ).grid(row=0, column=1, sticky="ew", padx=(5, 0))
-            completed, total = self._completion_progress_counts()
+            button_text, button_command, button_enabled = (
+                self._completion_notice_button_action()
+            )
             continue_button = AppButton(
                 actions,
-                text=f"Go to Step 5 ({completed}/{total} completed)",
+                text=button_text,
                 variant="success",
-                command=self._continue_to_step5,
-                state="normal" if self._completion_step5_handoff_ready() else "disabled",
+                command=button_command,
+                state="normal" if button_enabled else "disabled",
             )
             continue_button.grid(
                 row=1,
@@ -2670,6 +2722,31 @@ class Step4Frame(SidebarStepFrame):
             return completed, total
         return (1, 1) if getattr(self, "_stack_build_complete", False) else (0, 1)
 
+    def _completion_notice_button_action(self) -> tuple[str, object, bool]:
+        """Return the navigation offered by a completed-file notice."""
+
+        completed, total = self._completion_progress_counts()
+        tab_states = getattr(self, "batch_roi_tab_states", {})
+        if self.batch_roi_notebook is not None and tab_states and any(
+            not state.get("complete", False) for state in tab_states.values()
+        ):
+            return (
+                f"Go to next tab ({completed}/{total} completed)",
+                self._go_to_next_batch_roi_tab,
+                True,
+            )
+        return (
+            f"Go to Step 5 ({completed}/{total} completed)",
+            self._continue_to_step5,
+            self._completion_step5_handoff_ready(),
+        )
+
+    def _go_to_next_batch_roi_tab(self) -> None:
+        """Move from a completed file to the next file only when requested."""
+
+        if not self._select_next_incomplete_batch_roi_tab():
+            self._refresh_completion_notice_progress()
+
     def _refresh_completion_notice_progress(self) -> None:
         """Refresh a retained completed-tab card with current batch progress."""
 
@@ -2678,14 +2755,12 @@ class Step4Frame(SidebarStepFrame):
         if notice is None:
             return
         button = getattr(notice, "_step4_continue_button", None)
-        completed, total = self._completion_progress_counts()
         if button is not None:
-            button.configure(text=f"Go to Step 5 ({completed}/{total} completed)")
-            button.state(
-                ["!disabled"]
-                if self._completion_step5_handoff_ready()
-                else ["disabled"]
+            button_text, button_command, button_enabled = (
+                self._completion_notice_button_action()
             )
+            button.configure(text=button_text, command=button_command)
+            button.state(["!disabled"] if button_enabled else ["disabled"])
 
     def _open_results_directory(self, output_dir: str | os.PathLike | None = None) -> None:
         """Open the exact folder containing the active file's Step 4 outputs."""
@@ -4082,6 +4157,28 @@ class Step4Frame(SidebarStepFrame):
         else:
             button.state(["disabled"])
 
+    def _auto_detection_parameters(self) -> dict[str, int | float]:
+        """Return one validated snapshot of the saved auto-detection settings."""
+
+        preferences = getattr(self, "preferences", None)
+        raw_values = {
+            key: (
+                preferences.get(key, default)
+                if preferences is not None
+                else default
+            )
+            for key, default in STEP4_AUTO_DETECTION_DEFAULTS.items()
+        }
+        try:
+            return validate_step4_auto_detection_preferences(raw_values)
+        except ValueError:
+            # A manually edited or older malformed preference file must not
+            # prevent Step 4 from running. The Settings dialog only saves
+            # validated values, so this fallback is for external corruption.
+            return validate_step4_auto_detection_preferences(
+                STEP4_AUTO_DETECTION_DEFAULTS
+            )
+
     def _auto_detect_all_rois(self) -> None:
         """Detect and save high-confidence boundaries for every unconfirmed ROI."""
 
@@ -4109,19 +4206,40 @@ class Step4Frame(SidebarStepFrame):
 
         detections_by_index: dict[int, ProfileBoundaryDetection] = {}
         detection_errors: dict[int, str] = {}
+        parameters = self._auto_detection_parameters()
         try:
             for index, roi in enumerate(self.rois):
                 if index == AUTO_MANUAL_ONLY_ROI_INDEX:
                     continue
                 try:
                     profile = intensity_profile(self.image, roi)
-                    detections_by_index[index] = detect_profile_boundaries(profile)
+                    detections_by_index[index] = detect_profile_boundaries(
+                        profile,
+                        start_range=(
+                            parameters["step4_auto_start_min"],
+                            parameters["step4_auto_start_max"],
+                        ),
+                        end_range=(
+                            parameters["step4_auto_end_min"],
+                            parameters["step4_auto_end_max"],
+                        ),
+                        smoothing_window=parameters["step4_auto_savgol_window"],
+                        confidence_threshold=(
+                            parameters["step4_auto_confidence_percent"] / 100.0
+                        ),
+                        minimum_quadratic_r2=parameters[
+                            "step4_auto_min_quadratic_r2"
+                        ],
+                    )
                 except Exception as exc:
                     detection_errors[index] = str(exc)
 
             ordered_indexes = sorted(detections_by_index)
             consistent = apply_profile_detection_consistency(
-                [detections_by_index[index] for index in ordered_indexes]
+                [detections_by_index[index] for index in ordered_indexes],
+                minimum_tolerance=parameters[
+                    "step4_auto_consistency_tolerance"
+                ],
             )
             detections_by_index = dict(zip(ordered_indexes, consistent))
 
@@ -4446,9 +4564,15 @@ class Step4Frame(SidebarStepFrame):
             self._mark_active_batch_roi_complete()
             self._update_continue_to_step5_button_state()
             self._show_processed_grid_notice(outdir)
-            if self._select_next_incomplete_batch_roi_tab():
-                return
-            self.status_var.set("Processing complete. All selected Step 4 folders are done.")
+            tab_states = getattr(self, "batch_roi_tab_states", {})
+            if tab_states and all(
+                state.get("complete", False) for state in tab_states.values()
+            ):
+                self.status_var.set("Processing complete. All selected Step 4 folders are done.")
+            else:
+                self.status_var.set(
+                    "File processed. Use Go to next tab when you are ready to continue."
+                )
             self._update_continue_to_step5_button_state()
             return
         if self.batch_roi_paths and self.batch_roi_index >= 0:

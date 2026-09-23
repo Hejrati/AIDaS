@@ -282,6 +282,8 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
     def test_both_shells_use_one_current_set_of_workflow_frames(self):
         source = inspect.getsource(AIDaSApp._build_application)
 
+        self.assertEqual(source.count("self.preferences = Config()"), 1)
+        self.assertEqual(source.count('"Loading preferences..."'), 1)
         for step in range(1, 5):
             self.assertEqual(source.count(f"self.step{step} = Step{step}Frame("), 1)
         self.assertIn("self._install_modern_title_bar()", source)

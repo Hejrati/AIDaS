@@ -329,8 +329,6 @@ def _normalize_for_model(image: np.ndarray) -> np.ndarray:
     arr = np.asarray(image)
     if arr.ndim != 2:
         raise ValueError(f"AI_ForAIDAS expects a 2-D grayscale image, got shape {arr.shape}.")
-    if arr.dtype.byteorder not in ("=", "|"):
-        arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
     arr = arr.astype(np.float32, copy=False)
     lo = float(np.nanmin(arr))
     hi = float(np.nanmax(arr))

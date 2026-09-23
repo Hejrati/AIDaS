@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,7 +12,9 @@ from aidas.services.step4_compiler import (
     DEFAULT_OUTPUT_FILENAME,
     MeasureCompilation,
     compile_step4_results,
+    find_subject_folders,
     find_results_file,
+    make_light2_from_light,
 )
 
 
@@ -54,6 +57,39 @@ def _build_subject(root: Path) -> Path:
 
 
 class Step4CompilerTests(unittest.TestCase):
+    def test_compiler_uses_public_sheet_reordering_api(self):
+        source = inspect.getsource(compile_step4_results)
+
+        self.assertIn("workbook.move_sheet", source)
+        self.assertNotIn("workbook._sheets", source)
+
+    def test_subject_ids_over_999_are_discovered_and_sorted_numerically(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for subject_id in ("1000", "999"):
+                nasal = root / "LE" / f"{subject_id}_0_0" / "nasal"
+                nasal.mkdir(parents=True)
+                _write_results(nasal / "Results.xlsx", 1)
+
+            folders = find_subject_folders(root)
+            result = compile_step4_results(root, root / "compiled.xlsx")
+
+            self.assertEqual(set(folders["LE"]), {"999", "1000"})
+            self.assertEqual(result.le_ids, ("999", "1000"))
+
+    def test_light_cleanup_falls_back_to_original_on_any_os_error(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "LIGHT.txt"
+            source.write_text("Distance\tValue\n0\t1\n", encoding="utf-8")
+
+            with mock.patch(
+                "aidas.services.step4_compiler.write_tsv_rows",
+                side_effect=OSError("disk full"),
+            ):
+                result = make_light2_from_light(source, 2)
+
+            self.assertEqual(result, str(source))
+
     def test_compile_matches_legacy_layout_and_reads_current_step4_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -4,6 +4,7 @@ import numpy as np
 
 from aidas.canvas.image_canvas import ImageCanvas
 from aidas.steps.step2_annotate import Step2Frame
+from aidas.utils.step3_image_utils import _array_to_grayscale_image, _pil_font
 
 
 class _ControlStub:
@@ -22,6 +23,26 @@ class _ControlStub:
 
 
 class RedrawEfficiencyTests(unittest.TestCase):
+    def test_step3_font_lookup_is_cached(self):
+        _pil_font.cache_clear()
+
+        first = _pil_font(17, bold=True)
+        second = _pil_font(17, bold=True)
+
+        self.assertIs(first, second)
+        self.assertEqual(_pil_font.cache_info().misses, 1)
+        self.assertEqual(_pil_font.cache_info().hits, 1)
+
+    def test_step3_grayscale_conversion_handles_nonfinite_values(self):
+        source = np.array([[0.0, 1.0], [np.nan, np.inf]], dtype=np.float64)
+        original = source.copy()
+
+        image = _array_to_grayscale_image(source)
+
+        self.assertEqual(image.mode, "RGB")
+        self.assertEqual(image.size, (2, 2))
+        np.testing.assert_array_equal(source, original)
+
     def test_step2_control_updates_are_idempotent(self):
         control = _ControlStub("normal")
 
@@ -74,6 +95,19 @@ class RedrawEfficiencyTests(unittest.TestCase):
         ).astype(np.uint8)
 
         np.testing.assert_array_equal(canvas._to_display(data), reference)
+
+    def test_float_preview_does_not_mutate_caller_owned_data(self):
+        canvas = ImageCanvas.__new__(ImageCanvas)
+        data = np.array([[1.0, 2.0], [np.nan, np.inf]], dtype=np.float64)
+        original = data.copy()
+
+        rendered = canvas._to_display(data)
+
+        np.testing.assert_array_equal(data, original)
+        np.testing.assert_array_equal(
+            rendered,
+            np.array([[0, 255], [0, 0]], dtype=np.uint8),
+        )
 
 
 if __name__ == "__main__":

@@ -1920,6 +1920,8 @@ class RBatchSelectionTable(ttk.Frame):
 class RBatchSelectionPanel(ttk.Frame):
     """Embedded panel for selecting subfolders to run through the Step 3 R script."""
 
+    SCAN_POLL_MS = 50
+
     def __init__(self, step_frame, parent, root_dir, folders=None):
         super().__init__(parent)
         self.step_frame = step_frame
@@ -1927,6 +1929,7 @@ class RBatchSelectionPanel(ttk.Frame):
         self.input_folders = None if folders is None else tuple(Path(folder) for folder in folders)
         self.rows = []
         self.table = None
+        self._scan_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self._build_ui()
         self._start_scan()
@@ -2045,6 +2048,7 @@ class RBatchSelectionPanel(ttk.Frame):
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
         threading.Thread(target=self._scan_worker, daemon=True).start()
+        self.after(self.SCAN_POLL_MS, self._poll_scan_events)
 
     def _scan_worker(self):
         rows = []
@@ -2088,9 +2092,30 @@ class RBatchSelectionPanel(ttk.Frame):
                     }
                 )
         except Exception as exc:
-            self.after(0, lambda exc=exc: self._scan_failed(exc))
+            self._scan_events.put(("error", exc))
             return
-        self.after(0, lambda: self._scan_done(rows, scanned, missing, access_errors))
+        self._scan_events.put(
+            ("done", (rows, scanned, missing, access_errors))
+        )
+
+    def _poll_scan_events(self):
+        """Deliver scan results on Tk's owning thread."""
+
+        try:
+            kind, payload = self._scan_events.get_nowait()
+        except queue.Empty:
+            try:
+                if self.winfo_exists():
+                    self.after(self.SCAN_POLL_MS, self._poll_scan_events)
+            except tk.TclError:
+                pass
+            return
+
+        if kind == "error":
+            self._scan_failed(payload)
+            return
+        rows, scanned, missing, access_errors = payload
+        self._scan_done(rows, scanned, missing, access_errors)
 
     def _scan_failed(self, exc):
         if not self.winfo_exists():

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
+@lru_cache(maxsize=None)
 def _pil_font(size, bold=False):
     """Return a readable UI font without making a platform-specific font mandatory."""
     candidates = []
@@ -68,8 +70,20 @@ def _array_to_grayscale_image(array):
         if hi <= lo:
             scaled = np.zeros(arr.shape, dtype=np.uint8)
         else:
-            normalized = np.clip((np.nan_to_num(arr, nan=lo) - lo) / (hi - lo), 0.0, 1.0)
-            scaled = np.round(normalized * 255.0).astype(np.uint8)
+            normalized = np.array(arr, dtype=np.float64, copy=True)
+            np.nan_to_num(
+                normalized,
+                copy=False,
+                nan=lo,
+                posinf=hi,
+                neginf=lo,
+            )
+            normalized -= lo
+            normalized /= hi - lo
+            np.clip(normalized, 0.0, 1.0, out=normalized)
+            normalized *= 255.0
+            np.rint(normalized, out=normalized)
+            scaled = normalized.astype(np.uint8)
     return Image.fromarray(scaled, mode="L").convert("RGB")
 
 

@@ -274,9 +274,9 @@ def read_analyze(filepath):
 def save_tiff(filepath, data):
     """Save a numpy array as TIFF (8 or 16-bit)."""
     if data.dtype == np.uint16:
-        img = Image.fromarray(data.astype(np.uint16))
+        img = Image.fromarray(data.astype(np.uint16, copy=False))
     elif data.dtype == np.int16:
-        img = Image.fromarray(data.astype(np.int16))
+        img = Image.fromarray(data.astype(np.int16, copy=False))
     else:
         img = Image.fromarray(data)
     img.save(filepath)

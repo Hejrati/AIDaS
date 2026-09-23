@@ -41,7 +41,7 @@ def main() -> int:
             _record_worker_startup("Worker module imported.")
             sys.argv = [sys.argv[0], *sys.argv[2:]]
             return int(ai_worker_main() or 0)
-        except BaseException:
+        except Exception:
             _record_worker_startup(traceback.format_exc())
             raise
 

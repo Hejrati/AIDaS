@@ -16,6 +16,7 @@ from aidas.steps.step4_analyze_isez import (
     apply_profile_detection_consistency,
     detect_profile_boundaries,
 )
+from aidas.core.config import STEP4_AUTO_DETECTION_DEFAULTS
 
 
 def _bell_profile() -> np.ndarray:
@@ -86,6 +87,26 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         self.assertFalse(results[-1].accepted)
         self.assertIn("consensus", results[-1].reason)
 
+    def test_cross_roi_consistency_tolerance_is_measured_in_samples(self):
+        detections = [
+            _detection(100, 120),
+            _detection(100, 120),
+            _detection(100, 120),
+            _detection(108, 120),
+        ]
+
+        permissive = apply_profile_detection_consistency(
+            detections,
+            minimum_tolerance=10.0,
+        )
+        strict = apply_profile_detection_consistency(
+            detections,
+            minimum_tolerance=5.0,
+        )
+
+        self.assertTrue(permissive[-1].accepted)
+        self.assertFalse(strict[-1].accepted)
+
     def test_auto_detect_accepts_confident_roi_and_marks_uncertain_roi(self):
         frame = object.__new__(Step4Frame)
         frame.image = object()
@@ -108,6 +129,20 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         frame._refresh_roi_list = mock.Mock()
         frame._select_roi_in_list = mock.Mock()
         frame._render_current_roi = mock.Mock()
+        custom_parameters = dict(STEP4_AUTO_DETECTION_DEFAULTS)
+        custom_parameters.update(
+            step4_auto_start_min=72,
+            step4_auto_start_max=91,
+            step4_auto_end_min=92,
+            step4_auto_end_max=112,
+            step4_auto_savgol_window=11,
+            step4_auto_confidence_percent=70.0,
+            step4_auto_min_quadratic_r2=0.6,
+            step4_auto_consistency_tolerance=8.0,
+        )
+        frame.preferences = SimpleNamespace(
+            get=lambda key, default=None: custom_parameters.get(key, default)
+        )
 
         accepted = _detection(78, 100)
         uncertain = _detection(79, 101, accepted=False)
@@ -118,10 +153,10 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         ), mock.patch(
             "aidas.steps.step4_analyze_isez.detect_profile_boundaries",
             side_effect=[accepted, uncertain],
-        ), mock.patch(
+        ) as detect, mock.patch(
             "aidas.steps.step4_analyze_isez.apply_profile_detection_consistency",
-            side_effect=lambda values: values,
-        ), mock.patch(
+            side_effect=lambda values, **_kwargs: values,
+        ) as consistency, mock.patch(
             "aidas.steps.step4_analyze_isez.analyze_and_save_roi",
             return_value=saved,
         ):
@@ -134,6 +169,17 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         self.assertEqual(frame.current_roi_idx, 1)
         self.assertIn("amber", frame.status_var.value)
         self.assertFalse(frame._auto_detecting)
+        self.assertEqual(
+            detect.call_args.kwargs,
+            {
+                "start_range": (72, 91),
+                "end_range": (92, 112),
+                "smoothing_window": 11,
+                "confidence_threshold": 0.7,
+                "minimum_quadratic_r2": 0.6,
+            },
+        )
+        self.assertEqual(consistency.call_args.kwargs["minimum_tolerance"], 8.0)
 
     def test_auto_detect_never_processes_roi_21(self):
         frame = object.__new__(Step4Frame)
@@ -196,6 +242,15 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertIn(text, readme)
+
+    def test_savitzky_golay_polynomial_order_is_fixed_at_degree_two(self):
+        with mock.patch(
+            "scipy.signal.savgol_filter",
+            side_effect=lambda values, **_kwargs: values,
+        ) as smoother:
+            detect_profile_boundaries(_bell_profile(), smoothing_window=11)
+
+        self.assertEqual(smoother.call_args.kwargs["polyorder"], 2)
 
 
 if __name__ == "__main__":

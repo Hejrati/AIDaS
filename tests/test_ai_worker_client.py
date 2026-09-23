@@ -2,8 +2,14 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr
 import io
+from pathlib import Path
+from types import SimpleNamespace
+import tempfile
 import unittest
 from unittest import mock
+import zipfile
+
+import numpy as np
 
 from aidas.ai.client import AIWorkerClient
 from aidas.ai import worker
@@ -16,6 +22,25 @@ class _FakeListener:
 
 
 class AIWorkerClientCommandTests(unittest.TestCase):
+    def test_worker_prediction_archive_is_uncompressed_local_ipc(self):
+        prediction = SimpleNamespace(
+            boundaries=np.arange(12, dtype=np.float32).reshape(3, 4),
+            fovea_x=2,
+            device="CPU",
+            execution_provider="CPUExecutionProvider",
+            fallback_reason=None,
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output = Path(temp_dir) / "prediction.npz"
+
+            worker._write_prediction(output, prediction)
+
+            with zipfile.ZipFile(output) as archive:
+                self.assertTrue(archive.infolist())
+                self.assertTrue(
+                    all(item.compress_type == zipfile.ZIP_STORED for item in archive.infolist())
+                )
+
     def _client_with_token(self, token):
         client = AIWorkerClient(
             ["aidas", "--aidas-ai-worker"],

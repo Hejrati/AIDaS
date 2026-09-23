@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import unittest
-import threading
 from types import SimpleNamespace
 
 from aidas.ui.title_bar import (
     CustomWindowsTitleBar,
     WindowsCaptionController,
     _SWP_ASYNCWINDOWPOS,
+    _SWP_NOZORDER,
     _WindowsAPI,
     _REQUIRED_NATIVE_STYLES,
     _RETAINED_NATIVE_STYLES,
@@ -157,21 +157,20 @@ class WindowsCaptionControllerTests(unittest.TestCase):
         self.assertEqual(api.root_handle(window), 4321)
         self.assertEqual(calls, [])
 
-    def test_frame_refresh_is_posted_from_a_non_ui_thread(self):
+    def test_frame_refresh_posts_directly_without_blocking_on_a_worker(self):
         api = _WindowsAPI.__new__(_WindowsAPI)
         calls = []
-        ui_thread = threading.get_ident()
 
         def set_window_pos(*args):
-            calls.append((threading.get_ident(), args))
+            calls.append(args)
             return True
 
-        api._frame_set_window_pos = set_window_pos
+        api._set_window_pos = set_window_pos
 
         self.assertTrue(api.refresh_frame(101))
         self.assertEqual(len(calls), 1)
-        self.assertNotEqual(calls[0][0], ui_thread)
-        self.assertTrue(calls[0][1][-1] & _SWP_ASYNCWINDOWPOS)
+        self.assertTrue(calls[0][-1] & _SWP_ASYNCWINDOWPOS)
+        self.assertTrue(calls[0][-1] & _SWP_NOZORDER)
 
     def test_descendant_configure_does_not_schedule_title_state_work(self):
         title_bar = object.__new__(CustomWindowsTitleBar)

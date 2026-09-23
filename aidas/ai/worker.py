@@ -64,7 +64,9 @@ def _emit_progress(stage, fraction, *, request_id=None):
 def _write_prediction(output_path, prediction):
     fovea_x = -1 if prediction.fovea_x is None else int(prediction.fovea_x)
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    np.savez_compressed(
+    # This archive is a short-lived local IPC file.  Avoid spending CPU on
+    # compression only to decompress it immediately in the client process.
+    np.savez(
         output_path,
         boundaries=prediction.boundaries,
         fovea_x=np.array([fovea_x], dtype=np.int64),

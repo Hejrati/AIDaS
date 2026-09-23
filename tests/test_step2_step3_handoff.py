@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import queue
 import tempfile
 import unittest
 from unittest import mock
@@ -249,12 +250,13 @@ class Step2Step3HandoffTests(unittest.TestCase):
             panel.step_frame = step_frame
             panel.root_dir = root
             panel.input_folders = (selected,)
-            panel.after = lambda _delay, callback: callback()
+            panel._scan_events = queue.Queue()
             scan_results = []
             panel._scan_done = lambda rows, *_rest: scan_results.extend(rows)
             panel._scan_failed = self.fail
 
             panel._scan_worker()
+            panel._poll_scan_events()
 
             self.assertEqual([row["folder"] for row in scan_results], [selected])
 

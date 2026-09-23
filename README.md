@@ -76,6 +76,9 @@ Step 4 can automatically process the first 20 intensity profiles with
 **Auto-detect ROIs 1-20**. **ROI 21 is deliberately excluded** because its
 profile shape differs from the bell-shaped profiles and must always be selected
 manually.
+These values can be changed and saved under **Settings > Step 4 auto-detect
+ROI (Savitzky-Golay)**. Hover the info marker beside any setting for a short
+explanation. The values below are the defaults.
 The detector uses the anatomical ranges supplied for this workflow rather than
 copying one pair of lines to every plot:
 
@@ -87,7 +90,8 @@ copying one pair of lines to every plot:
 For each profile, AIDaS performs these deterministic steps:
 
 1. Replace non-finite samples by linear interpolation.
-2. Smooth the profile with a nine-sample, degree-2 Savitzky-Golay filter.
+2. Smooth the profile with the configured Savitzky-Golay window and a fixed
+   degree-2 polynomial (nine samples by default).
 3. Enumerate local-minimum candidates in the Start and End ranges. The lowest
    sample in a range is retained as a fallback for a flat or boundary minimum.
 4. For every valid Start/End pair, locate the strongest internal maximum and
@@ -98,10 +102,11 @@ For each profile, AIDaS performs these deterministic steps:
 6. Calculate a confidence score from baseline prominence (32%), rise from the
    Start minimum (16%), fall to the End minimum (16%), quadratic fit (26%), and
    strict-local-minimum evidence (10%). The automatic acceptance threshold is
-   66%.
+   66% by default.
 7. Compare the detected Start and End positions from ROIs 1-20 with their robust
    medians. A boundary outside three scaled median absolute deviations, with a
-   minimum tolerance of six samples, is treated as an outlier.
+   configurable minimum tolerance of six samples by default, is treated as an
+   outlier.
 
 High-confidence detections are saved in memory and shown with green checkmarks.
 Low-confidence, invalid, or cross-ROI outlier detections are shown as amber

@@ -465,19 +465,24 @@ class ImageCanvas(ttk.Frame):
                 d *= 255.0 / (hi - lo)
             np.clip(d, 0, 255, out=d)
             return d.astype(np.uint8)
-        d = np.asarray(data, dtype=np.float64)
+        # Always detach display normalization from caller-owned floating-point
+        # arrays.  The in-place operations below must never alter source data
+        # that later workflow steps may save or process.
+        d = np.array(data, dtype=np.float64, copy=True)
         finite = np.isfinite(d)
         if not np.any(finite):
             return np.zeros(data.shape, dtype=np.uint8)
         if not np.all(finite):
-            d = np.where(finite, d, np.nan)
+            d[~finite] = np.nan
         lo = float(np.nanmin(d))
         hi = float(np.nanmax(d))
         if hi > lo:
-            d = np.clip((d - lo) / (hi - lo) * 255.0, 0, 255)
+            d -= lo
+            d *= 255.0 / (hi - lo)
         else:
-            d = np.clip(d, 0, 255)
-        d = np.nan_to_num(d, nan=0.0, posinf=255.0, neginf=0.0)
+            d[finite] = np.clip(d[finite], 0, 255)
+        np.clip(d, 0, 255, out=d)
+        d[~finite] = 0.0
         return d.astype(np.uint8)
 
     def _redraw(self):

@@ -28,6 +28,7 @@ from aidas.ui.components import (
     WorkflowProgressStrip,
 )
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
+from aidas.utils.batch_ui import BatchTable
 from aidas.utils.ui_utils import (
     ACTION_ICON_FILES,
     ACTION_ICON_SIZE,
@@ -177,9 +178,26 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("self._open_r_setup", source)
         self.assertIn("self._refresh_r_script_choices(role)", source)
         self.assertIn('text="Apply"', source)
+        self.assertIn('"Step 4 auto-detect ROI (Savitzky-Golay)"', source)
+        self.assertIn("self.AUTO_DETECTION_FIELDS", source)
+        self.assertIn("help_text=help_text", source)
+        field_keys = {field[0] for field in SettingsDialog.AUTO_DETECTION_FIELDS}
+        self.assertNotIn("step4_auto_savgol_polyorder", field_keys)
+        self.assertIn("step4_auto_confidence_percent", field_keys)
+        self.assertIn("step4_auto_consistency_tolerance", field_keys)
+        field_labels = {field[1] for field in SettingsDialog.AUTO_DETECTION_FIELDS}
+        for label in (
+            "Start point minimum threshold",
+            "Start point maximum threshold",
+            "End point minimum threshold",
+            "End point maximum threshold",
+            "Consistency tolerance (samples)",
+        ):
+            self.assertIn(label, field_labels)
         self.assertNotIn('text="Save SDB defaults"', source)
         apply_source = inspect.getsource(SettingsDialog._apply_changes)
         self.assertIn('self._preferences.set("sdb_raw_width"', apply_source)
+        self.assertIn("auto_detection_settings.items()", apply_source)
         self.assertIn("self._step3.select_r_script", apply_source)
         self.assertIn("self._set_appearance_command", apply_source)
 
@@ -191,6 +209,8 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("ttk.Checkbutton(", source)
         self.assertIn("ttk.Entry(", source)
         self.assertIn("action_button(", source)
+        self.assertIn('text="Step 4 auto-detect ROI (Savitzky-Golay)"', source)
+        self.assertIn("HoverToolTip(help_label, help_text)", source)
         self.assertNotIn("ctk.CTkOptionMenu(", source)
         self.assertNotIn("ctk.CTkSwitch(", source)
         self.assertIn("base_row = 1 + row * 3", source)
@@ -550,11 +570,26 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
 
 
 class WorkflowNavigationTests(unittest.TestCase):
+    def test_batch_table_height_query_does_not_reenter_the_idle_loop(self):
+        source = inspect.getsource(BatchTable._table_content_height)
+
+        self.assertIn("winfo_reqheight", source)
+        self.assertNotIn("update_idletasks", source)
+
     def test_large_badge_can_reuse_progress_number_typography(self):
         self.assertEqual(ProgressCircle.NUMBER_FONT_FAMILY, "Segoe UI")
         self.assertEqual(ProgressCircle.NUMBER_FONT_WEIGHT, "bold")
         self.assertEqual(ProgressCircle.default_number_font_size(24), 9)
         self.assertEqual(ProgressCircle.default_number_font_size(112), 37)
+
+    def test_batch_scan_workers_publish_to_queues_instead_of_calling_tk(self):
+        for panel_type in (RBatchSelectionPanel, Step4BatchROISelectionPanel):
+            with self.subTest(panel=panel_type.__name__):
+                worker_source = inspect.getsource(panel_type._scan_worker)
+                poll_source = inspect.getsource(panel_type._poll_scan_events)
+                self.assertIn("_scan_events.put", worker_source)
+                self.assertNotIn(".after(", worker_source)
+                self.assertIn("self.after(", poll_source)
 
     def test_header_names_all_five_workflow_steps(self):
         self.assertEqual(
