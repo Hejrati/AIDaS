@@ -34,6 +34,36 @@ def _completion_frame() -> Step4Frame:
 
 
 class Step4CompletionTests(unittest.TestCase):
+    def test_build_stack_replaces_auto_detect_as_highlighted_action_when_ready(self):
+        frame = object.__new__(Step4Frame)
+        frame.rois = [mock.Mock(suffix="01"), mock.Mock(suffix="02")]
+        frame.completed = {"01": object(), "02": object()}
+        frame._stack_building = False
+        frame._stack_build_complete = False
+        frame.auto_detect_button = mock.Mock()
+        frame.build_stacks_button = mock.Mock()
+
+        frame._update_build_stack_button_state()
+
+        frame.build_stacks_button.set_variant.assert_called_once_with("primary")
+        frame.build_stacks_button.state.assert_called_once_with(["!disabled"])
+        frame.auto_detect_button.set_variant.assert_called_once_with("secondary")
+
+    def test_auto_detect_remains_highlighted_until_every_roi_is_complete(self):
+        frame = object.__new__(Step4Frame)
+        frame.rois = [mock.Mock(suffix="01"), mock.Mock(suffix="02")]
+        frame.completed = {"01": object()}
+        frame._stack_building = False
+        frame._stack_build_complete = False
+        frame.auto_detect_button = mock.Mock()
+        frame.build_stacks_button = mock.Mock()
+
+        frame._update_build_stack_button_state()
+
+        frame.build_stacks_button.set_variant.assert_called_once_with("secondary")
+        frame.build_stacks_button.state.assert_called_once_with(["disabled"])
+        frame.auto_detect_button.set_variant.assert_called_once_with("primary")
+
     def test_step4_module_import_does_not_require_openpyxl(self):
         project_root = Path(__file__).resolve().parents[1]
         code = (
@@ -109,12 +139,22 @@ class Step4CompletionTests(unittest.TestCase):
     def test_build_stack_action_uses_a_reserved_sidebar_footer(self):
         source = inspect.getsource(Step4Frame._build_ui)
         footer_start = source.index("self.sidebar_footer = ctk.CTkFrame")
-        button_start = source.index("self.build_stacks_button = action_button")
+        button_start = source.index("self.build_stacks_button = AppButton")
         button_end = source.index("self.build_stacks_button.pack", button_start)
 
         self.assertIn("before=self.sidebar", source[footer_start:button_start])
         self.assertIn("self.sidebar_footer", source[button_start:button_end])
         self.assertNotIn("roi_box", source[button_start:button_end])
+
+    def test_step4_footer_actions_share_the_standard_rounded_button(self):
+        source = inspect.getsource(Step4Frame._build_ui)
+        footer_start = source.index("self.auto_detect_button = AppButton")
+        footer_end = source.index("self.continue_to_step5_button.pack", footer_start)
+        footer_source = source[footer_start:footer_end]
+
+        self.assertEqual(footer_source.count("= AppButton("), 3)
+        self.assertIn('"flat-color-icons--stack-of-photos.png"', footer_source)
+        self.assertNotIn("self.build_stacks_button = action_button", footer_source)
 
     def test_auto_detect_uses_the_process_icon_and_explains_roi_21(self):
         source = inspect.getsource(Step4Frame._build_ui)
@@ -170,6 +210,68 @@ class Step4CompletionTests(unittest.TestCase):
 
         self.assertIn('text="Open results folder"', source)
         self.assertIn('text="Restart this file"', source)
+        self.assertIn('text=f"Go to Step 5 ({completed}/{total} completed)"', source)
+        self.assertIn("command=self._continue_to_step5", source)
+        self.assertNotIn("_step4_completion_label", source)
+
+    def test_completion_step5_action_waits_for_every_batch_tab(self):
+        frame = object.__new__(Step4Frame)
+        frame.on_continue_to_step5 = mock.Mock()
+        frame.batch_roi_notebook = object()
+        frame.batch_roi_tab_states = {
+            "complete": {"complete": True},
+            "pending": {"complete": False},
+        }
+
+        self.assertFalse(frame._completion_step5_handoff_ready())
+        self.assertEqual(frame._completion_progress_counts(), (1, 2))
+
+        frame.batch_roi_tab_states["pending"]["complete"] = True
+
+        self.assertTrue(frame._completion_step5_handoff_ready())
+        self.assertEqual(frame._completion_progress_counts(), (2, 2))
+
+    def test_main_step5_button_shows_the_same_batch_progress(self):
+        frame = object.__new__(Step4Frame)
+        frame.continue_to_step5_button = mock.Mock()
+        frame.batch_roi_notebook = object()
+        frame.batch_roi_tab_states = {
+            "complete": {"complete": True},
+            "pending": {"complete": False},
+        }
+
+        frame._update_continue_to_step5_button_state()
+
+        frame.continue_to_step5_button.configure.assert_called_once_with(
+            text="Go to Step 5 (1/2 completed)"
+        )
+        frame.continue_to_step5_button.state.assert_called_once_with(["disabled"])
+
+        frame.continue_to_step5_button.reset_mock()
+        frame.batch_roi_tab_states["pending"]["complete"] = True
+        frame._update_continue_to_step5_button_state()
+
+        frame.continue_to_step5_button.configure.assert_called_once_with(
+            text="Go to Step 5 (2/2 completed)"
+        )
+        frame.continue_to_step5_button.state.assert_called_once_with(["!disabled"])
+
+    def test_main_step5_button_hides_progress_when_no_file_tabs_are_open(self):
+        frame = object.__new__(Step4Frame)
+        frame.continue_to_step5_button = mock.Mock()
+        frame.batch_roi_notebook = None
+        frame.batch_roi_tab_states = {}
+        frame.batch_roi_paths = []
+        frame.batch_roi_index = -1
+        frame.current_path = None
+        frame.image = None
+
+        frame._update_continue_to_step5_button_state()
+
+        frame.continue_to_step5_button.configure.assert_called_once_with(
+            text="Go to Step 5"
+        )
+        frame.continue_to_step5_button.state.assert_called_once_with(["disabled"])
 
     def test_stack_build_displays_wait_notice_before_creating_files(self):
         source = inspect.getsource(Step4Frame._build_stack_outputs)

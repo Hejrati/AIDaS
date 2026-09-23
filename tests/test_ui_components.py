@@ -19,7 +19,14 @@ from aidas.steps.step3_flatten import (
 )
 from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel, Step4Frame
 from aidas.steps.step5_compile import Step5Frame
-from aidas.ui.components import AppButton, AppSplitButton, WorkflowHeader, WorkflowNavigation, WorkflowProgressStrip
+from aidas.ui.components import (
+    AppButton,
+    AppSplitButton,
+    ProgressCircle,
+    WorkflowHeader,
+    WorkflowNavigation,
+    WorkflowProgressStrip,
+)
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
 from aidas.utils.ui_utils import (
     ACTION_ICON_FILES,
@@ -543,6 +550,12 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
 
 
 class WorkflowNavigationTests(unittest.TestCase):
+    def test_large_badge_can_reuse_progress_number_typography(self):
+        self.assertEqual(ProgressCircle.NUMBER_FONT_FAMILY, "Segoe UI")
+        self.assertEqual(ProgressCircle.NUMBER_FONT_WEIGHT, "bold")
+        self.assertEqual(ProgressCircle.default_number_font_size(24), 9)
+        self.assertEqual(ProgressCircle.default_number_font_size(112), 37)
+
     def test_header_names_all_five_workflow_steps(self):
         self.assertEqual(
             WorkflowHeader.DEFAULT_STEPS,
@@ -561,7 +574,7 @@ class WorkflowNavigationTests(unittest.TestCase):
         strip.circles = [mock.Mock() for _ in range(len(strip._step_labels))]
         strip.workflow_progress_label = mock.Mock()
 
-        strip.select_step(3)
+        strip.set_completed_steps(3)
 
         # Finished step (0, 1, 2)
         strip.circles[0].update_state.assert_called_with(
@@ -586,6 +599,24 @@ class WorkflowNavigationTests(unittest.TestCase):
 
         strip.workflow_progress_label.configure.assert_called_once_with(
             text="Step 4 of 5: MCP/AR"
+        )
+
+    def test_workflow_progress_can_show_all_steps_complete(self):
+        strip = WorkflowProgressStrip.__new__(WorkflowProgressStrip)
+        strip._step_labels = WorkflowProgressStrip.DEFAULT_STEPS
+        strip.circles = [mock.Mock() for _ in strip._step_labels]
+        strip.workflow_progress_label = mock.Mock()
+
+        strip.set_completed_steps(5)
+
+        for circle in strip.circles:
+            circle.update_state.assert_called_once_with(
+                fill_color=COLOR_PAIRS["success"],
+                text_color=COLOR_PAIRS["on_primary"],
+                text="✓",
+            )
+        strip.workflow_progress_label.configure.assert_called_once_with(
+            text="Workflow complete: 5 of 5 steps"
         )
 
     def test_header_keeps_only_settings_and_help_shortcuts_at_top_right(self):

@@ -107,7 +107,8 @@ High-confidence detections are saved in memory and shown with green checkmarks.
 Low-confidence, invalid, or cross-ROI outlier detections are shown as amber
 `!` cells and are not considered complete. ROI 21 is always shown for manual
 review unless it was already confirmed before automatic detection. Click an amber cell to open its
-zoomed profile, drag either boundary line, and apply the correction. **Build
+zoomed profile, click the exact sample or drag either boundary line, and apply the correction. Manual
+zoom edits do not snap to a nearby minimum. **Build
 stack** remains disabled until every amber result has been reviewed. The final
 TIFF stacks and `rr_MCPAR.xlsx` are still written only when **Build stack** is
 pressed.

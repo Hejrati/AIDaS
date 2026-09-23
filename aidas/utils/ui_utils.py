@@ -170,6 +170,61 @@ def load_color_close_ctk_icon(owner, *, size=ACTION_ICON_SIZE):
     )
 
 
+def _compile_icon_image(color: str, size: int) -> Image.Image:
+    """Render the Vaadin compile glyph as a crisp, DPI-friendly image.
+
+    The 16-unit geometry comes from Vaadin Icons' ``compile`` glyph, licensed
+    under CC BY 4.0: https://github.com/vaadin/vaadin-icons
+    """
+
+    size = max(8, int(size))
+    scale = 4
+    source_size = 16 * scale
+    image = Image.new("RGBA", (source_size, source_size), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    blocks = (
+        (1, 12, 4, 4),
+        (6, 12, 4, 4),
+        (11, 12, 4, 4),
+        (1, 7, 4, 4),
+        (1, 2, 4, 4),
+        (6, 7, 4, 4),
+        (7, 1, 4, 4),
+        (11, 7, 4, 4),
+        (13, 0, 3, 3),
+    )
+    for x, y, width, height in blocks:
+        left = x * scale
+        top = y * scale
+        draw.rectangle(
+            (left, top, left + width * scale - 1, top + height * scale - 1),
+            fill=color,
+        )
+    if size == source_size:
+        return image
+    return image.resize((size, size), Image.Resampling.LANCZOS)
+
+
+def load_compile_ctk_icon(
+    owner,
+    *,
+    size=ACTION_ICON_SIZE,
+    color_pair=None,
+):
+    """Create the theme-aware compile grid used by the Step 5 action."""
+
+    light_color, dark_color = color_pair or COLOR_PAIRS["on_primary"]
+    icon_size = max(8, int(size))
+    return remember_image(
+        owner,
+        ctk.CTkImage(
+            light_image=_compile_icon_image(light_color, icon_size),
+            dark_image=_compile_icon_image(dark_color, icon_size),
+            size=(icon_size, icon_size),
+        ),
+    )
+
+
 def action_button(
     parent,
     owner,

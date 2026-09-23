@@ -215,11 +215,11 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             ),
             (
                 "For ROIs 1-20, automatic detection smooths each profile with a degree-2 Savitzky-Golay filter, finds two minima around an internal maximum, validates peak prominence and quadratic fit, and checks agreement across those ROIs. High-confidence results are accepted; ROI 21 and other amber ! cells require review.",
-                "Review the grid previews and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, drag the Start or End line in the zoomed editor, and use Apply changes to confirm it.",
+                "Review the grid previews and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, click the exact sample or drag the Start or End line in the zoomed editor, and use Apply changes to confirm it. Zoomed manual edits do not snap to a nearby minimum.",
             ),
             (
                 "When all 21 ROIs are complete, Build stack becomes available and marks the folder tab Done after a successful build.",
-                "The build shows a wait message while writing ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder. A completed plot tab provides Open results folder and Restart this file actions.",
+                "The build shows a wait message while writing ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder. A completed plot tab provides Open results folder, Restart this file, and Go to Step 5 actions.",
                 "Go to Step 5 opens the dedicated compiler and carries forward the current measurement root.",
             ),
         ),

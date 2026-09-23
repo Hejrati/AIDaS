@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tkinter as tk
 from typing import Callable, Sequence
 
 import customtkinter as ctk
@@ -18,6 +19,7 @@ class AppButton(ctk.CTkButton):
     _PALETTE_OPTIONS = (
         "fg_color",
         "hover_color",
+        "text_color",
         "border_color",
         "border_width",
         "background_corner_colors",
@@ -37,6 +39,35 @@ class AppButton(ctk.CTkButton):
         if legacy_style in {"Accent.TButton", "AIDaS.Primary.TButton"}:
             variant = "primary"
 
+        options = {
+            "height": CONTROLS.height_md,
+            "corner_radius": SHAPES.corner_radius_md,
+            "border_width": SHAPES.border_width,
+            "text_color_disabled": COLOR_PAIRS["disabled_text"],
+            "font": ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.body_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        }
+        if not isinstance(master, ctk.CTkBaseClass):
+            # ttk parents expose only their creation-time background to CTk;
+            # a dual color prevents stale light corners after switching dark.
+            options["bg_color"] = COLOR_PAIRS["surface"]
+        options.update(self._variant_palette(variant))
+        options.update(kwargs)
+        self._variant = variant
+        self._enabled_palette = {
+            name: options[name]
+            for name in self._PALETTE_OPTIONS
+            if name in options
+        }
+        if options.get("state") == "disabled":
+            options.update(self._disabled_palette())
+        super().__init__(master, **options)
+
+    @staticmethod
+    def _variant_palette(variant: str):
         palettes = {
             "primary": {
                 "fg_color": COLOR_PAIRS["primary"],
@@ -69,31 +100,13 @@ class AppButton(ctk.CTkButton):
                 "border_color": COLOR_PAIRS["border_strong"],
             },
         }
-        options = {
-            "height": CONTROLS.height_md,
-            "corner_radius": SHAPES.corner_radius_md,
-            "border_width": SHAPES.border_width,
-            "text_color_disabled": COLOR_PAIRS["disabled_text"],
-            "font": ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.body_size,
-                weight=TYPOGRAPHY.semibold_weight,
-            ),
-        }
-        if not isinstance(master, ctk.CTkBaseClass):
-            # ttk parents expose only their creation-time background to CTk;
-            # a dual color prevents stale light corners after switching dark.
-            options["bg_color"] = COLOR_PAIRS["surface"]
-        options.update(palettes.get(variant, palettes["secondary"]))
-        options.update(kwargs)
-        self._enabled_palette = {
-            name: options[name]
-            for name in self._PALETTE_OPTIONS
-            if name in options
-        }
-        if options.get("state") == "disabled":
-            options.update(self._disabled_palette())
-        super().__init__(master, **options)
+        return palettes.get(variant, palettes["secondary"])
+
+    def set_variant(self, variant: str) -> None:
+        """Change semantic emphasis while preserving state and geometry."""
+
+        self._variant = variant
+        self.configure(**self._variant_palette(variant))
 
     def _disabled_palette(self):
         """Return a neutral palette while preserving a composite's silhouette."""
@@ -605,8 +618,6 @@ class AppStatusBar(ctk.CTkFrame):
         self.label.configure(text=text)
 
 
-import tkinter as tk
-
 def _resolve_color(widget, color):
     if hasattr(widget, "_apply_appearance_mode"):
         return widget._apply_appearance_mode(color)
@@ -616,16 +627,34 @@ def _resolve_color(widget, color):
     return color
 
 class ProgressCircle(tk.Canvas):
-    def __init__(self, master, size=24, text="", bg_color=None):
+    NUMBER_FONT_FAMILY = TYPOGRAPHY.family
+    NUMBER_FONT_WEIGHT = "bold"
+
+    @staticmethod
+    def default_number_font_size(size: int) -> int:
+        """Return the numeral size used by workflow progress markers."""
+
+        return max(9, int(size) // 3)
+
+    def __init__(self, master, size=24, text="", bg_color=None, font_size=None):
         self.size = size
         self.bg_color_ref = bg_color
+        self.font_size = (
+            font_size
+            if font_size is not None
+            else self.default_number_font_size(size)
+        )
         bg = _resolve_color(master, bg_color) if bg_color else "#000000"
         super().__init__(master, width=size, height=size, bg=bg, highlightthickness=0)
         self.oval_id = self.create_oval(1, 1, size-1, size-1, fill="", outline="")
         self.text_id = self.create_text(
             size/2, size/2,
             text=text,
-            font=(TYPOGRAPHY.family, 9, "bold"),
+            font=(
+                self.NUMBER_FONT_FAMILY,
+                self.font_size,
+                self.NUMBER_FONT_WEIGHT,
+            ),
             fill="black"
         )
 
@@ -637,8 +666,9 @@ class ProgressCircle(tk.Canvas):
         self.itemconfig(self.oval_id, fill=f_color, outline=f_color)
         self.itemconfig(self.text_id, fill=t_color, text=text)
 
+
 class WorkflowProgressStrip(ctk.CTkFrame):
-    """A highly visible global progress indicator for both Classic and Modern UI."""
+    """Show completed workflow milestones independently of tab selection."""
 
     DEFAULT_STEPS = (
         "1  Load & Crop",
@@ -665,6 +695,8 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         self.pack_propagate(False)
         self.grid_propagate(False)
         self._step_labels = tuple(step_labels or self.DEFAULT_STEPS)
+        self._completion_animation_job = None
+        self._completion_animation_overlay = None
 
         self.center_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.center_frame.place(relx=0.5, rely=0.5, anchor="center")
@@ -697,18 +729,21 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         )
         self.workflow_progress_label.pack(side="left", padx=(10, 0))
 
-    def select_step(self, index: int) -> None:
+    def set_completed_steps(self, completed_steps: int) -> None:
+        """Render progress from the number of successfully completed steps."""
+
         total = max(1, len(self._step_labels))
-        current = min(total, max(1, int(index) + 1))
+        completed = min(total, max(0, int(completed_steps)))
+        active_index = completed if completed < total else None
         
         for i, circle in enumerate(self.circles):
-            if i < current - 1:
+            if i < completed:
                 circle.update_state(
                     fill_color=COLOR_PAIRS["success"],
                     text_color=COLOR_PAIRS["on_primary"],
                     text="✓"
                 )
-            elif i == current - 1:
+            elif i == active_index:
                 circle.update_state(
                     fill_color=COLOR_PAIRS["primary"],
                     text_color=COLOR_PAIRS["on_primary"],
@@ -720,17 +755,94 @@ class WorkflowProgressStrip(ctk.CTkFrame):
                     text_color=COLOR_PAIRS["muted_text"],
                     text=str(i + 1)
                 )
-                
-        step_name = self._step_labels[current - 1] if 0 <= current - 1 < len(self._step_labels) else ""
-        step_name = step_name.split("  ", 1)[-1] if "  " in step_name else step_name
-        
-        self.workflow_progress_label.configure(text=f"Step {current} of {total}: {step_name}")
+
+        if completed == total:
+            label = f"Workflow complete: {total} of {total} steps"
+        else:
+            current = completed + 1
+            step_name = self._step_labels[active_index]
+            step_name = step_name.split("  ", 1)[-1] if "  " in step_name else step_name
+            label = f"Step {current} of {total}: {step_name}"
+        self.workflow_progress_label.configure(text=label)
+
+    def animate_completion(self, completed_index: int) -> None:
+        """Show a brief oversized check when a workflow milestone completes."""
+
+        try:
+            index = int(completed_index)
+        except (TypeError, ValueError):
+            return
+        if index < 0 or index >= len(self.circles):
+            return
+
+        if self._completion_animation_job is not None:
+            try:
+                self.after_cancel(self._completion_animation_job)
+            except tk.TclError:
+                pass
+            self._completion_animation_job = None
+        if self._completion_animation_overlay is not None:
+            try:
+                self._completion_animation_overlay.destroy()
+            except tk.TclError:
+                pass
+
+        self.update_idletasks()
+        circle = self.circles[index]
+        x = circle.winfo_rootx() - self.winfo_rootx() + (circle.winfo_width() // 2)
+        y = circle.winfo_rooty() - self.winfo_rooty() + (circle.winfo_height() // 2)
+        overlay = ctk.CTkLabel(
+            self,
+            text="✓",
+            fg_color="transparent",
+            text_color=COLOR_PAIRS["success"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=10,
+                weight=TYPOGRAPHY.bold_weight,
+            ),
+        )
+        overlay.place(x=x, y=y, anchor="center")
+        self._completion_animation_overlay = overlay
+
+        frames = (10, 16, 23, 29, 25, 20, 16)
+
+        def render(frame_index: int = 0) -> None:
+            if self._completion_animation_overlay is not overlay:
+                return
+            if frame_index >= len(frames):
+                try:
+                    overlay.destroy()
+                except tk.TclError:
+                    pass
+                self._completion_animation_overlay = None
+                self._completion_animation_job = None
+                return
+            overlay.configure(
+                font=ctk.CTkFont(
+                    family=TYPOGRAPHY.family,
+                    size=frames[frame_index],
+                    weight=TYPOGRAPHY.bold_weight,
+                )
+            )
+            self._completion_animation_job = self.after(
+                65,
+                lambda: render(frame_index + 1),
+            )
+
+        render()
+
+    def select_step(self, index: int) -> None:
+        """Compatibility alias for callers that supply a zero-based step index."""
+
+        self.set_completed_steps(index)
 
 
 __all__ = [
     "AppButton",
     "AppSplitButton",
     "AppStatusBar",
+    "ProgressCircle",
     "WorkflowHeader",
     "WorkflowNavigation",
     "WorkflowProgressStrip",

@@ -399,10 +399,17 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
         ("AIDaS.PrimaryAction.TButton", "primary", "primary_hover"),
         ("AIDaS.DangerAction.TButton", "danger", "danger_hover"),
     ):
+        # The Classic interface intentionally keeps the native Windows ttk
+        # theme (xpnative/vista).  Those themes retain a light button face and
+        # ignore most custom background colors, so white ``on_primary`` text
+        # becomes effectively invisible on an enabled action button.  Use the
+        # normal text color for Classic while retaining the high-contrast
+        # on-primary label used by Modern's filled buttons.
+        action_foreground = color("text") if classic else color("on_primary")
         style.configure(
             style_name,
             background=color(base_color),
-            foreground=color("on_primary"),
+            foreground=action_foreground,
             bordercolor=color(base_color),
             focusthickness=1,
             focuscolor=color(base_color),
@@ -416,7 +423,7 @@ def configure_ttk_styles(style: ttk.Style, appearance_mode: str | None = None) -
                 ("pressed", color(hover_color)),
                 ("active", color(hover_color)),
             ],
-            foreground=[("disabled", color("disabled_text")), ("!disabled", color("on_primary"))],
+            foreground=[("disabled", color("disabled_text")), ("!disabled", action_foreground)],
             bordercolor=[("disabled", color("border")), ("!disabled", color(base_color))],
         )
     style.configure("AIDaS.Icon.TButton", anchor="center")

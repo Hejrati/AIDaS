@@ -30,7 +30,13 @@ from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
 from aidas.ui.classic import build_classic_application_menu
-from aidas.ui.components import AppButton, AppStatusBar, WorkflowHeader, WorkflowProgressStrip
+from aidas.ui.components import (
+    AppButton,
+    AppStatusBar,
+    ProgressCircle,
+    WorkflowHeader,
+    WorkflowProgressStrip,
+)
 from aidas.ui.menu_bar import ApplicationMenuBar
 from aidas.ui.splash import SplashWindow
 from aidas.ui.theme import (
@@ -1521,6 +1527,9 @@ class AIDaSApp(ctk.CTk):
         self._modern_header_cache = None
         self._modern_status_bar_cache = None
         self._progress_strip_cache = None
+        self._workflow_completed_steps = 0
+        self._workflow_completion_popup = None
+        self._workflow_completion_popup_job = None
         self._build_workflow_header()
         self._build_progress_strip()
         self._build_status_surface(f"AIDaS v{__version__} — ready")
@@ -1573,6 +1582,7 @@ class AIDaSApp(ctk.CTk):
             self.notebook,
             preferences=self.preferences,
             source_step=self.step4,
+            on_compilation_complete=self._on_step5_compilation_complete,
         )
         self.notebook.add(self.step5, text="  Step 5 — Compile Results  ")
 
@@ -1585,8 +1595,7 @@ class AIDaSApp(ctk.CTk):
             self._prime_modern_shell_cache()
         if self.header is not None:
             self.header.select_step(0)
-        if getattr(self, "progress_strip", None) is not None:
-            self.progress_strip.select_step(0)
+        self._sync_workflow_progress_strip()
         refresh_native_widgets(self)
         self._queue_interface_widget_refresh(include_splash=True)
         self._last_effective_appearance = ctk.get_appearance_mode()
@@ -1834,6 +1843,7 @@ class AIDaSApp(ctk.CTk):
             if cached is not None and cached.winfo_exists():
                 self.progress_strip = cached
                 self._pack_shell_surface(cached, side="top")
+                self._sync_workflow_progress_strip()
                 return cached
         except (AttributeError, tk.TclError):
             self._progress_strip_cache = None
@@ -1842,7 +1852,173 @@ class AIDaSApp(ctk.CTk):
         self.progress_strip = progress_strip
         self._progress_strip_cache = progress_strip
         self._pack_shell_surface(progress_strip, side="top")
+        self._sync_workflow_progress_strip()
         return progress_strip
+
+    def _sync_workflow_progress_strip(self) -> None:
+        """Render saved workflow completion without consulting the active tab."""
+
+        progress_strip = self.__dict__.get("progress_strip")
+        if progress_strip is None:
+            return
+        completed = self.__dict__.get("_workflow_completed_steps", 0)
+        try:
+            progress_strip.set_completed_steps(completed)
+        except (AttributeError, tk.TclError, TypeError, ValueError):
+            pass
+
+    def _advance_workflow_progress(self, completed_steps: int) -> None:
+        """Advance, but never regress, successfully completed workflow steps."""
+
+        try:
+            total_steps = len(WorkflowProgressStrip.DEFAULT_STEPS)
+            requested = min(total_steps, max(0, int(completed_steps)))
+        except (TypeError, ValueError):
+            return
+        current = self.__dict__.get("_workflow_completed_steps", 0)
+        self._workflow_completed_steps = max(current, requested)
+        self._sync_workflow_progress_strip()
+        if self._workflow_completed_steps > current:
+            progress_strip = self.__dict__.get("progress_strip")
+            if progress_strip is not None:
+                try:
+                    progress_strip.animate_completion(current)
+                except (AttributeError, tk.TclError, TypeError, ValueError):
+                    pass
+            try:
+                self._show_workflow_completion_popup(current)
+            except (AttributeError, tk.TclError, TypeError, ValueError):
+                pass
+
+    def _show_workflow_completion_popup(self, completed_index: int) -> None:
+        """Show a prominent completion cue over the active workspace."""
+
+        # Lightweight app stubs used by non-GUI workflow tests do not have a
+        # Tk interpreter; the real window always has ``tk`` in its instance
+        # dictionary before any transition callback can run.
+        if self.__dict__.get("tk") is None:
+            return
+
+        total = len(WorkflowProgressStrip.DEFAULT_STEPS)
+        if completed_index < 0 or completed_index >= total:
+            return
+
+        popup_job = self.__dict__.get("_workflow_completion_popup_job")
+        if popup_job is not None:
+            try:
+                self.after_cancel(popup_job)
+            except tk.TclError:
+                pass
+            self._workflow_completion_popup_job = None
+        popup = self.__dict__.get("_workflow_completion_popup")
+        if popup is not None:
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+
+        completed_name = WorkflowProgressStrip.DEFAULT_STEPS[completed_index].split(
+            "  ", 1
+        )[-1]
+        popup = ctk.CTkFrame(
+            self,
+            width=500,
+            height=285,
+            corner_radius=22,
+            border_width=2,
+            border_color=COLOR_PAIRS["success"],
+            fg_color=COLOR_PAIRS["surface_elevated"],
+        )
+        popup.pack_propagate(False)
+        popup.place(relx=0.5, rely=0.58, anchor="center")
+        popup.lift()
+
+        # Keep the complete cue together as one requested-size group and
+        # place that group at the exact center of the fixed popup.  This
+        # centers the message horizontally and vertically instead of leaving
+        # the badge pinned near the top edge.
+        content = ctk.CTkFrame(
+            popup,
+            width=460,
+            height=150,
+            fg_color="transparent",
+            corner_radius=0,
+        )
+        content.pack_propagate(False)
+        content.place(relx=0.5, rely=0.5, anchor="center")
+        # Draw the Iconify ``glyphs:certificate-bold`` silhouette and its
+        # numeral on one native Tk canvas.  Using the same ``create_text``
+        # renderer as ProgressCircle prevents a rectangular label background
+        # from covering the badge and guarantees the same numeral glyph.
+        badge_size = 112
+        badge_path = resource_path(
+            os.path.join("assets", "certificate-badge-iconify.png")
+        )
+        with Image.open(badge_path) as source:
+            badge_source = source.convert("RGBA").resize(
+                (badge_size, badge_size),
+                Image.Resampling.LANCZOS,
+            )
+        badge_color = popup._apply_appearance_mode(COLOR_PAIRS["success"])
+        badge_pixels = Image.new("RGBA", badge_source.size, badge_color)
+        badge_pixels.putalpha(badge_source.getchannel("A"))
+        badge_image = ImageTk.PhotoImage(badge_pixels, master=self)
+        badge_background = popup._apply_appearance_mode(
+            COLOR_PAIRS["surface_elevated"]
+        )
+        number_color = popup._apply_appearance_mode(COLOR_PAIRS["on_primary"])
+        badge_canvas = tk.Canvas(
+            content,
+            width=badge_size,
+            height=badge_size,
+            bg=badge_background,
+            highlightthickness=0,
+            bd=0,
+        )
+        badge_canvas.pack(pady=(0, 12))
+        badge_canvas.create_image(
+            badge_size / 2,
+            badge_size / 2,
+            image=badge_image,
+        )
+        badge_canvas.create_text(
+            badge_size / 2,
+            badge_size / 2,
+            text=str(completed_index + 1),
+            font=(
+                ProgressCircle.NUMBER_FONT_FAMILY,
+                ProgressCircle.default_number_font_size(badge_size),
+                ProgressCircle.NUMBER_FONT_WEIGHT,
+            ),
+            fill=number_color,
+        )
+        badge_canvas.badge_image = badge_image
+        ctk.CTkLabel(
+            content,
+            text=f"Step {completed_index + 1} complete — {completed_name}",
+            anchor="center",
+            justify="center",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.title_size,
+                weight=TYPOGRAPHY.bold_weight,
+            ),
+        ).pack(anchor="center")
+        self._workflow_completion_popup = popup
+
+        def close_popup() -> None:
+            if self._workflow_completion_popup is not popup:
+                return
+            try:
+                popup.destroy()
+            except tk.TclError:
+                pass
+            self._workflow_completion_popup = None
+            self._workflow_completion_popup_job = None
+
+        # Leave the static cue visible long enough to read, then dismiss it.
+        self._workflow_completion_popup_job = self.after(1500, close_popup)
 
     def _build_status_surface(self, text: str):
         """Create the status presentation for the active interface."""
@@ -1910,11 +2086,15 @@ class AIDaSApp(ctk.CTk):
         progress_strip = self.__dict__.get("progress_strip")
         if progress_strip is not None:
             try:
-                progress_strip.pack_forget()
-                self._progress_strip_cache = progress_strip
+                # ProgressCircle uses native Tk canvases. Keeping the strip
+                # cached across a Classic/Modern switch leaves their old
+                # rasterized backgrounds on screen even after color tokens
+                # update, so recreate the strip under the new theme.
+                progress_strip.destroy()
             except tk.TclError:
                 pass
         self.progress_strip = None
+        self._progress_strip_cache = None
 
     def _destroy_application_menus(self) -> None:
         """Remove both menu implementations and all of their root bindings."""
@@ -2123,13 +2303,6 @@ class AIDaSApp(ctk.CTk):
             except (tk.TclError, TypeError, ValueError):
                 pass
                 
-        progress_strip = self.__dict__.get("progress_strip")
-        if progress_strip is not None:
-            try:
-                progress_strip.select_step(selected_index)
-            except (tk.TclError, TypeError, ValueError):
-                pass
-
         step2 = self.__dict__.get("step2")
         if step2 is not None:
             try:
@@ -2328,6 +2501,13 @@ class AIDaSApp(ctk.CTk):
             self._build_workflow_header()
             self._build_progress_strip()
             self._build_status_surface(status_text)
+            # Appearance changes are applied to CustomTkinter widgets on a
+            # short deferred redraw. Repaint the native Tk progress circles
+            # after that redraw so their fills use the new mode as well.
+            try:
+                self.after(75, self._sync_workflow_progress_strip)
+            except tk.TclError:
+                pass
 
             notebook = self.__dict__.get("notebook")
             if notebook is not None:
@@ -2338,9 +2518,7 @@ class AIDaSApp(ctk.CTk):
             header = self.__dict__.get("header")
             if header is not None:
                 header.select_step(selected_index)
-            progress_strip = self.__dict__.get("progress_strip")
-            if progress_strip is not None:
-                progress_strip.select_step(selected_index)
+            self._sync_workflow_progress_strip()
 
             self._sync_settings_interface_controls()
             step3 = self.__dict__.get("step3")
@@ -2482,6 +2660,7 @@ class AIDaSApp(ctk.CTk):
         step2 = getattr(self, "step2", None)
         if step2 is None:
             return
+        self._advance_workflow_progress(1)
         self.notebook.select(step2)
         self.update_idletasks()
         step2.start_batch_segmentation_for_folders(folders)
@@ -2513,6 +2692,7 @@ class AIDaSApp(ctk.CTk):
         step3 = getattr(self, "step3", None)
         if step3 is None or not folders:
             return
+        self._advance_workflow_progress(2)
         self.notebook.select(step3)
         self.update_idletasks()
         step3.open_batch_folders(folders)
@@ -2523,6 +2703,7 @@ class AIDaSApp(ctk.CTk):
         step4 = getattr(self, "step4", None)
         if step4 is None or not folders:
             return
+        self._advance_workflow_progress(3)
         self.notebook.select(step4)
         self.update_idletasks()
         step4.open_batch_folders(folders)
@@ -2533,10 +2714,16 @@ class AIDaSApp(ctk.CTk):
         step5 = self.__dict__.get("step5")
         if step5 is None:
             return
+        self._advance_workflow_progress(4)
         self.notebook.select(step5)
         self.update_idletasks()
         if folder:
             step5.set_input_folder(folder)
+
+    def _on_step5_compilation_complete(self, _output_path=None) -> None:
+        """Mark the workflow complete only after the final workbook is saved."""
+
+        self._advance_workflow_progress(5)
 
     def _show_about(self) -> None:
         """Open one modal About window, or focus the existing one."""

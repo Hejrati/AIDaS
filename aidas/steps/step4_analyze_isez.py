@@ -1731,7 +1731,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.bind("<Escape>", lambda _event: self.close())
 
         self.selection_var = tk.StringVar()
-        self.cursor_var = tk.StringVar(value="Drag a boundary line, or hover to inspect an exact value.")
+        self.cursor_var = tk.StringVar(
+            value="Click a minimum, drag a boundary line, or hover to inspect a value."
+        )
         self.apply_status_var = tk.StringVar(value="")
         self.measurement_vars = {
             name: tk.StringVar(value="--") for name in RESULTS_HEADERS[1:]
@@ -1743,8 +1745,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         ttk.Label(
             instructions,
             text=(
-                "Drag the blue Start or red End line directly across the plot. On release, the line "
-                f"snaps to the minimum within ±{PROFILE_LOCAL_MINIMUM_RADIUS} samples."
+                "Click the exact profile position you want to move the closest boundary, or "
+                "drag the blue Start or red End line. Manual edits use the selected sample "
+                "without automatic minimum snapping."
             ),
             justify="left",
             wraplength=860,
@@ -2020,7 +2023,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
             self._move_boundary(self._drag_boundary, sample, refresh_measurements=False)
             self.cursor_var.set(
-                f"Moving {self._drag_boundary.title()} — release to snap to a local minimum"
+                f"Moving {self._drag_boundary.title()} — release to use this sample"
             )
             try:
                 self.canvas.get_tk_widget().configure(cursor="sb_h_double_arrow")
@@ -2065,7 +2068,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         if self._drag_boundary is not None:
             return
         self._set_crosshair_visible(False)
-        self.cursor_var.set("Drag a boundary line, or hover to inspect an exact value.")
+        self.cursor_var.set(
+            "Click a minimum, drag a boundary line, or hover to inspect a value."
+        )
         try:
             self.canvas.get_tk_widget().configure(cursor="")
         except tk.TclError:
@@ -2116,8 +2121,23 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
     def _on_press(self, event) -> None:
         if getattr(event, "button", None) != 1:
             return
+        if event.inaxes is not self.ax or event.xdata is None:
+            return
         boundary = self._boundary_at_event(event)
         if boundary is None:
+            boundary = (
+                "start"
+                if abs(float(event.xdata) - self._start)
+                <= abs(float(event.xdata) - self._end)
+                else "end"
+            )
+            sample, intensity = _nearest_profile_sample(self.profile, event.xdata)
+            self._move_boundary(boundary, sample, refresh_measurements=True)
+            self.cursor_var.set(
+                f"{boundary.title()} set to sample {sample} "
+                f"({self._format_intensity(intensity)})"
+            )
+            self.canvas.draw_idle()
             return
         self._drag_boundary = boundary
         self._set_crosshair_visible(False)
@@ -2134,10 +2154,10 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._drag_boundary = None
         current = self._start if boundary == "start" else self._end
         x_value = event.xdata if event.inaxes is self.ax and event.xdata is not None else current
-        sample, intensity = _nearest_local_minimum(self.profile, x_value)
+        sample, intensity = _nearest_profile_sample(self.profile, x_value)
         self._move_boundary(boundary, sample, refresh_measurements=True)
         self.cursor_var.set(
-            f"{boundary.title()} snapped to local minimum {sample} "
+            f"{boundary.title()} set to sample {sample} "
             f"({self._format_intensity(intensity)})"
         )
         try:
@@ -2389,13 +2409,23 @@ class Step4Frame(SidebarStepFrame):
             "Automatically detect the Start and End minima for ROIs 1-20; ROI 21 remains manual.",
         )
         self.auto_detect_button.pack(fill="x", pady=(0, 4))
-        self.build_stacks_button = action_button(
-            self.sidebar_footer,
+        self.build_stacks_button_icon = load_ctk_image(
             self,
-            "Build stack",
-            self._build_stack_outputs,
-            "stack",
-            tooltip="Build output stacks after all ROIs are complete.",
+            "flat-color-icons--stack-of-photos.png",
+            size=20,
+        )
+        self.build_stacks_button = AppButton(
+            self.sidebar_footer,
+            text="Build stack",
+            variant="secondary",
+            command=self._build_stack_outputs,
+            state="disabled",
+            image=self.build_stacks_button_icon,
+            compound="left",
+        )
+        HoverToolTip(
+            self.build_stacks_button,
+            "Build output stacks after all ROIs are complete.",
         )
         self.build_stacks_button.pack(fill="x")
         self.continue_to_step5_button_icon = load_ctk_image(
@@ -2572,6 +2602,22 @@ class Step4Frame(SidebarStepFrame):
                 variant="secondary",
                 command=self._restart_current_file,
             ).grid(row=0, column=1, sticky="ew", padx=(5, 0))
+            completed, total = self._completion_progress_counts()
+            continue_button = AppButton(
+                actions,
+                text=f"Go to Step 5 ({completed}/{total} completed)",
+                variant="success",
+                command=self._continue_to_step5,
+                state="normal" if self._completion_step5_handoff_ready() else "disabled",
+            )
+            continue_button.grid(
+                row=1,
+                column=0,
+                columnspan=2,
+                sticky="ew",
+                pady=(8, 0),
+            )
+            notice._step4_continue_button = continue_button
 
         notice.lift()
         return notice
@@ -2594,6 +2640,52 @@ class Step4Frame(SidebarStepFrame):
             f"{message}\n\nSaved results:\n{outdir}",
             output_dir=outdir,
         )
+
+    def _completion_step5_handoff_ready(self) -> bool:
+        """Return whether a completion card may advance the whole Step 4 run."""
+
+        if not callable(getattr(self, "on_continue_to_step5", None)):
+            return False
+        if self.batch_roi_notebook is not None:
+            return bool(self.batch_roi_tab_states) and all(
+                state.get("complete", False)
+                for state in self.batch_roi_tab_states.values()
+            )
+        if self.batch_roi_paths:
+            return (
+                self.batch_roi_index >= len(self.batch_roi_paths) - 1
+                and getattr(self, "_stack_build_complete", False)
+            )
+        return bool(getattr(self, "_stack_build_complete", False))
+
+    def _completion_progress_counts(self) -> tuple[int, int]:
+        """Return completed and total files represented by the Step 4 run."""
+
+        if self.batch_roi_notebook is not None and self.batch_roi_tab_states:
+            states = tuple(self.batch_roi_tab_states.values())
+            return sum(bool(state.get("complete", False)) for state in states), len(states)
+        if self.batch_roi_paths:
+            total = len(self.batch_roi_paths)
+            completed = min(total, max(0, self.batch_roi_index + 1))
+            return completed, total
+        return (1, 1) if getattr(self, "_stack_build_complete", False) else (0, 1)
+
+    def _refresh_completion_notice_progress(self) -> None:
+        """Refresh a retained completed-tab card with current batch progress."""
+
+        holder = getattr(self, "plot_holder", None)
+        notice = getattr(holder, "_step4_grid_notice", None) if holder is not None else None
+        if notice is None:
+            return
+        button = getattr(notice, "_step4_continue_button", None)
+        completed, total = self._completion_progress_counts()
+        if button is not None:
+            button.configure(text=f"Go to Step 5 ({completed}/{total} completed)")
+            button.state(
+                ["!disabled"]
+                if self._completion_step5_handoff_ready()
+                else ["disabled"]
+            )
 
     def _open_results_directory(self, output_dir: str | os.PathLike | None = None) -> None:
         """Open the exact folder containing the active file's Step 4 outputs."""
@@ -3060,6 +3152,7 @@ class Step4Frame(SidebarStepFrame):
         self.status_var.set(
             f"Loaded {self.current_path}. Click near the start/end minima on the profile."
         )
+        self._refresh_completion_notice_progress()
         return True
 
     def _close_batch_roi_tab(self, notebook, tab) -> None:
@@ -3088,6 +3181,7 @@ class Step4Frame(SidebarStepFrame):
                 self.batch_roi_notebook = None
                 self.plot_holder = self.plot_container
                 self._render_empty_canvas()
+        self._update_continue_to_step5_button_state()
 
     def _update_active_batch_roi_tab_progress(self) -> None:
         tab_key = self._active_batch_roi_tab
@@ -3909,14 +4003,27 @@ class Step4Frame(SidebarStepFrame):
     def _all_rois_completed(self) -> bool:
         return bool(self.rois) and all(roi.suffix in self.completed for roi in self.rois)
 
+    def _update_roi_action_emphasis(self, build_ready: bool) -> None:
+        """Highlight the next useful ROI action without changing availability."""
+
+        auto_detect_button = getattr(self, "auto_detect_button", None)
+        if auto_detect_button is not None:
+            auto_detect_button.set_variant("secondary" if build_ready else "primary")
+
+        build_button = getattr(self, "build_stacks_button", None)
+        if build_button is not None:
+            build_button.set_variant("primary" if build_ready else "secondary")
+
     def _update_build_stack_button_state(self) -> None:
         if self.build_stacks_button is None:
             return
-        if (
+        build_ready = (
             self._all_rois_completed()
             and not getattr(self, "_stack_building", False)
             and not getattr(self, "_stack_build_complete", False)
-        ):
+        )
+        self._update_roi_action_emphasis(build_ready)
+        if build_ready:
             self.build_stacks_button.state(["!disabled"])
         else:
             self.build_stacks_button.state(["disabled"])
@@ -3925,6 +4032,32 @@ class Step4Frame(SidebarStepFrame):
         button = getattr(self, "continue_to_step5_button", None)
         if button is None:
             return
+
+        states = getattr(self, "batch_roi_tab_states", {})
+        batch_paths = getattr(self, "batch_roi_paths", [])
+        if states:
+            has_open_work = True
+        elif batch_paths:
+            # A closed tab leaves its batch path in the session history. Only
+            # the legacy sequential batch flow has open work without tab state.
+            has_open_work = (
+                getattr(self, "batch_roi_index", -1) >= 0
+                and getattr(self, "current_path", None) is not None
+                and getattr(self, "image", None) is not None
+            )
+        else:
+            has_open_work = (
+                getattr(self, "current_path", None) is not None
+                and getattr(self, "image", None) is not None
+            )
+
+        if not has_open_work:
+            button.configure(text="Go to Step 5")
+            button.state(["disabled"])
+            return
+
+        completed, total = self._completion_progress_counts()
+        button.configure(text=f"Go to Step 5 ({completed}/{total} completed)")
         if force_enable:
             button.state(["!disabled"])
             return
@@ -4310,8 +4443,9 @@ class Step4Frame(SidebarStepFrame):
         self._update_build_stack_button_state()
         self._update_auto_detect_button_state()
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
-            self._show_processed_grid_notice(outdir)
             self._mark_active_batch_roi_complete()
+            self._update_continue_to_step5_button_state()
+            self._show_processed_grid_notice(outdir)
             if self._select_next_incomplete_batch_roi_tab():
                 return
             self.status_var.set("Processing complete. All selected Step 4 folders are done.")

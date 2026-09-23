@@ -134,7 +134,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertIn('face = palette["warning_soft"]', grid_source)
         self.assertIn("facecolor=face", grid_source)
 
-    def test_dragged_boundary_snaps_to_local_minimum_on_release(self):
+    def test_dragged_boundary_uses_exact_selected_sample_on_release(self):
         profile = np.full(20, 9.0)
         profile[11] = 1.5
         dialog = Step4ProfileZoomDialog.__new__(Step4ProfileZoomDialog)
@@ -153,11 +153,46 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
 
         dialog._move_boundary.assert_called_once_with(
             "end",
-            12,
+            14,
             refresh_measurements=True,
         )
         self.assertIsNone(dialog._drag_boundary)
         dialog.canvas.draw_idle.assert_called_once_with()
+
+    def test_click_replaces_auto_detected_boundary_without_minimum_snapping(self):
+        profile = np.full(30, 9.0)
+        profile[5] = 1.5
+        dialog = Step4ProfileZoomDialog.__new__(Step4ProfileZoomDialog)
+        dialog.profile = profile
+        dialog.ax = object()
+        dialog._start = 10
+        dialog._end = 24
+        dialog._drag_boundary = None
+        dialog._boundary_at_event = mock.Mock(return_value=None)
+        dialog._move_boundary = mock.Mock()
+        dialog.cursor_var = mock.Mock()
+        dialog.canvas = mock.Mock()
+
+        dialog._on_press(
+            SimpleNamespace(inaxes=dialog.ax, xdata=7.0, button=1)
+        )
+
+        dialog._move_boundary.assert_called_once_with(
+            "start",
+            7,
+            refresh_measurements=True,
+        )
+        self.assertIn("Start set to sample 7", dialog.cursor_var.set.call_args.args[0])
+        dialog.canvas.draw_idle.assert_called_once_with()
+
+    def test_zoom_manual_handlers_do_not_call_local_minimum_search(self):
+        press_source = inspect.getsource(Step4ProfileZoomDialog._on_press)
+        release_source = inspect.getsource(Step4ProfileZoomDialog._on_release)
+
+        self.assertNotIn("_nearest_local_minimum", press_source)
+        self.assertNotIn("_nearest_local_minimum", release_source)
+        self.assertIn("_nearest_profile_sample", press_source)
+        self.assertIn("_nearest_profile_sample", release_source)
 
     def test_end_click_save_uses_fast_path_and_advances_new_roi(self):
         frame = Step4Frame.__new__(Step4Frame)

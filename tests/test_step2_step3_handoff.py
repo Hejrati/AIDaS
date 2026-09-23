@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -152,11 +153,13 @@ class Step2Step3HandoffTests(unittest.TestCase):
         app = AIDaSApp.__new__(AIDaSApp)
         app.notebook = Notebook()
         app.header = header
+        app.progress_strip = mock.Mock()
         app.step2 = step2
 
         app._on_workflow_tab_changed()
 
         self.assertEqual(events, [("header", 1), "render"])
+        app.progress_strip.set_completed_steps.assert_not_called()
 
     def test_saved_pairs_are_converted_to_unique_step3_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -10,12 +10,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from aidas.ui.components import AppButton
-from aidas.ui.theme import COLORS, CONTROLS
+from aidas.ui.theme import COLORS, COLOR_PAIRS, CONTROLS
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     SidebarStepFrame,
     action_button,
-    load_ctk_image,
+    load_compile_ctk_icon,
 )
 
 
@@ -27,10 +27,17 @@ class Step5Frame(SidebarStepFrame):
 
     EVENT_POLL_MS = 75
 
-    def __init__(self, parent, preferences=None, source_step=None):
+    def __init__(
+        self,
+        parent,
+        preferences=None,
+        source_step=None,
+        on_compilation_complete=None,
+    ):
         super().__init__(parent)
         self.preferences = preferences
         self.source_step = source_step
+        self.on_compilation_complete = on_compilation_complete
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._worker: threading.Thread | None = None
         self._running = False
@@ -148,10 +155,14 @@ class Step5Frame(SidebarStepFrame):
             pady=(0, LAYOUT.space_sm),
             before=self.sidebar,
         )
-        self.run_button_icon = load_ctk_image(
+        self.run_button_icon = load_compile_ctk_icon(
             self,
-            "flat-color-icons--process.png",
             size=CONTROLS.icon_size,
+        )
+        self.run_button_disabled_icon = load_compile_ctk_icon(
+            self,
+            size=CONTROLS.icon_size,
+            color_pair=COLOR_PAIRS["disabled_text"],
         )
         self.run_button = AppButton(
             footer,
@@ -159,7 +170,7 @@ class Step5Frame(SidebarStepFrame):
             variant="success",
             command=self._run_clicked,
             state="disabled",
-            image=self.run_button_icon,
+            image=self.run_button_disabled_icon,
             compound="left",
         )
         self.run_button.pack(fill="x")
@@ -388,8 +399,10 @@ class Step5Frame(SidebarStepFrame):
         has_output = bool(self.output_var.get().strip())
         
         if has_input and has_output:
+            self.run_button.configure(image=self.run_button_icon)
             self.run_button.state(["!disabled"])
         else:
+            self.run_button.configure(image=self.run_button_disabled_icon)
             self.run_button.state(["disabled"])
 
     def _set_running(self, running: bool) -> None:
@@ -405,7 +418,11 @@ class Step5Frame(SidebarStepFrame):
             control.configure(state=state)
         
         if running:
-            self.run_button.configure(state="disabled", text="Compiling…")
+            self.run_button.configure(
+                state="disabled",
+                text="Compiling…",
+                image=self.run_button_disabled_icon,
+            )
             self.status_var.set("Compiling measurements…")
             self.progress.configure(maximum=1, value=0)
         else:
@@ -432,6 +449,9 @@ class Step5Frame(SidebarStepFrame):
         self.output_var.set(str(result_path))
         self.status_var.set(f"Saved compiled workbook: {result_path}")
         self._append_log(f"Saved compiled workbook: {result_path}")
+        callback = getattr(self, "on_compilation_complete", None)
+        if callable(callback):
+            callback(result_path)
         messagebox.showinfo(
             "Compilation complete",
             f"All measurements were compiled into:\n{result_path}",
