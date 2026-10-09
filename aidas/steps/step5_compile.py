@@ -1,4 +1,4 @@
-"""Step 5 - compile all workflow measurements into one workbook."""
+"""Step 5 - create an Excel file containing all workflow measurements."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ class Step5Frame(SidebarStepFrame):
         self.output_var = tk.StringVar(
             value=str(output_folder / DEFAULT_OUTPUT_FILENAME)
         )
-        self.status_var = tk.StringVar(value="Ready to compile measurements.")
+        self.status_var = tk.StringVar(value="Ready to create the Excel file.")
 
         self.input_var.trace_add("write", self._update_run_button_state)
         self.output_var.trace_add("write", self._update_run_button_state)
@@ -129,7 +129,7 @@ class Step5Frame(SidebarStepFrame):
         self.include_fovea_checkbox.pack(anchor="w", pady=(7, 0))
 
         output_section = self.add_sidebar_section(
-            "Compiled workbook",
+            "Excel file",
             pady=(0, LAYOUT.space_xs),
         )
         output_group = output_section.body
@@ -166,7 +166,7 @@ class Step5Frame(SidebarStepFrame):
         )
         self.run_button = AppButton(
             footer,
-            text="Compile all measurements",
+            text="Create Excel File",
             variant="success",
             command=self._run_clicked,
             state="disabled",
@@ -177,7 +177,7 @@ class Step5Frame(SidebarStepFrame):
 
         ttk.Label(
             self.content,
-            text="Compile all measurements and results",
+            text="Create Excel File",
             font=("", 14, "bold"),
             anchor="w",
         ).pack(fill="x")
@@ -193,7 +193,7 @@ class Step5Frame(SidebarStepFrame):
 
         progress_group = ttk.LabelFrame(
             self.content,
-            text="Compilation progress",
+            text="Excel file progress",
             padding=(10, 8, 10, 10),
         )
         progress_group.pack(fill="x", pady=(0, 10))
@@ -212,7 +212,7 @@ class Step5Frame(SidebarStepFrame):
 
         log_group = ttk.LabelFrame(
             self.content,
-            text="Compiler log",
+            text="Excel file log",
             padding=(6, 5, 6, 6),
         )
         log_group.pack(fill="both", expand=True)
@@ -246,7 +246,7 @@ class Step5Frame(SidebarStepFrame):
         self.input_var.set(str(path))
         if not self._output_user_selected:
             self.output_var.set(str(path / DEFAULT_OUTPUT_FILENAME))
-        self.status_var.set(f"Ready to compile measurements under {path}.")
+        self.status_var.set(f"Ready to create an Excel file from measurements in {path}.")
         return True
 
     def on_show(self) -> None:
@@ -274,7 +274,7 @@ class Step5Frame(SidebarStepFrame):
         if initial_dir is None:
             initial_dir = self._existing_directory(self.input_var.get()) or Path.home()
         selected = filedialog.asksaveasfilename(
-            title="Save compiled workbook as",
+            title="Save Excel file as",
             defaultextension=".xlsx",
             initialdir=str(initial_dir),
             initialfile=(
@@ -302,7 +302,7 @@ class Step5Frame(SidebarStepFrame):
         if not output_text:
             messagebox.showerror(
                 "Missing output",
-                "Choose where to save the compiled Excel workbook.",
+                "Choose where to save the Excel file.",
                 parent=self,
             )
             return None
@@ -312,14 +312,14 @@ class Step5Frame(SidebarStepFrame):
         elif output_path.suffix.lower() != ".xlsx":
             messagebox.showerror(
                 "Invalid output",
-                "The compiled workbook must use the .xlsx file extension.",
+                "The Excel file must use the .xlsx file extension.",
                 parent=self,
             )
             return None
         if not output_path.parent.is_dir():
             messagebox.showerror(
                 "Invalid output folder",
-                "Choose an existing folder for the compiled workbook.",
+                "Choose an existing folder for the Excel file.",
                 parent=self,
             )
             return None
@@ -420,13 +420,13 @@ class Step5Frame(SidebarStepFrame):
         if running:
             self.run_button.configure(
                 state="disabled",
-                text="Compiling…",
+                text="Creating Excel File…",
                 image=self.run_button_disabled_icon,
             )
-            self.status_var.set("Compiling measurements…")
+            self.status_var.set("Creating the Excel file…")
             self.progress.configure(maximum=1, value=0)
         else:
-            self.run_button.configure(text="Compile all measurements")
+            self.run_button.configure(text="Create Excel File")
             self._update_run_button_state()
 
     def _update_progress(self, payload: object) -> None:
@@ -438,7 +438,7 @@ class Step5Frame(SidebarStepFrame):
             return
         self.progress.configure(maximum=total, value=completed)
         percentage = round((completed / total) * 100)
-        message = str(message_value).strip() or "Compiling measurements…"
+        message = str(message_value).strip() or "Creating the Excel file…"
         self.status_var.set(f"{message} ({percentage}%)")
 
     def _compilation_succeeded(self, result: object) -> None:
@@ -447,22 +447,22 @@ class Step5Frame(SidebarStepFrame):
         self.progress.configure(value=maximum)
         result_path = Path(getattr(result, "output_path", self.output_var.get()))
         self.output_var.set(str(result_path))
-        self.status_var.set(f"Saved compiled workbook: {result_path}")
-        self._append_log(f"Saved compiled workbook: {result_path}")
+        self.status_var.set(f"Excel file saved: {result_path}")
+        self._append_log(f"Excel file saved: {result_path}")
         callback = getattr(self, "on_compilation_complete", None)
         if callable(callback):
             callback(result_path)
         messagebox.showinfo(
-            "Compilation complete",
-            f"All measurements were compiled into:\n{result_path}",
+            "Excel file created",
+            f"All measurements were saved to:\n{result_path}",
             parent=self,
         )
 
     def _compilation_failed(self, error: object) -> None:
         self._set_running(False)
-        self.status_var.set("Compilation failed. See the log for details.")
+        self.status_var.set("Could not create the Excel file. See the log for details.")
         self._append_log(f"ERROR: {error}")
-        messagebox.showerror("Compilation failed", str(error), parent=self)
+        messagebox.showerror("Excel file creation failed", str(error), parent=self)
 
     def _clear_log(self) -> None:
         self.log_text.configure(state="normal")

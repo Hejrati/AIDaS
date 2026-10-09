@@ -126,7 +126,7 @@ class Step5CompileTests(unittest.TestCase):
                 Path(frame.output_var.get()),
                 Path(temp_dir) / DEFAULT_OUTPUT_FILENAME,
             )
-            self.assertIn("Ready to compile", frame.status_var.get())
+            self.assertIn("Ready to create an Excel file", frame.status_var.get())
 
     def test_validation_adds_xlsx_extension(self):
         with tempfile.TemporaryDirectory() as temp_dir:

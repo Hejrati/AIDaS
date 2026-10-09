@@ -10,7 +10,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
-from aidas.utils.ui_utils import HoverToolTip
+from aidas.utils.ui_utils import HoverToolTip, _tint_icon
 
 
 class AppButton(ctk.CTkButton):
@@ -62,8 +62,16 @@ class AppButton(ctk.CTkButton):
             for name in self._PALETTE_OPTIONS
             if name in options
         }
+        self._aidas_action_icon_source = options.get("image")
+        self._aidas_tinted_action_icon = None
+        self._aidas_action_icon_signature = None
         if options.get("state") == "disabled":
             options.update(self._disabled_palette())
+        if self._aidas_action_icon_source is not None:
+            options["image"] = self._action_icon_for_state(
+                options.get("state", "normal"),
+                options["text_color"], options["text_color_disabled"],
+            )
         super().__init__(master, **options)
 
     @staticmethod
@@ -137,6 +145,9 @@ class AppButton(ctk.CTkButton):
         requested_state = kwargs.get("state")
         current_state = getattr(self, "_state", "normal")
         target_state = requested_state if requested_state is not None else current_state
+        if "image" in kwargs and (kwargs["image"] is None or
+                                  kwargs["image"] is not getattr(self, "_aidas_tinted_action_icon", None)):
+            self._aidas_action_icon_source = kwargs["image"]
 
         # Explicit palette changes describe the enabled appearance. This lets
         # callers restyle a disabled button without accidentally making it
@@ -150,9 +161,46 @@ class AppButton(ctk.CTkButton):
         elif current_state == "disabled" and target_state != "disabled":
             kwargs.update(self._enabled_palette)
 
+        if getattr(self, "_aidas_action_icon_source", None) is not None or "image" in kwargs:
+            kwargs["image"] = self._action_icon_for_state(
+                target_state,
+                self._enabled_palette.get("text_color", COLOR_PAIRS["text"]),
+                kwargs.get("text_color_disabled", getattr(self, "_text_color_disabled", COLOR_PAIRS["disabled_text"])),
+            )
+
         return super().configure(require_redraw, **kwargs)
 
     config = configure
+
+    def _action_icon_for_state(self, state, enabled_color, disabled_color):
+        """Match action glyphs to their labels without altering shared images."""
+        source = self._aidas_action_icon_source
+        if not isinstance(source, ctk.CTkImage) or not (
+            self._variant in {"primary", "success", "danger"}
+            or getattr(source, "_aidas_monochrome_action", False)
+        ):
+            return source
+        color = disabled_color if state == "disabled" else enabled_color
+        light_color, dark_color = color if isinstance(color, (list, tuple)) else (color, color)
+        light_source = source.cget("light_image") or source.cget("dark_image")
+        dark_source = source.cget("dark_image") or source.cget("light_image")
+        size = source.cget("size")
+        signature = (id(source), id(light_source), id(dark_source), light_color, dark_color, size)
+        if signature != self._aidas_action_icon_signature:
+            options = {
+                "light_image": _tint_icon(light_source, light_color),
+                "dark_image": _tint_icon(dark_source, dark_color),
+                "size": size,
+            }
+            if self._aidas_tinted_action_icon is None:
+                self._aidas_tinted_action_icon = ctk.CTkImage(**options)
+            else:
+                self._aidas_tinted_action_icon.configure(**options)
+            self._aidas_action_icon_signature = signature
+        return self._aidas_tinted_action_icon
+
+    def _apply_aidas_theme(self):
+        self.configure()
 
     def state(self, statespec=None):
         """Support the subset of ttk.Button.state used by workflow panels."""
@@ -398,7 +446,7 @@ class WorkflowHeader(ctk.CTkFrame):
         "2  Segment",
         "3  Flatten",
         "4  MCP/AR",
-        "5  Compile",
+        "5  Create Excel File",
     )
 
     def __init__(
@@ -639,6 +687,9 @@ class ProgressCircle(tk.Canvas):
     def __init__(self, master, size=24, text="", bg_color=None, font_size=None):
         self.size = size
         self.bg_color_ref = bg_color
+        self._fill_color_ref = ""
+        self._text_color_ref = "black"
+        self._state_text = text
         self.font_size = (
             font_size
             if font_size is not None
@@ -659,12 +710,20 @@ class ProgressCircle(tk.Canvas):
         )
 
     def update_state(self, fill_color, text_color, text):
-        f_color = _resolve_color(self.master, fill_color)
-        t_color = _resolve_color(self.master, text_color)
+        self._fill_color_ref = fill_color
+        self._text_color_ref = text_color
+        self._state_text = text
+        self._apply_aidas_theme()
+
+    def _apply_aidas_theme(self) -> None:
+        """Refresh native canvas colors without changing workflow progress."""
+
+        f_color = _resolve_color(self.master, self._fill_color_ref)
+        t_color = _resolve_color(self.master, self._text_color_ref)
         if self.bg_color_ref:
             self.configure(bg=_resolve_color(self.master, self.bg_color_ref))
         self.itemconfig(self.oval_id, fill=f_color, outline=f_color)
-        self.itemconfig(self.text_id, fill=t_color, text=text)
+        self.itemconfig(self.text_id, fill=t_color, text=self._state_text)
 
 
 class WorkflowProgressStrip(ctk.CTkFrame):
@@ -675,7 +734,7 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         "2  Segment",
         "3  Flatten",
         "4  MCP/AR",
-        "5  Compile",
+        "5  Create Excel File",
     )
 
     def __init__(

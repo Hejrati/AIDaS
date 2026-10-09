@@ -1404,6 +1404,8 @@ class Step4BatchROITable(ttk.Frame):
         super().__init__(parent)
         self.rows = []
         self._row_by_iid = {}
+        self._hide_processed = False
+        self._placeholder_iid = "no_visible_folders"
         self._checkbox_images = self._make_checkbox_images()
         self._tree_font = tkfont.nametofont("TkDefaultFont")
         self._heading_font = self._tree_font.copy()
@@ -1467,13 +1469,12 @@ class Step4BatchROITable(ttk.Frame):
         return images
 
     def set_rows(self, rows):
+        # Detached processed entries also need removing when results change.
+        old_iids = tuple(dict.fromkeys((*self._row_by_iid, *self.tree.get_children(""))))
+        if old_iids:
+            self.tree.delete(*old_iids)
         self.rows = list(rows or [])
         self._row_by_iid = {}
-        self.tree.delete(*self.tree.get_children(""))
-        if not self.rows:
-            self.tree.insert("", "end", values=("No _flat_LIGHT folders were found.", "", ""), tags=("locked",))
-            self._refresh_header_checkbox()
-            return
         for index, row in enumerate(self.rows):
             iid = str(index)
             self._row_by_iid[iid] = row
@@ -1485,8 +1486,41 @@ class Step4BatchROITable(ttk.Frame):
                 values=self._values_for_row(row),
                 tags=("locked",) if row.get("locked") else (),
             )
-        self._fit_columns_to_content()
+        if self.rows:
+            self._fit_columns_to_content()
+        self._apply_processed_filter()
         self._refresh_header_checkbox()
+
+    def set_hide_processed(self, hide_processed):
+        self._hide_processed = bool(hide_processed)
+        self._apply_processed_filter()
+
+    def _apply_processed_filter(self):
+        if self.tree.exists(self._placeholder_iid):
+            self.tree.delete(self._placeholder_iid)
+
+        visible_count = 0
+        for iid, row in self._row_by_iid.items():
+            if self._hide_processed and row.get("locked"):
+                self.tree.detach(iid)
+            else:
+                # Restore the same entry, including its checkbox state.
+                self.tree.move(iid, "", "end")
+                visible_count += 1
+
+        if not visible_count:
+            message = (
+                "No unprocessed folders to show."
+                if self.rows and self._hide_processed
+                else "No _flat_LIGHT folders were found."
+            )
+            self.tree.insert(
+                "",
+                "end",
+                iid=self._placeholder_iid,
+                values=(message, "", ""),
+                tags=("locked",),
+            )
 
     def _image_for_row(self, row):
         if row.get("locked"):
@@ -1599,30 +1633,44 @@ class Step4BatchROISelectionPanel(ttk.Frame):
     def _build_ui(self):
         wrapper = ttk.Frame(self, padding=12)
         wrapper.pack(fill="both", expand=True)
-        ttk.Label(wrapper, text="Batch ROI", font=("", 12, "bold")).pack(anchor="w")
-        ttk.Label(
-            wrapper,
-            text=(
-                "AIDaS will search the selected folder and subfolders for _flat_LIGHT.img/_flat_LIGHT.hdr. "
-                "Folders with existing Step 4 outputs are locked and skipped."
-            ),
-            wraplength=760,
-            justify="left",
-        ).pack(anchor="w", pady=(4, 10))
-
-        top = ttk.Frame(wrapper)
-        top.pack(fill="x", pady=(0, 8))
-        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
-        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(side="left", fill="x", expand=True)
-        self.more_label = ttk.Label(top, text="", style="AIDaS.Link.TLabel", cursor="hand2")
-        self.more_label.pack(side="right", padx=(8, 0))
-        self.more_tooltip = HoverToolTip(self.more_label, "")
+        self.filter_row = ttk.Frame(wrapper)
+        self.filter_row.pack(side="top", fill="x", pady=(0, 8))
+        ttk.Label(self.filter_row, text="Batch ROI", font=("", 12, "bold")).pack(side="left")
+        self.hide_processed_var = tk.BooleanVar(master=self, value=True)
+        self.hide_processed_check = ttk.Checkbutton(
+            self.filter_row,
+            text="Hide processed folders",
+            variable=self.hide_processed_var,
+            command=self._on_hide_processed_changed,
+        )
+        self.hide_processed_check.pack(side="right", padx=(12, 0))
 
         run_box = ttk.Frame(wrapper)
         run_box.pack(side="bottom", fill="x", pady=(10, 0))
         self.action_footer = run_box
+        self.summary_row = ttk.Frame(run_box)
+        self.summary_row.pack(side="top", fill="x", pady=(0, 8))
+        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        self.more_label = ttk.Label(
+            self.summary_row, text="", style="AIDaS.Link.TLabel", cursor="hand2",
+        )
+        self.more_label.pack(side="right", anchor="n", padx=(8, 0))
+        self.more_tooltip = HoverToolTip(self.more_label, "")
+        self.summary_label = ttk.Label(
+            self.summary_row,
+            textvariable=self.summary_var,
+            width=1,
+            wraplength=320,
+            anchor="nw",
+            justify="left",
+        )
+        self.summary_label.pack(side="left", fill="x", expand=True)
+        self.summary_label.bind("<Configure>", self._resize_summary, add="+")
+
+        action_row = ttk.Frame(run_box)
+        action_row.pack(side="bottom", fill="x")
         self.process_button = action_button(
-            run_box,
+            action_row,
             self,
             "Process selected folders",
             self._process_selected,
@@ -1631,12 +1679,21 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         )
         self.process_button.pack(side="right")
         self.process_button.state(["disabled"])
-        action_button(run_box, self, "Cancel", self._cancel, "cancel").pack(side="left")
+        action_button(action_row, self, "Cancel", self._cancel, "cancel").pack(side="left")
 
         self.table_host = ttk.Frame(wrapper)
         self.table_host.pack(side="top", fill="both", expand=True)
         self.scan_label = ttk.Label(self.table_host, text="Scanning folders...", anchor="center", justify="center")
         self.scan_label.pack(fill="both", expand=True)
+
+    def _resize_summary(self, event):
+        wraplength = max(1, event.width - 4)
+        if int(float(self.summary_label.cget("wraplength"))) != wraplength:
+            self.summary_label.configure(wraplength=wraplength)
+
+    def _on_hide_processed_changed(self):
+        if self.table is not None:
+            self.table.set_hide_processed(self.hide_processed_var.get())
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning Step 4 ROI folders under {self.root_dir}...")
@@ -1689,6 +1746,7 @@ class Step4BatchROISelectionPanel(ttk.Frame):
                 pass
         table = Step4BatchROITable(self.table_host)
         table.set_rows(rows)
+        table.set_hide_processed(self.hide_processed_var.get())
         table.pack(fill="both", expand=True)
         self.table = table
 
@@ -2329,8 +2387,6 @@ class Step4Frame(SidebarStepFrame):
     def _build_ui(self) -> None:
         self.build_standard_layout(
             sidebar_width=self.SIDEBAR_WIDTH,
-            status_var=self.status_var,
-            status_bar_content_margin=True,
         )
 
         source_section = self.add_sidebar_section(
@@ -2349,18 +2405,7 @@ class Step4Frame(SidebarStepFrame):
             "folder",
             tooltip="Choose a parent folder. AIDaS will find eligible flattened images inside it.",
         )
-        self.batch_roi_button.pack(
-            fill="x",
-            pady=(0, LAYOUT.space_xs // 2),
-        )
-
-        ttk.Label(
-            source,
-            textvariable=self.image_label_var,
-            wraplength=self.SIDEBAR_TEXT_WRAP,
-            style="AIDaS.Muted.TLabel",
-            justify="left",
-        ).pack(fill="x")
+        self.batch_roi_button.pack(fill="x")
 
         roi_section = self.add_sidebar_section(
             "ROIs",
@@ -2535,7 +2580,7 @@ class Step4Frame(SidebarStepFrame):
 
         callback = self.on_continue_to_step5
         if callback is None:
-            messagebox.showerror("Step 5 unavailable", "Step 5 compilation is unavailable.")
+            messagebox.showerror("Step 5 unavailable", "Step 5 — Create Excel File is unavailable.")
             return
         folder = (
             self.batch_roi_root

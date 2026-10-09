@@ -45,6 +45,11 @@ ACTION_ICON_FILES = {
     "stack": "flat-color-icons--stack-of-photos.png",
     "undo": "flat-color-icons--undo-action.png",
 }
+_MONOCHROME_ACTIONS = {"next", "previous", "process"}
+_FILLED_ACTION_STYLES = {
+    "AIDaS.PrimaryAction.TButton", "AIDaS.DangerAction.TButton",
+    "Accent.TButton", "AIDaS.Primary.TButton",
+}
 ICON_FOLDER = ACTION_ICON_FILES["folder"]
 ICON_HOME = ACTION_ICON_FILES["home"]
 ICON_REFRESH = ACTION_ICON_FILES["refresh"]
@@ -116,7 +121,10 @@ def load_action_icon(owner, action, *, size=ACTION_ICON_SIZE):
         filename = ACTION_ICON_FILES[action]
     except KeyError as exc:
         raise ValueError(f"Unknown UI action icon: {action}") from exc
-    return load_ui_icon(owner, filename, size=size)
+    icon = load_ui_icon(owner, filename, size=size)
+    with Image.open(asset_path(filename)) as source:
+        icon._aidas_source_image = source.convert("RGBA").copy()
+    return icon
 
 
 def _color_close_image(size=ACTION_ICON_SIZE):
@@ -256,6 +264,57 @@ def action_button(
     button = ttk.Button(parent, **options)
     button._aidas_action_icon = icon
     button._aidas_disabled_action_icon = icon
+    if action in _MONOCHROME_ACTIONS or options["style"] in _FILLED_ACTION_STYLES:
+        source_image = getattr(icon, "_aidas_source_image", None)
+        raw_icon = icon
+        signature = None
+
+        def refresh_icon():
+            nonlocal source_image, raw_icon, signature
+            image_spec = button.cget("image")
+            if isinstance(image_spec, str):
+                image_spec = button.tk.splitlist(image_spec)
+            current_image = str(image_spec[0]) if image_spec else ""
+            own_images = {str(button._aidas_action_icon), str(button._aidas_disabled_action_icon)}
+            if current_image and current_image not in own_images:
+                # Some actions change glyphs in place (Next becomes Finish in
+                # the setup wizard). Retain the new shape during theme refresh.
+                replacement = next((image for image in getattr(owner, "_ui_image_refs", ())
+                                    if str(image) == current_image), None)
+                source_image = getattr(replacement, "_aidas_source_image", None)
+                raw_icon = replacement
+                signature = None
+            if source_image is None:
+                return
+            style_name = str(button.cget("style")) or "TButton"
+            if action not in _MONOCHROME_ACTIONS and style_name not in _FILLED_ACTION_STYLES:
+                button.configure(image=(raw_icon, "disabled", raw_icon))
+                button._aidas_action_icon = raw_icon
+                button._aidas_disabled_action_icon = raw_icon
+                signature = None
+                return
+            style = ttk.Style(button)
+
+            def foreground(states):
+                color = style.lookup(style_name, "foreground", state=states) or COLORS.text
+                red, green, blue = button.winfo_rgb(color)
+                return f"#{red >> 8:02x}{green >> 8:02x}{blue >> 8:02x}"
+
+            enabled_color = foreground(("!disabled",))
+            disabled_color = foreground(("disabled",))
+            next_signature = (id(source_image), enabled_color, disabled_color)
+            if signature == next_signature:
+                return
+            rendered = source_image.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
+            enabled_icon = ImageTk.PhotoImage(_tint_icon(rendered, enabled_color), master=button)
+            disabled_icon = ImageTk.PhotoImage(_tint_icon(rendered, disabled_color), master=button)
+            button._aidas_action_icon = enabled_icon
+            button._aidas_disabled_action_icon = disabled_icon
+            button.configure(image=(enabled_icon, "disabled", disabled_icon))
+            signature = next_signature
+
+        button._apply_aidas_theme = refresh_icon
+        refresh_icon()
     if tooltip:
         HoverToolTip(button, tooltip)
     return button
@@ -325,10 +384,14 @@ def load_ctk_image(owner, filename, *, size=CONTROLS.icon_size, tint=None):
         light_color, dark_color = tint if isinstance(tint, (tuple, list)) else (tint, tint)
         light_image = _tint_icon(image, light_color)
         dark_image = _tint_icon(image, dark_color)
-    return remember_image(
+    icon = remember_image(
         owner,
         ctk.CTkImage(light_image=light_image, dark_image=dark_image, size=target_size),
     )
+    icon._aidas_monochrome_action = filename in {
+        ACTION_ICON_FILES[action] for action in _MONOCHROME_ACTIONS
+    }
+    return icon
 
 
 def icon_button(parent, owner, icon_filename, command, *, tooltip=None, **button_options):
@@ -595,9 +658,9 @@ def apply_app_icon_to(window):
 
 
 class HoverToolTip:
-    """One-at-a-time tooltip that cannot leave orphan hover windows behind."""
+    """Immediate, widget-centered tooltips with one visible popup at a time."""
 
-    SHOW_DELAY_MS = 450
+    SHOW_DELAY_MS = 0
     POINTER_CHECK_MS = 100
     _active_tooltip = None
     _pending_tooltip = None
@@ -635,7 +698,7 @@ class HoverToolTip:
         was_visible = self.tipwindow is not None
         self._text = updated
         # Never leave stale dynamic text on screen. The current hover can show
-        # the updated copy again after the normal short delay.
+        # the updated copy again on the next event-loop turn.
         self._hide()
         if was_visible and updated.strip() and self._pointer_is_over_widget():
             self._schedule_show()
@@ -698,8 +761,6 @@ class HoverToolTip:
         if active is not None and active is not self:
             active._hide()
 
-        x = self.widget.winfo_pointerx() + 12
-        y = self.widget.winfo_pointery() + 12
         tw = tk.Toplevel(self.widget)
         tw.withdraw()
         tw.wm_overrideredirect(True)
@@ -732,10 +793,9 @@ class HoverToolTip:
         tw.update_idletasks()
         width = max(1, tw.winfo_reqwidth())
         height = max(1, tw.winfo_reqheight())
-        left, top, right, bottom = work_area_bounds(
-            tw,
-            parent=self.widget.winfo_toplevel(),
-        )
+        x = self.widget.winfo_rootx() + (self.widget.winfo_width() - width) // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + CONTROLS.gap // 2
+        left, top, right, bottom = work_area_bounds(tw)
         x = max(left, min(x, right - width))
         y = max(top, min(y, bottom - height))
         tw.wm_geometry(f"+{x}+{y}")

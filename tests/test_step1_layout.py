@@ -5,7 +5,7 @@ from aidas.steps.step1_resize_raw import Step1Frame
 
 
 class Step1LayoutTests(unittest.TestCase):
-    def test_save_and_handoff_actions_are_in_a_fixed_sidebar_footer(self):
+    def test_handoff_action_stays_in_a_fixed_sidebar_footer(self):
         source = inspect.getsource(Step1Frame._build_controls)
 
         footer_start = source.index("self.step_actions_footer = ttk.Frame(")

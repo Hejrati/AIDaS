@@ -131,12 +131,12 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             (
                 "Use the Step 1 handoff or Select folders to segment, then review the discovered Light images and choose the ready rows.",
                 "Folders that already contain Light_MARKED are identified and skipped.",
-                "For each image, first drag the foveal line or enter Center X, then choose Confirm fovea.",
+                "For each image, drag the foveal marker to the center, then choose Confirm fovea.",
                 "Next identify the image as Temporal or Nasal. Both prompts are required; Exit cancels the batch.",
             ),
             (
-                "After the final confirmation, AIDaS runs AI segmentation using a compatible DirectML GPU or the displayed shared CPU-core budget.",
-                "Review RNFL-Vitreous, GCL-RNFL, INL-IPL, ONL-OPL, ELM, and RPE; Revert and redraw an AI trace or add at least two points for a missing trace, then choose Done. Clear removes boundary traces but keeps the foveal line.",
+                "Draw like ImageJ's segmented-line tool: click to place points, double-click or click the starting handle to finish. To edit, select a line under Completed and use its square handles. Shift-click a handle and drag the new point to add a vertex; Alt-click or Ctrl-click a handle to remove it. At least three handles must remain.",
+                "The buttons between Incomplete and Completed control the current image: < reverts the selected line to Incomplete; << reverts all lines. > runs AI for the selected incomplete line; >> runs AI for all six lines. The foveal marker is kept.",
             ),
             (
                 "Save or Save all commits the reviewed results; unsaved AI results and edits exist only in the open review tabs.",
@@ -145,7 +145,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             ),
         ),
         tips=(
-            "The completed and incomplete lists are the authoritative boundary checklist.",
+            "The lists track RNFL-Vitreous, GCL-RNFL, INL-IPL, ONL-OPL, ELM, and RPE.",
             "Step 2 normalizes saved images to two slices and 2133 pixels wide so Step 3 receives consistent geometry.",
         ),
         step_index=1,
@@ -220,7 +220,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             (
                 "When all 21 ROIs are complete, Build stack becomes available and marks the folder tab Done after a successful build.",
                 "The build shows a wait message while writing ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder. A completed plot tab provides Open results folder, Restart this file, and Go to Step 5 actions.",
-                "Go to Step 5 opens the dedicated compiler and carries forward the current measurement root.",
+                "Go to Step 5 opens Create Excel File and carries forward the current measurement root.",
             ),
         ),
         tips=(
@@ -233,39 +233,39 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
     ),
     TutorialPage(
         key="step5",
-        navigation_label="Step 5 - Compile",
-        title="Step 5 - Compile all measurements and results",
+        navigation_label="Step 5 - Create Excel File",
+        title="Step 5 - Create Excel File",
         purpose=(
             "Step 5 combines measurements produced throughout the workflow into "
-            "one workbook for downstream review and analysis."
+            "one Excel file for downstream review and analysis."
         ),
         input_summary="An LE/RE parent tree containing Step 3 text exports and Step 4 workbooks",
-        function_summary="Validate result folders and compile rrMCP/AR, ELM-RPE, and ONL measurements",
+        function_summary="Combine rrMCP/AR, ELM-RPE, and ONL measurements into an Excel file",
         output_summary="LE_RE_rrMCPAR_ELMRPE_ONL.xlsx",
         completion_check=(
-            "The compiler reaches 100%, the log reports a saved workbook, and the "
+            "Progress reaches 100%, the log reports a saved Excel file, and the "
             "selected output path contains LE_RE_rrMCPAR_ELMRPE_ONL.xlsx."
         ),
         stage_points=(
             (
                 "Use the Step 4 handoff or browse to the parent folder containing LE and RE subject folders.",
-                "Review the compiled workbook path and choose a different .xlsx destination if needed.",
+                "Review the Excel file path and choose a different .xlsx destination if needed.",
                 "Choose whether to include the fovea RPEtoOLM row in the ELM-RPE sheet.",
-                "Select Compile all measurements to start the final workflow step.",
+                "Select Create Excel File to start the final workflow step.",
             ),
             (
                 "AIDaS discovers current rr_MCPAR.xlsx and compatible legacy workbooks, then reads the Step 3 ELM-RPE and ONL exports.",
-                "Follow the overall progress bar and compiler log; inputs stay locked while compilation is running.",
+                "Follow the progress bar and Excel file log; inputs stay locked while the file is being created.",
             ),
             (
-                "The compiler creates the rrMCP-AR, ELM-RPE, and ONL workbook sheets.",
-                "The completed workbook is saved at the selected output path.",
+                "AIDaS creates the rrMCP-AR, ELM-RPE, and ONL worksheets.",
+                "The Excel file is saved at the selected output path.",
                 "A 100% progress value and completion message confirm that the five-step workflow is finished.",
             ),
         ),
         tips=(
             "Select the common parent above the LE and RE trees rather than an individual subject folder.",
-            "The compiler accepts both current rr_MCPAR.xlsx outputs and recognized legacy result names.",
+            "AIDaS accepts both current rr_MCPAR.xlsx outputs and recognized legacy result names.",
         ),
         step_index=4,
     ),
@@ -380,7 +380,7 @@ class _WorkflowOverviewMap(ctk.CTkFrame):
             "success_soft",
         ),
         (
-            "Compile",
+            "Create Excel File",
             "Combine rrMCP/AR, ELM-RPE, and ONL measurements into one workbook.",
             "primary",
             "primary_soft",

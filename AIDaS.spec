@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from aidas.utils.r_script_library import OPTIMIZED_R_SCRIPTS_ENABLED, OPTIMIZED_R_SCRIPT_NAME
 
 
 project_root = Path(SPECPATH)
@@ -29,7 +30,11 @@ hiddenimports = [
 def collect_r_scripts():
     """Bundle only the release R scripts stored at the project root."""
     script_paths = sorted(
-        (path for path in project_root.iterdir() if path.is_file() and path.suffix.lower() == ".r"),
+        (
+            path for path in project_root.iterdir()
+            if path.is_file() and path.suffix.lower() == ".r"
+            and (OPTIMIZED_R_SCRIPTS_ENABLED or path.name.lower() != OPTIMIZED_R_SCRIPT_NAME.lower())
+        ),
         key=lambda path: path.name.lower(),
     )
 

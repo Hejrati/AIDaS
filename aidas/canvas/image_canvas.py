@@ -41,6 +41,8 @@ class ImageCanvas(ttk.Frame):
         on_roi_change=None,
         on_mouse_move=None,
         on_line_change=None,
+        on_line_finish=None,
+        on_line_edit=None,
         on_vertical_line_change=None,
         on_zoom_change=None,
         auto_fit_on_resize=False,
@@ -51,6 +53,8 @@ class ImageCanvas(ttk.Frame):
         self._cb_roi = on_roi_change      # (x, y, w, h)
         self._cb_mouse = on_mouse_move    # (ix, iy, value)
         self._cb_line = on_line_change    # (points)
+        self._cb_line_finish = on_line_finish  # () on double-click
+        self._cb_line_edit = on_line_edit  # (label, points) after editing a saved line
         self._cb_vertical_line = on_vertical_line_change  # (x or None)
         self._cb_zoom = on_zoom_change    # (zoom)
         self._auto_fit_on_resize = bool(auto_fit_on_resize)
@@ -89,7 +93,9 @@ class ImageCanvas(ttk.Frame):
         self._line_overlays = []   # list[dict(points, color, label)]
         self._active_line = []     # list[(x, y)] image-coordinate ints
         self._line_preview = None  # canvas-coordinate preview point
-        self._line_color = "#00E5FF"
+        self._line_color = "#ffff00"
+        self._editable_line_label = None
+        self._line_edit_drag = None
         self._line_width = 2
         self._label_font_family = "TkDefaultFont"
         self._label_font_size = 4
@@ -139,6 +145,8 @@ class ImageCanvas(ttk.Frame):
         self.canvas.bind("<Control-Button-5>",   self._on_wheel)
         self.canvas.bind("<Configure>",       self._on_canvas_resize)
         self.canvas.bind("<ButtonPress-1>",   self._on_press)
+        self.canvas.bind("<Double-Button-1>", self._on_double_click)
+        self.canvas.bind("<Escape>", self._on_escape)
         self.canvas.bind("<B1-Motion>",       self._on_drag_motion)
         self.canvas.bind("<ButtonRelease-1>", self._on_release)
         self.canvas.bind("<ButtonPress-3>",   self._on_pan_start)
@@ -178,6 +186,8 @@ class ImageCanvas(ttk.Frame):
         self._active_line.clear()
         self._line_overlays.clear()
         self._line_preview = None
+        self._editable_line_label = None
+        self._line_edit_drag = None
         self._vertical_line_x = None
         self._drag_vertical_line = False
         if data is not None:
@@ -214,7 +224,134 @@ class ImageCanvas(ttk.Frame):
 
     def clear_line_overlays(self):
         self._line_overlays.clear()
+        self._line_edit_drag = None
         self._redraw_overlays()
+
+    def set_editable_line(self, label):
+        """Select a saved line for ImageJ-style vertex and whole-line editing."""
+        if self._editable_line_label == label:
+            return
+        self._editable_line_label = label
+        self._line_edit_drag = None
+        self._redraw_overlays()
+
+    def _editable_line(self):
+        label = getattr(self, "_editable_line_label", None)
+        if label is None:
+            return None
+        return next((item for item in self._line_overlays if item.get("label") == label), None)
+
+    def get_line_handle_indices(self, label):
+        """Return the stable editing handles of a line after a user edit."""
+        item = next((item for item in self._line_overlays if item.get("label") == label), None)
+        if item is None or item.get("handle_indices") is None:
+            return None
+        return list(item["handle_indices"])
+
+    def _line_handle_indices(self, points, handle_indices=None):
+        """Space editing handles in screen pixels without resampling the line."""
+        if not points:
+            return []
+        candidates = (range(len(points)) if handle_indices is None else
+                      sorted({0, len(points) - 1, *handle_indices}))
+        candidates = [index for index in candidates if 0 <= index < len(points)]
+        indices = [candidates[0]]
+        # User-added handles can be closer together than the initial AI handles.
+        minimum_distance_squared = (16 if handle_indices is None else 8) ** 2
+        for index in candidates[1:-1]:
+            px, py = self._i2c(*points[indices[-1]])
+            cx, cy = self._i2c(*points[index])
+            if (cx - px) ** 2 + (cy - py) ** 2 >= minimum_distance_squared:
+                indices.append(index)
+        if len(points) > 1:
+            cx, cy = self._i2c(*points[-1])
+            while len(indices) > 1:
+                px, py = self._i2c(*points[indices[-1]])
+                if (cx - px) ** 2 + (cy - py) ** 2 >= minimum_distance_squared:
+                    break
+                indices.pop()
+            indices.append(len(points) - 1)
+        return indices
+
+    def _hit_line_vertex(self, points, cx, cy, handle_indices=None):
+        closest = None
+        distance = 36.0
+        for index in self._line_handle_indices(points, handle_indices):
+            px, py = self._i2c(*points[index])
+            candidate = (px - cx) ** 2 + (py - cy) ** 2
+            if candidate <= distance:
+                closest, distance = index, candidate
+        return closest
+
+    def _hit_line_segment(self, points, cx, cy):
+        for start, end in zip(points, points[1:]):
+            ax, ay = self._i2c(*start)
+            bx, by = self._i2c(*end)
+            dx, dy = bx - ax, by - ay
+            length_squared = dx * dx + dy * dy
+            fraction = 0.0 if length_squared == 0 else max(0.0, min(1.0, ((cx-ax)*dx + (cy-ay)*dy)/length_squared))
+            if (cx - ax - fraction*dx) ** 2 + (cy - ay - fraction*dy) ** 2 <= 25:
+                return True
+        return False
+
+    @staticmethod
+    def _replace_line_points(item, start, stop, replacement):
+        """Replace one handle's local span and keep all other handles stable."""
+        delta = len(replacement) - (stop - start)
+        handles = [index if index < start else index + delta
+                   for index in item["handle_indices"] if index < start or index >= stop]
+        handles.extend(range(start, start + len(replacement)))
+        item["points"][start:stop] = replacement
+        item["handle_indices"] = sorted(set(handles))
+
+    def _begin_line_edit(self, event, cx, cy):
+        item = self._editable_line()
+        if item is None:
+            return False
+        points = item["points"]
+        handles = self._line_handle_indices(points, item.get("handle_indices"))
+        vertex = self._hit_line_vertex(points, cx, cy, item.get("handle_indices"))
+        if vertex is None and not self._hit_line_segment(points, cx, cy):
+            return False
+        self.canvas.focus_set()
+        before = list(points)
+        modifiers = int(getattr(event, "state", 0))
+        # Modifier bits differ across Tk platforms. On Windows, Mod1 (0x8)
+        # is Num Lock; treating it as Alt would delete on every plain click.
+        windowing_system = getattr(self, "_windowing_system", "")
+        alt_mask = {"win32": 0x20000, "aqua": 0x0010}.get(windowing_system, 0x0008)
+        if item.get("handle_indices") is None:
+            item["handle_indices"] = list(handles)
+        if vertex is not None:
+            handle = handles.index(vertex)
+            previous_index = handles[max(0, handle - 1)]
+            following_index = handles[min(len(handles) - 1, handle + 1)]
+            start = previous_index + 1 if vertex > 0 else 0
+            stop = following_index if vertex < len(points) - 1 else len(points)
+        if vertex is not None and modifiers & (alt_mask | 0x0004):
+            # Remove the visible handle and its dense AI samples; otherwise a
+            # neighboring sample would immediately appear in its place.
+            if len(handles) > 3:
+                self._replace_line_points(item, start, stop, [])
+                self._redraw_overlays()
+                if self._cb_line_edit is not None:
+                    self._cb_line_edit(item["label"], list(points))
+            return True
+        if vertex is not None and modifiers & 0x0001:
+            # ImageJ splits a vertex into two points along its adjacent segments.
+            previous = points[previous_index]
+            point = points[vertex]
+            following = points[following_index]
+            first = self._clamp_line_point(*[a + 2*(b-a)/3 for a, b in zip(previous, point)])
+            second = self._clamp_line_point(*[a + (b-a)/3 for a, b in zip(point, following)])
+            self._replace_line_points(item, start, stop, [first, second])
+            vertex = start + 1
+        self._line_edit_drag = {
+            "item": item, "vertex": vertex, "before": before,
+            "origin": self._c2i(cx, cy), "points": list(points),
+        }
+        self._redraw_overlays()
+        return True
 
     def set_line_overlays(self, overlays):
         self._line_overlays.clear()
@@ -223,22 +360,46 @@ class ImageCanvas(ttk.Frame):
                 points = overlay.get("points", [])
                 color = overlay.get("color") or self._line_color
                 label = overlay.get("label")
+                handles = overlay.get("handle_indices")
             else:
                 points = overlay
                 color = self._line_color
                 label = None
+                handles = None
             cleaned = self._clean_line_points(points)
             if not cleaned:
                 continue
-            self._line_overlays.append({
+            item = {
                 "points": cleaned,
                 "color": color,
                 "label": label,
-            })
+            }
+            if handles is not None:
+                # Cleaning can merge coincident points after an edit. Map the
+                # original handle indices onto the cleaned polyline.
+                index_map = {}
+                cleaned_index = -1
+                previous = None
+                for index, point in enumerate(points):
+                    if point is None:
+                        continue
+                    point = self._clamp_line_point(*point)
+                    if point != previous:
+                        cleaned_index += 1
+                    index_map[index] = cleaned_index
+                    previous = point
+                item["handle_indices"] = sorted({index_map[index] for index in handles if index in index_map})
+            self._line_overlays.append(item)
         self._redraw_overlays()
 
     def clear_active_line(self):
         self._active_line.clear()
+        self._line_preview = None
+        self._redraw_overlays()
+        self._emit_line_change()
+
+    def set_active_line(self, points):
+        self._active_line = self._clean_line_points(points)
         self._line_preview = None
         self._redraw_overlays()
         self._emit_line_change()
@@ -748,10 +909,18 @@ class ImageCanvas(ttk.Frame):
             if point is None:
                 continue
             x, y = point
-            cleaned_point = self._clamp_image_point(x, y)
+            cleaned_point = self._clamp_line_point(x, y)
             if not cleaned or cleaned[-1] != cleaned_point:
                 cleaned.append(cleaned_point)
         return cleaned
+
+    def _clamp_line_point(self, x, y):
+        """Keep subpixel vertices so Shift-click can split closely spaced points."""
+        x, y = float(x), float(y)
+        if self._data is None:
+            return x, y
+        height, width = self._data.shape[:2]
+        return max(0.0, min(x, width - 1)), max(0.0, min(y, height - 1))
 
     def _clamp_image_point(self, x, y):
         if self._data is None:
@@ -771,8 +940,11 @@ class ImageCanvas(ttk.Frame):
 
     def _draw_line_overlays(self):
         for item in self._line_overlays:
-            # Saved overlays can contain thousands of points; skip vertex dots for speed.
-            self._draw_polyline(item["points"], item["color"], item.get("label"), show_vertices=False)
+            selected = self._editable_line_label is not None and item.get("label") == self._editable_line_label
+            self._draw_polyline(
+                item["points"], item["color"], item.get("label"),
+                show_vertices=selected, handle_indices=item.get("handle_indices"),
+            )
 
     def _draw_active_line(self):
         if not self._active_line:
@@ -855,7 +1027,7 @@ class ImageCanvas(ttk.Frame):
         self.canvas.tag_lower(rect_id, text_id)
         return [rect_id, text_id]
 
-    def _draw_polyline(self, points, color, label=None, preview=None, show_vertices=True):
+    def _draw_polyline(self, points, color, label=None, preview=None, show_vertices=True, handle_indices=None):
         if not points:
             return
 
@@ -887,16 +1059,16 @@ class ImageCanvas(ttk.Frame):
             )
 
         if show_vertices:
-            radius = self._scaled_vertex_radius()
-            for ix, iy in points:
-                cx, cy = self._i2c(ix, iy)
-                self.canvas.create_oval(
+            radius = 3
+            for index in self._line_handle_indices(points, handle_indices):
+                cx, cy = self._i2c(*points[index])
+                self.canvas.create_rectangle(
                     cx - radius,
                     cy - radius,
                     cx + radius,
                     cy + radius,
-                    fill=color,
-                    outline=color,
+                    fill=color if index == 0 else "white",
+                    outline="black",
                     tags=("overlay",),
                 )
 
@@ -917,7 +1089,6 @@ class ImageCanvas(ttk.Frame):
                 preview[1],
                 fill=color,
                 width=self._scaled_line_width(),
-                dash=(4, 3),
                 tags=("overlay",),
             )
 
@@ -1065,7 +1236,12 @@ class ImageCanvas(ttk.Frame):
             self._refresh_viewport_geometry()
 
     def _on_press(self, event):
-        if self._vertical_line_on:
+        if self._data is not None:
+            cx = self.canvas.canvasx(event.x)
+            cy = self.canvas.canvasy(event.y)
+            if self._begin_line_edit(event, cx, cy):
+                return
+        if self._vertical_line_on and not self._line_on:
             if self._data is None:
                 return
             cx = self.canvas.canvasx(event.x)
@@ -1083,6 +1259,13 @@ class ImageCanvas(ttk.Frame):
                 return
             cx = self.canvas.canvasx(event.x)
             cy = self.canvas.canvasy(event.y)
+            self.canvas.focus_set()
+            if len(self._active_line) >= 2 and self._cb_line_finish is not None:
+                sx, sy = self._i2c(*self._active_line[0])
+                if (abs(cx - sx) <= 5 and abs(cy - sy) <= 5) or int(getattr(event, "state", 0)) & 0x0004:
+                    self._line_preview = None
+                    self._cb_line_finish()
+                    return
             point = self._clamp_image_point(*self._c2i(cx, cy))
             if not self._active_line:
                 self._active_line = [point]
@@ -1111,7 +1294,47 @@ class ImageCanvas(ttk.Frame):
             self._drag_roi0 = self._roi
             self._draw_roi()
 
+    def _on_double_click(self, event):
+        """Finish a polyline at the double-clicked point, without repeating it."""
+        if not self._line_on or self._cb_line_finish is None:
+            return self._on_press(event)
+        if self._data is None or self._drag_vertical_line or not self._active_line:
+            return "break"
+        cx = self.canvas.canvasx(event.x)
+        cy = self.canvas.canvasy(event.y)
+        point = self._clamp_image_point(*self._c2i(cx, cy))
+        if self._active_line[-1] != point:
+            self._active_line.append(point)
+        self._line_preview = None
+        self._redraw_overlays()
+        self._emit_line_change()
+        if len(self._active_line) >= 2:
+            self._cb_line_finish()
+        return "break"
+
+    def _on_escape(self, _event):
+        if self._line_on and self._active_line:
+            self.clear_active_line()
+            return "break"
+
     def _on_drag_motion(self, event):
+        edit = getattr(self, "_line_edit_drag", None)
+        if edit is not None:
+            cx = self.canvas.canvasx(event.x)
+            cy = self.canvas.canvasy(event.y)
+            ix, iy = self._c2i(cx, cy)
+            points = edit["item"]["points"]
+            if edit["vertex"] is not None:
+                points[edit["vertex"]] = self._clamp_line_point(ix, iy)
+            else:
+                dx, dy = ix - edit["origin"][0], iy - edit["origin"][1]
+                old = edit["points"]
+                height, width = self._data.shape[:2]
+                dx = max(-min(x for x, _ in old), min(dx, width-1-max(x for x, _ in old)))
+                dy = max(-min(y for _, y in old), min(dy, height-1-max(y for _, y in old)))
+                points[:] = [self._clamp_line_point(x + dx, y + dy) for x, y in old]
+            self._redraw_overlays()
+            return
         if self._vertical_line_on and self._drag_vertical_line:
             cx = self.canvas.canvasx(event.x)
             ix, _iy = self._c2i(cx, 0)
@@ -1155,6 +1378,10 @@ class ImageCanvas(ttk.Frame):
             self._cb_roi(self._roi)
 
     def _on_release(self, _event):
+        edit = getattr(self, "_line_edit_drag", None)
+        self._line_edit_drag = None
+        if edit is not None and edit["before"] != edit["item"]["points"] and self._cb_line_edit is not None:
+            self._cb_line_edit(edit["item"]["label"], list(edit["item"]["points"]))
         self._drag_vertical_line = False
         self._drag = None
         self._drag_anchor = None
@@ -1225,7 +1452,15 @@ class ImageCanvas(ttk.Frame):
         if self._is_panning:
             self._set_canvas_cursor("fleur")
             return
-        if self._hit_vertical_line(cx):
+        item = self._editable_line()
+        if item is not None:
+            if self._hit_line_vertex(item["points"], cx, cy, item.get("handle_indices")) is not None:
+                self._set_canvas_cursor("crosshair")
+                return
+            if self._hit_line_segment(item["points"], cx, cy):
+                self._set_canvas_cursor("fleur")
+                return
+        if not self._line_on and self._hit_vertical_line(cx):
             self._set_canvas_cursor("sb_h_double_arrow")
             return
         if self._line_on:

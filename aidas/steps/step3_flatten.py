@@ -20,7 +20,7 @@ import os
 import sys
 import zipfile
 
-from PIL import Image, ImageColor, ImageOps, ImageTk
+from PIL import Image, ImageColor, ImageDraw, ImageOps, ImageTk
 
 try:
     import pyreadr
@@ -33,7 +33,13 @@ from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
 )
 from aidas.utils.log_paths import app_log_dir
-from aidas.utils.r_script_library import discover_r_scripts, import_r_script, user_r_script_dir
+from aidas.utils.r_script_library import (
+    OPTIMIZED_R_SCRIPTS_ENABLED,
+    OPTIMIZED_R_SCRIPT_NAME,
+    discover_r_scripts,
+    import_r_script,
+    user_r_script_dir,
+)
 from aidas.ui.components import AppButton
 from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
 from aidas.utils.ui_layout import LAYOUT
@@ -1517,6 +1523,7 @@ class RBatchSelectionTable(ttk.Frame):
         super().__init__(parent)
         self.rows = []
         self._row_by_iid = {}
+        self._hide_processed = False
         self._xscroll_visible = False
         self._xscroll_after_id = None
         self._column_resize_active = False
@@ -1608,25 +1615,17 @@ class RBatchSelectionTable(ttk.Frame):
         return images
 
     def set_rows(self, rows):
+        # Detached processed items are absent from get_children(), but must be
+        # removed before reusing their stable row IDs for a new scan.
+        previous_iids = tuple(dict.fromkeys((*self.tree.get_children(""), *self._row_by_iid)))
+        if previous_iids:
+            self.tree.delete(*previous_iids)
         self.rows = list(rows or [])
         self._row_by_iid = {}
         self._column_resize_active = False
         self._resize_start_widths = None
         self._manual_column_widths = None
         self._set_xscroll_visible(False)
-        self.tree.delete(*self.tree.get_children(""))
-
-        if not self.rows:
-            self.tree.insert(
-                "",
-                "end",
-                text="",
-                values=("No folders with complete Step 3 inputs were found.", "", ""),
-                tags=("locked",),
-            )
-            self._fit_columns_to_content()
-            self._refresh_header_checkbox()
-            return
 
         for index, row in enumerate(self.rows):
             iid = str(index)
@@ -1640,7 +1639,35 @@ class RBatchSelectionTable(ttk.Frame):
                 values=self._values_for_row(row),
                 tags=("locked",) if row.get("locked") else (),
             )
+        self._apply_processed_filter()
         self._fit_columns_to_content()
+
+    def set_hide_processed(self, hide_processed):
+        """Hide completed folders without rebuilding rows or column geometry."""
+        self._hide_processed = bool(hide_processed)
+        self._apply_processed_filter()
+
+    def _apply_processed_filter(self):
+        placeholder_iid = "_empty"
+        if self.tree.exists(placeholder_iid):
+            self.tree.delete(placeholder_iid)
+        visible_count = 0
+        for iid, row in self._row_by_iid.items():
+            if self._hide_processed and row.get("locked"):
+                self.tree.detach(iid)
+            else:
+                self.tree.move(iid, "", visible_count)
+                visible_count += 1
+        if not visible_count:
+            message = (
+                "No unprocessed folders to show."
+                if self.rows and self._hide_processed
+                else "No folders with complete Step 3 inputs were found."
+            )
+            self.tree.insert(
+                "", "end", iid=placeholder_iid, text="",
+                values=(message, "", ""), tags=("locked",),
+            )
         self._refresh_header_checkbox()
 
     def _image_for_row(self, row):
@@ -1938,19 +1965,19 @@ class RBatchSelectionPanel(ttk.Frame):
         wrapper = ttk.Frame(self, padding=12)
         wrapper.pack(fill="both", expand=True)
 
-        ttk.Label(wrapper, text="Batch R Script Processing", font=("", 12, "bold")).pack(anchor="w")
-
-        top = ttk.Frame(wrapper)
-        top.pack(fill="x", pady=(6, 8))
-        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
-        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(
-            side="left",
-            fill="x",
-            expand=True,
+        header = ttk.Frame(wrapper)
+        header.pack(fill="x", pady=(0, 8))
+        header.columnconfigure(0, weight=1)
+        ttk.Label(header, text="Batch R Script Processing", font=("", 12, "bold")).grid(
+            row=0, column=0, sticky="w",
         )
-        self.more_label = ttk.Label(top, text="", style="AIDaS.Link.TLabel", cursor="hand2")
-        self.more_label.pack(side="right", padx=(8, 0))
-        self.more_tooltip = HoverToolTip(self.more_label, "")
+        self.filter_row = header
+        self.hide_processed_var = tk.BooleanVar(value=True)
+        self.hide_processed_check = ttk.Checkbutton(
+            header, text="Hide processed folders", variable=self.hide_processed_var,
+            command=self._on_hide_processed_changed,
+        )
+        self.hide_processed_check.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
         run_box = ttk.Frame(wrapper)
         run_box.pack(side="bottom", fill="x", pady=(10, 0))
@@ -2020,6 +2047,21 @@ class RBatchSelectionPanel(ttk.Frame):
             ),
         )
 
+        self.summary_row = ttk.Frame(run_box)
+        self.summary_row.pack(side="bottom", fill="x", pady=(0, 8))
+        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        self.more_label = ttk.Label(
+            self.summary_row, text="", style="AIDaS.Link.TLabel", cursor="hand2",
+        )
+        self.more_label.pack(side="right", padx=(8, 0))
+        self.more_tooltip = HoverToolTip(self.more_label, "")
+        self.summary_label = ttk.Label(
+            self.summary_row, textvariable=self.summary_var, width=1,
+            wraplength=320, justify="left", anchor="w",
+        )
+        self.summary_label.pack(side="left", fill="x", expand=True)
+        self.summary_label.bind("<Configure>", self._resize_summary, add="+")
+
         # The table is the only vertically flexible region. Packing it after
         # the footer guarantees that resize pressure cannot cover the actions.
         self.table_host = ttk.Frame(wrapper)
@@ -2031,6 +2073,19 @@ class RBatchSelectionPanel(ttk.Frame):
             justify="center",
         )
         self.scan_label.pack(fill="both", expand=True)
+
+    def _resize_summary(self, event=None):
+        """Wrap scan statistics in the width left beside the details link."""
+        try:
+            width = max(1, int(event.width if event is not None else self.summary_label.winfo_width()) - 4)
+            if int(float(self.summary_label.cget("wraplength"))) != width:
+                self.summary_label.configure(wraplength=width)
+        except (tk.TclError, TypeError, ValueError):
+            pass
+
+    def _on_hide_processed_changed(self):
+        if self.table is not None:
+            self.table.set_hide_processed(self.hide_processed_var.get())
 
     def _max_worker_count(self, ready_count=None):
         core_limit = self.step_frame._available_r_worker_limit()
@@ -2139,6 +2194,7 @@ class RBatchSelectionPanel(ttk.Frame):
 
         table = RBatchSelectionTable(self.table_host)
         table.set_rows(rows)
+        table.set_hide_processed(self.hide_processed_var.get())
         table.pack(fill="both", expand=True)
         self.table = table
 
@@ -2565,6 +2621,13 @@ class Step3ResultZoomDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _event: self.destroy(), add="+")
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.deiconify()
+        try:
+            self.state("zoomed")
+        except tk.TclError:
+            try:
+                self.attributes("-zoomed", True)
+            except tk.TclError:
+                pass
         self.lift()
         self.after_idle(self._redraw)
 
@@ -2610,6 +2673,8 @@ class Step3Frame(SidebarStepFrame):
     )
     RESULT_SIDE_ORDER = ("temporal", "nasal")
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
+    R_OPTIMIZED_SCRIPT_NAME = OPTIMIZED_R_SCRIPT_NAME
+    R_OPTIMIZED_ENABLED = OPTIMIZED_R_SCRIPTS_ENABLED
     R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
     R_OUTPUT_MODE_PARALLEL = "parallel"
     R_OUTPUT_MODE_SEQUENTIAL = "sequential"
@@ -2723,8 +2788,6 @@ class Step3Frame(SidebarStepFrame):
     def _build_ui(self):
         self.build_standard_layout(
             sidebar_width=self.SIDEBAR_WIDTH,
-            status_var=self.status_var,
-            status_bar_content_margin=True,
         )
         process_section = self.add_sidebar_section("Process", pady=(0, 5))
         process = process_section.body
@@ -2755,21 +2818,9 @@ class Step3Frame(SidebarStepFrame):
             "Load R results…",
             self._browse_r_results_folder,
             "results",
-            tooltip="Open a folder containing completed Step 3 results.",
+            tooltip="Open all saved Step 3 results in a folder and its subfolders.",
         )
         self.load_r_results_button.pack(fill="x", pady=2)
-
-        ttk.Separator(process, orient="horizontal").pack(fill="x", pady=(8, 4))
-        progress_text_frame = ttk.Frame(process, height=44)
-        progress_text_frame.pack(fill="x", pady=(0, 4))
-        progress_text_frame.pack_propagate(False)
-        ttk.Label(
-            progress_text_frame,
-            textvariable=self.progress_text_var,
-            wraplength=self.SIDEBAR_TEXT_WRAP,
-            foreground="gray",
-            justify="left",
-        ).pack(fill="both", expand=True)
 
         # Keep the workflow handoff visible below the scrolling sidebar, as in
         # Steps 1 and 2.
@@ -2908,7 +2959,10 @@ class Step3Frame(SidebarStepFrame):
     @staticmethod
     def _script_path(role="main"):
         """Return a Step 3 script from source or PyInstaller's bundle."""
-        script_name = Step3Frame.R_SCRIPT_NAME if role == "main" else Step3Frame.R_OUTPUT_SCRIPT_NAME
+        if role == "main":
+            script_name = Step3Frame.R_OPTIMIZED_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_SCRIPT_NAME
+        else:
+            script_name = Step3Frame.R_OUTPUT_SCRIPT_NAME
         return Path(resource_path(script_name))
 
     @staticmethod
@@ -2917,11 +2971,26 @@ class Step3Frame(SidebarStepFrame):
 
     def _available_r_scripts(self, role="main"):
         prefixes = ("RAW_OCT_PROCESSING_",) if role == "main" else ("more_outputs_afterRAW_OCT_PROCESSING_",)
-        return discover_r_scripts(
-            self._script_path(role),
+        default_script = self._script_path(role)
+        if role == "main":
+            bundled_versions = {default_script.with_name(self.R_SCRIPT_NAME): "original"}
+            if self.R_OPTIMIZED_ENABLED:
+                bundled_versions[default_script.with_name(self.R_OPTIMIZED_SCRIPT_NAME)] = "optimized"
+        else:
+            bundled_versions = {default_script: "original"}
+        choices = discover_r_scripts(
+            default_script,
             self._user_r_script_dir(role),
             bundled_prefixes=prefixes,
+            bundled_versions=bundled_versions,
         )
+        return [choice for choice in choices if self._r_script_is_enabled(role, choice.path)]
+
+    def _r_script_is_enabled(self, role, path):
+        if role == "main" and not self.R_OPTIMIZED_ENABLED:
+            optimized = self._script_path(role).with_name(self.R_OPTIMIZED_SCRIPT_NAME)
+            return Path(path).resolve() != optimized.resolve()
+        return True
 
     def _import_user_r_script(self, source_path, role="main"):
         return import_r_script(Path(source_path), self._user_r_script_dir(role))
@@ -2941,8 +3010,15 @@ class Step3Frame(SidebarStepFrame):
         configured = None if self.preferences is None else self.preferences.get(preference_key)
         if configured:
             configured_path = Path(configured)
+            if not self._r_script_is_enabled(role, configured_path):
+                return self._script_path(role)
             if configured_path.is_file():
                 return configured_path
+            if role == "main":
+                original = self._script_path(role).with_name(self.R_SCRIPT_NAME)
+                legacy_original = original.with_name(original.stem + "_original.R")
+                if configured_path.resolve() == legacy_original.resolve() and original.is_file():
+                    return original
         choices = self._available_r_scripts(role)
         return choices[0].path if choices else None
 
@@ -2950,6 +3026,8 @@ class Step3Frame(SidebarStepFrame):
         """Persist one Settings-selected R script for future Step 3 runs."""
 
         selected = Path(path).resolve()
+        if not self._r_script_is_enabled(role, selected):
+            raise ValueError("The optimized R script is disabled for this release. Select the original script.")
         if not selected.is_file():
             raise FileNotFoundError(selected)
         preference_key = "r_main_script_path" if role == "main" else "r_output_script_path"
@@ -3608,6 +3686,76 @@ class Step3Frame(SidebarStepFrame):
         self._update_continue_to_step4_button_state()
         return True
 
+    @classmethod
+    def _folder_has_r_results(cls, folder):
+        """Recognize saved Step 3 previews or supported result data."""
+        folder = Path(folder)
+        files = {path.name.casefold() for path in folder.iterdir() if path.is_file()}
+        if any(filename.casefold() in files for _title, filename in cls.RESULT_IMAGE_ROWS):
+            return True
+        if any(name.startswith("_tissueborders__") and name.endswith(".png") for name in files):
+            return True
+        if all(name.casefold() in files for name in cls.R_WORKSPACE_FILES):
+            return True
+        if {"_flat_light.hdr", "_flat_light.img"}.issubset(files):
+            return True
+        export_dir = folder / cls.R_ARRAY_EXPORT_DIR
+        return all(
+            (export_dir / f"{name}.{suffix}").is_file()
+            for name in (
+                "FLATTENED_DARK_RETINA_RRC",
+                "FLATTENED_LIGHT_RETINA_RRC",
+                "FLATTENED_MARKERS_RRC",
+            )
+            for suffix in ("bin", "shape")
+        )
+
+    @classmethod
+    def _find_r_result_folders(cls, root):
+        """Include every result-bearing directory, even below matching parents."""
+        directories, access_errors = walk_accessible_directories(Path(root).expanduser())
+        folders = []
+        seen = set()
+        for folder in directories:
+            try:
+                if not cls._folder_has_r_results(folder):
+                    continue
+                resolved = folder.resolve()
+                key = cls._folder_key(resolved)
+            except (OSError, RuntimeError) as exc:
+                access_errors.append((folder, str(exc)))
+                continue
+            if key not in seen:
+                seen.add(key)
+                folders.append(resolved)
+        return folders, access_errors
+
+    def _load_r_results_from_tree(self, root, show_errors=True):
+        folders, access_errors = self._find_r_result_folders(root)
+        if not folders:
+            message = "No Step 3 R results were found in the selected folder or its subfolders."
+            if access_errors:
+                message += "\n\n" + skipped_directories_warning(access_errors)
+            self.status_var.set("No Step 3 R results found.")
+            if show_errors:
+                messagebox.showwarning("Load R Results", message)
+            return False
+
+        # Keep the single-folder data loader, while PNG-only and multiple
+        # results can be reopened without reading every volume into memory.
+        loaded_single = len(folders) == 1 and self._load_r_results_from_folder(
+            folders[0], show_errors=False
+        )
+        if not loaded_single:
+            self._open_batch_r_result_tabs(folders)
+        self.step4_result_folders = self._normalize_step4_result_folders(folders)
+        self._update_continue_to_step4_button_state()
+        self.progress_text_var.set("Loaded R results")
+        self.status_var.set(f"Loaded Step 3 R results from {len(folders)} folder(s).")
+        if access_errors:
+            self.info_var.set(self.info_var.get() + "\n\n" + skipped_directories_warning(access_errors))
+        return True
+
     def _load_result_png(self, filename):
         return self._load_result_png_from_folder(self.output_sdb_dir or self.current_sdb_dir, filename)
 
@@ -3624,11 +3772,11 @@ class Step3Frame(SidebarStepFrame):
 
     def _browse_r_results_folder(self):
         folder = filedialog.askdirectory(
-            title="Select folder containing Step 3 R results",
+            title="Select a folder to load all Step 3 R results inside",
             initialdir=self.output_sdb_dir or self.current_sdb_dir or None,
         )
         if folder:
-            self._load_r_results_from_folder(folder, show_errors=True)
+            self._load_r_results_from_tree(folder, show_errors=True)
 
     @staticmethod
     def _existing_basepath(folder, names):
@@ -4816,9 +4964,19 @@ class Step3Frame(SidebarStepFrame):
     def _tutorial_asset_path(self):
         return self._resource_path(Path("assets") / self.TUTORIAL_IMAGE_NAME)
 
-    def _display_preview_image(self, image, background="#ffffff", parent=None, on_click=None):
+    def _display_preview_image(
+        self,
+        image,
+        background="#ffffff",
+        parent=None,
+        on_click=None,
+        on_image_layout=None,
+        align_top=False,
+    ):
         parent = self.plot_holder if parent is None else parent
-        label = tk.Label(parent, bg=background, borderwidth=0, highlightthickness=0)
+        label = tk.Label(
+            parent, bg=background, borderwidth=0, highlightthickness=0, padx=0, pady=0
+        )
         label.pack(fill="both", expand=True)
         source = image.convert("RGB")
 
@@ -4833,13 +4991,17 @@ class Step3Frame(SidebarStepFrame):
             if width <= 1 or height <= 1:
                 return
             fitted = ImageOps.contain(source, (width, height), Image.Resampling.LANCZOS)
+            left = (width - fitted.width) // 2
+            top = 0 if align_top else (height - fitted.height) // 2
             canvas = Image.new("RGB", (width, height), background)
-            canvas.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
+            canvas.paste(fitted, (left, top))
             label.preview_photo = ImageTk.PhotoImage(canvas)
             try:
                 label.configure(image=label.preview_photo)
             except tk.TclError:
                 return
+            if on_image_layout is not None:
+                on_image_layout(label, (left, top, fitted.width, fitted.height))
 
         label.bind("<Configure>", redraw, add="+")
         if on_click is not None:
@@ -4877,7 +5039,7 @@ class Step3Frame(SidebarStepFrame):
                 groups[key]["folders"][side] = path
                 continue
 
-            if has_side_children:
+            if has_side_children and not cls._folder_has_r_results(path):
                 root = path
                 key = ("sides", os.path.normcase(os.path.abspath(os.fspath(root))))
                 if key not in groups:
@@ -4921,6 +5083,28 @@ class Step3Frame(SidebarStepFrame):
                 title=filename,
             )
 
+    @staticmethod
+    def _result_plot_bounds(image):
+        """Find the plot panel inside the R PNG's white axis/title margins."""
+        width, height = image.size
+        full_image = (0, 0, width, height)
+        foreground = np.asarray(image.convert("L")) < 245
+        # The chart frame spans most of its row; the tissue panel contains
+        # dense grayscale pixels. Short axis labels do not meet this threshold.
+        rows = np.flatnonzero(foreground.sum(axis=1) >= width * 0.5)
+        if rows.size < 2:
+            return full_image
+        top, bottom = int(rows[0]), int(rows[-1]) + 1
+        columns = np.flatnonzero(
+            foreground[top:bottom].sum(axis=0) >= (bottom - top) * 0.5
+        )
+        if columns.size < 2:
+            return full_image
+        left, right = int(columns[0]), int(columns[-1]) + 1
+        if right - left < width * 0.5 or bottom - top < height * 0.15:
+            return full_image
+        return left, top, right, bottom
+
     def _open_result_zoom(self, image, title):
         current = getattr(self, "_result_zoom_dialog", None)
         if current is not None:
@@ -4929,6 +5113,25 @@ class Step3Frame(SidebarStepFrame):
             except tk.TclError:
                 pass
         self._result_zoom_dialog = Step3ResultZoomDialog(self, image, title)
+
+    @staticmethod
+    def _result_expand_icon():
+        # Draw the familiar four-corner glyph without relying on symbol fonts.
+        scale = 4
+        icon = Image.new("RGBA", (20 * scale, 20 * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(icon)
+        for corner in (
+            ((8, 3), (3, 3), (3, 8)),
+            ((12, 3), (17, 3), (17, 8)),
+            ((3, 12), (3, 17), (8, 17)),
+            ((12, 17), (17, 17), (17, 12)),
+        ):
+            draw.line(
+                [(x * scale, y * scale) for x, y in corner],
+                fill=resolve_color(COLOR_PAIRS["text"]),
+                width=2 * scale,
+            )
+        return ImageTk.PhotoImage(icon.resize((20, 20), Image.Resampling.LANCZOS))
 
     @staticmethod
     def _bind_result_grid_mousewheel(widget, canvas):
@@ -4963,6 +5166,7 @@ class Step3Frame(SidebarStepFrame):
         viewport.columnconfigure(0, weight=1)
 
         background = resolve_color(COLOR_PAIRS["surface"])
+        expand_icon = self._result_expand_icon()
         canvas = tk.Canvas(
             viewport,
             bg=background,
@@ -4983,13 +5187,14 @@ class Step3Frame(SidebarStepFrame):
         )
 
         def resize_grid(event):
-            # Give each subject one complete viewport. Its four diagnostics can
-            # then stay visible together, while additional subjects scroll as
-            # full, consistently sized result pages.
+            # Keep each subject within a viewport, with the grid's top/bottom
+            # padding counted once so the last subject title stays visible.
+            vertical_padding = 20
+            page_height = max(1, event.height - vertical_padding)
             canvas.itemconfigure(
                 window_id,
                 width=event.width,
-                height=max(1, event.height * len(groups)),
+                height=page_height * len(groups) + vertical_padding,
             )
 
         canvas.bind(
@@ -5002,55 +5207,114 @@ class Step3Frame(SidebarStepFrame):
             subject = ttk.LabelFrame(grid, text=group["label"], padding=(10, 6, 10, 10))
             subject.grid(row=group_index, column=0, sticky="nsew", pady=(0, 10))
             grid.rowconfigure(group_index, weight=1, uniform="result-subject")
-            subject.columnconfigure(0, minsize=72)
+            subject.columnconfigure(0, weight=1)
 
             if group["sided"]:
-                columns = [
+                sides = [
                     (side_name.title(), group["folders"][side_name])
                     for side_name in self.RESULT_SIDE_ORDER
                 ]
             else:
-                columns = [("Result", group["folders"]["result"])]
+                sides = [(None, group["folders"]["result"])]
 
-            for column_index, (column_title, _folder) in enumerate(columns, start=1):
-                subject.columnconfigure(column_index, weight=1, uniform="result-side")
-                ttk.Label(
-                    subject,
-                    text=column_title,
-                    anchor="center",
-                    font=("", 10, "bold"),
-                ).grid(row=0, column=column_index, sticky="ew", padx=5, pady=(0, 4))
+            for side_index, (side_title, folder) in enumerate(sides):
+                if side_title is None:
+                    result_pair = subject
+                else:
+                    result_pair = ttk.LabelFrame(
+                        subject, text=side_title, padding=(5, 4, 5, 5)
+                    )
+                    result_pair.grid(
+                        row=side_index, column=0, sticky="nsew", pady=(0, 5)
+                    )
+                    subject.rowconfigure(side_index, weight=1, uniform="result-side-row")
+                result_pair.rowconfigure(1, weight=1)
 
-            for row_index, (result_title, filename) in enumerate(self.RESULT_IMAGE_ROWS, start=1):
-                subject.rowconfigure(row_index, weight=1, uniform="result-image-row")
-                ttk.Label(
-                    subject,
-                    text=result_title,
-                    anchor="e",
-                    font=("", 10, "bold"),
-                ).grid(row=row_index, column=0, sticky="e", padx=(0, 6))
-                for column_index, (column_title, folder) in enumerate(columns, start=1):
+                for column_index, (result_title, filename) in enumerate(self.RESULT_IMAGE_ROWS):
+                    result_pair.columnconfigure(
+                        column_index, weight=1, uniform="result-image-column"
+                    )
+                    ttk.Label(
+                        result_pair,
+                        text=result_title,
+                        anchor="center",
+                        font=("", 10, "bold"),
+                    ).grid(row=0, column=column_index, sticky="ew", padx=5, pady=(0, 4))
                     image = self._load_result_preview(folder, filename)
-                    zoom_title = f"{group['label']} — {column_title} — {result_title}"
-                    image_host = ttk.Frame(subject)
+                    plot_bounds = self._result_plot_bounds(image)
+                    zoom_parts = [group["label"], side_title, result_title]
+                    zoom_title = " — ".join(part for part in zoom_parts if part)
+                    image_host = ttk.Frame(result_pair)
                     image_host.grid(
-                        row=row_index,
+                        row=1,
                         column=column_index,
                         sticky="nsew",
                         padx=5,
                         pady=5,
                     )
                     image_host.pack_propagate(False)
+                    def open_zoom(image=image, title=zoom_title):
+                        self._open_result_zoom(image, title)
+
+                    expand_button = ttk.Button(
+                        image_host,
+                        image=expand_icon,
+                        style="AIDaS.Icon.TButton",
+                        width=0,
+                        compound="image",
+                        command=open_zoom,
+                        cursor="hand2",
+                        takefocus=True,
+                    )
+                    expand_button.expand_icon = expand_icon
+
+                    def refresh_expand_icon(button=expand_button):
+                        button.expand_icon = self._result_expand_icon()
+                        button.configure(image=button.expand_icon)
+
+                    expand_button._apply_aidas_theme = refresh_expand_icon
+
+                    def position_expand_button(
+                        preview,
+                        bounds,
+                        button=expand_button,
+                        panel=plot_bounds,
+                        source_size=image.size,
+                    ):
+                        left, top, width, height = bounds
+                        source_width, source_height = source_size
+                        # Round the transformed panel edges inward so the
+                        # complete button stays inside the visible plot box.
+                        panel_left = left + (panel[0] * width + source_width - 1) // source_width
+                        panel_top = top + (panel[1] * height + source_height - 1) // source_height
+                        panel_right = left + panel[2] * width // source_width
+                        panel_bottom = top + panel[3] * height // source_height
+                        button_width = button.winfo_reqwidth()
+                        button_height = button.winfo_reqheight()
+                        inset = 8
+                        if (
+                            panel_right - panel_left < button_width + 2 * inset
+                            or panel_bottom - panel_top < button_height + 2 * inset
+                        ):
+                            button.place_forget()
+                            return
+                        button.place(
+                            x=preview.winfo_x() + panel_right - inset,
+                            y=preview.winfo_y() + panel_top + inset,
+                            anchor="ne",
+                        )
+                        button.lift()
+
                     preview = self._display_preview_image(
                         image,
                         background=background,
                         parent=image_host,
-                        on_click=lambda image=image, title=zoom_title: self._open_result_zoom(
-                            image,
-                            title,
-                        ),
+                        on_click=open_zoom,
+                        on_image_layout=position_expand_button,
+                        align_top=True,
                     )
-                    HoverToolTip(preview, f"Open {zoom_title} in a zoomed view.")
+                    HoverToolTip(preview, f"Click to maximize {zoom_title}.")
+                    HoverToolTip(expand_button, f"Maximize {result_title} preview.")
 
         grid.columnconfigure(0, weight=1)
         self.canvas = canvas

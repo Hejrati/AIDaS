@@ -12,6 +12,8 @@ import tkinter as tk
 from tkinter import ttk
 from unittest import mock
 
+import numpy as np
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -205,12 +207,13 @@ def _assert_crop_split_button_geometry(step):
         "Crop & Scale must keep a clean 198x40 outer silhouette; "
         f"rendered size is {split_width}x{split_height}."
     )
-    assert split_height == undo.winfo_height(), (
-        "Crop & Scale and Undo do not have the same rendered height."
-    )
-    assert split_y == undo.winfo_rooty(), (
-        "Crop & Scale and Undo are not vertically aligned."
-    )
+    if undo.winfo_ismapped():
+        assert split_height == undo.winfo_height(), (
+            "Crop & Scale and Undo do not have the same rendered height."
+        )
+        assert split_y == undo.winfo_rooty(), (
+            "Crop & Scale and Undo are not vertically aligned."
+        )
     assert action.cget("corner_radius") == undo.cget("corner_radius"), (
         "Crop & Scale does not use the same standard corner radius as Undo."
     )
@@ -289,13 +292,12 @@ def _assert_crop_split_button_geometry(step):
 
 
 def _assert_step1_sidebar_actions_visible(step, width, height):
-    """Guard the fixed Step 1 footer and its actions at each window size."""
+    """Guard the fixed Step 1 handoff footer at each window size."""
 
     assert step.step_actions_footer.master is step.sidebar_shell, (
         "Step 1 workflow actions are not attached to the fixed sidebar shell."
     )
     assert step.step_actions_frame.master is step.step_actions_footer
-    assert step.save_all_btn.master is step.step_actions_frame
     assert step.batch_segment_cropped_btn.master is step.step_actions_frame
 
     shell_left = step.sidebar_shell.winfo_rootx()
@@ -305,7 +307,6 @@ def _assert_step1_sidebar_actions_visible(step, width, height):
     for name, widget in (
         ("footer", step.step_actions_footer),
         ("action row", step.step_actions_frame),
-        ("Save", step.save_all_btn),
         ("Go to Step 2", step.batch_segment_cropped_btn),
     ):
         assert widget.winfo_ismapped(), (
@@ -328,6 +329,91 @@ def _assert_step1_sidebar_actions_visible(step, width, height):
     assert scroll_bottom <= step.step_actions_footer.winfo_rooty(), (
         f"Step 1 scrolling controls overlap the fixed actions at {width}x{height}."
     )
+
+
+def _assert_step1_canvas_actions(step, app, width, height):
+    """Exercise the rendered canvas actions before and after a crop exists."""
+
+    assert not hasattr(step, "canvas_roi_toolbar")
+    assert not hasattr(step, "roi_entries")
+    assert not hasattr(step, "source_view_radio")
+    assert not hasattr(step, "target_view_radio")
+    assert step.canvas_actions.master is step.canvas_toolbar
+    assert step.crop_split_frame.master is step.canvas_actions
+    assert step.crop_btn.master is step.crop_split_frame
+    assert step.crop_options_btn.master is step.crop_split_frame
+    assert step.undo_crop_btn.master is step.canvas_actions
+    assert not hasattr(step, "save_all_btn")
+    assert step.canvas_navigation.master is step.canvas_toolbar
+    assert int(step.canvas_navigation.grid_info()["row"]) == 0
+    assert int(step.canvas_actions.grid_info()["row"]) == 0
+
+    navigation = step.canvas_navigation
+    count = step.queue_progress_label
+    back = step.back_sdb_btn
+    following = step.next_sdb_btn
+    assert all(control.master is navigation for control in (back, count, following))
+    assert all(control.winfo_ismapped() for control in (back, count, following))
+    assert str(count.cget("anchor")) == "center"
+    assert abs(_widget_center(count)[0] - _widget_center(step.canvas_toolbar)[0]) <= 1, (
+        f"Step 1 saved-image count is not centered at {width}x{height}."
+    )
+    assert abs(_widget_center(navigation)[0] - _widget_center(step.canvas_toolbar)[0]) <= 1
+    assert all(control.cget("image") is not None for control in (back, following))
+    assert len({control.winfo_rooty() for control in (back, following)}) == 1
+    assert following.winfo_rootx() - (back.winfo_rootx() + back.winfo_width()) >= LAYOUT.space_sm
+
+    def assert_row(actions):
+        controls = (*actions, back, following)
+        assert all(control.winfo_ismapped() for control in controls)
+        assert len({control.winfo_height() for control in controls}) == 1
+        assert len({control.winfo_rooty() for control in controls}) == 1, (
+            f"Step 1 buttons are not in one row at {width}x{height}."
+        )
+        for left, right in ((actions[-1], back), (back, count), (count, following)):
+            gap = right.winfo_rootx() - (left.winfo_rootx() + left.winfo_width())
+            assert gap >= LAYOUT.space_sm, (
+                f"Step 1 toolbar controls touch or overlap at {width}x{height}."
+            )
+        assert abs(_widget_center(count)[0] - _widget_center(step.canvas_toolbar)[0]) <= 1
+
+    status = step.content_status_bar
+    scrollbar = step.image_canvas._hsb
+    assert status.winfo_rootx() == step.image_canvas.winfo_rootx()
+    assert status.winfo_width() == step.image_canvas.winfo_width()
+    scrollbar_bottom = scrollbar.winfo_rooty() + scrollbar.winfo_height()
+    assert status.winfo_rooty() - scrollbar_bottom >= LAYOUT.space_sm, (
+        f"Step 1 image scrollbar touches the status bar at {width}x{height}."
+    )
+
+    previous_raw = step.raw_image
+    previous_processed = step.processed_image
+    try:
+        step.raw_image = np.zeros((4, 4), dtype=np.uint16)
+        step.processed_image = None
+        step._update_processing_controls()
+        app.update_idletasks()
+        assert not step.undo_crop_btn.winfo_ismapped()
+        _assert_crop_split_button_geometry(step)
+        assert_row((step.crop_split_frame,))
+
+        step.processed_image = np.zeros((4, 4), dtype=np.int16)
+        step._update_processing_controls()
+        app.update_idletasks()
+        assert step.undo_crop_btn.winfo_ismapped()
+        assert str(step.undo_crop_btn.cget("state")) == "normal"
+        assert not step.crop_split_frame.winfo_ismapped()
+        processing_controls = (
+            step.undo_crop_btn,
+        )
+        assert_row(processing_controls)
+        toolbar_right = step.canvas_toolbar.winfo_rootx() + step.canvas_toolbar.winfo_width()
+        assert step.undo_crop_btn.winfo_rootx() + step.undo_crop_btn.winfo_width() <= toolbar_right
+    finally:
+        step.raw_image = previous_raw
+        step.processed_image = previous_processed
+        step._update_processing_controls()
+        app.update_idletasks()
 
 
 def _assert_step2_sidebar_actions_visible(step, width, height):
@@ -494,7 +580,7 @@ def _assert_step4_sidebar_actions_visible(step, width, height):
     ) <= 1
 
 
-def main(interface_mode="Modern") -> int:
+def _run_smoke(interface_mode="Modern") -> int:
     preferences = _SmokePreferences(interface_mode)
     config_factory = mock.Mock(return_value=preferences)
     config_factory.peek.return_value = interface_mode
@@ -706,9 +792,22 @@ def main(interface_mode="Modern") -> int:
                     f"Step {step_number} has controls outside the sidebar viewport: "
                     + ", ".join(overflow[:5])
                 )
-                assert int(step.content_status_bar._label.cget("padx")) >= LAYOUT.space_sm, (
-                    f"Step {step_number} status text touches its left border."
-                )
+                if step_number == 4:
+                    assert not hasattr(step, "content_status_bar"), (
+                        "Step 4 still displays the removed status panel."
+                    )
+                elif step_number == 2:
+                    assert not hasattr(step, "content_status_bar"), (
+                        "Step 2 still reserves space for the removed instruction panel."
+                    )
+                elif step_number == 3:
+                    assert not hasattr(step, "content_status_bar"), (
+                        "Step 3 still displays the removed status panel."
+                    )
+                else:
+                    assert int(step.content_status_bar._label.cget("padx")) >= LAYOUT.space_sm, (
+                        f"Step {step_number} status text touches its left border."
+                    )
                 if (width, height) == WINDOW_SIZES[-1]:
                     step.sidebar.canvas.yview_moveto(1.0)
                     app.update_idletasks()
@@ -731,80 +830,12 @@ def main(interface_mode="Modern") -> int:
                     step.sidebar.canvas.yview_moveto(0.0)
                     app.update_idletasks()
                 if step_number == 1:
-                    _assert_crop_split_button_geometry(step)
                     _assert_step1_sidebar_actions_visible(step, width, height)
-                    assert (
-                        step.content_status_bar.winfo_rootx()
-                        == step.canvas_roi_toolbar.winfo_rootx()
-                    ), "Step 1 status and bottom toolbar do not share a left edge."
-                    assert (
-                        step.content_status_bar.winfo_width()
-                        == step.canvas_roi_toolbar.winfo_width()
-                    ), "Step 1 status and bottom toolbar do not have the same width."
-                    action_heights = {
-                        step.crop_split_frame.winfo_reqheight(),
-                        step.undo_crop_btn.winfo_reqheight(),
-                    }
-                    assert len(action_heights) == 1, (
-                        "Step 1 Crop and Undo buttons do not have a "
-                        "consistent requested height."
-                    )
-                    sidebar_action_heights = {
-                        step.save_all_btn.winfo_reqheight(),
-                        step.batch_segment_cropped_btn.winfo_reqheight(),
-                    }
-                    assert len(sidebar_action_heights) == 1, (
-                        "Step 1 Save and Go to Step 2 buttons do not have a "
-                        "consistent requested height."
-                    )
-                    assert step.crop_btn.winfo_reqheight() == step.crop_options_btn.winfo_reqheight(), (
-                        "Step 1 Crop split-button segments have different heights."
-                    )
-                    action_buttons = (
-                        step.crop_btn,
-                        step.crop_options_btn,
-                        step.undo_crop_btn,
-                    )
-                    assert step.crop_split_frame.master is step.canvas_toolbar
-                    assert step.crop_btn.master is step.crop_split_frame
-                    assert step.crop_options_btn.master is step.crop_split_frame
-                    assert all(
-                        button.master is step.canvas_toolbar
-                        for button in action_buttons[2:]
-                    ), "Step 1 processing actions are not in the top canvas toolbar."
-                    aligned_controls = (
-                        step.crop_split_frame,
-                        step.undo_crop_btn,
-                    )
-                    assert len({control.winfo_rooty() for control in aligned_controls}) == 1, (
-                        "Step 1 processing buttons are not aligned in one row."
-                    )
-                    sidebar_actions = (
-                        step.save_all_btn,
-                        step.batch_segment_cropped_btn,
-                    )
-                    assert len({control.winfo_rooty() for control in sidebar_actions}) == 1, (
-                        "Step 1 sidebar actions are not aligned in one row."
-                    )
-                    roi_controls = tuple(
-                        step.roi_entries + step.target_size_entries
-                    )
-                    assert all(
-                        control.master.master is step.canvas_roi_toolbar
-                        for control in roi_controls
-                    ), "Step 1 ROI controls are not in the bottom canvas toolbar."
-                    assert len({control.winfo_rooty() for control in roi_controls}) == 1, (
-                        "Step 1 ROI controls are not aligned in one row."
-                    )
-                    view_buttons = (
-                        step.source_view_radio,
-                        step.target_view_radio,
-                    )
-                    assert all(
-                        button.master.master.master is step.canvas_roi_toolbar
-                        for button in view_buttons
-                    ), "Step 1 view choices are not in the bottom canvas toolbar."
+                    _assert_step1_canvas_actions(step, app, width, height)
                 if step_number == 2:
+                    assert not hasattr(step, "image_info_frame"), (
+                        "Step 2 still displays the removed image-information panel."
+                    )
                     _assert_step2_sidebar_actions_visible(step, width, height)
                 if step_number == 4:
                     _assert_step4_sidebar_actions_visible(step, width, height)
@@ -854,6 +885,28 @@ def main(interface_mode="Modern") -> int:
     return 0
 
 
+def main(interface_mode="Modern", *, transparent=False) -> int:
+    """Optionally keep mapped smoke-test windows invisible on a user's desktop."""
+
+    if not transparent:
+        return _run_smoke(interface_mode)
+
+    def transparent_initializer(original):
+        def initialize(window, *args, **kwargs):
+            original(window, *args, **kwargs)
+            window.wm_attributes("-alpha", 0.0)
+
+        return initialize
+
+    with (
+        mock.patch.object(tk.Tk, "__init__", transparent_initializer(tk.Tk.__init__)),
+        mock.patch.object(
+            tk.Toplevel, "__init__", transparent_initializer(tk.Toplevel.__init__)
+        ),
+    ):
+        return _run_smoke(interface_mode)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -861,5 +914,6 @@ if __name__ == "__main__":
         choices=("Modern", "Classic"),
         default="Modern",
     )
+    parser.add_argument("--transparent", action="store_true")
     options = parser.parse_args()
-    raise SystemExit(main(options.interface))
+    raise SystemExit(main(options.interface, transparent=options.transparent))

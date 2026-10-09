@@ -70,6 +70,7 @@ from aidas.ui.windowing import (
     synchronize_window_chrome,
 )
 from aidas.utils.ui_layout import LAYOUT
+from aidas.utils.r_script_library import OPTIMIZED_R_SCRIPTS_ENABLED, RScriptChoice
 from aidas.utils.ui_utils import (
     HoverToolTip,
     action_button,
@@ -436,6 +437,14 @@ class SettingsDialog(ctk.CTkToplevel):
         ("main", "Main processing script"),
         ("output", "Output processing script"),
     )
+    SCRIPT_OPTIONS = ("Original script", "Optimized version", "Custom script")
+
+    @classmethod
+    def _r_script_options(cls, role):
+        if role == "main" and OPTIMIZED_R_SCRIPTS_ENABLED:
+            return cls.SCRIPT_OPTIONS
+        return ("Original script", "Custom script")
+
     AUTO_DETECTION_FIELDS = (
         (
             "step4_auto_start_min",
@@ -490,6 +499,7 @@ class SettingsDialog(ctk.CTkToplevel):
         set_appearance_command,
         step1,
         step3,
+        step2=None,
     ):
         super().__init__(parent)
         self.withdraw()
@@ -503,7 +513,15 @@ class SettingsDialog(ctk.CTkToplevel):
         self._set_interface_command = set_interface_command
         self._set_appearance_command = set_appearance_command
         self._step1 = step1
+        self._step2 = step2
         self._step3 = step3
+        self._annotation_tutorial_applied_value = bool(
+            preferences.get("show_step2_annotation_tutorial", True)
+        )
+        self.annotation_tutorial_var = tk.BooleanVar(
+            master=self, value=self._annotation_tutorial_applied_value,
+        )
+        self._annotation_tutorial_dirty = False
         self._presentation_mode = normalize_interface_mode(interface_mode)
         self._classic_settings = self._presentation_mode == "Classic"
         self._presentation_refresh_after_id = None
@@ -514,6 +532,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self._r_setup_wizard = None
         self._script_choices = {"main": [], "output": []}
         self._script_by_label = {"main": {}, "output": {}}
+        self._script_custom_choices = {"main": None, "output": None}
+        self._script_popups = {}
         self._script_vars = {
             "main": tk.StringVar(master=self),
             "output": tk.StringVar(master=self),
@@ -619,7 +639,21 @@ class SettingsDialog(ctk.CTkToplevel):
             text_color=COLOR_PAIRS["text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
         )
-        self.update_switch.grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 12))
+        self.update_switch.grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 6))
+        self.annotation_tutorial_switch = ctk.CTkSwitch(
+            general,
+            text="Enable tutorial",
+            variable=self.annotation_tutorial_var,
+            command=self._annotation_tutorial_choice_changed,
+            onvalue=True,
+            offvalue=False,
+            progress_color=COLOR_PAIRS["primary"],
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+        )
+        self.annotation_tutorial_switch.grid(
+            row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 12),
+        )
 
         sdb = self._settings_section("Default SDB image parameters", row=2)
         self.sdb_default_vars = {
@@ -717,14 +751,15 @@ class SettingsDialog(ctk.CTkToplevel):
         scripts = self._settings_section("Step 3 R scripts", row=5)
         ctk.CTkLabel(
             scripts,
-            text="Choose each active script from its list, then click Apply.",
+            text="Choose a script for each processing step, then click Apply.",
             anchor="w",
             text_color=COLOR_PAIRS["muted_text"],
-        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(4, 8))
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 8))
         self.script_menus = {}
+        self._script_popups = {}
         for row, (role, label) in enumerate(self.SCRIPT_ROLES):
             role_frame = ctk.CTkFrame(scripts, fg_color="transparent", corner_radius=0)
-            role_frame.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(6, 10))
+            role_frame.grid(row=row + 1, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 10))
             role_frame.grid_columnconfigure(0, weight=1)
             ctk.CTkLabel(
                 role_frame,
@@ -740,8 +775,8 @@ class SettingsDialog(ctk.CTkToplevel):
             menu = ctk.CTkOptionMenu(
                 role_frame,
                 variable=self._script_vars[role],
-                values=["No R scripts found"],
-                command=lambda _label, selected_role=role: self._select_r_script(selected_role),
+                values=list(self._r_script_options(role)),
+                command=lambda label, selected_role=role: self._choose_r_script_option(selected_role, label),
                 height=34,
                 fg_color=COLOR_PAIRS["button"],
                 button_color=COLOR_PAIRS["primary"],
@@ -753,13 +788,16 @@ class SettingsDialog(ctk.CTkToplevel):
             )
             menu.grid(row=1, column=0, sticky="ew", pady=(4, 0))
             self.script_menus[role] = menu
-            AppButton(
-                role_frame,
-                text="Add R script...",
-                variant="secondary",
-                command=lambda selected_role=role: self._add_r_script(selected_role),
-                width=132,
-            ).grid(row=1, column=1, padx=(8, 0), pady=(4, 0))
+            self._script_popups[role] = menu._dropdown_menu
+            open_dropdown = menu._open_dropdown_menu
+
+            def open_script_choices(selected_role=role, open_dropdown=open_dropdown):
+                # CTk can rebuild its native menu when fonts/scaling change.
+                # Restore our separator and selected check mark before opening.
+                self._update_r_script_popup(selected_role)
+                open_dropdown()
+
+            menu._open_dropdown_menu = open_script_choices
             ctk.CTkLabel(
                 role_frame,
                 textvariable=self._script_status_vars[role],
@@ -926,6 +964,15 @@ class SettingsDialog(ctk.CTkToplevel):
             command=self._mark_dirty,
         )
         self.update_switch.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 2))
+        self.annotation_tutorial_switch = ttk.Checkbutton(
+            general,
+            text="Enable tutorial",
+            variable=self.annotation_tutorial_var,
+            command=self._annotation_tutorial_choice_changed,
+        )
+        self.annotation_tutorial_switch.grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(4, 2),
+        )
 
         sdb = ttk.LabelFrame(content, text="Default SDB image parameters", padding=10)
         sdb.pack(fill="x", pady=(0, 10))
@@ -1016,9 +1063,10 @@ class SettingsDialog(ctk.CTkToplevel):
         scripts.columnconfigure(0, weight=1)
         ttk.Label(
             scripts,
-            text="Choose each active script from its list, then click Apply.",
+            text="Choose a script for each processing step, then click Apply.",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.script_menus = {}
+        self._script_popups = {}
         for row, (role, label) in enumerate(self.SCRIPT_ROLES):
             base_row = 1 + row * 3
             ttk.Label(scripts, text=label).grid(
@@ -1028,25 +1076,18 @@ class SettingsDialog(ctk.CTkToplevel):
                 sticky="w",
                 pady=(5, 2),
             )
-            menu = ttk.Combobox(
+            menu = ttk.Menubutton(
                 scripts,
                 textvariable=self._script_vars[role],
-                values=["No R scripts found"],
-                state="readonly",
                 width=62,
+                direction="below",
             )
-            menu.grid(row=base_row + 1, column=0, sticky="ew")
-            menu.bind(
-                "<<ComboboxSelected>>",
-                lambda _event, selected_role=role: self._select_r_script(selected_role),
-                add="+",
-            )
+            menu.grid(row=base_row + 1, column=0, columnspan=2, sticky="ew")
             self.script_menus[role] = menu
-            ttk.Button(
-                scripts,
-                text="Add R script...",
-                command=lambda selected_role=role: self._add_r_script(selected_role),
-            ).grid(row=base_row + 1, column=1, padx=(8, 0))
+            popup = tk.Menu(menu, tearoff=False)
+            menu.configure(menu=popup)
+            popup.configure(postcommand=lambda selected_role=role: self._update_r_script_popup(selected_role))
+            self._script_popups[role] = popup
             ttk.Label(
                 scripts,
                 textvariable=self._script_status_vars[role],
@@ -1142,6 +1183,22 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _mark_dirty(self, *_args) -> None:
         self.apply_status_var.set("Unsaved changes")
+
+    def _annotation_tutorial_choice_changed(self) -> None:
+        self._annotation_tutorial_dirty = True
+        self._mark_dirty()
+
+    def _apply_annotation_tutorial_setting(self) -> None:
+        variable = self.__dict__.get("annotation_tutorial_var")
+        if variable is None:
+            return
+        enabled = bool(variable.get())
+        changed = enabled != self._annotation_tutorial_applied_value
+        self._preferences.set("show_step2_annotation_tutorial", enabled)
+        if self._step2 is not None and (changed or self._annotation_tutorial_dirty):
+            self._step2.set_annotation_tutorial_enabled(enabled)
+        self._annotation_tutorial_applied_value = enabled
+        self._annotation_tutorial_dirty = False
 
     def _interface_choice_changed(self, mode_name: str) -> None:
         """Keep dependent appearance controls honest before Apply is clicked."""
@@ -1280,42 +1337,106 @@ class SettingsDialog(ctk.CTkToplevel):
 
     @classmethod
     def _script_display_label(cls, choice):
-        source = "Default" if choice.is_default else str(choice.source).title()
+        source = cls._script_version_label(choice)
+        if source is not None:
+            if choice.is_default:
+                source += " (default)"
+        else:
+            source = "Default" if choice.is_default else str(choice.source).title()
         return f"{source} — {cls._compact_script_name(choice.path.name)}"
+
+    @staticmethod
+    def _script_version_label(choice):
+        return {
+            "original": "Original script",
+            "optimized": "Optimized version",
+        }.get(getattr(choice, "version", None))
+
+    @classmethod
+    def _script_status_label(cls, choice):
+        name = cls._compact_script_name(choice.path.name)
+        version = cls._script_version_label(choice)
+        return f"{version} — {name}" if version is not None else name
 
     def _refresh_r_script_choices(self, role, *, select_path=None) -> None:
         choices = self._step3.available_r_scripts(role)
         self._script_choices[role] = choices
         by_label = {}
-        labels = []
-        for choice in choices:
-            label = self._script_display_label(choice)
-            if label in by_label:
-                label = f"{label} ({len(labels) + 1})"
-            labels.append(label)
-            by_label[label] = choice
-        self._script_by_label[role] = by_label
-        labels = labels or ["No R scripts found"]
-        self.script_menus[role].configure(values=labels)
+        for version, label in (("original", "Original script"), ("optimized", "Optimized version")):
+            if label not in self._r_script_options(role):
+                continue
+            choice = next((choice for choice in choices if choice.version == version), None)
+            if choice is not None:
+                by_label[label] = choice
         selected_path = Path(select_path).resolve() if select_path is not None else self._step3._selected_r_script_path(role)
         selected = next(
             (choice for choice in choices if selected_path is not None and choice.path.resolve() == selected_path.resolve()),
-            choices[0] if choices else None,
+            None,
         )
-        label = next(
-            (display for display, choice in by_label.items() if choice == selected),
-            labels[0],
-        )
+        if selected is None and selected_path is not None and selected_path.is_file():
+            selected = RScriptChoice("Custom script", selected_path.resolve(), "user")
+        if selected is None:
+            selected = choices[0] if choices else None
+
+        custom_choices = getattr(self, "_script_custom_choices", {})
+        self._script_custom_choices = custom_choices
+        label = next((label for label, choice in by_label.items() if choice == selected), "Custom script")
+        if selected is not None and label == "Custom script":
+            custom_choices[role] = selected
+        custom = custom_choices.get(role)
+        if custom is not None and custom.path.is_file():
+            by_label["Custom script"] = custom
+        self._script_by_label[role] = by_label
         self._script_vars[role].set(label)
+        self._update_r_script_popup(role)
         if selected is not None:
             state = "Pending" if select_path is not None else "Active"
             self._script_status_vars[role].set(
-                f"{state}: {self._compact_script_name(selected.path.name)}"
+                f"{state}: {self._script_status_label(selected)}"
             )
             if select_path is not None:
                 self._mark_dirty()
         else:
             self._script_status_vars[role].set("No runnable script is available")
+
+    def _update_r_script_popup(self, role) -> None:
+        popup = getattr(self, "_script_popups", {}).get(role)
+        if popup is None:
+            return
+        popup.delete(0, "end")
+        selected = self._script_vars[role].get()
+        for label in self._r_script_options(role):
+            if label == "Custom script":
+                popup.add_separator()
+                display = "Select custom script…"
+                enabled = True
+            else:
+                display = label
+                enabled = label in self._script_by_label[role]
+            checked = label == selected and label in self._script_by_label[role]
+            popup.add_command(
+                label=("✓ " if checked else "   ") + display,
+                state="normal" if enabled else "disabled",
+                command=lambda selected_label=label, selected_role=role: self._choose_r_script_option(
+                    selected_role, selected_label
+                ),
+            )
+
+    def _choose_r_script_option(self, role, label) -> None:
+        if self._step3._busy:
+            messagebox.showwarning(
+                "Step 3 is running",
+                "R script settings cannot be changed until the current Step 3 batch finishes.",
+                parent=self,
+            )
+            return
+        if label == "Custom script":
+            self._add_r_script(role)
+            return
+        if label not in self._script_by_label[role]:
+            return
+        self._script_vars[role].set(label)
+        self._select_r_script(role)
 
     def _select_r_script(self, role) -> None:
         if self._step3._busy:
@@ -1330,21 +1451,22 @@ class SettingsDialog(ctk.CTkToplevel):
         if choice is None:
             return
         self._script_status_vars[role].set(
-            f"Pending: {self._compact_script_name(choice.path.name)} — click Apply"
+            f"Pending: {self._script_status_label(choice)} — click Apply"
         )
+        self._update_r_script_popup(role)
         self._mark_dirty()
 
     def _add_r_script(self, role) -> None:
         if self._step3._busy:
             messagebox.showwarning(
                 "Step 3 is running",
-                "Wait for the current Step 3 batch to finish before adding an R script.",
+                "Wait for the current Step 3 batch to finish before selecting a custom R script.",
                 parent=self,
             )
             return
         selected = filedialog.askopenfilename(
             parent=self,
-            title="Add main processing R script" if role == "main" else "Add output R script",
+            title="Select custom main processing R script" if role == "main" else "Select custom output R script",
             filetypes=(("R scripts", "*.R"), ("All files", "*.*")),
         )
         if not selected:
@@ -1352,7 +1474,9 @@ class SettingsDialog(ctk.CTkToplevel):
         try:
             imported = self._step3.import_r_script_for_role(Path(selected), role)
         except (OSError, ValueError) as exc:
-            messagebox.showerror("Add R Script", f"Could not add the R script.\n{exc}", parent=self)
+            messagebox.showerror(
+                "Select Custom R Script", f"Could not select the custom R script.\n{exc}", parent=self
+            )
             return
         self._refresh_r_script_choices(role, select_path=imported)
 
@@ -1388,6 +1512,12 @@ class SettingsDialog(ctk.CTkToplevel):
                 )
                 return
 
+        # Switching or reselecting the interface synchronizes these controls
+        # with the app's current values. Preserve the user's choices before
+        # any callbacks can replace them with the previously saved appearance.
+        selected_interface = normalize_interface_mode(self.interface_menu.get())
+        selected_appearance = normalize_appearance_mode(self.appearance_menu.get())
+        self._apply_annotation_tutorial_setting()
         width, height, offset, little_endian = sdb_defaults
         self._preferences.set("check_for_updates", bool(self.update_checks_var.get()))
         self._preferences.set("sdb_raw_width", width)
@@ -1405,9 +1535,9 @@ class SettingsDialog(ctk.CTkToplevel):
         for role, choice in selected_scripts.items():
             self._step3.select_r_script(role, choice.path)
             self._script_status_vars[role].set(
-                f"Active: {self._compact_script_name(choice.path.name)}"
+                f"Active: {self._script_status_label(choice)}"
             )
-        selected_interface = normalize_interface_mode(self.interface_menu.get())
+            self._update_r_script_popup(role)
         self._applying_changes = True
         try:
             applied_interface = self._set_interface_command(selected_interface)
@@ -1420,13 +1550,11 @@ class SettingsDialog(ctk.CTkToplevel):
             applied_interface = normalize_interface_mode(applied_interface)
             self.interface_menu.set(applied_interface)
             if applied_interface == selected_interface == "Modern":
-                self._set_appearance_command(self.appearance_menu.get())
-                self.appearance_menu.set(
-                    normalize_appearance_mode(self.appearance_menu.get())
-                )
+                self._set_appearance_command(selected_appearance)
+                self.appearance_menu.set(selected_appearance)
             self._sync_interface_controls(
                 applied_interface,
-                self.appearance_menu.get(),
+                selected_appearance,
             )
             if applied_interface == selected_interface:
                 self.apply_status_var.set("All settings applied")
@@ -1619,7 +1747,7 @@ class AIDaSApp(ctk.CTk):
         self._set_splash_progress(42, "Loading Step 4 analysis tools...")
         from aidas.steps.step4_analyze_isez import Step4Frame
 
-        self._set_splash_progress(48, "Loading Step 5 compiler...")
+        self._set_splash_progress(48, "Loading Step 5 - Create Excel File...")
         from aidas.steps.step5_compile import Step5Frame
 
         self._set_splash_progress(50, "Loading preferences...")
@@ -1728,14 +1856,14 @@ class AIDaSApp(ctk.CTk):
         )
         self.notebook.add(self.step4, text="  Step 4 — MCP/AR  ")
 
-        self._set_splash_progress(96, "Preparing Step 5 - Compile Results...")
+        self._set_splash_progress(96, "Preparing Step 5 - Create Excel File...")
         self.step5 = Step5Frame(
             self.notebook,
             preferences=self.preferences,
             source_step=self.step4,
             on_compilation_complete=self._on_step5_compilation_complete,
         )
-        self.notebook.add(self.step5, text="  Step 5 — Compile Results  ")
+        self.notebook.add(self.step5, text="  Step 5 — Create Excel File  ")
 
         self._set_splash_progress(98, "Finalizing the main window...")
         if self.interface_mode == "Classic":
@@ -2501,7 +2629,7 @@ class AIDaSApp(ctk.CTk):
                 return "Step 3 R or package setup is still running."
         step5 = self.__dict__.get("step5")
         if step5 is not None and getattr(step5, "_running", False):
-            return "Step 5 measurement compilation is still running."
+            return "Step 5 is still creating the Excel file."
         return None
 
     def _queue_update_install(self, installer_path) -> None:
@@ -2937,6 +3065,7 @@ class AIDaSApp(ctk.CTk):
             set_appearance_command=self._set_theme,
             step1=self.step1,
             step3=self.step3,
+            step2=self.step2,
         )
 
 

@@ -1,6 +1,10 @@
 import inspect
+import tkinter as tk
 import unittest
 from unittest import mock
+
+import customtkinter as ctk
+import numpy as np
 
 from aidas.steps.step2_annotate import Step2Frame
 
@@ -85,10 +89,70 @@ class _TtkStateControlStub:
 
 
 class Step2ResultLifecycleTests(unittest.TestCase):
+    def test_loaded_results_start_at_the_canvas_and_failed_results_show_the_error(self):
+        root = None
+        try:
+            try:
+                root = ctk.CTk()
+                root.withdraw()
+                root.attributes("-alpha", 0)
+                root.geometry("1024x680+0+0")
+            except tk.TclError as exc:
+                self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
+
+            image = np.zeros((4, 8), dtype=np.uint16)
+            trace = {"RPE": {"points": [(0, 2), (7, 2)], "color": "#ffb703"}}
+            with (
+                mock.patch.object(Step2Frame, "_start_ai_device_probe"),
+                mock.patch.object(
+                    Step2Frame,
+                    "_read_image_for_annotation",
+                    side_effect=[(image, None, False), OSError("image is unavailable")],
+                ),
+            ):
+                frame = Step2Frame(root)
+                frame.pack(fill="both", expand=True)
+                root.deiconify()
+                frame._open_aidas_batch_results_viewer(
+                    [
+                        {"input": "loaded.img", "traces": trace},
+                        {"input": "missing.img", "traces": trace},
+                    ]
+                )
+                notebook = frame.batch_results_notebook
+                loaded_id, failed_id = notebook.tabs()
+                loaded_page = notebook.nametowidget(loaded_id)
+                loaded_canvas = frame._batch_result_tab_canvases[loaded_id]
+                notebook.select(loaded_id)
+                root.update()
+
+                self.assertEqual(loaded_canvas.winfo_rooty(), loaded_page.winfo_rooty())
+                self.assertFalse(
+                    any(isinstance(child, ctk.CTkLabel) for child in loaded_page.winfo_children())
+                )
+
+                notebook.select(failed_id)
+                root.update()
+                failed_page = notebook.nametowidget(failed_id)
+                error_labels = [
+                    child for child in failed_page.winfo_children()
+                    if isinstance(child, ctk.CTkLabel)
+                ]
+                self.assertEqual(len(error_labels), 1)
+                error_label = error_labels[0]
+                self.assertTrue(error_label.winfo_ismapped())
+                self.assertIn("missing.img", error_label.cget("text"))
+                self.assertIn("image is unavailable", error_label.cget("text"))
+                failed_canvas = frame._batch_result_tab_canvases[failed_id]
+                self.assertLess(error_label.winfo_rooty(), failed_canvas.winfo_rooty())
+        finally:
+            if root is not None:
+                root.destroy()
+
     def test_fixed_boundary_lists_do_not_show_redundant_scrollbars(self):
         source = inspect.getsource(Step2Frame._build_controls)
         lists_start = source.index("self.boundary_incomplete_listbox = tk.Listbox")
-        lists_end = source.index("workflow_buttons = ttk.Frame", lists_start)
+        lists_end = source.index("for attribute, symbol, command, tooltip", lists_start)
         lists_source = source[lists_start:lists_end]
 
         self.assertEqual(lists_source.count("height=6"), 2)
@@ -126,9 +190,10 @@ class Step2ResultLifecycleTests(unittest.TestCase):
         frame._incomplete_boundary_names = lambda: []
         frame._has_clearable_boundary_markers = lambda: False
         frame._all_required_boundaries_complete = lambda: True
-        frame.finish_boundary_btn = _ControlStub("disabled")
-        frame.revert_boundary_btn = _ControlStub("disabled")
-        frame.clear_all_traces_btn = _ControlStub("disabled")
+        frame.revert_line_btn = _ControlStub("disabled")
+        frame.revert_all_lines_btn = _ControlStub("disabled")
+        frame.ai_line_btn = _ControlStub("disabled")
+        frame.ai_all_lines_btn = _ControlStub("disabled")
         frame.saved_button = _ControlStub("disabled")
         frame.save_all_button = _ControlStub("disabled")
         frame.continue_to_step3_button = _ControlStub("disabled")

@@ -92,6 +92,7 @@ class Config:
         "sdb_raw_height": 1200,
         "sdb_raw_offset": 1050,
         "sdb_little_endian": True,
+        "show_step2_annotation_tutorial": True,
         "rscript_path": "",
         "r_main_script_path": "",
         "r_output_script_path": "",

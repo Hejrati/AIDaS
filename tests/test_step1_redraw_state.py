@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import tkinter as tk
+from unittest.mock import patch
 
 import numpy as np
 
@@ -112,22 +113,20 @@ class Step1RedrawStateTests(unittest.TestCase):
         for control in controls:
             self.assertEqual(control.configure_calls, [{"state": "disabled"}])
 
-    def test_save_state_refresh_only_configures_changed_controls(self):
+    def test_processing_state_refresh_only_configures_changed_controls(self):
         frame = Step1Frame.__new__(Step1Frame)
         frame.raw_image = object()
         frame.processed_image = None
-        frame.save_all_btn = _ControlStub("disabled")
         frame.undo_crop_btn = _ControlStub("disabled")
         frame.crop_btn = _ControlStub("normal")
         frame.crop_options_btn = _ControlStub("normal")
         frame.target_view_radio = _ControlStub("normal")
         frame.source_view_radio = _ControlStub("normal")
 
-        frame._update_save_button_state()
+        frame._update_processing_controls()
         self.assertFalse(any(
             control.configure_calls
             for control in (
-                frame.save_all_btn,
                 frame.undo_crop_btn,
                 frame.crop_btn,
                 frame.crop_options_btn,
@@ -137,15 +136,41 @@ class Step1RedrawStateTests(unittest.TestCase):
         ))
 
         frame.processed_image = object()
-        frame._update_save_button_state()
-        frame._update_save_button_state()
+        frame._update_processing_controls()
+        frame._update_processing_controls()
 
-        self.assertEqual(frame.save_all_btn.configure_calls, [{"state": "normal"}])
         self.assertEqual(frame.undo_crop_btn.configure_calls, [{"state": "normal"}])
         self.assertEqual(frame.crop_btn.configure_calls, [{"state": "disabled"}])
         self.assertEqual(frame.crop_options_btn.configure_calls, [{"state": "disabled"}])
         self.assertEqual(frame.source_view_radio.configure_calls, [{"state": "disabled"}])
         self.assertEqual(frame.target_view_radio.configure_calls, [])
+
+    def test_queue_refresh_only_updates_changed_progress_and_navigation(self):
+        frame = Step1Frame.__new__(Step1Frame)
+        frame._sdb_directory_files = {
+            "folder": ["folder/first.sdb", "folder/second.sdb"],
+        }
+        frame._sdb_directories = ["folder"]
+        frame._cropped_sdb_files = set()
+        frame._saved_output_directories = set()
+        frame.current_file = "folder/first.sdb"
+        frame.queue_progress_var = _VariableStub("(0/2)")
+        frame.back_sdb_btn = _ControlStub("disabled")
+        frame.next_sdb_btn = _ControlStub("normal")
+
+        with patch.object(frame.queue_progress_var, "set", wraps=frame.queue_progress_var.set) as update:
+            frame._update_queue_controls()
+            frame._update_queue_controls()
+            update.assert_not_called()
+
+            frame._cropped_sdb_files.add(frame._path_key("folder/second.sdb"))
+            frame._update_queue_controls()
+            frame._update_queue_controls()
+
+            update.assert_called_once_with("(1/2)")
+
+        self.assertEqual(frame.back_sdb_btn.configure_calls, [])
+        self.assertEqual(frame.next_sdb_btn.configure_calls, [{"state": "disabled"}])
 
     def test_numeric_spinbox_does_not_reconfigure_same_state(self):
         spinbox = object.__new__(NativeNumericSpinbox)

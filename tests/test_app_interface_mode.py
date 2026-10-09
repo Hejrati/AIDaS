@@ -2,19 +2,27 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+import tkinter as tk
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+
+import customtkinter as ctk
 
 from aidas.app import AIDaSApp, SettingsDialog
 
 
 class _Preferences:
-    def __init__(self):
+    def __init__(self, values=None):
         self.saved = []
+        self.values = dict(values or {})
+
+    def get(self, key, default=None):
+        return self.values.get(key, default)
 
     def set(self, key, value):
         self.saved.append((key, value))
+        self.values[key] = value
 
 
 class _Status:
@@ -39,6 +47,21 @@ class _Notebook:
 
     def index(self, value):
         return int(value)
+
+
+class _StatefulMenu:
+    def __init__(self, value):
+        self.value = value
+        self.options = {}
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+    def configure(self, **options):
+        self.options.update(options)
 
 
 class InterfacePreferenceTests(unittest.TestCase):
@@ -81,6 +104,147 @@ class InterfacePreferenceTests(unittest.TestCase):
         app._sync_settings_interface_controls = mock.Mock()
         app._set_status_message = mock.Mock()
         return app
+
+    def _settings_stub(self, app, *, selected_appearance):
+        dialog = SettingsDialog.__new__(SettingsDialog)
+        dialog._validated_sdb_defaults = mock.Mock(return_value=(10, 20, 0, True))
+        dialog._validated_auto_detection_settings = mock.Mock(return_value={})
+        choices = {
+            role: SimpleNamespace(path=Path(f"{role}.R"))
+            for role, _label in dialog.SCRIPT_ROLES
+        }
+        dialog._script_by_label = {role: {role: choice} for role, choice in choices.items()}
+        dialog._script_vars = {role: _StatefulMenu(role) for role in choices}
+        dialog._script_status_vars = {role: mock.Mock() for role in choices}
+        dialog._step3 = SimpleNamespace(_busy=False, select_r_script=mock.Mock())
+        dialog._step1 = SimpleNamespace(set_sdb_parameter_defaults=mock.Mock())
+        dialog._step2 = SimpleNamespace(set_annotation_tutorial_enabled=mock.Mock())
+        dialog._preferences = app.preferences
+        dialog.annotation_tutorial_var = _StatefulMenu(True)
+        dialog._annotation_tutorial_applied_value = True
+        dialog._annotation_tutorial_dirty = False
+        dialog.update_checks_var = SimpleNamespace(get=lambda: True)
+        dialog.interface_menu = _StatefulMenu("Modern")
+        dialog.appearance_menu = _StatefulMenu(selected_appearance)
+        dialog.apply_status_var = mock.Mock()
+        dialog._parent = app
+        dialog._classic_settings = app.interface_mode == "Classic"
+        dialog._presentation_mode = app.interface_mode
+        dialog._presentation_refresh_pending = False
+        dialog._schedule_presentation_refresh = mock.Mock()
+        dialog.winfo_exists = mock.Mock(return_value=True)
+        dialog._set_interface_command = app._set_interface
+        dialog._set_appearance_command = app._set_theme
+        app._settings_dialog = dialog
+        app._sync_settings_interface_controls = AIDaSApp._sync_settings_interface_controls.__get__(
+            app, AIDaSApp,
+        )
+        return dialog
+
+    def test_settings_restores_guide_once_and_applies_disabling_immediately(self):
+        app = self._app_stub()
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+        dialog._annotation_tutorial_applied_value = False
+        dialog._set_appearance_command = mock.Mock()
+
+        dialog._apply_changes()
+        dialog._apply_changes()
+
+        dialog._step2.set_annotation_tutorial_enabled.assert_called_once_with(True)
+        self.assertTrue(app.preferences.get("show_step2_annotation_tutorial"))
+
+        dialog.annotation_tutorial_var.set(False)
+        dialog._annotation_tutorial_choice_changed()
+        dialog._apply_changes()
+
+        self.assertFalse(app.preferences.get("show_step2_annotation_tutorial"))
+        self.assertEqual(dialog._step2.set_annotation_tutorial_enabled.call_args_list,
+                         [mock.call(True), mock.call(False)])
+        self.assertFalse(dialog._annotation_tutorial_dirty)
+
+    def test_explicit_off_on_toggle_replays_session_dismissed_guide_once(self):
+        app = self._app_stub()
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+        dialog._set_appearance_command = mock.Mock()
+
+        dialog._apply_changes()
+        dialog._step2.set_annotation_tutorial_enabled.assert_not_called()
+        dialog.annotation_tutorial_var.set(False)
+        dialog._annotation_tutorial_choice_changed()
+        dialog.annotation_tutorial_var.set(True)
+        dialog._annotation_tutorial_choice_changed()
+        dialog._apply_changes()
+        dialog._apply_changes()
+
+        dialog._step2.set_annotation_tutorial_enabled.assert_called_once_with(True)
+        self.assertTrue(app.preferences.get("show_step2_annotation_tutorial"))
+        self.assertFalse(dialog._annotation_tutorial_dirty)
+
+    def test_guide_preference_is_saved_without_step2_before_interface_refresh(self):
+        app = self._app_stub()
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+        dialog._step2 = None
+        dialog.annotation_tutorial_var.set(False)
+        dialog._annotation_tutorial_choice_changed()
+        dialog.interface_menu.set("Classic")
+
+        def change_interface(selected):
+            self.assertFalse(app.preferences.get("show_step2_annotation_tutorial"))
+            dialog._sync_interface_controls(selected, "Light")
+            self.assertFalse(dialog.annotation_tutorial_var.get())
+            return selected
+
+        dialog._set_interface_command = change_interface
+        dialog._apply_changes()
+
+        self.assertFalse(dialog.annotation_tutorial_var.get())
+        self.assertFalse(dialog._annotation_tutorial_dirty)
+        self.assertEqual(dialog.apply_status_var.set.call_args.args[0], "All settings applied")
+
+    def test_settings_applies_and_persists_selected_appearance_after_interface_resync(self):
+        for previous, selected in (("Dark", "Light"), ("System", "Dark"), ("System", "Light")):
+            with self.subTest(previous=previous, selected=selected):
+                app = self._app_stub()
+                app.appearance_mode = previous
+                dialog = self._settings_stub(app, selected_appearance=selected)
+
+                with (
+                    mock.patch("aidas.app.apply_appearance_mode") as apply,
+                    mock.patch("aidas.app.ctk.get_appearance_mode", return_value=selected),
+                ):
+                    dialog._apply_changes()
+
+                self.assertEqual(app.appearance_mode, selected)
+                self.assertEqual(dialog.appearance_menu.get(), selected)
+                self.assertEqual(
+                    [saved for saved in app.preferences.saved if saved[0] == "appearance_mode"],
+                    [("appearance_mode", selected)],
+                )
+                apply.assert_called_once_with(selected, root=app, style=app.style)
+
+    def test_settings_keeps_selected_appearance_when_switching_classic_to_modern(self):
+        app = self._app_stub()
+        app.interface_mode = "Classic"
+        app.appearance_mode = "System"
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+
+        def switch_interface(selected):
+            app.interface_mode = selected
+            app._sync_settings_interface_controls()
+            return selected
+
+        dialog._set_interface_command = switch_interface
+        with (
+            mock.patch("aidas.app.apply_appearance_mode") as apply,
+            mock.patch("aidas.app.ctk.get_appearance_mode", return_value="Dark"),
+        ):
+            dialog._apply_changes()
+
+        self.assertEqual(app.interface_mode, "Modern")
+        self.assertEqual(app.appearance_mode, "Dark")
+        self.assertEqual(dialog.appearance_menu.get(), "Dark")
+        self.assertIn(("appearance_mode", "Dark"), app.preferences.saved)
+        apply.assert_called_once_with("Dark", root=app, style=app.style)
 
     def test_selecting_classic_switches_live_without_rebuilding_workflows(self):
         app = self._app_stub()
@@ -431,6 +595,7 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
         app.preferences = object()
         app.appearance_mode = "Dark"
         app.step1 = object()
+        app.step2 = object()
         app.step3 = object()
         existing = mock.Mock()
         existing.winfo_exists.return_value = True
@@ -441,6 +606,7 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
 
         self.assertEqual(dialog_type.call_count, 1)
         self.assertEqual(dialog_type.call_args.kwargs["interface_mode"], "Classic")
+        self.assertIs(dialog_type.call_args.kwargs["step2"], app.step2)
         existing.deiconify.assert_called_once_with()
         existing.lift.assert_called_once_with()
         existing.focus_force.assert_called_once_with()
@@ -461,6 +627,73 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
         self.assertEqual(dialog_type.call_args.kwargs["interface_mode"], "Classic")
         existing.lift.assert_called_once_with()
         existing.focus_force.assert_called_once_with()
+
+
+class AnnotationTutorialControlTests(unittest.TestCase):
+    def test_both_settings_presentations_restore_saved_guide_choice_and_track_interaction(self):
+        root = None
+        try:
+            try:
+                root = ctk.CTk()
+                root.withdraw()
+                root.attributes("-alpha", 0)
+                root.geometry("1024x820+0+0")
+                root.deiconify()
+            except tk.TclError as exc:
+                self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
+
+            for presentation, initial in (("Modern", False), ("Classic", False), ("Modern", True)):
+                with self.subTest(presentation=presentation, initial=initial):
+                    preferences = _Preferences(
+                        {} if initial else {"show_step2_annotation_tutorial": False}
+                    )
+                    step2 = SimpleNamespace(set_annotation_tutorial_enabled=mock.Mock())
+                    with (
+                        mock.patch.object(SettingsDialog, "_refresh_r_script_choices"),
+                        mock.patch.object(SettingsDialog, "_schedule_modal_activation"),
+                    ):
+                        dialog = SettingsDialog(
+                            root,
+                            preferences=preferences,
+                            interface_mode=presentation,
+                            set_interface_command=lambda value: value,
+                            appearance_mode="Light",
+                            set_appearance_command=mock.Mock(),
+                            step1=SimpleNamespace(),
+                            step2=step2,
+                            step3=SimpleNamespace(R_REQUIRED_VERSION="3.3.1"),
+                        )
+                    try:
+                        dialog.attributes("-alpha", 0)
+                        settled = tk.BooleanVar(master=root, value=False)
+                        root.after(100, lambda: settled.set(True))
+                        root.wait_variable(settled)
+                        root.update()
+                        control = dialog.annotation_tutorial_switch
+                        self.assertTrue(control.winfo_viewable())
+                        self.assertEqual(control.cget("text"), "Enable tutorial")
+                        self.assertEqual(dialog.annotation_tutorial_var.get(), initial)
+                        self.assertFalse(dialog._annotation_tutorial_dirty)
+                        if presentation == "Modern":
+                            control.toggle()
+                        else:
+                            control.invoke()
+                        self.assertEqual(dialog.annotation_tutorial_var.get(), not initial)
+                        self.assertTrue(dialog._annotation_tutorial_dirty)
+                        self.assertEqual(preferences.saved, [])
+                        dialog._sync_interface_controls("Classic", "Light")
+                        dialog._sync_interface_controls("Modern", "Dark")
+                        self.assertEqual(dialog.annotation_tutorial_var.get(), not initial)
+                        dialog._apply_annotation_tutorial_setting()
+                        step2.set_annotation_tutorial_enabled.assert_called_once_with(not initial)
+                        self.assertEqual(preferences.saved,
+                                         [("show_step2_annotation_tutorial", not initial)])
+                    finally:
+                        dialog._close()
+                        root.update()
+        finally:
+            if root is not None:
+                root.destroy()
 
 
 if __name__ == "__main__":

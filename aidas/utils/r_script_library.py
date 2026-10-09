@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import filecmp
 import os
 from pathlib import Path
 import shutil
+
+
+# Keep the original workflow active until the optimized version's release.
+OPTIMIZED_R_SCRIPTS_ENABLED = False
+OPTIMIZED_R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R"
 
 
 @dataclass(frozen=True)
@@ -17,6 +23,7 @@ class RScriptChoice:
     path: Path
     source: str
     is_default: bool = False
+    version: str | None = None
 
 
 def user_r_script_dir(role: str | None = None) -> Path:
@@ -46,12 +53,18 @@ def discover_r_scripts(
     library_dir: Path | None = None,
     *,
     bundled_prefixes: tuple[str, ...] | None = None,
+    bundled_versions: Mapping[Path, str] | None = None,
 ) -> list[RScriptChoice]:
     """List the default, other bundled, and imported user R scripts."""
     default_script = Path(default_script)
     library_dir = Path(library_dir) if library_dir is not None else user_r_script_dir()
     choices: list[RScriptChoice] = []
     seen: set[str] = set()
+    versions = {}
+    for path, version in (bundled_versions or {}).items():
+        if version not in {"original", "optimized"}:
+            raise ValueError(f"Unknown bundled R script version: {version}")
+        versions[_path_key(Path(path))] = version
 
     def add(path: Path, source: str, *, is_default: bool = False) -> None:
         if not path.is_file():
@@ -60,13 +73,24 @@ def discover_r_scripts(
         if key in seen:
             return
         seen.add(key)
-        if is_default:
+        version = versions.get(key) if source == "bundled" else None
+        if version is not None:
+            version_label = "Original script" if version == "original" else "Optimized version"
+            default_label = " (default)" if is_default else ""
+            label = f"{version_label}{default_label} — {path.name}"
+        elif is_default:
             label = f"Embedded (default) — {path.name}"
         elif source == "bundled":
             label = f"Bundled — {path.name}"
         else:
             label = f"User — {path.name}"
-        choices.append(RScriptChoice(label=label, path=path.resolve(), source=source, is_default=is_default))
+        choices.append(RScriptChoice(
+            label=label,
+            path=path.resolve(),
+            source=source,
+            is_default=is_default,
+            version=version,
+        ))
 
     add(default_script, "bundled", is_default=True)
     prefixes = tuple(prefix.lower() for prefix in bundled_prefixes or ())

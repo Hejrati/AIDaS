@@ -12,9 +12,8 @@ Core Functionality:
     traces for review.
     Predictions are automatically imported as boundary traces.
   • Boundary Workflow: Tracks annotation progress with separate incomplete/
-    completed boundary lists; auto-advances to next boundary after finish.
-  • Foveal Center Line: Always-visible draggable vertical marker for the
-    foveal center X-coordinate with nudge buttons and keyboard entry.
+    completed boundary lists; double-click finishes the current boundary.
+  • Foveal Center Line: Draggable vertical marker for the foveal center.
   • Export: CSV export of all boundary row coordinates (one row per boundary).
   • MARKED Images: Generate Light_MARKED Analyze volumes
     (8-bit) with boundary pixels marked at specific intensity values per
@@ -35,6 +34,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, font as tkfont, messagebox, ttk
 
+import customtkinter as ctk
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
@@ -42,7 +42,7 @@ from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.ui.components import AppButton
 from aidas.ui.tabs import ClosableTabView
-from aidas.ui.theme import COLOR_PAIRS
+from aidas.ui.theme import COLOR_PAIRS, COLORS, SHAPES, TYPOGRAPHY
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
@@ -53,7 +53,6 @@ from aidas.utils.ui_utils import (
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
-    icon_action_button,
     load_color_close_ctk_icon,
     load_ctk_image,
 )
@@ -251,6 +250,8 @@ class Step2BatchSegmentationTable(ttk.Frame):
         super().__init__(parent)
         self.rows = []
         self._row_by_iid = {}
+        self._hide_processed = False
+        self._placeholder_iid = "no_visible_folders"
         self._checkbox_images = self._make_checkbox_images()
         self._tree_font = tkfont.nametofont("TkDefaultFont")
         self._heading_font = self._tree_font.copy()
@@ -324,20 +325,13 @@ class Step2BatchSegmentationTable(ttk.Frame):
         return images
 
     def set_rows(self, rows):
+        # Detached entries are not returned by get_children; remove them too
+        # when replacing the scan results.
+        old_iids = tuple(dict.fromkeys((*self._row_by_iid, *self.tree.get_children(""))))
+        if old_iids:
+            self.tree.delete(*old_iids)
         self.rows = list(rows or [])
         self._row_by_iid = {}
-        self.tree.delete(*self.tree.get_children(""))
-
-        if not self.rows:
-            self.tree.insert(
-                "",
-                "end",
-                text="",
-                values=("No folders with Light.img were found.", "", ""),
-                tags=("locked",),
-            )
-            self._refresh_header_checkbox()
-            return
 
         for index, row in enumerate(self.rows):
             iid = str(index)
@@ -351,8 +345,42 @@ class Step2BatchSegmentationTable(ttk.Frame):
                 values=self._values_for_row(row),
                 tags=("locked",) if row.get("locked") else (),
             )
-        self._fit_columns_to_content()
+        if self.rows:
+            self._fit_columns_to_content()
+        self._apply_processed_filter()
         self._refresh_header_checkbox()
+
+    def set_hide_processed(self, hide_processed):
+        self._hide_processed = bool(hide_processed)
+        self._apply_processed_filter()
+
+    def _apply_processed_filter(self):
+        if self.tree.exists(self._placeholder_iid):
+            self.tree.delete(self._placeholder_iid)
+
+        visible_count = 0
+        for iid, row in self._row_by_iid.items():
+            if self._hide_processed and row.get("locked"):
+                self.tree.detach(iid)
+            else:
+                # Moving a detached entry restores its checkbox and values.
+                self.tree.move(iid, "", "end")
+                visible_count += 1
+
+        if not visible_count:
+            message = (
+                "No unprocessed folders to show."
+                if self.rows and self._hide_processed
+                else "No folders with Light.img were found."
+            )
+            self.tree.insert(
+                "",
+                "end",
+                iid=self._placeholder_iid,
+                text="",
+                values=(message, "", ""),
+                tags=("locked",),
+            )
 
     def _image_for_row(self, row):
         if row.get("locked"):
@@ -488,32 +516,46 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         wrapper = ttk.Frame(self, padding=12)
         wrapper.pack(fill="both", expand=True)
 
-        ttk.Label(wrapper, text="Batch Segmentation", font=("", 12, "bold")).pack(anchor="w")
+        self.filter_row = ttk.Frame(wrapper)
+        self.filter_row.pack(side="top", fill="x", pady=(0, 8))
         ttk.Label(
-            wrapper,
-            text=(
-                "AIDaS will search the selected folder and subfolders for Light.img. "
-                "Folders with existing MARKED segmentation are shown as already segmented and skipped."
-            ),
-            wraplength=760,
-            justify="left",
-        ).pack(anchor="w", pady=(4, 10))
-
-        top = ttk.Frame(wrapper)
-        top.pack(fill="x", pady=(0, 8))
-        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
-        ttk.Label(top, textvariable=self.summary_var, wraplength=760, justify="left").pack(
-            side="left",
-            fill="x",
-            expand=True,
+            self.filter_row,
+            text="Batch Segmentation",
+            font=("", 12, "bold"),
+        ).pack(side="left")
+        self.hide_processed_var = tk.BooleanVar(master=self, value=True)
+        self.hide_processed_check = ttk.Checkbutton(
+            self.filter_row,
+            text="Hide processed folders",
+            variable=self.hide_processed_var,
+            command=self._on_hide_processed_changed,
         )
-        self.more_label = ttk.Label(top, text="", style="AIDaS.Link.TLabel", cursor="hand2")
-        self.more_label.pack(side="right", padx=(8, 0))
-        self.more_tooltip = HoverToolTip(self.more_label, "")
+        self.hide_processed_check.pack(side="right", padx=(12, 0))
 
         run_box = ttk.Frame(wrapper)
         run_box.pack(side="bottom", fill="x", pady=(10, 0))
         self.action_footer = run_box
+        self.summary_row = ttk.Frame(run_box)
+        self.summary_row.pack(side="top", fill="x", pady=(0, 8))
+        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        self.more_label = ttk.Label(
+            self.summary_row,
+            text="",
+            style="AIDaS.Link.TLabel",
+            cursor="hand2",
+        )
+        self.more_label.pack(side="right", anchor="n", padx=(8, 0))
+        self.more_tooltip = HoverToolTip(self.more_label, "")
+        self.summary_label = ttk.Label(
+            self.summary_row,
+            textvariable=self.summary_var,
+            width=1,
+            wraplength=320,
+            anchor="nw",
+            justify="left",
+        )
+        self.summary_label.pack(side="left", fill="x", expand=True)
+        self.summary_label.bind("<Configure>", self._on_summary_label_configure, add="+")
         action_row = ttk.Frame(run_box)
         action_row.pack(side="bottom", fill="x")
         self.next_button = action_button(
@@ -534,16 +576,6 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             self._cancel,
             "cancel",
         ).pack(side="left")
-
-        device_row = ttk.Frame(run_box)
-        device_row.pack(side="bottom", fill="x", pady=(0, 5))
-        ttk.Label(
-            device_row,
-            textvariable=self.step_frame.ai_device_status_var,
-            style="AIDaS.Muted.TLabel",
-            wraplength=760,
-            justify="left",
-        ).pack(side="left", fill="x", expand=True)
 
         self.core_row = ttk.Frame(run_box)
         self._core_row_pack_options = {
@@ -591,6 +623,11 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         )
         self.scan_label.pack(fill="both", expand=True)
 
+    def _on_summary_label_configure(self, event):
+        wraplength = max(1, event.width - 4)
+        if int(self.summary_label.cget("wraplength")) != wraplength:
+            self.summary_label.configure(wraplength=wraplength)
+
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
         threading.Thread(target=self._scan_worker, daemon=True).start()
@@ -624,8 +661,13 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
 
         table = Step2BatchSegmentationTable(self.table_host)
         table.set_rows(rows)
+        table.set_hide_processed(self.hide_processed_var.get())
         table.pack(fill="both", expand=True)
         self.table = table
+
+    def _on_hide_processed_changed(self):
+        if self.table is not None:
+            self.table.set_hide_processed(self.hide_processed_var.get())
 
     def _scan_done(self, rows, scanned, skipped, access_errors):
         if not self.winfo_exists():
@@ -750,7 +792,7 @@ class Step2Frame(SidebarStepFrame):
 
     The UI is split into:
       - Left panel: scrollable controls (load, segmentation, fovea, export)
-      - Right panel: image canvas with line-drawing and coordinate display
+      - Right panel: image canvas with line-drawing and editing guidance
 
     Key data structures:
       - boundary_traces: {name -> {points, pixels, color}} for saved boundaries
@@ -817,6 +859,12 @@ class Step2Frame(SidebarStepFrame):
         self._drawing_locked = False  # True if foveal center is locked (prevents other drawing)
         self._updating_fovea_entry = False  # Flag to avoid feedback loop when updating entry widget
         self._syncing_boundary_selection = False  # Flag to avoid feedback loop when selecting boundaries
+        self._annotation_tutorial_dismissed = False
+        self._annotation_tutorial_after_id = None
+        self._annotation_tutorial_canvas = None
+        self._annotation_tutorial_canvas_bind_id = None
+        self._annotation_tutorial_canvas_map_bind_id = None
+        self.annotation_tutorial = None
         
         # ─ Fovea nudge repeat (keyboard acceleration) ─
         self._fovea_repeat_job = None  # After() job ID for fovea nudge repeat
@@ -842,17 +890,16 @@ class Step2Frame(SidebarStepFrame):
         self.ai_device_status_var = tk.StringVar(
             value="AI device: Checking GPU compatibility..."
         )
-        self.build_standard_layout(
-            status_var=self.status_var,
-            status_bar_content_margin=True,
-        )
+        self.build_standard_layout()
         right = self.content
 
         self.image_info_var = tk.StringVar(value="No image loaded")
-        self.image_info_frame = self.add_content_header(self.image_info_var, parent=right)
+        # self.image_info_frame = self.add_content_header(self.image_info_var, parent=right)
 
         self.canvas_area = ttk.Frame(right)
         self.canvas_area.pack(fill="both", expand=True)
+        self.canvas_area.bind("<Map>", self._queue_annotation_tutorial, add="+")
+        self.canvas_area.bind("<Configure>", self._queue_annotation_tutorial, add="+")
         self.batch_results_notebook = None
         self.batch_segmentation_panel = None
         self._batch_result_canvases = []
@@ -871,6 +918,8 @@ class Step2Frame(SidebarStepFrame):
             self.canvas_area,
             on_mouse_move=self._on_mouse_moved,
             on_line_change=self._on_active_line_changed,
+            on_line_finish=self._finish_boundary,
+            on_line_edit=self._on_saved_line_edited,
             on_vertical_line_change=self._on_vertical_line_changed,
             on_zoom_change=self._on_canvas_zoom_changed,
         )
@@ -886,6 +935,234 @@ class Step2Frame(SidebarStepFrame):
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
+    def _build_annotation_tutorial(self):
+        """Build a shallow information banner across the image work area."""
+        card = ctk.CTkFrame(
+            self.canvas_area,
+            corner_radius=SHAPES.corner_radius_sm,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
+            bg_color=self.image_canvas.canvas.cget("background"),
+            fg_color=COLOR_PAIRS["surface"],
+        )
+        card.grid_columnconfigure(0, weight=1)
+        card.bind("<Configure>", self._queue_annotation_tutorial, add="+")
+        self.annotation_tutorial = card
+        header = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        header.grid(row=0, column=0, sticky="ew", padx=LAYOUT.space_sm, pady=(6, 4))
+        header.grid_columnconfigure(1, weight=1)
+        self.annotation_tutorial_header = header
+        self.annotation_tutorial_info_icon = tk.Canvas(header, highlightthickness=0)
+        self.annotation_tutorial_info_icon.grid(row=0, column=0, padx=(0, LAYOUT.space_sm))
+        self.annotation_tutorial_info_icon._apply_aidas_theme = self._draw_annotation_tutorial_info_icon
+        self._draw_annotation_tutorial_info_icon()
+        self.annotation_tutorial_title = ctk.CTkLabel(
+            header, text="Annotation quick guide", anchor="w", height=28,
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size, weight="bold"),
+        )
+        self.annotation_tutorial_title.grid(row=0, column=1, sticky="ew", padx=(0, LAYOUT.space_sm))
+        buttons = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        buttons.grid(row=2, column=0, sticky="ew", padx=LAYOUT.space_sm, pady=(4, 6))
+        buttons.grid_columnconfigure(0, weight=1)
+        self.annotation_tutorial_actions = buttons
+        self.annotation_tutorial_opt_out_btn = AppButton(
+            buttons, text="Do not show again", width=160, height=28,
+            command=lambda: self._dismiss_annotation_tutorial(do_not_show_again=True),
+        )
+        self.annotation_tutorial_opt_out_btn.grid(row=0, column=1, sticky="e")
+        self.annotation_tutorial_ok_btn = AppButton(
+            buttons, text="OK", variant="primary", width=72, height=28,
+            command=self._dismiss_annotation_tutorial,
+        )
+        self.annotation_tutorial_ok_btn.grid(row=0, column=2, sticky="e", padx=(LAYOUT.space_sm, 0))
+        instructions = ttk.Frame(card, style="AIDaS.Section.TFrame")
+        instructions.grid(row=1, column=0, sticky="ew", padx=LAYOUT.space_md, pady=(0, LAYOUT.space_xs))
+        self.annotation_tutorial_instruction_grid = instructions
+        self.annotation_tutorial_labels = {}
+        self.annotation_tutorial_heading_labels = {}
+        for column, (action, instruction) in enumerate((
+            ("Draw", "Click points. Double-click to finish."),
+            ("Edit", "Select a completed line. Drag to edit."),
+            ("Add point", "Shift-click a handle, then drag."),
+            ("Remove point", "Alt-click a handle (at least 3 remain)."),
+        )):
+            instructions.columnconfigure(column, weight=1, uniform="annotation_tutorial_items")
+            heading = ttk.Label(
+                instructions, text=action, anchor="nw", padding=0,
+                font=(TYPOGRAPHY.family, TYPOGRAPHY.caption_size, "bold"),
+            )
+            gap = (0, LAYOUT.space_sm) if column < 3 else 0
+            heading.grid(row=0, column=column, sticky="ew", padx=gap, pady=(0, 2))
+            label = ttk.Label(
+                instructions, text=instruction, padding=0,
+                font=(TYPOGRAPHY.family, TYPOGRAPHY.caption_size),
+                justify="left", anchor="nw", width=1, wraplength=220,
+            )
+            label.grid(row=1, column=column, sticky="new", padx=gap)
+            label.bind(
+                "<Configure>",
+                lambda event, body=label: body.configure(wraplength=max(1, event.width)),
+                add="+",
+            )
+            self.annotation_tutorial_heading_labels[action] = heading
+            self.annotation_tutorial_labels[action] = label
+
+    def _draw_annotation_tutorial_info_icon(self):
+        """Draw a circled i using the current palette and display scale."""
+        icon = self.annotation_tutorial_info_icon
+        scale = self._get_widget_scaling()
+        icon.configure(width=round(24 * scale), height=round(24 * scale), background=COLORS.surface)
+        icon.delete("all")
+        icon.create_oval(*(value * scale for value in (2, 2, 22, 22)),
+                         outline=COLORS.primary, width=max(1, round(1.5 * scale)))
+        icon.create_oval(*(value * scale for value in (11, 6, 13, 8)),
+                         fill=COLORS.primary, outline="")
+        icon.create_rectangle(*(value * scale for value in (11, 10, 13, 18)),
+                              fill=COLORS.primary, outline="")
+
+    def _queue_annotation_tutorial(self, _event=None):
+        """Wait for canvas layout before deciding whether to show the guide."""
+        if not hasattr(self, "canvas_area") or getattr(self, "_annotation_tutorial_dismissed", False):
+            return
+        if getattr(self, "_annotation_tutorial_after_id", None) is not None:
+            return
+        try:
+            self._annotation_tutorial_after_id = self.after_idle(self._show_annotation_tutorial)
+        except tk.TclError:
+            pass
+
+    def _annotation_tutorial_viewport_bounds(self):
+        """Return the native canvas's drawable bounds in physical screen pixels."""
+        canvas = self.image_canvas.canvas
+        border = sum(canvas.winfo_pixels(str(canvas.cget(option)))
+                     for option in ("borderwidth", "highlightthickness"))
+        return (
+            canvas.winfo_rootx() + border,
+            canvas.winfo_rooty() + border,
+            max(0, canvas.winfo_width() - border * 2),
+            max(0, canvas.winfo_height() - border * 2),
+        )
+
+    def _watch_annotation_tutorial_canvas(self, canvas):
+        """Track the drawing viewport's visibility and size independently."""
+        previous = getattr(self, "_annotation_tutorial_canvas", None)
+        if previous is canvas:
+            return
+        for event, attribute in (
+            ("<Configure>", "_annotation_tutorial_canvas_bind_id"),
+            ("<Map>", "_annotation_tutorial_canvas_map_bind_id"),
+        ):
+            binding = getattr(self, attribute, None)
+            if previous is not None and binding is not None:
+                try:
+                    previous.unbind(event, binding)
+                except tk.TclError:
+                    pass
+        self._annotation_tutorial_canvas = canvas
+        self._annotation_tutorial_canvas_bind_id = (
+            canvas.bind("<Configure>", self._queue_annotation_tutorial, add="+")
+            if canvas is not None else None
+        )
+        self._annotation_tutorial_canvas_map_bind_id = (
+            canvas.bind("<Map>", self._queue_annotation_tutorial, add="+")
+            if canvas is not None else None
+        )
+
+    def _show_annotation_tutorial(self):
+        self._annotation_tutorial_after_id = None
+        preferences = getattr(self, "preferences", None)
+        if (
+            getattr(self, "_annotation_tutorial_dismissed", False)
+            or (preferences is not None and not preferences.get("show_step2_annotation_tutorial", True))
+            or getattr(self, "image_data", None) is None
+            or getattr(self, "batch_segmentation_panel", None) is not None
+            or getattr(self, "_batch_fovea_picker_active", False)
+        ):
+            self._hide_annotation_tutorial()
+            return
+        try:
+            canvas = self.image_canvas.canvas
+            area = self.canvas_area
+            self._watch_annotation_tutorial_canvas(canvas)
+            if (not canvas.winfo_viewable() or canvas.winfo_width() <= 1
+                    or canvas.winfo_height() <= 1 or area.winfo_width() <= 1):
+                self._hide_annotation_tutorial()
+                return
+            card = self.annotation_tutorial
+            if card is None or not card.winfo_exists():
+                self._build_annotation_tutorial()
+                card = self.annotation_tutorial
+            scale = self._get_widget_scaling()
+            self._draw_annotation_tutorial_info_icon()
+            viewport_left, viewport_top, viewport_width, viewport_height = self._annotation_tutorial_viewport_bounds()
+            inset = round(LAYOUT.space_sm * scale)
+            width = max(1, viewport_width - inset * 2)
+            # The first narrow layout can be much taller than the guide at its
+            # final viewport width. Let wrapping settle before checking height.
+            layout_ready = (
+                abs(card.winfo_width() - width) <= 1
+                and abs(card.winfo_height() - card.winfo_reqheight()) <= 1
+                and all(abs(label.winfo_height() - label.winfo_reqheight()) <= 1
+                        for label in self.annotation_tutorial_labels.values())
+            )
+            if layout_ready and card.winfo_height() > viewport_height - inset * 2:
+                self._hide_annotation_tutorial()
+                return
+            left = viewport_left + inset - area.winfo_rootx()
+            top = viewport_top + inset - area.winfo_rooty()
+            card.place(
+                relx=left / area.winfo_width(), relwidth=width / area.winfo_width(),
+                y=top / scale, anchor="nw",
+            )
+            card.lift()
+        except tk.TclError:
+            pass
+
+    def _hide_annotation_tutorial(self):
+        job = getattr(self, "_annotation_tutorial_after_id", None)
+        self._annotation_tutorial_after_id = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        card = getattr(self, "annotation_tutorial", None)
+        if card is not None:
+            try:
+                card.place_forget()
+            except tk.TclError:
+                pass
+
+    def _dismiss_annotation_tutorial(self, *, do_not_show_again=False):
+        self._annotation_tutorial_dismissed = True
+        if do_not_show_again:
+            preferences = getattr(self, "preferences", None)
+            if callable(getattr(preferences, "set", None)):
+                preferences.set("show_step2_annotation_tutorial", False)
+            elif isinstance(preferences, dict):
+                preferences["show_step2_annotation_tutorial"] = False
+        self._hide_annotation_tutorial()
+
+    def set_annotation_tutorial_enabled(self, enabled):
+        """Apply the guide preference and allow a dismissed guide to reopen."""
+        enabled = bool(enabled)
+        preferences = getattr(self, "preferences", None)
+        if preferences is not None and bool(preferences.get("show_step2_annotation_tutorial", True)) != enabled:
+            if callable(getattr(preferences, "set", None)):
+                preferences.set("show_step2_annotation_tutorial", enabled)
+            elif isinstance(preferences, dict):
+                preferences["show_step2_annotation_tutorial"] = enabled
+        self._annotation_tutorial_dismissed = not enabled
+        self._hide_annotation_tutorial()
+        if enabled:
+            self._queue_annotation_tutorial()
+
+    def destroy(self):
+        self._watch_annotation_tutorial_canvas(None)
+        self._hide_annotation_tutorial()
+        super().destroy()
+
     def _build_controls(self):
         """Construct and lay out all left-side control widgets.
 
@@ -909,25 +1186,20 @@ class Step2Frame(SidebarStepFrame):
             tooltip="Choose a parent folder. AIDaS will find eligible image folders inside it.",
         )
         self.batch_ai_button.pack(fill="x")
-        self.ai_device_status_label = ttk.Label(
-            segmentation,
-            textvariable=self.ai_device_status_var,
-            style="AIDaS.Muted.TLabel",
-            wraplength=300,
-            justify="left",
-        )
-        self.ai_device_status_label.pack(fill="x", pady=(5, 0))
-
         workflow = ttk.LabelFrame(segmentation, text="Boundary Progress", padding=3)
         workflow.pack(fill="x", pady=(4, 0))
 
         workflow_lists = ttk.Frame(workflow)
         workflow_lists.pack(fill="x")
+        workflow_lists.columnconfigure(0, weight=1, uniform="boundary_lists")
+        workflow_lists.columnconfigure(2, weight=1, uniform="boundary_lists")
 
         incomplete_box = ttk.Frame(workflow_lists)
-        incomplete_box.pack(side="left", fill="both", expand=True, padx=(0, 4))
+        incomplete_box.grid(row=0, column=0, sticky="nsew")
+        workflow_buttons = ttk.Frame(workflow_lists)
+        workflow_buttons.grid(row=0, column=1, padx=6)
         completed_box = ttk.Frame(workflow_lists)
-        completed_box.pack(side="right", fill="both", expand=True, padx=(4, 0))
+        completed_box.grid(row=0, column=2, sticky="nsew")
 
         ttk.Label(incomplete_box, text="Incomplete").pack(anchor="w")
         ttk.Label(completed_box, text="Completed").pack(anchor="w")
@@ -952,93 +1224,31 @@ class Step2Frame(SidebarStepFrame):
         self.boundary_completed_listbox.pack(fill="both", expand=True)
         self.boundary_completed_listbox.bind("<<ListboxSelect>>", self._on_boundary_completed_selected)
 
-        workflow_buttons = ttk.Frame(workflow)
-        workflow_buttons.pack(fill="x", pady=(6, 0))
-        workflow_buttons.grid_columnconfigure(0, weight=1, uniform="boundary_actions")
-        workflow_buttons.grid_columnconfigure(1, weight=1, uniform="boundary_actions")
-        self.finish_boundary_btn = action_button(
-            workflow_buttons,
-            self,
-            "Done",
-            self._finish_boundary,
-            "confirm",
-            tooltip="Mark the active boundary as complete.",
-            style="AIDaS.PrimaryAction.TButton",
-        )
-        self.finish_boundary_btn.grid(row=0, column=0, sticky="ew", padx=(0, 2))
-        self.clear_all_traces_btn = action_button(
-            workflow_buttons,
-            self,
-            "Clear",
-            self._clear_all_traces,
-            "clear",
-            tooltip="Clear every point from the active boundary.",
-        )
-        self.clear_all_traces_btn.grid(row=0, column=1, sticky="ew", padx=(2, 0))
-        self.revert_boundary_btn = action_button(
-            workflow_buttons,
-            self,
-            "Revert",
-            self._revert_boundary,
-            "undo",
-            tooltip="Return the selected completed boundary to editing.",
-        )
-        self.revert_boundary_btn.grid(
-            row=1,
-            column=0,
-            columnspan=2,
-            sticky="ew",
-            pady=(4, 0),
-        )
-
+        for attribute, symbol, command, tooltip in (
+            ("revert_line_btn", "<", self._delete_selected_boundary,
+             "Revert line: return the selected completed boundary to Incomplete for redrawing."),
+            ("revert_all_lines_btn", "<<", self._clear_all_traces,
+             "Revert all lines: return every boundary to Incomplete. Keep the foveal marker."),
+            ("ai_line_btn", ">", self._segment_selected_boundary,
+             "AI line: generate the selected incomplete boundary for this image."),
+            ("ai_all_lines_btn", ">>", self._segment_current_image,
+             "AI all lines: generate all six boundaries for this image."),
+        ):
+            button = AppButton(workflow_buttons, text=symbol, width=36, height=28, command=command)
+            button.pack(fill="x", pady=2)
+            HoverToolTip(button, tooltip)
+            setattr(self, attribute, button)
         self.segmenter_progress_var = tk.StringVar(value="Idle")
         self.segmenter_progress = ttk.Progressbar(workflow, mode="determinate", maximum=6, value=0)
         self.segmenter_progress.pack(fill="x", pady=(6, 4))
 
         self.active_trace_var = tk.StringVar(value="No active boundary")
-        ttk.Label(workflow, textvariable=self.active_trace_var, wraplength=240, justify="left").pack(fill="x", pady=(0, 4))
-
         self.boundary_workflow_status_var = tk.StringVar(value="Select a boundary to make it active.")
-        ttk.Label(workflow, textvariable=self.boundary_workflow_status_var, wraplength=240, justify="left").pack(
-            fill="x",
-            pady=(4, 0),
-        )
 
-        fovea = ttk.LabelFrame(segmentation, text="Foveal Center Line", padding=3)
-        fovea.pack(fill="x", pady=(4, 2))
-        self.fovea_frame = fovea  # Store reference for later state management
-
-        # Keep this state var even when the label is hidden; callbacks rely on it.
+        # Keep fovea state for the canvas marker and batch confirmation prompts.
         self.fovea_line_var = tk.StringVar(value="Fovea line: not set")
-
-        coord_row = ttk.Frame(fovea)
-        coord_row.pack(fill="x", pady=(0, 2))
-        ttk.Label(coord_row, text="Center X:").pack(side="left")
         self.fovea_x_entry_var = tk.StringVar(value="")
         self.fovea_x_entry_var.trace_add("write", self._on_fovea_x_entry_changed)
-        self.fovea_stepper = NativeNumericSpinbox(
-            coord_row,
-            self.fovea_x_entry_var,
-            width=6,
-            step=1,
-            minimum=0,
-        )
-        self.fovea_stepper.pack(side="left", padx=(8, 4))
-        self.fovea_x_entry = self.fovea_stepper.entry
-
-        self.fovea_reset_btn = icon_action_button(
-            coord_row,
-            self,
-            self._center_vertical_line,
-            "refresh",
-            tooltip="Reset the foveal center line",
-        )
-        self.fovea_reset_btn.pack(side="left")
-
-        fovea_action_row = ttk.Frame(fovea)
-        fovea_action_row.pack(fill="x", pady=(2, 0))
-
-        self._set_fovea_controls_enabled(False)
 
         # Reserve the final workflow actions in the non-scrolling sidebar
         # shell.  The Segmentation card is taller than the compact Modern
@@ -1236,6 +1446,7 @@ class Step2Frame(SidebarStepFrame):
     def _open_step2_batch_segmentation_panel(self, root_dir, *, initial_rows=None):
         if not self._prepare_for_new_batch_session():
             return False
+        self._hide_annotation_tutorial()
 
         try:
             self.single_image_canvas.pack_forget()
@@ -1771,6 +1982,7 @@ class Step2Frame(SidebarStepFrame):
         prompt_tooltip = HoverToolTip(prompt_label, "")
 
         self._batch_fovea_picker_active = True
+        self._hide_annotation_tutorial()
 
         try:
             for index, path in enumerate(image_paths, start=1):
@@ -1839,6 +2051,7 @@ class Step2Frame(SidebarStepFrame):
                     pass
             self._update_boundary_action_buttons()
             self._update_batch_ai_button_state()
+            self._queue_annotation_tutorial()
 
 
         return fovea_by_path
@@ -1961,6 +2174,7 @@ class Step2Frame(SidebarStepFrame):
         self._active_batch_result_tab = None
         if self.single_image_canvas.winfo_manager() != "pack":
             self.single_image_canvas.pack(fill="both", expand=True)
+        self._queue_annotation_tutorial()
         return True
 
     def _show_batch_results_canvas(self):
@@ -1968,6 +2182,7 @@ class Step2Frame(SidebarStepFrame):
         notebook = getattr(self, "batch_results_notebook", None)
         if notebook is not None and notebook.winfo_manager() != "pack":
             notebook.pack(fill="both", expand=True)
+        self._queue_annotation_tutorial()
 
     def _show_image(self, image, path, *, notify_output_folder=True):
         """Load a new image and reset the annotation UI.
@@ -2018,10 +2233,12 @@ class Step2Frame(SidebarStepFrame):
         )
         if notify_output_folder:
             self._notify_output_folder_changed()
+        self._queue_annotation_tutorial()
         return True
 
     def _clear_image_display(self, status_message=None):
         """Clear the editor canvas and reset image-specific annotation state."""
+        self._hide_annotation_tutorial()
         self._pending_external_image = None
         self._show_single_image_canvas()
         self.current_file = None
@@ -2057,6 +2274,7 @@ class Step2Frame(SidebarStepFrame):
         self._update_ai_button_states()
         if status_message:
             self.status_var.set(status_message)
+        self._queue_annotation_tutorial()
 
     def _notify_output_folder_changed(self):
         if not self.current_file or self.current_file == "Step 1 output":
@@ -2075,6 +2293,8 @@ class Step2Frame(SidebarStepFrame):
                 "pixels": list(trace.get("pixels", [])),
                 "color": trace.get("color", ""),
             }
+            if trace.get("handle_indices") is not None:
+                copied[name]["handle_indices"] = list(trace["handle_indices"])
         return copied
 
     @staticmethod
@@ -2129,12 +2349,18 @@ class Step2Frame(SidebarStepFrame):
         return {
             "input": self.current_file,
             "image": self.image_data,
-            "traces": self._copy_trace_dict(self.boundary_traces),
-            "order": list(self.boundary_order),
-            "fovea_x": self.fovea_x,
+            **self._annotation_snapshot(),
             "template": self._input_analyze_template,
             "source_was_8bit": getattr(self, "_source_was_8bit", False),
             "save_orientation": self._selected_save_orientation(),
+        }
+
+    def _annotation_snapshot(self):
+        """Copy annotations independently of the editable per-image state."""
+        return {
+            "traces": self._copy_trace_dict(self.boundary_traces),
+            "order": list(self.boundary_order),
+            "fovea_x": self.fovea_x,
         }
 
     def _set_completion_from_traces(self):
@@ -2142,7 +2368,7 @@ class Step2Frame(SidebarStepFrame):
             if name in self.boundary_completion_vars:
                 self.boundary_completion_vars[name].set(name in self.boundary_traces)
 
-    def _load_editor_state(self, state, canvas, status_message=None):
+    def _load_editor_state(self, state, canvas, status_message=None, *, fit_view=True):
         if not state or canvas is None:
             return
 
@@ -2198,9 +2424,11 @@ class Step2Frame(SidebarStepFrame):
         self._set_segmentation_frame_enabled(True)
         self._update_ai_button_states()
         self._sync_boundary_canvas_state()
-        self.image_canvas.fit_to_window()
+        if fit_view:
+            self.image_canvas.fit_to_window()
         if status_message:
             self.status_var.set(status_message)
+        self._queue_annotation_tutorial()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Boundary tracing actions
@@ -2295,9 +2523,12 @@ class Step2Frame(SidebarStepFrame):
         self.active_boundary = name
         self.image_canvas.clear_active_line()
         self.boundary_workflow_status_var.set(f"Tracing {name}. Click a boundary name to switch targets.")
-        self.status_var.set(
-            f"Tracing {name}. Left-click to add points, undo points if needed, then finish the boundary."
-        )
+        if name in self._completed_boundary_names():
+            self.status_var.set(f"Selected '{name}'. Drag a vertex to edit, or use < to redraw.")
+        else:
+            self.status_var.set(
+                f"Tracing {name}. Click to add points; double-click the final point to finish."
+            )
         self._update_active_trace_summary()
         self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
@@ -2315,9 +2546,12 @@ class Step2Frame(SidebarStepFrame):
             self._refresh_boundary_lists(select_incomplete_name=name)
 
         self.boundary_workflow_status_var.set(f"Active boundary: {name}")
-        self.status_var.set(
-            f"Tracing {name}. Left-click to add points, undo points if needed, then finish the boundary."
-        )
+        if name in self._completed_boundary_names():
+            self.status_var.set(f"Selected '{name}'. Drag a vertex to edit, or use < to redraw.")
+        else:
+            self.status_var.set(
+                f"Tracing {name}. Click to add points; double-click the final point to finish."
+            )
         self._update_active_trace_summary()
         self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
@@ -2341,17 +2575,27 @@ class Step2Frame(SidebarStepFrame):
     def _update_boundary_action_buttons(self):
         active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
         is_completed = active_name in self._completed_boundary_names()
-        is_incomplete = active_name in self._incomplete_boundary_names()
         has_clearable_markers = self._has_clearable_boundary_markers()
+        editable = not (
+            getattr(self, "_segmenter_running", False)
+            or getattr(self, "_batch_fovea_picker_active", False)
+        )
 
         self._set_control_enabled(
-            getattr(self, "finish_boundary_btn", None), is_incomplete
+            getattr(self, "revert_line_btn", None), editable and is_completed,
         )
         self._set_control_enabled(
-            getattr(self, "revert_boundary_btn", None), is_completed
+            getattr(self, "revert_all_lines_btn", None), editable and has_clearable_markers
         )
         self._set_control_enabled(
-            getattr(self, "clear_all_traces_btn", None), has_clearable_markers
+            getattr(self, "ai_line_btn", None),
+            editable and getattr(self, "image_data", None) is not None
+            and self._selected_incomplete_boundary() is not None,
+        )
+        self._set_control_enabled(
+            getattr(self, "ai_all_lines_btn", None),
+            editable and getattr(self, "image_data", None) is not None
+            and not self._all_required_boundaries_complete(),
         )
         self._set_control_enabled(
             getattr(self, "saved_button", None),
@@ -2384,18 +2628,10 @@ class Step2Frame(SidebarStepFrame):
         return palette[index]
 
     def _sync_boundary_canvas_state(self):
-        """Enable or disable line drawing on canvas based on current state.
+        """Draw incomplete lines and expose handles on the selected completed line.
 
-        Line drawing is DISABLED if:
-          - AI segmentation is actively running (prevents accidental edits)
-          - No boundary is selected or selected boundary is complete
-
-        Completed boundaries must be reverted to incomplete to edit.
-
-        The foveal center line remains visible whenever an image is loaded.
-
-        This method is called after each state change (AI finish, boundary selection,
-        vertical line toggle) to maintain consistent canvas interactivity.
+        Drawing, vertex editing, and foveal dragging are disabled during AI runs
+        or the image-side confirmation. The foveal marker remains visible.
         """
         active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
         # Only allow drawing on incomplete boundaries
@@ -2410,7 +2646,13 @@ class Step2Frame(SidebarStepFrame):
         if self.image_data is not None and self.image_canvas.get_vertical_line_x() is None:
             self._ensure_fovea_line()
         self.image_canvas.enable_line(drawing_enabled)
-        self.image_canvas.enable_vertical_line(self.image_data is not None)
+        self.image_canvas.set_editable_line(
+            active_name if active_name in self.boundary_traces
+            and not self._segmenter_running and not self._drawing_locked else None
+        )
+        self.image_canvas.enable_vertical_line(
+            self.image_data is not None and not self._segmenter_running and not self._drawing_locked
+        )
 
     def _start_boundary(self):
         """Begin drawing the currently selected boundary from the incomplete list.
@@ -2452,11 +2694,13 @@ class Step2Frame(SidebarStepFrame):
           3. Check minimum 2-point requirement
           4. Convert points to pixel coordinates using Bresenham's algorithm
           5. Save boundary to boundary_traces dict and mark as complete
-          6. Refresh UI lists and auto-advance to next boundary
+          6. Refresh UI lists and stop drawing
 
         Auto-saves MARKED images if all 6 boundaries are complete (unless disabled).
         Clears active line and prepares UI for next boundary.
         """
+        if self._segmenter_running:
+            return
         if self.image_data is None:
             messagebox.showwarning("No image", "Load an image first.")
             return
@@ -2481,15 +2725,15 @@ class Step2Frame(SidebarStepFrame):
             self.boundary_order.append(name)
 
         self.image_canvas.commit_active_line(color=color, label=name)
-        self.active_boundary = None
+        self.active_boundary = name
         next_name = self._mark_boundary_complete(name)
         self._refresh_trace_list()
         self._select_trace_by_name(name)
-        self.active_trace_var.set("No active boundary")
+        self.active_trace_var.set(f"Completed: {name}")
         self._update_boundary_action_buttons()
+        self._sync_boundary_canvas_state()
         if next_name is not None:
-            self._start_boundary_for_name(next_name, auto_advance=True)
-            self.status_var.set(f"Saved '{name}'. Next boundary: {next_name}.")
+            self.status_var.set(f"Completed '{name}'. Select another boundary to draw a new line.")
         else:
             self.boundary_workflow_status_var.set("All preset boundaries are complete.")
             if getattr(self, "_active_batch_result_tab", None):
@@ -2505,61 +2749,27 @@ class Step2Frame(SidebarStepFrame):
                     f"Saved boundary '{name}', but the MARKED Analyze files were not saved."
                 )
 
-    def _revert_boundary(self):
-        """Mark a completed boundary as incomplete and re-open it for editing.
-
-        Removes the boundary from saved traces and completion status, clearing
-        its pixels from all MARKED images. User can re-trace or edit.
-        Prompts for confirmation to prevent accidental reverts.
-        """
-        name = self._selected_active_boundary_name()
-        if name is None or name not in self._completed_boundary_names():
-            messagebox.showinfo("Select a boundary", "Choose a completed boundary first.")
+    def _delete_selected_boundary(self):
+        """Delete the selected completed line or its unfinished drawing."""
+        if self._segmenter_running:
             return
-
+        name = self._selected_active_boundary_name()
+        if name not in BOUNDARY_NAMES:
+            return
         self.boundary_traces.pop(name, None)
         if name in self.boundary_order:
             self.boundary_order.remove(name)
         if name in self.boundary_completion_vars:
             self.boundary_completion_vars[name].set(False)
-
         self.active_boundary = name
         self.image_canvas.clear_active_line()
+        self._refresh_boundary_lists(select_incomplete_name=name)
         self._rebuild_saved_overlays()
         self._refresh_trace_list()
-        self._refresh_boundary_lists(select_incomplete_name=name)
-        self._update_boundary_action_buttons()
         self._sync_boundary_canvas_state()
-        self.active_trace_var.set(f"Active: {name} | no vertices placed yet")
-        self.status_var.set(f"Reverted '{name}' back to incomplete.")
-
-    def _delete_selected_boundary(self):
-        """Delete a saved boundary from the trace list.
-
-        Allows removal of individual saved boundaries without reverting all.
-        Boundary must be selected in the trace listbox.
-        """
-        trace_listbox = getattr(self, "trace_listbox", None)
-        if trace_listbox is None:
-            messagebox.showinfo("Unavailable", "Boundary list is hidden in this layout.")
-            return
-        selection = trace_listbox.curselection()
-        if not selection:
-            messagebox.showinfo("Nothing selected", "Select a saved boundary first.")
-            return
-        name = self.boundary_order[selection[0]]
-        if name == FOVEA_BOUNDARY_NAME:
-            self._center_vertical_line()
-            self.status_var.set("Foveal center line reset to image center.")
-            return
-        self.boundary_traces.pop(name, None)
-        self.boundary_order.remove(name)
-        if name in self.boundary_completion_vars:
-            self.boundary_completion_vars[name].set(False)
-        self._refresh_boundary_lists(select_incomplete_name=name)
-        self._rebuild_saved_overlays()
-        self._refresh_trace_list()
-        self.status_var.set(f"Deleted boundary '{name}'.")
+        self._update_active_trace_summary()
+        self._update_boundary_action_buttons()
+        self.status_var.set(f"Reverted '{name}' to Incomplete. Click to redraw; double-click to finish.")
 
     def _clear_all_traces(self):
         """Remove all saved boundaries and the active trace at once.
@@ -2567,12 +2777,14 @@ class Step2Frame(SidebarStepFrame):
         Asks for confirmation before clearing to prevent accidental data loss.
         Resets boundary completion status and clears canvas overlays.
         """
+        if self._segmenter_running:
+            return
         has_boundary_traces = any(name != FOVEA_BOUNDARY_NAME for name in self.boundary_traces)
         if not has_boundary_traces and not self.image_canvas.get_active_line():
             return
         if not messagebox.askyesno(
-            "Clear all traces?",
-            "Remove every saved and active boundary trace? The foveal center line will be kept.",
+            "Revert all lines?",
+            "Return all boundary lines to Incomplete for redrawing? The foveal marker will be kept.",
         ):
             return
         fovea_x = self.fovea_x
@@ -2586,8 +2798,9 @@ class Step2Frame(SidebarStepFrame):
         self._refresh_boundary_lists()
         self._refresh_trace_list()
         self.active_trace_var.set("No active boundary")
+        self._sync_boundary_canvas_state()
         self._update_boundary_action_buttons()
-        self.status_var.set("All boundary traces cleared. Foveal center line kept.")
+        self.status_var.set("All boundary lines reverted to Incomplete. Foveal marker kept.")
 
     def _rebuild_saved_overlays(self):
         """Redraw all saved boundary overlays on the canvas from boundary_traces.
@@ -2597,7 +2810,7 @@ class Step2Frame(SidebarStepFrame):
         The fovea line is drawn only by the interactive vertical marker.
         """
         overlays = []
-        for name in self.boundary_order:
+        for name in dict.fromkeys(self.boundary_order):
             if name == FOVEA_BOUNDARY_NAME:
                 continue
             trace = self.boundary_traces.get(name)
@@ -2606,6 +2819,7 @@ class Step2Frame(SidebarStepFrame):
                     "points": trace["points"],
                     "color": trace.get("color") or self._boundary_color(name),
                     "label": name,
+                    "handle_indices": trace.get("handle_indices"),
                 })
         self.image_canvas.set_line_overlays(overlays)
 
@@ -2621,7 +2835,7 @@ class Step2Frame(SidebarStepFrame):
         self._update_boundary_progress_bar()
 
     def _mark_boundary_complete(self, name):
-        """Mark a boundary as complete and auto-advance to the next incomplete.
+        """Mark a boundary as complete while keeping the finished line selected.
 
         Updates boundary_completion_vars and refreshes UI lists.
         Returns the next incomplete boundary name for auto-advancing, or None if complete.
@@ -2636,10 +2850,7 @@ class Step2Frame(SidebarStepFrame):
             self.boundary_completion_vars[name].set(True)
 
         next_name = self._next_incomplete_boundary(name)
-        if next_name is not None:
-            self._refresh_boundary_lists(select_incomplete_name=next_name)
-        else:
-            self._refresh_boundary_lists(select_completed_name=name)
+        self._refresh_boundary_lists(select_completed_name=name)
         self._update_boundary_progress_bar()
         return next_name
 
@@ -2784,10 +2995,10 @@ class Step2Frame(SidebarStepFrame):
 
     def _set_fovea_controls_enabled(self, enabled):
         """Enable/disable fovea-specific controls based on mode and lock state."""
-        controls_enabled = enabled and not self._drawing_locked
+        controls_enabled = enabled and not self._drawing_locked and not self._segmenter_running
         for widget in (
-            self.fovea_stepper,
-            self.fovea_reset_btn,
+            getattr(self, "fovea_stepper", None),
+            getattr(self, "fovea_reset_btn", None),
         ):
             self._set_control_enabled(widget, controls_enabled)
 
@@ -2800,9 +3011,10 @@ class Step2Frame(SidebarStepFrame):
         # Recursively disable/enable all children in the segmentation frame
         def set_state(widget):
             if widget in (
-                self.finish_boundary_btn,
-                self.revert_boundary_btn,
-                getattr(self, "clear_all_traces_btn", None),
+                getattr(self, "revert_line_btn", None),
+                getattr(self, "revert_all_lines_btn", None),
+                getattr(self, "ai_line_btn", None),
+                getattr(self, "ai_all_lines_btn", None),
                 getattr(self, "batch_ai_button", None),
                 getattr(self, "save_btn", None),
                 getattr(self, "saved_button", None),
@@ -2930,10 +3142,30 @@ class Step2Frame(SidebarStepFrame):
             fovea_x_entry_var.set(str(x))
         self._updating_fovea_entry = False
         self._refresh_live_image_status()
+        if hasattr(self, "revert_line_btn"):
+            self._update_boundary_action_buttons()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Live updates and selection handling
     # ═══════════════════════════════════════════════════════════════════════
+    def _on_saved_line_edited(self, name, points):
+        if self._segmenter_running or name not in self.boundary_traces or name not in BOUNDARY_NAMES:
+            return
+        color = self.boundary_traces[name].get("color") or self._boundary_color(name)
+        self.boundary_traces[name] = {
+            "points": list(points),
+            "pixels": _polyline_pixels(points),
+            "color": color,
+        }
+        handles = self.image_canvas.get_line_handle_indices(name)
+        if handles is not None:
+            self.boundary_traces[name]["handle_indices"] = handles
+        self._sync_active_batch_result_state()
+        self._rebuild_saved_overlays()
+        self._update_boundary_action_buttons()
+        self.active_trace_var.set(f"Selected: {name} | {len(points)} vertices")
+        self.status_var.set(f"Updated '{name}'. Drag vertices to adjust; Shift-click adds and Alt-click removes.")
+
     def _on_active_line_changed(self, points):
         if self.image_data is None:
             return
@@ -4363,6 +4595,152 @@ class Step2Frame(SidebarStepFrame):
 
         self._progress_animation_job = self.after(80, self._animate_progress_bar)
 
+    def _selected_incomplete_boundary(self):
+        incomplete = self._incomplete_boundary_names()
+        if self.active_boundary in incomplete:
+            return self.active_boundary
+        return self._get_listbox_selection(getattr(self, "boundary_incomplete_listbox", None), incomplete)
+
+    def _segment_selected_boundary(self):
+        name = self._selected_incomplete_boundary()
+        if name is not None:
+            self._segment_current_image(boundary_names=[name])
+
+    def _segment_current_image(self, *, boundary_names=None):
+        """Run the existing AI worker for this image without replacing other tabs."""
+        if (
+            self.image_data is None
+            or self._segmenter_running
+            or getattr(self, "_batch_fovea_picker_active", False)
+            or (boundary_names is None and self._all_required_boundaries_complete())
+        ):
+            return
+        requested = list(BOUNDARY_NAMES if boundary_names is None else boundary_names)
+        if not requested or any(name not in BOUNDARY_NAMES for name in requested):
+            return
+        model_path = self.aidas_model_path
+        if not os.path.isfile(model_path):
+            messagebox.showerror("Missing model", f"AI boundary model not found:\n{model_path}")
+            return
+        total_cores, step3_used, _free_cores = self._shared_core_budget()
+        if not self._confirm_shared_core_contention(total_cores, step3_used):
+            return
+        core_limit = self._normalized_shared_core_limit(None)
+        self._ensure_fovea_line(self.fovea_x)
+        state = self._capture_current_editor_state()
+        state["image"] = np.array(self.image_data, copy=True)
+        state["source_image"] = self.image_data
+        state["source_file"] = self.current_file
+        state["tab_key"] = getattr(self, "_active_batch_result_tab", None)
+        state["boundary_names"] = requested
+        state["active_boundary"] = self.active_boundary
+        state["unfinished_line"] = self.image_canvas.get_active_line()
+        path = self.current_file or "Step 1 output"
+        state["input"] = path
+        key = self._image_pair_key(path)
+        self._active_ai_core_limit = core_limit
+        self._active_ai_using_gpu = False
+        self._set_segmentation_running(
+            True,
+            status_message="Segmenting the current image with AI…",
+            progress_max=1,
+        )
+        worker = threading.Thread(
+            target=self._run_aidas_batch_segmenter_worker,
+            args=([path], model_path, "auto", 0, core_limit,
+                  {key: state["fovea_x"]}, {key: state["save_orientation"]}),
+            kwargs={"current_image_state": state},
+            daemon=True,
+        )
+        try:
+            worker.start()
+        except RuntimeError as exc:
+            self._set_segmentation_running(False)
+            self._restore_unfinished_ai_trace(state)
+            messagebox.showerror("AI segmentation failed", str(exc))
+
+    def _restore_unfinished_ai_trace(self, state):
+        if (
+            state.get("unfinished_line")
+            and state.get("tab_key") == getattr(self, "_active_batch_result_tab", None)
+            and self.image_data is state.get("source_image")
+        ):
+            self._set_active_boundary_target(state["active_boundary"])
+            self.image_canvas.set_active_line(state["unfinished_line"])
+
+    def _on_current_image_segmentation_done(self, result, original_state):
+        self._set_segmentation_running(False)
+        if result.get("log_path"):
+            self._append_segmenter_log(f"Saved AI run log: {result['log_path']}")
+        items = result.get("results") or []
+        if not items:
+            failures = result.get("failures") or []
+            error = result.get("exception") or (
+                failures[0].get("error") if failures else "No boundaries were returned."
+            )
+            self.status_var.set("AI segmentation failed. Current annotations were kept.")
+            self._restore_unfinished_ai_trace(original_state)
+            messagebox.showerror("AI segmentation failed", str(error))
+            return
+        self._set_runtime_ai_device_status(
+            result.get("device") or "unknown",
+            result.get("execution_provider"),
+            result.get("fallback_reason"),
+        )
+        tab_key = original_state.get("tab_key")
+        if tab_key:
+            state = self._batch_result_states.get(tab_key)
+            if state is None or state.get("image") is not original_state.get("source_image", state.get("image")):
+                return  # The target image was closed while inference was running.
+            canvas = state.get("canvas") or self._batch_result_tab_canvases.get(tab_key)
+        else:
+            state = dict(original_state)
+            state["image"] = original_state.get("source_image", self.image_data)
+            canvas = self.single_image_canvas
+            if getattr(self, "_active_batch_result_tab", None):
+                state = self._single_editor_state
+            elif (
+                self.current_file != original_state.get("source_file", original_state.get("input"))
+                or self.image_data is not original_state.get("source_image", self.image_data)
+            ):
+                return
+        if state is None or canvas is None:
+            return
+        if "source_image" in original_state and state.get("image") is not original_state["source_image"]:
+            return
+        requested = original_state.get("boundary_names", BOUNDARY_NAMES)
+        predicted = items[0]["traces"]
+        if any(name not in predicted for name in requested):
+            self._restore_unfinished_ai_trace(original_state)
+            messagebox.showerror("AI segmentation failed", "AI did not return the requested boundary lines.")
+            return
+        traces = self._copy_trace_dict(state.get("traces", original_state.get("traces", {})))
+        traces.update(self._copy_trace_dict({name: predicted[name] for name in requested}))
+        fovea_x = state.get("fovea_x", original_state["fovea_x"])
+        if FOVEA_BOUNDARY_NAME not in traces:
+            traces[FOVEA_BOUNDARY_NAME] = self._vertical_line_trace(fovea_x, original_state["image"].shape[0])
+        state["traces"] = traces
+        state["order"] = list(dict.fromkeys(
+            [name for name in state.get("order", []) if name in traces]
+            + [name for name in BOUNDARY_NAMES if name in traces] + [FOVEA_BOUNDARY_NAME]
+        ))
+        state["fovea_x"] = fovea_x
+        if tab_key == getattr(self, "_active_batch_result_tab", None):
+            # Refresh overlays in the existing viewport; select a completed line
+            # explicitly to show its editing handles.
+            self._load_editor_state(
+                state, canvas,
+                status_message="AI segmentation complete. Review the boundary lines.",
+                fit_view=False,
+            )
+        else:
+            canvas.set_line_overlays([
+                {"points": trace["points"], "color": trace["color"], "label": name,
+                 "handle_indices": trace.get("handle_indices")}
+                for name, trace in traces.items() if name != FOVEA_BOUNDARY_NAME
+            ])
+            self.status_var.set("AI segmentation complete for the selected image.")
+
     def _run_aidas_batch_segmentation(
         self,
         image_paths=None,
@@ -4487,6 +4865,8 @@ class Step2Frame(SidebarStepFrame):
         core_limit,
         manual_fovea_by_key=None,
         orientation_by_key=None,
+        *,
+        current_image_state=None,
     ):
         results = []
         failures = []
@@ -4510,15 +4890,17 @@ class Step2Frame(SidebarStepFrame):
             total = len(image_paths)
             name = os.path.basename(path)
             self.after(0, lambda i=index, t=total: self._set_segmenter_progress_value(i - 1, t))
-            self.after(0, lambda: self.status_var.set(f"AI_ForAIDAS batch {index}/{total}: {name}"))
+            label = "AI segmentation" if current_image_state is not None else f"AI_ForAIDAS batch {index}/{total}"
+            self.after(0, lambda: self.status_var.set(f"{label}: {name}"))
             self.after(0, lambda: self._append_segmenter_log(f"Batch {index}/{total}: {path}"))
 
         def report_model_progress(index, total, path, fraction, stage):
             progress_value = (index - 1) + max(0.0, min(float(fraction), 1.0))
             label = str(stage or "running").replace("_", " ")
             name = os.path.basename(path)
+            prefix = "AI segmentation" if current_image_state is not None else f"AI_ForAIDAS batch {index}/{total}"
             self.after(0, lambda v=progress_value, t=total: self._set_segmenter_progress_value(v, t))
-            self.after(0, lambda: self.status_var.set(f"AI_ForAIDAS batch {index}/{total}: {name} - {label}"))
+            self.after(0, lambda: self.status_var.set(f"{prefix}: {name} - {label}"))
 
         try:
             worker_client = AIWorkerClient(
@@ -4563,7 +4945,11 @@ class Step2Frame(SidebarStepFrame):
                 for index, path in enumerate(image_paths, start=1):
                     report_status(index, path)
                     try:
-                        image, template, _source_was_8bit = self._read_image_for_annotation(path)
+                        if current_image_state is None:
+                            image, template, _source_was_8bit = self._read_image_for_annotation(path)
+                        else:
+                            image = current_image_state["image"]
+                            template = current_image_state.get("template")
                         model_input_uses_stored_y = template is not None
                         image_for_ai = np.array(image, copy=True)
                         if model_input_uses_stored_y:
@@ -4654,7 +5040,10 @@ class Step2Frame(SidebarStepFrame):
             "log_path": log_path,
             "total": len(image_paths),
         }
-        self.after(0, lambda: self._on_aidas_batch_segmenter_worker_done(result))
+        if current_image_state is None:
+            self.after(0, lambda: self._on_aidas_batch_segmenter_worker_done(result))
+        else:
+            self.after(0, lambda: self._on_current_image_segmentation_done(result, current_image_state))
 
     def _on_aidas_batch_segmenter_worker_done(self, result):
         running_cleared = False
@@ -4750,13 +5139,12 @@ class Step2Frame(SidebarStepFrame):
             tab_text = self._batch_result_tab_text(input_name or f"Result {index}")
             frame = notebook.add(text=tab_text)
 
-            info_var = tk.StringVar(value=input_path)
-            ttk.Label(frame, textvariable=info_var, anchor="w", padding=4).pack(fill="x")
-
             canvas = ImageCanvas(
                 frame,
                 on_mouse_move=self._on_mouse_moved,
                 on_line_change=self._on_active_line_changed,
+                on_line_finish=self._finish_boundary,
+                on_line_edit=self._on_saved_line_edited,
                 on_vertical_line_change=self._on_vertical_line_changed,
                 on_zoom_change=self._on_canvas_zoom_changed,
             )
@@ -4788,6 +5176,7 @@ class Step2Frame(SidebarStepFrame):
                             "points": trace["points"],
                             "color": trace.get("color"),
                             "label": name,
+                            "handle_indices": trace.get("handle_indices"),
                         })
                 fovea_x = item.get("fovea_x")
                 if fovea_x is not None:
@@ -4814,7 +5203,14 @@ class Step2Frame(SidebarStepFrame):
                 }
                 canvas.fit_to_window()
             except (OSError, ValueError, RuntimeError) as exc:
-                info_var.set(f"Could not load {input_path}: {exc}")
+                ctk.CTkLabel(
+                    frame,
+                    text=f"Could not load {input_path}: {exc}",
+                    text_color=COLOR_PAIRS["danger"],
+                    anchor="w",
+                    justify="left",
+                    wraplength=360,
+                ).pack(fill="x", padx=8, pady=4, before=canvas)
 
         self._show_batch_results_canvas()
         if notebook.tabs():

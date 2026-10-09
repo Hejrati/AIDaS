@@ -1,0 +1,46 @@
+Step 3 R output verification
+
+The original remains unchanged as RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R.
+The optimized version is RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R.
+
+Run from the checkout using Windows PowerShell:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File release_tools/verify_step3_r_outputs.ps1 -BaselineScript RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R -CandidateScript RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R -FixtureDirectory "Examples/R_TEST/flip human" -WorkDirectory debug_outputs/r_optimization_validation/harness
+
+The default fixture configuration expects Light and Light_MARKED Analyze pairs
+with two slices. Set -ImageIndex "1,2,3" for a three-slice fixture, -PixelWidth
+for another acquisition scale, and -Rscript/-RLibrary for another R installation.
+The legacy script's single-slice behavior is intentionally preserved.
+
+The harness copies inputs into its own work directory and runs both versions
+at identical paths with identical arguments. It compares every exported file
+directly, without numerical tolerance, and records SHA256 hashes, timing, and
+the first differing byte. This includes both saved R workspaces. The same paths
+are necessary because INPUTDIR, OUTDIR, PYEXPORTDIR, and args are saved objects.
+
+All generated artifacts are retained under snapshots; manifests and comparisons
+are JSON files in the work directory. Existing acquisition files are not changed.
+Use -Phase baseline, candidate, or compare to execute one step at a time. An
+optional -RepeatBaseline checks whether the original produces reproducible bytes.
+
+To validate the optional parallel lateral search after the default comparison:
+
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File release_tools/verify_step3_r_outputs.ps1 -BaselineScript RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R -CandidateScript RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R -FixtureDirectory "Examples/R_TEST/flip human" -WorkDirectory debug_outputs/r_optimization_validation/harness -Phase candidate -CandidateName candidate2 -Workers 2
+
+Repeat with -Phase compare -CandidateName candidate2 to compare that snapshot.
+The processing script defaults to one worker. Set AIDAS_STEP3_WORKERS=2 to use
+two workers outside the harness; no additional R packages are required.
+
+R 3.3.1 writes wall-clock CreationDate and ModDate fields in the automatic
+input/Rplots.pdf. Even unchanged runs can differ in those fields. The harness
+reports raw PDF inequality and separately diagnoses timestamp-only differences;
+it never excludes or normalizes an artifact to make the strict check pass.
+The analysis-output comparison count is reported separately from that PDF.
+
+Run the focused regression suites with the production Rscript executable:
+
+  Rscript.exe --vanilla tests/r/step3_optimization_kernels.R
+  Rscript.exe --vanilla tests/r/step3_lateral_registration.R
+
+These cover byte-exact sampling, mean arithmetic, correlation, depth lookup,
+factor alignment, spline prediction, workspace cleanup, and parallel/RNG state.

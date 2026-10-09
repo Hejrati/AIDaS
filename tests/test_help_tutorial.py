@@ -157,7 +157,7 @@ class TutorialContentTests(unittest.TestCase):
             "rrMCP/AR",
             "ELM-RPE",
             "ONL",
-            "Compile all measurements",
+            "Create Excel File",
             "LE_RE_rrMCPAR_ELMRPE_ONL.xlsx",
             "100%",
         ):
@@ -749,7 +749,7 @@ class WorkflowOverviewMapTests(unittest.TestCase):
     def test_overview_has_exactly_five_ordered_static_step_cards(self):
         self.assertEqual(
             [card[0] for card in _WorkflowOverviewMap.STEP_CARDS],
-            ["Load & Crop", "Segment", "Flatten", "MCP/AR", "Compile"],
+            ["Load & Crop", "Segment", "Flatten", "MCP/AR", "Create Excel File"],
         )
         source = inspect.getsource(_WorkflowOverviewMap)
         self.assertNotIn("Pause animation", source)

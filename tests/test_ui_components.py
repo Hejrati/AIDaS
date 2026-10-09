@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+import tkinter as tk
 import unittest
 from unittest import mock
 
+import customtkinter as ctk
 from PIL import Image
 
 from aidas.app import AboutDialog, SettingsDialog
@@ -27,7 +29,15 @@ from aidas.ui.components import (
     WorkflowNavigation,
     WorkflowProgressStrip,
 )
-from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
+from aidas.ui.theme import (
+    COLOR_PAIRS,
+    CONTROLS,
+    SHAPES,
+    apply_appearance_mode,
+    get_interface_mode,
+    resolve_color,
+    set_interface_mode,
+)
 from aidas.utils.batch_ui import BatchTable
 from aidas.utils.ui_utils import (
     ACTION_ICON_FILES,
@@ -268,8 +278,8 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("RESULT_SIDE_ORDER", grid_source)
         self.assertIn("RESULT_IMAGE_ROWS", grid_source)
         self.assertIn("_open_result_zoom", grid_source)
-        self.assertIn("height=max(1, event.height * len(groups))", grid_source)
-        self.assertIn('uniform="result-image-row"', grid_source)
+        self.assertIn("height=page_height * len(groups) + vertical_padding", grid_source)
+        self.assertIn('uniform="result-image-column"', grid_source)
         self.assertIn("image_host.pack_propagate(False)", grid_source)
         self.assertIn('label.bind("<Button-1>"', preview_source)
 
@@ -390,7 +400,7 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("NativeNumericSpinbox(", source)
         self.assertIn("Maximum Step 2 cores for GPU fallback", source)
         self.assertIn("_shared_core_budget()", source)
-        self.assertIn("ai_device_status_var", source)
+        self.assertNotIn("ai_device_status_var", source)
         self.assertNotIn("CPU reserved", source)
 
     def test_batch_panels_reserve_the_footer_before_the_flexible_table(self):
@@ -543,17 +553,8 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         panel._resize_summary_footer(type("Event", (), {"width": 300})())
         panel.summary_label.configure.assert_called_once_with(wraplength=120)
 
-    def test_step2_reserves_status_space_through_the_shared_layout(self):
-        source = inspect.getsource(Step2Frame.__init__)
-        self.assertIn("status_var=self.status_var", source)
-        self.assertIn("status_bar_content_margin=True", source)
-        self.assertLess(source.index("self.status_var ="), source.index("self.build_standard_layout("))
-
     def test_workflow_status_bars_align_to_their_content_margins(self):
         for builder in (
-            Step2Frame.__init__,
-            Step3Frame._build_ui,
-            Step4Frame._build_ui,
             Step5Frame._build_ui,
         ):
             with self.subTest(builder=builder.__qualname__):
@@ -570,6 +571,52 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
 
 
 class WorkflowNavigationTests(unittest.TestCase):
+    def test_progress_badges_follow_dark_light_dark_without_changing_completion(self):
+        original_interface = get_interface_mode()
+        original_appearance = ctk.get_appearance_mode()
+        original_source = ctk.AppearanceModeTracker.appearance_mode_set_by
+        root = None
+        try:
+            set_interface_mode("Modern", redraw=False)
+            ctk.set_appearance_mode("Dark")
+            try:
+                root = ctk.CTk()
+                root.withdraw()
+                root.attributes("-alpha", 0)
+                root.geometry("720x120+0+0")
+            except tk.TclError as exc:
+                self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
+
+            strip = WorkflowProgressStrip(root)
+            strip.pack(fill="x")
+            strip.set_completed_steps(2)
+            root.deiconify()
+            states = (
+                ("success", "on_primary", "\u2713"),
+                ("success", "on_primary", "\u2713"),
+                ("primary", "on_primary", "3"),
+                ("surface_subtle", "muted_text", "4"),
+                ("surface_subtle", "muted_text", "5"),
+            )
+            for mode in ("Dark", "Light", "Dark"):
+                with self.subTest(mode=mode):
+                    apply_appearance_mode(mode, root=root)
+                    root.update_idletasks()
+                    for circle, (fill, foreground, text) in zip(strip.circles, states):
+                        self.assertEqual(circle.cget("background"),
+                                         resolve_color(COLOR_PAIRS["primary_soft"], mode))
+                        self.assertEqual(circle.itemcget(circle.oval_id, "fill"),
+                                         resolve_color(COLOR_PAIRS[fill], mode))
+                        self.assertEqual(circle.itemcget(circle.text_id, "fill"),
+                                         resolve_color(COLOR_PAIRS[foreground], mode))
+                        self.assertEqual(circle.itemcget(circle.text_id, "text"), text)
+                    self.assertEqual(strip.workflow_progress_label.cget("text"), "Step 3 of 5: Flatten")
+        finally:
+            if root is not None:
+                root.destroy()
+            set_interface_mode(original_interface, redraw=False)
+            ctk.set_appearance_mode("System" if original_source == "system" else original_appearance)
+
     def test_batch_table_height_query_does_not_reenter_the_idle_loop(self):
         source = inspect.getsource(BatchTable._table_content_height)
 
@@ -599,7 +646,7 @@ class WorkflowNavigationTests(unittest.TestCase):
                 "2  Segment",
                 "3  Flatten",
                 "4  MCP/AR",
-                "5  Compile",
+                "5  Create Excel File",
             ),
         )
 
