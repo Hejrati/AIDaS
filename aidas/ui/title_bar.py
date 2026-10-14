@@ -744,6 +744,39 @@ class WindowsCaptionController:
             self._api.close_window(self.handle)
 
 
+class _CaptionCloseButton(ctk.CTkButton):
+    """Keep the caption glyph readable on its close-hover background."""
+
+    def _hover_active(self):
+        return self._mouse_inside and self._hover and self._state == tk.NORMAL
+
+    def _sync_glyph_color(self):
+        label = self.__dict__.get("_text_label")
+        if label is None:
+            return
+        if self._state == tk.DISABLED:
+            color = self._text_color_disabled
+        elif self._hover_active():
+            color = COLOR_PAIRS["caption_close_hover_text"]
+        else:
+            color = self._text_color
+        label.configure(fg=self._apply_appearance_mode(color))
+
+    def _draw(self, no_color_updates=False):
+        super()._draw(no_color_updates)
+        if self._hover_active():
+            super()._on_enter()
+        self._sync_glyph_color()
+
+    def _on_enter(self, event=None):
+        super()._on_enter(event)
+        self._sync_glyph_color()
+
+    def _on_leave(self, event=None):
+        super()._on_leave(event)
+        self._sync_glyph_color()
+
+
 class CustomWindowsTitleBar(ctk.CTkFrame):
     """Palette-aware client title bar backed by native window operations."""
 
@@ -869,20 +902,11 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
         font_size: int,
         close: bool = False,
     ) -> ctk.CTkButton:
-        button = ctk.CTkButton(
-            master,
-            text=text,
-            command=command,
-            width=48,
-            height=self.HEIGHT,
-            corner_radius=0,
-            border_width=0,
-            fg_color="transparent",
-            hover_color=(
-                COLOR_PAIRS["danger_hover"]
-                if close
-                else COLOR_PAIRS["surface_subtle"]
-            ),
+        button_class = _CaptionCloseButton if close else ctk.CTkButton
+        button = button_class(
+            master, text=text, command=command, width=48, height=self.HEIGHT,
+            corner_radius=0, border_width=0, fg_color="transparent",
+            hover_color=COLOR_PAIRS["danger_hover" if close else "surface_subtle"],
             text_color=COLOR_PAIRS["text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=font_size),
         )

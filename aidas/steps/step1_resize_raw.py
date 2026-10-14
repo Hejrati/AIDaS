@@ -14,9 +14,15 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 
 from aidas.canvas.image_canvas import ImageCanvas
+from aidas.utils.bright_pixels import (
+    BrightPixelDetection,
+    detect_bright_pixels_in_bands,
+    smooth_bright_pixels,
+)
 from aidas.utils.filesystem import find_sdb_directories, skipped_directories_warning
 from aidas.utils.io_utils import read_analyze, read_raw_oct, scale_image, write_analyze
 from aidas.ui.components import AppButton, AppSplitButton
+from aidas.ui.bright_pixel_notice import BrightPixelNotice
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS
 from aidas.utils.ui_layout import COLORS, LAYOUT
 from aidas.utils.ui_utils import (
@@ -92,6 +98,15 @@ class Step1Frame(SidebarStepFrame):
         # ----- state -----
         self.raw_image = None          # original loaded image (H, W)  uint16
         self._source_raw_image = None  # original imported image before width adjustments
+        self._working_source_raw_image = None  # opt-in corrections; original stays intact
+        self._source_bright_pixel_mask = None
+        self._raw_bright_pixel_mask = None
+        self._source_bright_pixel_threshold = None
+        self._bright_pixel_source_checked = False
+        self._source_bright_pixels_smoothed = False
+        self._bright_pixel_notice = None
+        self._bright_pixel_notice_pending = False
+        self._bright_pixel_decision = None
         self.processed_image = None    # after crop + scale           int16 (.img-like preview)
         self._processed_image_saved = False
         self.current_file = None       # path of opened raw file
@@ -173,9 +188,9 @@ class Step1Frame(SidebarStepFrame):
         """Create and lay out the full left-side control panel."""
         numeric_vcmd = (self.register(self._validate_digits_only), "%P")
 
-        # ── SDB Image Parameters ──
-        # UX Improvement: Increased padding for better section separation
-        self.sdb_params_section = self.add_sidebar_section("SDB Image Parameters", pady=(10, 5))
+        # Build import controls before the queue so its callbacks can use them.
+        # Their section is placed after the queue and collapsed below.
+        self.sdb_params_section = self.add_sidebar_section("Advanced import settings", pady=(5, 5))
         self.sdb_params_frame = self.sdb_params_section.body
         self.sdb_params_frame.grid_columnconfigure(2, weight=1)
 
@@ -337,6 +352,31 @@ class Step1Frame(SidebarStepFrame):
         lb_scroll.pack(side="right", fill="y")
         self.sdb_listbox.bind("<Double-1>", lambda e: self._open_selected_sdb())
         self.sdb_listbox.bind("<<ListboxSelect>>", self._on_sdb_list_select)
+
+        # Keep folder selection and the work queue first. The summary belongs
+        # outside the collapsible body so the import settings remain visible.
+        self.sdb_params_section.pack(after=sdb_section)
+        self.sdb_params_summary_var = tk.StringVar()
+        self.sdb_params_summary_label = ttk.Label(
+            self.sdb_params_section,
+            textvariable=self.sdb_params_summary_var,
+            style="AIDaS.Muted.TLabel",
+            justify="left",
+            wraplength=0,
+        )
+        self.sdb_params_summary_label.pack(
+            fill="x",
+            padx=LAYOUT.space_sm,
+            pady=(0, LAYOUT.space_sm),
+            after=self.sdb_params_section.header,
+        )
+        self._sdb_params_summary_tooltip = HoverToolTip(
+            self.sdb_params_summary_label,
+            "W/H: image width and height in pixels. Offset: skipped bytes.\n"
+            "LE: little-endian; BE: big-endian.",
+        )
+        self._update_import_settings_summary()
+        self.sdb_params_section.toggle()
 
         # Navigation is available in the canvas toolbar below.
         # nav_frame = ttk.Frame(sdb)
@@ -533,7 +573,7 @@ class Step1Frame(SidebarStepFrame):
         )
         self.undo_crop_btn.grid(row=0, column=0)
         self.undo_crop_btn.grid_remove()
-        HoverToolTip(self.undo_crop_btn, "Remove the saved crop and restore the original SDB")
+        HoverToolTip(self.undo_crop_btn, "Remove the saved crop and return to the SDB working image")
 
         self._processing_controls_cropped = False
 
@@ -578,6 +618,9 @@ class Step1Frame(SidebarStepFrame):
         )
         self.next_sdb_btn.grid(row=0, column=2)
         HoverToolTip(self.next_sdb_btn, "Next uncropped image")
+        self.bright_pixel_status_var = tk.StringVar(
+            value="Bright pixels are checked when an SDB opens."
+        )
         self._update_processing_controls()
 
         # # ── View ──
@@ -752,6 +795,7 @@ class Step1Frame(SidebarStepFrame):
         self._crop_notification_job = self.after(2000, self._dismiss_crop_notification)
 
     def destroy(self):
+        self._dismiss_bright_pixel_notice()
         self._dismiss_crop_notification()
         super().destroy()
 
@@ -856,6 +900,8 @@ class Step1Frame(SidebarStepFrame):
         Args:
             directory: Directory path selected by user.
         """
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         self.sdb_dir_var.set(directory)
         if self.preferences is not None:
             self.preferences.set(SDB_PREF_KEY, directory)
@@ -914,8 +960,28 @@ class Step1Frame(SidebarStepFrame):
         self._apply_import_params(show_errors=False, skip_reload=True)
         self._apply_width_preview_adjustment()
 
+    def _update_import_settings_summary(self):
+        """Show validated import settings even while their controls are hidden."""
+        summary = self.__dict__.get("sdb_params_summary_var")
+        if summary is None:
+            return
+        params = self.raw_import_params or {
+            "width": self.default_raw_width,
+            "height": self.default_raw_height,
+            "offset": self.default_raw_offset,
+            "bit_depth": DEFAULT_RAW_BIT_DEPTH,
+            "little_endian": self.default_little_endian,
+        }
+        byte_order = "LE" if params["little_endian"] else "BE"
+        summary.set(
+            f"W: {params['width']:,} · H: {params['height']:,} · "
+            f"Offset: {params['offset']:,} B · {params['bit_depth']}-bit · {byte_order}"
+        )
+
     def _apply_width_preview_adjustment(self):
         """Crop or pad the loaded image to match the requested width."""
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         if self._source_raw_image is None or self.current_file is None:
             return
 
@@ -927,24 +993,34 @@ class Step1Frame(SidebarStepFrame):
         if requested_width <= 0:
             return
 
-        source = self._source_raw_image
+        source = self.__dict__.get("_working_source_raw_image")
+        if source is None:
+            source = self._source_raw_image
+        source_mask = self.__dict__.get("_source_bright_pixel_mask")
         source_width = int(source.shape[1])
         if requested_width == source_width:
             adjusted = np.array(source, copy=True)
+            adjusted_mask = source_mask
         elif requested_width < source_width:
             crop = source_width - requested_width
             left = crop // 2
             right = left + requested_width
             adjusted = np.array(source[:, left:right], copy=True)
+            adjusted_mask = None if source_mask is None else source_mask[:, left:right]
         else:
             pad = requested_width - source_width
             left = pad // 2
             right = pad - left
             adjusted = np.pad(source, ((0, 0), (left, right)), mode="constant", constant_values=0)
+            adjusted_mask = None if source_mask is None else np.pad(
+                source_mask, ((0, 0), (left, right)), mode="constant", constant_values=False
+            )
 
         self.raw_image = adjusted
+        self._raw_bright_pixel_mask = adjusted_mask
         self.processed_image = None
         self._processed_image_saved = False
+        self._set_source_bright_pixel_status()
         self.view_mode_var.set("source")
         self.image_canvas.set_image(adjusted)
         self.image_canvas.enable_roi(True)
@@ -1043,6 +1119,8 @@ class Step1Frame(SidebarStepFrame):
         Returns:
             bool: True when parameters are valid (and reload succeeds if needed).
         """
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         try:
             w = int(self.width_var.get())
             h = int(self.height_var.get())
@@ -1065,6 +1143,7 @@ class Step1Frame(SidebarStepFrame):
             "bit_depth": DEFAULT_RAW_BIT_DEPTH,
             "little_endian": le,
         }
+        self._update_import_settings_summary()
 
         # If an image is already open, immediately re-read it with new params.
         # Width changes are handled separately as a display-only crop/pad step.
@@ -1077,35 +1156,59 @@ class Step1Frame(SidebarStepFrame):
                     f"Parameters applied, but reloading current image failed:\n{exc}",
                 )
                 return False
-            self._load_image(img, self.current_file)
-            return True
+            return self._load_image(img, self.current_file)
 
         if self.current_file and skip_reload:
             return True
 
         return True
 
-    def _load_image(self, img, path):
+    def _load_image(self, img, path, *, check_bright_pixels=True, source_check=None):
         """Load image data into UI state and refresh display widgets.
 
         Args:
             img: Loaded image array with shape (H, W).
             path: Source file path for display and output naming.
         """
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
+        signed = np.asarray(img).astype(np.int16, copy=True)
+        detection = None
+        prepared = signed
+        if source_check is not None:
+            # Undo checks and obtains consent before deleting saved outputs.
+            # Reuse that result when restoring its raw source afterwards.
+            signed, detection, prepared = source_check
+        elif check_bright_pixels:
+            detection = detect_bright_pixels_in_bands(signed)
+            prepared = self._offer_bright_pixel_removal(
+                signed, detection=detection, context="SDB image", preview_image=img
+            )
+            if prepared is None:
+                return False
+
         self._source_raw_image = np.array(img, copy=True)
-        self.raw_image = np.array(img, copy=True)
+        self._working_source_raw_image = prepared.astype(img.dtype, copy=True)
+        self.raw_image = np.array(self._working_source_raw_image, copy=True)
+        self._source_bright_pixel_mask = None if detection is None else detection.mask
+        self._raw_bright_pixel_mask = self._source_bright_pixel_mask
+        self._source_bright_pixel_threshold = None if detection is None else detection.threshold
+        self._bright_pixel_source_checked = check_bright_pixels or source_check is not None
+        self._source_bright_pixels_smoothed = prepared is not signed
         self.processed_image = None
         self._processed_image_saved = False
         self.current_file = path
+        self._set_source_bright_pixel_status()
         self.view_mode_var.set("source")
 
-        self.image_canvas.set_image(img)
+        self.image_canvas.set_image(self.raw_image)
         self.image_canvas.enable_roi(True)
         self._set_default_roi()
         self._update_zoom_label()
         self._update_processing_controls()
         self._set_sdb_parameters_enabled(True)
         self._update_image_status()
+        return True
 
     # ── Open Raw ──
     def _saved_crop_for_path(self, path):
@@ -1132,11 +1235,24 @@ class Step1Frame(SidebarStepFrame):
 
     def _load_saved_crop(self, image, path):
         """Display a completed crop; load its raw source only if Undo is used."""
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
+        original = np.array(image, copy=True)
+        prepared = self._offer_bright_pixel_removal(original, context="saved crop")
+        if prepared is None:
+            return False
+        corrected = prepared is not original
         self.raw_image = None
         self._source_raw_image = None
+        self._working_source_raw_image = None
+        self._source_bright_pixel_mask = None
+        self._raw_bright_pixel_mask = None
+        self._source_bright_pixel_threshold = None
+        self._bright_pixel_source_checked = False
+        self._source_bright_pixels_smoothed = False
         self._source_roi = None
-        self.processed_image = np.array(image, copy=True)
-        self._processed_image_saved = True
+        self.processed_image = np.array(prepared, copy=True)
+        self._processed_image_saved = not corrected
         self.current_file = path
         self.view_mode_var.set("target")
         self.image_canvas.enable_roi(False)
@@ -1146,6 +1262,9 @@ class Step1Frame(SidebarStepFrame):
         self._update_zoom_label()
         self._update_processing_controls()
         self._update_image_status()
+        if corrected:
+            return self._save_processed_image()
+        return True
 
     def _open_raw(self, path=None, *, show_saved=True):
         """Open a `.sdb` raw file and display it.
@@ -1154,6 +1273,8 @@ class Step1Frame(SidebarStepFrame):
             path: Optional explicit file path. When omitted, shows file picker.
             show_saved: Prefer a saved crop when the image is already complete.
         """
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         if path is None:
             path = filedialog.askopenfilename(
                 title="Select SDB raw OCT file",
@@ -1181,8 +1302,7 @@ class Step1Frame(SidebarStepFrame):
                 messagebox.showerror("Error reading cropped image", str(exc))
                 return
             if saved_crop is not None:
-                self._load_saved_crop(saved_crop, path)
-                return
+                return self._load_saved_crop(saved_crop, path)
 
         # Re-apply before opening so current form values are always used.
         if not self._apply_import_params(skip_reload=True):
@@ -1194,7 +1314,7 @@ class Step1Frame(SidebarStepFrame):
             messagebox.showerror("Error reading file", str(exc))
             return
 
-        self._load_image(img, path)
+        return self._load_image(img, path)
 
     def _browse_sdb_dir(self):
         """Prompt for a parent folder and recursively discover SDB folders."""
@@ -1214,6 +1334,8 @@ class Step1Frame(SidebarStepFrame):
 
     def refresh_sdb_list(self, preview_first=False):
         """Recursively scan the selected parent and rebuild the work queue."""
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         previous_directory = self._active_sdb_directory
         self._active_sdb_directory = None
         self._sdb_directory_files.clear()
@@ -1699,6 +1821,8 @@ class Step1Frame(SidebarStepFrame):
             w: Width in pixels.
             h: Height in pixels.
         """
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         roi = self._clamp_source_roi(x, y, w, h)
         if roi is None:
             return
@@ -1816,19 +1940,212 @@ class Step1Frame(SidebarStepFrame):
             scale_image(self.raw_image, sx=CROP_SCALE_X, sy=CROP_SCALE_Y)
         )
 
-    def _build_processed_target_image(self):
+    def _build_processed_target_image(self, *, cropped=None):
         """Build the final cropped/scaled target from the shared source ROI."""
         if self.raw_image is None or self._source_roi is None:
             return None
-        x, y, w, h = self._source_roi
-        cropped = self.raw_image[y:y + h, x:x + w].copy()
+        if cropped is None:
+            x, y, w, h = self._source_roi
+            cropped = self.raw_image[y:y + h, x:x + w].copy()
         target = scale_image(cropped, sx=CROP_SCALE_X, sy=CROP_SCALE_Y)
         if target.dtype != np.int16:
             target = target.astype(np.int16, copy=False)
         return np.ascontiguousarray(target)
 
+    def _set_bright_pixel_status(self, message):
+        """Keep the last histogram result visible beside the crop controls."""
+        status = self.__dict__.get("bright_pixel_status_var")
+        if status is not None:
+            try:
+                status.set(message)
+            except tk.TclError:
+                pass  # Closing the app also cancels a pending canvas notice.
+
+    def _dismiss_bright_pixel_notice(self):
+        """Resolve a pending action before removing its in-canvas notice."""
+        decision = self.__dict__.get("_bright_pixel_decision")
+        if decision is not None:
+            try:
+                if decision.get() == -1:
+                    decision.set(2)
+            except tk.TclError:
+                pass
+        notice = self.__dict__.get("_bright_pixel_notice")
+        self._bright_pixel_notice = None
+        if notice is not None:
+            try:
+                notice.destroy()
+            except tk.TclError:
+                pass
+
+    def _ask_bright_pixel_action(self, detection, image, *, context="crop"):
+        """Get consent from an embedded canvas notice without a window or grab.
+
+        Only this Step 1 workspace pauses while the Tk event loop continues.
+        The pending image is a temporary preview until the caller commits it.
+        """
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return None
+        if self.__dict__.get("tk") is None:
+            return None
+
+        self._dismiss_crop_notification()
+        canvas = self.image_canvas
+        old_image = canvas.get_image()
+        old_zoom = canvas.get_zoom()
+        old_roi = canvas.get_roi()
+        old_scroll = (canvas.canvas.xview()[0], canvas.canvas.yview()[0])
+        old_syncing = self.__dict__.get("_syncing_view_roi", False)
+        old_focus = self.focus_get()
+        choice = tk.IntVar(master=self, value=-1)
+        self._bright_pixel_decision = choice
+        self._bright_pixel_notice_pending = True
+        self._syncing_view_roi = True
+        guarded = []
+        bindings = []
+        guard_tag = f"AIDaSBrightPixels_{id(self)}"
+        binding_owner = self._root()
+        canvas_unmap_binding = None
+        outcome = None
+
+        def resolve(value):
+            try:
+                if choice.get() == -1:
+                    choice.set(2 if value is None else int(bool(value)))
+            except tk.TclError:
+                pass
+
+        try:
+            # Prepend a temporary tag to existing workspace controls. Notice
+            # buttons are created afterwards and remain active; other steps
+            # and the application menu keep their ordinary bindings.
+            for sequence in (
+                "<ButtonPress>", "<ButtonRelease>", "<KeyPress>",
+                "<KeyRelease>", "<MouseWheel>", "<<ListboxSelect>>",
+            ):
+                binding = self.bind_class(guard_tag, sequence, lambda _event: "break")
+                bindings.append((sequence, binding))
+            remaining = list(self.winfo_children())
+            while remaining:
+                widget = remaining.pop()
+                remaining.extend(widget.winfo_children())
+                tags = widget.bindtags()
+                guarded.append((widget, tags))
+                widget.bindtags((guard_tag, *tags))
+
+            canvas.set_image(image)
+            canvas_unmap_binding = canvas.bind(
+                "<Unmap>", lambda _event: resolve(None), add="+"
+            )
+            notice = BrightPixelNotice(
+                canvas.canvas, count=detection.count, context=context, on_decision=resolve
+            )
+            self._bright_pixel_notice = notice
+            notice.place(x=0, y=0, anchor="nw", relwidth=1.0)
+            notice.lift()
+            notice.bind("<Unmap>", lambda _event: resolve(None), add="+")
+            notice.focus_default()
+            self.wait_variable(choice)
+            outcome = {0: False, 1: True, 2: None}.get(choice.get())
+        except tk.TclError:
+            # A notice or its parent may be destroyed while awaiting a click.
+            outcome = None
+        finally:
+            self._dismiss_bright_pixel_notice()
+            self._bright_pixel_decision = None
+            if canvas_unmap_binding:
+                try:
+                    canvas.unbind("<Unmap>", canvas_unmap_binding)
+                except tk.TclError:
+                    pass
+            for widget, tags in guarded:
+                try:
+                    widget.bindtags(tags)
+                except tk.TclError:
+                    pass
+            for sequence, binding in bindings:
+                try:
+                    binding_owner.unbind_class(guard_tag, sequence)
+                    # bind_class registers callbacks on the Tk root. Removing
+                    # them through this frame leaves stale root callbacks and
+                    # can fail when the frame is destroyed during the choice.
+                    if binding in (binding_owner.__dict__.get("_tclCommands") or ()):
+                        binding_owner.deletecommand(binding)
+                except tk.TclError:
+                    pass
+            try:
+                if canvas.winfo_exists():
+                    canvas._zoom = old_zoom
+                    canvas.set_image(old_image)
+                    if old_image is not None:
+                        canvas.set_zoom(old_zoom)
+                        canvas.set_roi(old_roi)
+                        canvas.canvas.xview_moveto(old_scroll[0])
+                        canvas.canvas.yview_moveto(old_scroll[1])
+                        canvas._render_visible_image()
+                    self._update_zoom_label()
+                    self._update_image_status()
+                if old_focus is not None and old_focus.winfo_exists():
+                    old_focus.focus_set()
+            except tk.TclError:
+                pass
+            self._syncing_view_roi = old_syncing
+            self._bright_pixel_notice_pending = False
+        return outcome
+
+    def _set_source_bright_pixel_status(self, crop_mask=None):
+        """Keep the source-level decision visible through ROI and width edits."""
+        source_mask = self.__dict__.get("_source_bright_pixel_mask")
+        if source_mask is None:
+            self._set_bright_pixel_status("Bright pixels will be checked before cropping.")
+            return
+        count = int(np.count_nonzero(source_mask))
+        if not count:
+            self._set_bright_pixel_status("SDB histogram checked: no bright outliers found.")
+        elif self.__dict__.get("_source_bright_pixels_smoothed", False):
+            self._set_bright_pixel_status(
+                f"SDB check: smoothed {count:,} bright pixels; other values unchanged."
+            )
+        else:
+            location = "" if crop_mask is None else f" ({np.count_nonzero(crop_mask):,} in this crop)"
+            self._set_bright_pixel_status(f"SDB check: kept {count:,} bright pixels{location}.")
+
+    def _offer_bright_pixel_removal(
+        self, cropped, *, detection=None, context="crop", preview_image=None
+    ):
+        """Offer masked smoothing of histogram outliers in the signed crop.
+
+        Return None when the user cancels. Source buffers and the SDB file
+        stay untouched; only the copy destined for the saved crop is corrected.
+        """
+        if detection is None:
+            detection = detect_bright_pixels_in_bands(cropped)
+        if not detection.count:
+            self._set_bright_pixel_status(f"Histogram checked: no bright outliers found in this {context}.")
+            return cropped
+
+        self._set_bright_pixel_status(f"Histogram found {detection.count:,} bright pixel candidates.")
+        decision = self._ask_bright_pixel_action(
+            detection,
+            cropped if preview_image is None else preview_image,
+            context=context,
+        )
+        if decision is None:
+            self._set_bright_pixel_status("Bright pixel check cancelled; current image kept.")
+            return None
+        if decision:
+            corrected = smooth_bright_pixels(cropped, detection.mask)
+            self._set_bright_pixel_status(
+                f"Smoothed {detection.count:,} bright pixels; all other values unchanged."
+            )
+            return corrected
+        self._set_bright_pixel_status(f"Kept {detection.count:,} bright pixels unchanged.")
+        return cropped
+
     def _on_view_mode_changed(self):
         """Switch editable source/target work views or show the final target."""
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         mode = self.view_mode_var.get()
         if self.processed_image is not None and mode != "target":
             self.view_mode_var.set("target")
@@ -1921,6 +2238,8 @@ class Step1Frame(SidebarStepFrame):
         Returns:
             bool: True once the crop is saved; False on processing or save failure.
         """
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         if self.raw_image is None:
             messagebox.showwarning("No image", "Open a raw file first.")
             return False
@@ -1930,7 +2249,28 @@ class Step1Frame(SidebarStepFrame):
             messagebox.showwarning("No ROI", "Select a crop region first.")
             return False
 
-        self.processed_image = self._build_processed_target_image()
+        x, y, w, h = roi
+        # Analyze output uses signed 16-bit samples. Check that representation
+        # before replication: unsigned raw values can wrap into negative tissue
+        # intensities while the corrupt bright pixels remain strongly positive.
+        cropped = self.raw_image[y:y + h, x:x + w].astype(np.int16, copy=True)
+        known_mask = self.__dict__.get("_raw_bright_pixel_mask")
+        crop_mask = None if known_mask is None else known_mask[y:y + h, x:x + w]
+        if crop_mask is not None:
+            detection = detect_bright_pixels_in_bands(cropped)
+            new_mask = detection.mask & ~crop_mask
+            new_mask.setflags(write=False)
+            new_detection = BrightPixelDetection(new_mask, detection.threshold)
+            cropped = self._offer_bright_pixel_removal(cropped, detection=new_detection)
+            if cropped is not None and not new_detection.count:
+                # A file-level Yes or No already covered these candidates.
+                self._set_source_bright_pixel_status(crop_mask)
+        else:
+            cropped = self._offer_bright_pixel_removal(cropped)
+        if cropped is None:
+            return False
+
+        self.processed_image = self._build_processed_target_image(cropped=cropped)
         if self.processed_image is None:
             messagebox.showwarning("No ROI", "Select a crop region first.")
             return False
@@ -1968,9 +2308,12 @@ class Step1Frame(SidebarStepFrame):
 
     def _reset(self):
         """Delete the saved crop and restore the source image for recropping."""
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
         if self.processed_image is None or not self.current_file:
             return False
         original = self.raw_image
+        source_check = None
         if original is None:
             if not self._apply_import_params(skip_reload=True):
                 return False
@@ -1979,6 +2322,14 @@ class Step1Frame(SidebarStepFrame):
             except (OSError, ValueError, RuntimeError) as exc:
                 messagebox.showerror("Error reading source image", str(exc))
                 return False
+            signed = original.astype(np.int16, copy=True)
+            detection = detect_bright_pixels_in_bands(signed)
+            prepared = self._offer_bright_pixel_removal(
+                signed, detection=detection, context="SDB image", preview_image=original
+            )
+            if prepared is None:
+                return False
+            source_check = (signed, detection, prepared)
 
         directory = self._source_output_directory()
         if directory is None:
@@ -2001,7 +2352,7 @@ class Step1Frame(SidebarStepFrame):
 
         self._invalidate_saved_crop(self.current_file)
         if self.raw_image is None:
-            self._load_image(original, self.current_file)
+            self._load_image(original, self.current_file, source_check=source_check)
         else:
             self._restore_raw_view()
         self._active_sdb_directory = directory
@@ -2014,6 +2365,7 @@ class Step1Frame(SidebarStepFrame):
         """Restore the loaded raw image without changing its import source."""
         self.processed_image = None
         self._processed_image_saved = False
+        self._set_source_bright_pixel_status()
         self.view_mode_var.set("source")
         self.image_canvas.set_image(self.raw_image)
         self.image_canvas.enable_roi(True)

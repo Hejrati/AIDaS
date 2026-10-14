@@ -130,9 +130,6 @@ class ActionButtonConventionTests(unittest.TestCase):
         self.assertIn('action in {"cancel", "close"}', source)
         self.assertIn("load_color_close_icon(owner, size=size)", source)
 
-        settings_source = inspect.getsource(SettingsDialog.__init__)
-        self.assertIn("load_color_close_ctk_icon(self)", settings_source)
-
     def test_ctk_buttons_default_to_left_compound_when_they_have_icons(self):
         source = inspect.getsource(AppButton.__init__)
         self.assertIn('kwargs.setdefault("compound", "left")', source)
@@ -341,7 +338,8 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn('variant="success"', source)
         self.assertIn('tint=COLOR_PAIRS["on_primary"]', source)
         self.assertEqual(source.count("load_ctk_image("), 1)
-        self.assertIn("load_color_close_ctk_icon(self, size=20)", source)
+        self.assertNotIn("load_color_close_ctk_icon", source)
+        self.assertIn('variant="danger"', source)
         self.assertNotIn("btn_cancel = action_button(", source)
         self.assertNotIn("btn_skip = action_button(", source)
         self.assertNotIn("btn_set = action_button(", source)
@@ -523,8 +521,9 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertNotIn('f"Timeout:', source)
         self.assertNotIn('"Progress and logs update', source)
         self.assertIn('text="\\u25a0  Stop"', source)
-        self.assertIn("self.close_icon = load_color_close_icon(self)", source)
-        self.assertIn("image=self.close_icon", source)
+        self.assertNotIn("load_color_close_icon", source)
+        self.assertNotIn("image=self.close_icon", source)
+        self.assertIn('variant="danger"', source)
         self.assertIn('text="Close"', source)
         self.assertIn('style="AIDaS.DangerAction.TButton"', source)
 

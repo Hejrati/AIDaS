@@ -244,11 +244,26 @@ def action_button(
     icon_size=ACTION_ICON_SIZE,
     **button_options,
 ):
-    """Create a standard text-and-icon ttk action button.
+    """Create an action button, using the shared red style for dismissal.
 
     Geometry and interaction states come from the global ``TButton`` style;
     this helper standardizes semantic icons, their size, and tooltip behavior.
     """
+
+    if action in {"cancel", "close"}:
+        # A local import keeps the shared helpers usable by components.py.
+        from aidas.ui.components import AppButton
+
+        options = dict(button_options)
+        options.pop("image", None)
+        options.pop("compound", None)
+        options.pop("style", None)
+        options.setdefault("width", 104)
+        button = AppButton(parent, text=text or action.capitalize(), command=command,
+                           variant="danger", **options)
+        if tooltip:
+            HoverToolTip(button, tooltip)
+        return button
 
     icon = load_action_icon(owner, action, size=icon_size)
     options = {
@@ -673,9 +688,10 @@ class HoverToolTip:
         "<<AIDaSThemeChanged>>",
     )
 
-    def __init__(self, widget, text):
+    def __init__(self, widget, text, *, wraplength=320):
         self.widget = widget
         self._text = str(text or "")
+        self._wraplength = wraplength
         self.tipwindow = None
         self._show_after_id = None
         self._pointer_after_id = None
@@ -784,7 +800,7 @@ class HoverToolTip:
             text=self.text,
             justify="left",
             anchor="w",
-            wraplength=320,
+            wraplength=self._wraplength,
             fg_color="transparent",
             text_color=COLOR_PAIRS["text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
@@ -1219,6 +1235,7 @@ class CollapsibleSection(ctk.CTkFrame):
     """A rounded, accessible sidebar card with a collapsible body."""
 
     HEADER_HEIGHT = 36
+    INDICATOR_SIZE = 12
 
     def __init__(self, parent, title, *, padding=3, expanded=True):
         super().__init__(
@@ -1230,31 +1247,37 @@ class CollapsibleSection(ctk.CTkFrame):
         )
         self.title = title
         self.expanded = bool(expanded)
+        self._indicator_images = {}
+        self._indicator_palette = None
         self.header = ctk.CTkButton(
             self,
             text="",
             command=self.toggle,
             height=self.HEADER_HEIGHT,
-            corner_radius=SHAPES.corner_radius_md,
+            corner_radius=SHAPES.corner_radius_sm,
             border_width=0,
             fg_color="transparent",
             hover_color=COLOR_PAIRS["primary_soft"],
             text_color=COLOR_PAIRS["text"],
             anchor="w",
+            compound="left",
+            border_spacing=2,
             font=ctk.CTkFont(
                 family=TYPOGRAPHY.family,
                 size=TYPOGRAPHY.body_size,
                 weight=TYPOGRAPHY.semibold_weight,
             ),
         )
-        self.header.pack(fill="x", padx=2, pady=2)
+        # A transparent CTk child still has an opaque canvas background.
+        # Keep it inside the card's curved outline instead of covering it.
+        self.header.pack(fill="x", padx=8, pady=2)
 
         self._body_container = ctk.CTkFrame(
             self,
             fg_color="transparent",
             corner_radius=0,
         )
-        self._body_container.pack(fill="both", expand=True, padx=2, pady=(0, 4))
+        self._body_container.pack(fill="both", expand=True, padx=2, pady=(0, 8))
         self.body = ctk.CTkFrame(
             self._body_container,
             fg_color="transparent",
@@ -1266,15 +1289,42 @@ class CollapsibleSection(ctk.CTkFrame):
     def toggle(self):
         self.expanded = not self.expanded
         if self.expanded:
-            self._body_container.pack(fill="both", expand=True, padx=2, pady=(0, 4))
+            self._body_container.pack(fill="both", expand=True, padx=2, pady=(0, 8))
         else:
             self._body_container.pack_forget()
         self._sync_header()
         self._queue_sidebar_refresh()
 
+    @staticmethod
+    def _indicator_image(expanded, color):
+        """Draw a balanced triangle independently of the header's font."""
+        scale = 4
+        # An odd source size puts the tip on the exact center pixel, keeping
+        # both slopes symmetric when CTk resizes the icon for display scaling.
+        extent = CollapsibleSection.INDICATOR_SIZE * scale + 1
+        image = Image.new("RGBA", (extent, extent))
+        ImageDraw.Draw(image).polygon(
+            [(x * scale, y * scale) for x, y in ((2, 3), (10, 3), (6, 9))],
+            fill=color,
+        )
+        return image if expanded else image.transpose(Image.Transpose.ROTATE_90)
+
     def _sync_header(self):
-        marker = "▾" if self.expanded else "▸"
-        self.header.configure(text=f"  {marker}   {self.title}")
+        palette = tuple(COLOR_PAIRS["text"])
+        if palette != self._indicator_palette:
+            self._indicator_images = {
+                expanded: ctk.CTkImage(
+                    light_image=self._indicator_image(expanded, palette[0]),
+                    dark_image=self._indicator_image(expanded, palette[1]),
+                    size=(self.INDICATOR_SIZE, self.INDICATOR_SIZE),
+                )
+                for expanded in (True, False)
+            }
+            self._indicator_palette = palette
+        self.header.configure(text=self.title, image=self._indicator_images[self.expanded])
+
+    def _apply_aidas_theme(self):
+        self._sync_header()
 
     def _queue_sidebar_refresh(self):
         widget = self.master

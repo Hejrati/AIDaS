@@ -40,7 +40,8 @@ from PIL import Image, ImageDraw, ImageTk
 
 from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
-from aidas.ui.components import AppButton
+from aidas.ui.annotation_guide import AnnotationGuide
+from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS, SHAPES, TYPOGRAPHY
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
@@ -53,7 +54,6 @@ from aidas.utils.ui_utils import (
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
-    load_color_close_ctk_icon,
     load_ctk_image,
 )
 
@@ -558,15 +558,11 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.summary_label.bind("<Configure>", self._on_summary_label_configure, add="+")
         action_row = ttk.Frame(run_box)
         action_row.pack(side="bottom", fill="x")
-        self.next_button = action_button(
+        self.next_button = AppRunButton(
             action_row,
-            self,
-            "Continue",
-            self._run_selected,
-            "next",
-            tooltip="Continue with the selected folders.",
-            style="AIDaS.PrimaryAction.TButton",
+            command=self._run_selected,
         )
+        HoverToolTip(self.next_button, "Run segmentation for the selected folders.")
         self.next_button.pack(side="right")
         self.next_button.state(["disabled"])
         action_button(
@@ -860,6 +856,7 @@ class Step2Frame(SidebarStepFrame):
         self._updating_fovea_entry = False  # Flag to avoid feedback loop when updating entry widget
         self._syncing_boundary_selection = False  # Flag to avoid feedback loop when selecting boundaries
         self._annotation_tutorial_dismissed = False
+        self._annotation_tutorial_ready = False
         self._annotation_tutorial_after_id = None
         self._annotation_tutorial_canvas = None
         self._annotation_tutorial_canvas_bind_id = None
@@ -936,90 +933,22 @@ class Step2Frame(SidebarStepFrame):
     #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
     def _build_annotation_tutorial(self):
-        """Build a shallow information banner across the image work area."""
-        card = ctk.CTkFrame(
-            self.canvas_area,
-            corner_radius=SHAPES.corner_radius_sm,
-            border_width=SHAPES.border_width,
-            border_color=COLOR_PAIRS["border"],
+        """Build the help banner inside the active drawing viewport."""
+        card = AnnotationGuide(
+            self.image_canvas.canvas, dismiss=self._dismiss_annotation_tutorial,
             bg_color=self.image_canvas.canvas.cget("background"),
-            fg_color=COLOR_PAIRS["surface"],
         )
-        card.grid_columnconfigure(0, weight=1)
         card.bind("<Configure>", self._queue_annotation_tutorial, add="+")
         self.annotation_tutorial = card
-        header = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
-        header.grid(row=0, column=0, sticky="ew", padx=LAYOUT.space_sm, pady=(6, 4))
-        header.grid_columnconfigure(1, weight=1)
-        self.annotation_tutorial_header = header
-        self.annotation_tutorial_info_icon = tk.Canvas(header, highlightthickness=0)
-        self.annotation_tutorial_info_icon.grid(row=0, column=0, padx=(0, LAYOUT.space_sm))
-        self.annotation_tutorial_info_icon._apply_aidas_theme = self._draw_annotation_tutorial_info_icon
-        self._draw_annotation_tutorial_info_icon()
-        self.annotation_tutorial_title = ctk.CTkLabel(
-            header, text="Annotation quick guide", anchor="w", height=28,
-            text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size, weight="bold"),
-        )
-        self.annotation_tutorial_title.grid(row=0, column=1, sticky="ew", padx=(0, LAYOUT.space_sm))
-        buttons = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
-        buttons.grid(row=2, column=0, sticky="ew", padx=LAYOUT.space_sm, pady=(4, 6))
-        buttons.grid_columnconfigure(0, weight=1)
-        self.annotation_tutorial_actions = buttons
-        self.annotation_tutorial_opt_out_btn = AppButton(
-            buttons, text="Do not show again", width=160, height=28,
-            command=lambda: self._dismiss_annotation_tutorial(do_not_show_again=True),
-        )
-        self.annotation_tutorial_opt_out_btn.grid(row=0, column=1, sticky="e")
-        self.annotation_tutorial_ok_btn = AppButton(
-            buttons, text="OK", variant="primary", width=72, height=28,
-            command=self._dismiss_annotation_tutorial,
-        )
-        self.annotation_tutorial_ok_btn.grid(row=0, column=2, sticky="e", padx=(LAYOUT.space_sm, 0))
-        instructions = ttk.Frame(card, style="AIDaS.Section.TFrame")
-        instructions.grid(row=1, column=0, sticky="ew", padx=LAYOUT.space_md, pady=(0, LAYOUT.space_xs))
-        self.annotation_tutorial_instruction_grid = instructions
-        self.annotation_tutorial_labels = {}
-        self.annotation_tutorial_heading_labels = {}
-        for column, (action, instruction) in enumerate((
-            ("Draw", "Click points. Double-click to finish."),
-            ("Edit", "Select a completed line. Drag to edit."),
-            ("Add point", "Shift-click a handle, then drag."),
-            ("Remove point", "Alt-click a handle (at least 3 remain)."),
-        )):
-            instructions.columnconfigure(column, weight=1, uniform="annotation_tutorial_items")
-            heading = ttk.Label(
-                instructions, text=action, anchor="nw", padding=0,
-                font=(TYPOGRAPHY.family, TYPOGRAPHY.caption_size, "bold"),
-            )
-            gap = (0, LAYOUT.space_sm) if column < 3 else 0
-            heading.grid(row=0, column=column, sticky="ew", padx=gap, pady=(0, 2))
-            label = ttk.Label(
-                instructions, text=instruction, padding=0,
-                font=(TYPOGRAPHY.family, TYPOGRAPHY.caption_size),
-                justify="left", anchor="nw", width=1, wraplength=220,
-            )
-            label.grid(row=1, column=column, sticky="new", padx=gap)
-            label.bind(
-                "<Configure>",
-                lambda event, body=label: body.configure(wraplength=max(1, event.width)),
-                add="+",
-            )
-            self.annotation_tutorial_heading_labels[action] = heading
-            self.annotation_tutorial_labels[action] = label
-
-    def _draw_annotation_tutorial_info_icon(self):
-        """Draw a circled i using the current palette and display scale."""
-        icon = self.annotation_tutorial_info_icon
-        scale = self._get_widget_scaling()
-        icon.configure(width=round(24 * scale), height=round(24 * scale), background=COLORS.surface)
-        icon.delete("all")
-        icon.create_oval(*(value * scale for value in (2, 2, 22, 22)),
-                         outline=COLORS.primary, width=max(1, round(1.5 * scale)))
-        icon.create_oval(*(value * scale for value in (11, 6, 13, 8)),
-                         fill=COLORS.primary, outline="")
-        icon.create_rectangle(*(value * scale for value in (11, 10, 13, 18)),
-                              fill=COLORS.primary, outline="")
+        self.annotation_tutorial_header = card.header
+        self.annotation_tutorial_info_icon = card.info_icon
+        self.annotation_tutorial_title = card.title
+        self.annotation_tutorial_actions = card.actions
+        self.annotation_tutorial_opt_out_btn = card.opt_out_button
+        self.annotation_tutorial_ok_btn = card.ok_button
+        self.annotation_tutorial_instruction_grid = card.instruction_grid
+        self.annotation_tutorial_labels = card.labels
+        self.annotation_tutorial_heading_labels = card.heading_labels
 
     def _queue_annotation_tutorial(self, _event=None):
         """Wait for canvas layout before deciding whether to show the guide."""
@@ -1074,6 +1003,8 @@ class Step2Frame(SidebarStepFrame):
         preferences = getattr(self, "preferences", None)
         if (
             getattr(self, "_annotation_tutorial_dismissed", False)
+            or not getattr(self, "_annotation_tutorial_ready", False)
+            or getattr(self, "_segmenter_running", False)
             or (preferences is not None and not preferences.get("show_step2_annotation_tutorial", True))
             or getattr(self, "image_data", None) is None
             or getattr(self, "batch_segmentation_panel", None) is not None
@@ -1090,31 +1021,31 @@ class Step2Frame(SidebarStepFrame):
                 self._hide_annotation_tutorial()
                 return
             card = self.annotation_tutorial
-            if card is None or not card.winfo_exists():
+            if card is None or not card.winfo_exists() or card.master is not canvas:
+                if card is not None:
+                    try:
+                        card.destroy()
+                    except tk.TclError:
+                        pass
                 self._build_annotation_tutorial()
                 card = self.annotation_tutorial
             scale = self._get_widget_scaling()
-            self._draw_annotation_tutorial_info_icon()
-            viewport_left, viewport_top, viewport_width, viewport_height = self._annotation_tutorial_viewport_bounds()
-            inset = round(LAYOUT.space_sm * scale)
-            width = max(1, viewport_width - inset * 2)
-            # The first narrow layout can be much taller than the guide at its
-            # final viewport width. Let wrapping settle before checking height.
+            card.redraw_illustrations()
+            width = canvas.winfo_width()
+            viewport_height = canvas.winfo_height()
+            card.configure_layout(width / scale)
+            # Let text wrapping settle at the full viewport width before
+            # checking whether a short canvas can contain the banner.
             layout_ready = (
                 abs(card.winfo_width() - width) <= 1
                 and abs(card.winfo_height() - card.winfo_reqheight()) <= 1
                 and all(abs(label.winfo_height() - label.winfo_reqheight()) <= 1
                         for label in self.annotation_tutorial_labels.values())
             )
-            if layout_ready and card.winfo_height() > viewport_height - inset * 2:
+            if layout_ready and card.winfo_height() > viewport_height:
                 self._hide_annotation_tutorial()
                 return
-            left = viewport_left + inset - area.winfo_rootx()
-            top = viewport_top + inset - area.winfo_rooty()
-            card.place(
-                relx=left / area.winfo_width(), relwidth=width / area.winfo_width(),
-                y=top / scale, anchor="nw",
-            )
+            card.place(x=0, y=0, anchor="nw", relwidth=1.0)
             card.lift()
         except tk.TclError:
             pass
@@ -1824,14 +1755,11 @@ class Step2Frame(SidebarStepFrame):
         def on_cancel():
             next_var.set("cancel")
             
-        cancel_icon = load_color_close_ctk_icon(self, size=20)
         btn_cancel = AppButton(
             actions_frame,
             text="Exit",
-            variant="secondary",
+            variant="danger",
             command=on_cancel,
-            image=cancel_icon,
-            compound="left",
         )
         HoverToolTip(btn_cancel, "Exit batch segmentation.")
         btn_cancel.pack(side="right", padx=4, pady=4)
@@ -2206,6 +2134,7 @@ class Step2Frame(SidebarStepFrame):
         # Any explicitly rendered image supersedes a crop that was queued
         # while this page was hidden.
         self._pending_external_image = None
+        self._annotation_tutorial_ready = False
         self.current_file = path
         self.image_data = image
         self._last_status_mouse_sample = None
@@ -2243,6 +2172,7 @@ class Step2Frame(SidebarStepFrame):
         self._show_single_image_canvas()
         self.current_file = None
         self.image_data = None
+        self._annotation_tutorial_ready = False
         self._last_status_mouse_sample = None
         self.active_boundary = None
         self.boundary_traces = {}
@@ -2349,6 +2279,7 @@ class Step2Frame(SidebarStepFrame):
         return {
             "input": self.current_file,
             "image": self.image_data,
+            "annotation_tutorial_ready": getattr(self, "_annotation_tutorial_ready", False),
             **self._annotation_snapshot(),
             "template": self._input_analyze_template,
             "source_was_8bit": getattr(self, "_source_was_8bit", False),
@@ -2377,6 +2308,10 @@ class Step2Frame(SidebarStepFrame):
         self.image_data = state.get("image")
         self._last_status_mouse_sample = None
         self.boundary_traces = state.setdefault("traces", {})
+        self._annotation_tutorial_ready = bool(state.get(
+            "annotation_tutorial_ready", any(name in self.boundary_traces for name in BOUNDARY_NAMES),
+        ))
+        state["annotation_tutorial_ready"] = self._annotation_tutorial_ready
         self.boundary_order = state.setdefault("order", [])
         self.fovea_x = state.get("fovea_x")
         if self.fovea_x is None and FOVEA_BOUNDARY_NAME in self.boundary_traces:
@@ -4462,6 +4397,10 @@ class Step2Frame(SidebarStepFrame):
             status_message: Optional status text to display to user.
         """
         self._segmenter_running = bool(running)
+        if self._segmenter_running:
+            self._hide_annotation_tutorial()
+        else:
+            self._queue_annotation_tutorial()
         if not self._segmenter_running:
             self._active_ai_core_limit = 0
             self._active_ai_using_gpu = False
@@ -4720,6 +4659,7 @@ class Step2Frame(SidebarStepFrame):
         if FOVEA_BOUNDARY_NAME not in traces:
             traces[FOVEA_BOUNDARY_NAME] = self._vertical_line_trace(fovea_x, original_state["image"].shape[0])
         state["traces"] = traces
+        state["annotation_tutorial_ready"] = True
         state["order"] = list(dict.fromkeys(
             [name for name in state.get("order", []) if name in traces]
             + [name for name in BOUNDARY_NAMES if name in traces] + [FOVEA_BOUNDARY_NAME]
@@ -5137,7 +5077,10 @@ class Step2Frame(SidebarStepFrame):
             input_path = item["input"]
             input_name = self._batch_result_input_title(input_path)
             tab_text = self._batch_result_tab_text(input_name or f"Result {index}")
-            frame = notebook.add(text=tab_text)
+            frame = notebook.add(
+                text=tab_text,
+                tooltip=os.path.abspath(os.fspath(input_path)),
+            )
 
             canvas = ImageCanvas(
                 frame,
@@ -5194,6 +5137,7 @@ class Step2Frame(SidebarStepFrame):
                     "input": input_path,
                     "image": data,
                     "traces": traces,
+                    "annotation_tutorial_ready": True,
                     "order": order,
                     "fovea_x": None if fovea_x is None else int(fovea_x),
                     "template": _template,

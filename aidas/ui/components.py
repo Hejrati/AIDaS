@@ -7,7 +7,7 @@ import tkinter as tk
 from typing import Callable, Sequence
 
 import customtkinter as ctk
-from PIL import Image
+from PIL import Image, ImageDraw, ImageTk
 
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
 from aidas.utils.ui_utils import HoverToolTip, _tint_icon
@@ -215,6 +215,113 @@ class AppButton(ctk.CTkButton):
                 disabled = False
         self.configure(state="disabled" if disabled else "normal")
         return ()
+
+
+class AppRunButton(AppButton):
+    """The shared rounded blue Run action with a scalable play triangle."""
+
+    _aidas_preserve_corner_radius = True
+
+    def __init__(self, master, *, command, **kwargs):
+        def play_image(color):
+            scale = 4
+            image = Image.new("RGBA", (16 * scale, 16 * scale))
+            ImageDraw.Draw(image).polygon(
+                [(x * scale, y * scale) for x, y in ((4.5, 3), (12.5, 8), (4.5, 13))],
+                fill=color,
+            )
+            return image
+
+        icon = ctk.CTkImage(
+            light_image=play_image(COLOR_PAIRS["on_primary"][0]),
+            dark_image=play_image(COLOR_PAIRS["on_primary"][1]),
+            size=(CONTROLS.icon_size, CONTROLS.icon_size),
+        )
+        kwargs.setdefault("width", 104)
+        super().__init__(master, text="Run", variant="primary", command=command,
+                         image=icon, compound="left", **kwargs)
+
+
+class AppOptionMenu(ctk.CTkOptionMenu):
+    """A semantic option menu with a crisp, independently colored chevron."""
+
+    def __init__(self, master, **kwargs):
+        self._arrow_hovered = False
+        self._arrow_signature = None
+        self._arrow_photo = None
+        options = {
+            "fg_color": COLOR_PAIRS["button"],
+            "button_color": COLOR_PAIRS["primary"],
+            "button_hover_color": COLOR_PAIRS["primary_hover"],
+            "text_color": COLOR_PAIRS["text"],
+            "text_color_disabled": COLOR_PAIRS["disabled_text"],
+            "dropdown_fg_color": COLOR_PAIRS["surface_elevated"],
+            "dropdown_hover_color": COLOR_PAIRS["primary_soft"],
+            "dropdown_text_color": COLOR_PAIRS["text"],
+        }
+        options.update(kwargs)
+        super().__init__(master, **options)
+
+    @staticmethod
+    def _chevron_image(size: int, color: str) -> Image.Image:
+        """Supersample the stroke so it stays smooth at fractional DPI scales."""
+        supersampling = 4
+        image = Image.new("RGBA", (size * supersampling, size * supersampling))
+        draw = ImageDraw.Draw(image)
+        unit = size * supersampling / 16
+        points = [(x * unit, y * unit) for x, y in ((3.5, 6), (8, 10.5), (12.5, 6))]
+        stroke = max(1, round(1.8 * unit))
+        draw.line(points, fill=color, width=stroke, joint="curve")
+        radius = stroke / 2
+        for x, y in points:
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+        return image.resize((size, size), Image.Resampling.LANCZOS)
+
+    def _sync_arrow(self):
+        disabled = self._state == tk.DISABLED
+        hovering = self._arrow_hovered and self._hover and not disabled and bool(self._values)
+        if disabled:
+            background = COLOR_PAIRS["surface_subtle"]
+            foreground = self._text_color_disabled
+        else:
+            background = self._button_hover_color if hovering else self._button_color
+            foreground = COLOR_PAIRS["on_primary"]
+        color = self._apply_appearance_mode(foreground)
+        fill = self._apply_appearance_mode(background)
+        self._canvas.itemconfig("inner_parts_right", fill=fill, outline=fill)
+        # CTk uses the selected-value text color for its small font glyph;
+        # that dark foreground has poor contrast against the blue segment.
+        self._canvas.itemconfig("dropdown_arrow", state="hidden")
+        size = max(8, round(self._apply_widget_scaling(16)))
+        signature = (size, color)
+        if signature != self._arrow_signature:
+            self._arrow_photo = ImageTk.PhotoImage(self._chevron_image(size, color), master=self._canvas)
+            self._arrow_signature = signature
+        tag = "aidas_dropdown_arrow"
+        center = (
+            self._apply_widget_scaling(self._current_width - self._current_height / 2),
+            self._apply_widget_scaling(self._current_height / 2),
+        )
+        if self._canvas.find_withtag(tag):
+            self._canvas.coords(tag, *center)
+            self._canvas.itemconfig(tag, image=self._arrow_photo)
+        else:
+            self._canvas.create_image(*center, image=self._arrow_photo, tags=tag)
+        self._canvas.tag_raise(tag)
+
+    def _draw(self, no_color_updates=False):
+        super()._draw(no_color_updates)
+        self._sync_arrow()
+
+    def _on_enter(self, event=0):
+        self._arrow_hovered = True
+        super()._on_enter(event)
+        self._sync_arrow()
+
+    def _on_leave(self, event=0):
+        self._arrow_hovered = False
+        super()._on_leave(event)
+        self._sync_arrow()
 
 
 class AppSplitButton(ctk.CTkFrame):
@@ -528,7 +635,7 @@ class WorkflowHeader(ctk.CTkFrame):
             height=22,
             corner_radius=11,
             fg_color=COLOR_PAIRS["primary_soft"],
-            text_color=COLOR_PAIRS["primary"],
+            text_color=COLOR_PAIRS["version_badge_text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
         ).pack(side="left", padx=(8, 0))
         subtitle_row = ctk.CTkFrame(

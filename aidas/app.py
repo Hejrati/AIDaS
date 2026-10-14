@@ -36,6 +36,7 @@ from aidas.services.update_ui import UpdateController
 from aidas.ui.classic import build_classic_application_menu
 from aidas.ui.components import (
     AppButton,
+    AppOptionMenu,
     AppStatusBar,
     ProgressCircle,
     WorkflowHeader,
@@ -75,7 +76,6 @@ from aidas.utils.ui_utils import (
     HoverToolTip,
     action_button,
     apply_app_icon_to,
-    load_color_close_ctk_icon,
     resource_path,
 )
 
@@ -589,7 +589,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
 
         general = self._settings_section("General", row=1)
-        self.interface_menu = ctk.CTkOptionMenu(
+        self.interface_menu = AppOptionMenu(
             general,
             values=list(INTERFACE_MODES),
             command=self._interface_choice_changed,
@@ -606,7 +606,7 @@ class SettingsDialog(ctk.CTkToplevel):
         )
         self._labeled_control(general, 0, "Interface", self.interface_menu)
         self.interface_menu.set(normalize_interface_mode(interface_mode))
-        self.appearance_menu = ctk.CTkOptionMenu(
+        self.appearance_menu = AppOptionMenu(
             general,
             values=list(APPEARANCE_MODES),
             command=self._mark_dirty,
@@ -772,7 +772,7 @@ class SettingsDialog(ctk.CTkToplevel):
                     weight=TYPOGRAPHY.semibold_weight,
                 ),
             ).grid(row=0, column=0, columnspan=2, sticky="ew")
-            menu = ctk.CTkOptionMenu(
+            menu = AppOptionMenu(
                 role_frame,
                 variable=self._script_vars[role],
                 values=list(self._r_script_options(role)),
@@ -819,15 +819,14 @@ class SettingsDialog(ctk.CTkToplevel):
             anchor="w",
             text_color=COLOR_PAIRS["muted_text"],
         ).pack(side="left")
-        close_icon = load_color_close_ctk_icon(self)
-        AppButton(
+        self.close_button = AppButton(
             self.footer,
             text="Close",
-            variant="secondary",
+            variant="danger",
             command=self._close,
             width=104,
-            image=close_icon,
-        ).pack(side="right")
+        )
+        self.close_button.pack(side="right")
         AppButton(
             self.footer,
             text="Apply",
@@ -1103,13 +1102,14 @@ class SettingsDialog(ctk.CTkToplevel):
             textvariable=self.apply_status_var,
             style="AIDaS.Muted.TLabel",
         ).pack(side="left", fill="x", expand=True)
-        action_button(
+        self.close_button = AppButton(
             self.footer,
-            self,
-            "Close",
-            self._close,
-            "close",
-        ).pack(side="right")
+            text="Close",
+            variant="danger",
+            command=self._close,
+            width=104,
+        )
+        self.close_button.pack(side="right")
         action_button(
             self.footer,
             self,

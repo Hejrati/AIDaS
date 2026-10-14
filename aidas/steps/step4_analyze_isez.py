@@ -60,7 +60,7 @@ from aidas.core.config import (
     validate_step4_auto_detection_preferences,
 )
 from aidas.core.display import centered_position, work_area_bounds
-from aidas.ui.components import AppButton
+from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
@@ -72,7 +72,6 @@ from aidas.utils.ui_utils import (
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
-    load_color_close_ctk_icon,
     load_ctk_image,
 )
 
@@ -113,6 +112,7 @@ def _plot_palette() -> dict[str, str]:
         "grid": COLORS.border,
         "line": COLORS.text,
         "primary": COLORS.primary,
+        "primary_soft": COLORS.primary_soft,
         "success": COLORS.success,
         "success_soft": COLORS.success_soft,
         "warning": COLORS.warning,
@@ -225,6 +225,7 @@ class ISezResult:
     normalized_y: np.ndarray
     baseline_x: np.ndarray
     baseline_y: np.ndarray
+    manual_bounds: bool = False
 
 
 @dataclass
@@ -959,6 +960,38 @@ def rotated_rescaled_isez(profile: np.ndarray, start: int, end: int) -> dict[str
     }
 
 
+def _profile_selection_plot_data(
+    profile: np.ndarray,
+    start_click: float,
+    end_click: float,
+    *,
+    adjust_bounds: bool = True,
+) -> dict[str, np.ndarray | float | int]:
+    """Use the saved ROI analysis for any preview of the same selection."""
+
+    values = np.asarray(profile, dtype=np.float64).reshape(-1)
+    start = _clamp_profile_index(start_click, values.size)
+    end = _clamp_profile_index(end_click, values.size)
+    if start > end:
+        start, end = end, start
+        start_click, end_click = end_click, start_click
+    if adjust_bounds:
+        adjusted_start, adjusted_end, slope = adjust_isez_bounds(
+            values, start, end, right_click_x=end_click,
+        )
+    else:
+        if end <= start:
+            raise ValueError("ISez end must be greater than start.")
+        adjusted_start, adjusted_end = start, end
+        slope = float((values[end - 1] - values[start - 1]) / (end - start))
+    data = rotated_rescaled_isez(values, adjusted_start, adjusted_end)
+    data.update(
+        start=start, end=end, adjusted_start=adjusted_start, adjusted_end=adjusted_end,
+        center=(start + end) / 2.0, slope=slope,
+    )
+    return data
+
+
 def make_isez_plot_image(result: ISezResult) -> Image.Image:
     """Render one result as the ImageJ-stack ISez plot frame.
 
@@ -1027,6 +1060,7 @@ def analyze_and_save_roi(
     *,
     start_click: float,
     end_click: float,
+    adjust_bounds: bool = True,
 ) -> ISezResult:
     """Run the MATLAB ISez analysis for one ROI without writing files.
 
@@ -1035,29 +1069,16 @@ def analyze_and_save_roi(
     """
 
     profile = intensity_profile(image, roi)
-    start = _clamp_profile_index(start_click, profile.size)
-    end = _clamp_profile_index(end_click, profile.size)
-    if start > end:
-        start, end = end, start
-        start_click, end_click = end_click, start_click
-
-    adjusted_start, adjusted_end, slope = adjust_isez_bounds(
-        profile,
-        start,
-        end,
-        right_click_x=end_click,
-    )
-    center = (start + end) / 2.0
-    rescaled = rotated_rescaled_isez(profile, adjusted_start, adjusted_end)
+    rescaled = _profile_selection_plot_data(profile, start_click, end_click, adjust_bounds=adjust_bounds)
 
     return ISezResult(
         roi=roi,
-        start=start,
-        end=end,
-        adjusted_start=adjusted_start,
-        adjusted_end=adjusted_end,
-        center=center,
-        slope=slope,
+        start=int(rescaled["start"]),
+        end=int(rescaled["end"]),
+        adjusted_start=int(rescaled["adjusted_start"]),
+        adjusted_end=int(rescaled["adjusted_end"]),
+        center=float(rescaled["center"]),
+        slope=float(rescaled["slope"]),
         max_index=int(rescaled["max_index"]),
         min_intensity=float(rescaled["min_intensity"]),
         max_intensity=float(rescaled["max_intensity"]),
@@ -1065,6 +1086,7 @@ def analyze_and_save_roi(
         normalized_y=np.asarray(rescaled["y"], dtype=np.float64),
         baseline_x=np.asarray(rescaled["baseline_x"], dtype=np.float64),
         baseline_y=np.asarray(rescaled["baseline_y"], dtype=np.float64),
+        manual_bounds=not adjust_bounds,
     )
 
 
@@ -1669,14 +1691,11 @@ class Step4BatchROISelectionPanel(ttk.Frame):
 
         action_row = ttk.Frame(run_box)
         action_row.pack(side="bottom", fill="x")
-        self.process_button = action_button(
+        self.process_button = AppRunButton(
             action_row,
-            self,
-            "Process selected folders",
-            self._process_selected,
-            "process",
-            style="AIDaS.PrimaryAction.TButton",
+            command=self._process_selected,
         )
+        HoverToolTip(self.process_button, "Run ROI analysis for the selected folders.")
         self.process_button.pack(side="right")
         self.process_button.state(["disabled"])
         action_button(action_row, self, "Cancel", self._cancel, "cancel").pack(side="left")
@@ -1800,6 +1819,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
     """Focused profile editor opened from a completed ROI preview cell."""
 
     CROSSHAIR_COLOR = "#7c3aed"
+    CONTEXT_SAMPLES = 20
 
     def __init__(
         self,
@@ -1812,7 +1832,11 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         end: float | int,
         on_preview,
         on_apply,
+        on_save,
         on_close,
+        saved_bounds: tuple[float | int, float | int] | None = None,
+        adjust_bounds: bool = True,
+        saved_adjust_bounds: bool | None = None,
     ):
         super().__init__(owner)
         self.withdraw()
@@ -1826,9 +1850,12 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 
         self._on_preview_callback = on_preview
         self._on_apply_callback = on_apply
+        self._on_save_callback = on_save
         self._on_close_callback = on_close
         self._closing = False
         self._drag_boundary = None
+        self._drag_view = None
+        self._context_window = None
         self._start, self._end = _updated_profile_bounds(
             start,
             end,
@@ -1836,10 +1863,16 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             sample=max(float(start), float(end)),
             n_points=self.profile.size,
         )
-        self._view_left, self._view_right = _focused_profile_limits(
-            self.profile.size,
-            self._start,
-            self._end,
+        self._applied_bounds = (self._start, self._end)
+        self._saved_bounds = (
+            self._applied_bounds if saved_bounds is None else
+            tuple(sorted(_clamp_profile_index(value, self.profile.size) for value in saved_bounds))
+        )
+        self._actions_busy = False
+        self._adjust_bounds = bool(adjust_bounds)
+        self._applied_adjust_bounds = self._adjust_bounds
+        self._saved_adjust_bounds = (
+            self._adjust_bounds if saved_adjust_bounds is None else bool(saved_adjust_bounds)
         )
 
         self.title(f"Revise ROI {roi_suffix} profile")
@@ -1850,15 +1883,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _event: self.close())
 
-        self.selection_var = tk.StringVar()
-        self.cursor_var = tk.StringVar(
-            value="Click a minimum, drag a boundary line, or hover to inspect a value."
-        )
-        self.apply_status_var = tk.StringVar(value="")
         self.measurement_vars = {
             name: tk.StringVar(value="--") for name in RESULTS_HEADERS[1:]
         }
-        self.measurement_status_var = tk.StringVar(value="Live values for the current Start and End")
 
         instructions = ttk.Frame(self, padding=(10, 9, 10, 5))
         instructions.pack(fill="x")
@@ -1866,17 +1893,11 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             instructions,
             text=(
                 "Click the exact profile position you want to move the closest boundary, or "
-                "drag the blue Start or red End line. Manual edits use the selected sample "
-                "without automatic minimum snapping."
+                "drag the blue Start or red End line."
             ),
             justify="left",
             wraplength=860,
         ).pack(side="left", fill="x", expand=True)
-
-        editor = ttk.Frame(self, padding=(10, 0, 10, 5))
-        editor.pack(fill="x")
-        ttk.Label(editor, text="Current boundaries:").pack(side="left", padx=(0, 6))
-        ttk.Label(editor, textvariable=self.selection_var).pack(side="left")
 
         measurements = ttk.LabelFrame(self, text="Ellipse fitting measurements", padding=(8, 4, 8, 7))
         measurements.pack(fill="x", padx=10, pady=(0, 5))
@@ -1893,45 +1914,35 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
                 textvariable=self.measurement_vars[name],
                 anchor="center",
             ).grid(row=1, column=column, sticky="ew", padx=3, pady=(2, 0))
-        ttk.Label(
-            measurements,
-            textvariable=self.measurement_status_var,
-            anchor="w",
-            style="AIDaS.Muted.TLabel",
-        ).grid(row=2, column=0, columnspan=len(RESULTS_HEADERS) - 1, sticky="ew", padx=3, pady=(4, 0))
-
         footer = ttk.Frame(self, padding=(10, 5, 10, 10))
         footer.pack(side="bottom", fill="x")
-        ttk.Label(footer, textvariable=self.cursor_var).pack(side="left")
-        ttk.Label(footer, textvariable=self.apply_status_var, style="AIDaS.Success.TLabel").pack(
-            side="left", padx=(16, 0)
-        )
-        self.close_button_icon = load_color_close_ctk_icon(self, size=20)
-        self.close_button = AppButton(
-            footer,
-            text="Close",
-            variant="secondary",
+        actions = ttk.Frame(footer)
+        actions.pack(side="right")
+        self.cancel_button = AppButton(
+            actions,
+            text="Cancel",
+            variant="danger",
             command=self.close,
-            image=self.close_button_icon,
-            compound="left",
             width=104,
         )
-        self.close_button.pack(side="right")
-        self.apply_button_icon = load_ctk_image(
-            self,
-            "flat-color-icons--checkmark.png",
-            size=20,
-        )
+        self.cancel_button.pack(side="right")
         self.apply_button = AppButton(
-            footer,
-            text="Apply changes",
+            actions,
+            text="Apply",
             variant="primary",
             command=self._apply,
-            image=self.apply_button_icon,
-            compound="left",
-            width=142,
+            width=112,
         )
         self.apply_button.pack(side="right", padx=(0, 6))
+        self.save_button = AppButton(
+            actions,
+            text="Save and Exit",
+            variant="success",
+            command=self._save,
+            width=132,
+        )
+        self.save_button.pack(side="right", padx=(0, 6))
+        self._update_action_states()
 
         chart_frame = ttk.Frame(self)
         chart_frame.pack(fill="both", expand=True, padx=10)
@@ -1985,41 +1996,32 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
     def _draw_profile(self) -> None:
         self.ax.clear()
         palette = _theme_matplotlib_figure(self.figure, self.ax)
-        visible_x = np.arange(self._view_left, self._view_right + 1, dtype=np.float64)
-        visible_y = self.profile[self._view_left - 1:self._view_right]
-        self.ax.plot(
-            visible_x,
-            visible_y,
-            color=palette["line"],
-            linewidth=1.35,
-            marker="o",
-            markersize=3.2,
-            markerfacecolor=palette["axes"],
-            markeredgecolor=palette["line"],
-            markeredgewidth=0.8,
-            zorder=3,
-        )
-        boundary_x, boundary_curve, boundary_baseline = _profile_selection_boundary(
-            self.profile,
-            self._start,
-            self._end,
-        )
+        self._refresh_plot_data()
         (self._boundary_curve,) = self.ax.plot(
-            boundary_x,
-            boundary_curve,
-            color="#ffd400",
-            linewidth=2.6,
+            self._plot_data["x"],
+            self._plot_data["y"],
+            color=palette["line"],
+            linewidth=MATLAB_DATA_LINE_WIDTH,
             solid_capstyle="round",
             solid_joinstyle="round",
             zorder=4,
         )
         (self._baseline_line,) = self.ax.plot(
-            [boundary_x[0], boundary_x[-1]],
-            [boundary_baseline[0], boundary_baseline[-1]],
-            color="#ffd400",
-            linewidth=2.6,
+            self._plot_data["baseline_x"],
+            self._plot_data["baseline_y"],
+            color=palette["line"],
+            linewidth=MATLAB_DATA_LINE_WIDTH,
             solid_capstyle="round",
             zorder=4,
+        )
+        (self._context_curve,) = self.ax.plot(
+            self._context_x,
+            self._context_y,
+            color=palette["muted"],
+            linewidth=1.25,
+            solid_capstyle="round",
+            solid_joinstyle="round",
+            zorder=3,
         )
         self._start_line = self.ax.axvline(
             self._start,
@@ -2070,23 +2072,15 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             zorder=6,
         )
 
-        finite_values = visible_y[np.isfinite(visible_y)]
-        if finite_values.size:
-            y_min = float(np.min(finite_values))
-            y_max = float(np.max(finite_values))
-            y_span = y_max - y_min
-            y_padding = max(0.5, y_span * 0.08)
-            self.ax.set_ylim(y_min - y_padding, y_max + y_padding)
-        self.ax.set_xlim(self._view_left - 0.35, self._view_right + 0.35)
+        self._set_normalized_plot_limits()
         self.ax.set_xlabel("Profile position (1-based sample)")
-        self.ax.set_ylabel("Intensity")
+        self.ax.set_ylabel("Normalized intensity")
         self.ax.grid(True, color=palette["grid"], linewidth=0.55, alpha=0.75)
         legend = self.ax.legend(loc="upper right")
         legend.get_frame().set_facecolor(palette["axes"])
         legend.get_frame().set_edgecolor(palette["border"])
         for label in legend.get_texts():
             label.set_color(palette["text"])
-        self._update_selection_label()
         try:
             self.canvas.get_tk_widget().configure(background=palette["figure"], highlightthickness=0)
         except tk.TclError:
@@ -2099,37 +2093,102 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         if getattr(self, "figure", None) is not None:
             self._draw_profile()
 
-    def _update_selection_label(self) -> None:
-        start_value = float(self.profile[self._start - 1])
-        end_value = float(self.profile[self._end - 1])
-        self.selection_var.set(
-            f"Start {self._start} ({self._format_intensity(start_value)})    "
-            f"End {self._end} ({self._format_intensity(end_value)})"
+    def _update_closed_boundary(self) -> None:
+        self._refresh_plot_data()
+        self._boundary_curve.set_data(self._plot_data["x"], self._plot_data["y"])
+        self._baseline_line.set_data(
+            self._plot_data["baseline_x"], self._plot_data["baseline_y"],
+        )
+        self._context_curve.set_data(self._context_x, self._context_y)
+        self._set_normalized_plot_limits()
+        self._set_crosshair_visible(False)
+
+    def _refresh_plot_data(self) -> None:
+        self._plot_data = _profile_selection_plot_data(
+            self.profile, self._start, self._end, adjust_bounds=self._adjust_bounds,
+        )
+        center = float(self._plot_data["center"])
+        window = getattr(self, "_context_window", None)
+        left, right = window if window is not None else (
+            center - MATLAB_ISEZ_X_HALF_WIDTH, center + MATLAB_ISEZ_X_HALF_WIDTH,
+        )
+        left = min(left, min(self._start, int(self._plot_data["adjusted_start"])) - self.CONTEXT_SAMPLES)
+        right = max(right, max(self._end, int(self._plot_data["adjusted_end"])) + self.CONTEXT_SAMPLES)
+        self._context_window = (left, right)
+        self._view_left = max(1, math.ceil(left))
+        self._view_right = min(self.profile.size, math.floor(right))
+        self._context_x = np.arange(self._view_left, self._view_right + 1, dtype=np.float64)
+        values = self.profile[self._view_left - 1:self._view_right]
+        minimum = float(self._plot_data["min_intensity"])
+        denominator = float(self._plot_data["max_intensity"]) - minimum
+        self._context_y = (
+            np.zeros_like(values, dtype=np.float64) if abs(denominator) < np.finfo(np.float64).eps
+            else ((values - minimum) / denominator) * 100.0
         )
 
-    def _update_closed_boundary(self) -> None:
-        boundary_x, boundary_curve, boundary_baseline = _profile_selection_boundary(
-            self.profile,
-            self._start,
-            self._end,
+    def _set_normalized_plot_limits(self) -> None:
+        drag_view = getattr(self, "_drag_view", None)
+        if self._drag_boundary is not None and drag_view is not None:
+            x_limits, y_limits, aspect = drag_view
+            self.ax.set_xlim(*x_limits)
+            self.ax.set_ylim(*y_limits)
+            self.ax.set_box_aspect(aspect)
+            return
+        center = float(self._plot_data["center"])
+        window = getattr(self, "_context_window", None)
+        left, right = window if window is not None else (
+            center - MATLAB_ISEZ_X_HALF_WIDTH, center + MATLAB_ISEZ_X_HALF_WIDTH,
         )
-        self._boundary_curve.set_data(boundary_x, boundary_curve)
-        self._baseline_line.set_data(
-            [boundary_x[0], boundary_x[-1]],
-            [boundary_baseline[0], boundary_baseline[-1]],
-        )
+        y_min, y_max = MATLAB_ISEZ_Y_LIMITS
+        xs = np.concatenate((self._plot_data["x"], self._plot_data["baseline_x"]))
+        curve_x = np.asarray(self._plot_data["x"], dtype=np.float64)
+        curve_y = np.asarray(self._plot_data["y"], dtype=np.float64)
+        baseline_x = np.asarray(self._plot_data["baseline_x"], dtype=np.float64)
+        endpoints = baseline_x[np.isfinite(baseline_x)]
+        selected = np.isfinite(curve_x) & np.isfinite(curve_y)
+        if endpoints.size:
+            selected &= (curve_x >= np.min(endpoints)) & (curve_x <= np.max(endpoints))
+        # Padding and surrounding samples can grow enormously when a small
+        # selection has little intensity variation. Fit the selected ROI only.
+        ys = np.concatenate((curve_y[selected], self._plot_data["baseline_y"]))
+        finite_x, finite_y = xs[np.isfinite(xs)], ys[np.isfinite(ys)]
+        if finite_x.size:
+            left -= max(0, math.ceil((left - float(np.min(finite_x)) + 1) / MATLAB_ISEZ_X_TICK_STEP)) * MATLAB_ISEZ_X_TICK_STEP
+            right += max(0, math.ceil((float(np.max(finite_x)) + 1 - right) / MATLAB_ISEZ_X_TICK_STEP)) * MATLAB_ISEZ_X_TICK_STEP
+        if finite_y.size:
+            padding = MATLAB_ISEZ_Y_TICK_STEP / 4
+            y_min = min(y_min, math.floor((float(np.min(finite_y)) - padding) / MATLAB_ISEZ_Y_TICK_STEP) * MATLAB_ISEZ_Y_TICK_STEP)
+            y_max = max(y_max, math.ceil((float(np.max(finite_y)) + padding) / MATLAB_ISEZ_Y_TICK_STEP) * MATLAB_ISEZ_Y_TICK_STEP)
+        x_tick, y_tick = MATLAB_ISEZ_X_TICK_STEP, MATLAB_ISEZ_Y_TICK_STEP
+        while (right - left) / x_tick > 10:
+            x_tick *= 2
+        while (y_max - y_min) / y_tick > 10:
+            y_tick *= 2
+        self.ax.set_xticks(np.arange(left, right + x_tick / 100, x_tick))
+        self.ax.set_yticks(np.arange(y_min, y_max + y_tick / 100, y_tick))
+        self.ax.set_xlim(left, right)
+        self.ax.set_ylim(y_min, y_max)
+        # Keep the MATLAB frame's proportions independent of data ranges;
+        # changing normalization must never resize the axes into a thin strip.
+        self.ax.set_box_aspect(IMAGEJ_PLOT_BOX_ASPECT)
+
+    def _normalized_sample_intensity(self, sample: int) -> float | None:
+        indices = np.flatnonzero(self._context_x == sample)
+        if not indices.size:
+            return None
+        value = float(self._context_y[indices[0]])
+        return value if np.isfinite(value) else None
 
     def _refresh_measurements(self) -> None:
         try:
-            values = self._on_preview_callback(self.roi_index, self._start, self._end)
+            values = self._on_preview_callback(
+                self.roi_index, self._start, self._end, adjust_bounds=self._adjust_bounds,
+            )
             for name in RESULTS_HEADERS[1:]:
                 self.measurement_vars[name].set(f"{float(values[name]):.3f}")
         except Exception:
             for variable in self.measurement_vars.values():
                 variable.set("--")
-            self.measurement_status_var.set("Measurements are unavailable for this selection")
-            return
-        self.measurement_status_var.set("Updated for the current Start and End")
 
     def _set_crosshair_visible(self, visible: bool) -> None:
         self._crosshair_x.set_visible(visible)
@@ -2142,9 +2201,6 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
                 return
             sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
             self._move_boundary(self._drag_boundary, sample, refresh_measurements=False)
-            self.cursor_var.set(
-                f"Moving {self._drag_boundary.title()} — release to use this sample"
-            )
             try:
                 self.canvas.get_tk_widget().configure(cursor="sb_h_double_arrow")
             except tk.TclError:
@@ -2154,8 +2210,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         if event.inaxes is not self.ax or event.xdata is None:
             self._on_axes_leave(event)
             return
-        sample, intensity = _nearest_profile_sample(self.profile, event.xdata)
-        if sample < self._view_left or sample > self._view_right:
+        sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
+        intensity = self._normalized_sample_intensity(sample)
+        if intensity is None:
             self._on_axes_leave(event)
             return
 
@@ -2163,7 +2220,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._crosshair_y.set_ydata([intensity, intensity])
         self._hover_annotation.xy = (sample, intensity)
         self._hover_annotation.set_text(
-            f"Position: {sample}\nIntensity: {self._format_intensity(intensity)}"
+            f"Position: {sample}\nNormalized intensity: {self._format_intensity(intensity)}"
         )
         midpoint = (self._view_left + self._view_right) / 2.0
         self._hover_annotation.set_position((-12, 12) if sample > midpoint else (12, 12))
@@ -2171,12 +2228,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._set_crosshair_visible(True)
         hovered_boundary = self._boundary_at_event(event)
         if hovered_boundary is None:
-            self.cursor_var.set(
-                f"Position {sample}    Intensity {self._format_intensity(intensity)}"
-            )
             cursor = "crosshair"
         else:
-            self.cursor_var.set(f"Drag the {hovered_boundary.title()} boundary line")
             cursor = "sb_h_double_arrow"
         try:
             self.canvas.get_tk_widget().configure(cursor=cursor)
@@ -2188,9 +2241,6 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         if self._drag_boundary is not None:
             return
         self._set_crosshair_visible(False)
-        self.cursor_var.set(
-            "Click a minimum, drag a boundary line, or hover to inspect a value."
-        )
         try:
             self.canvas.get_tk_widget().configure(cursor="")
         except tk.TclError:
@@ -2223,6 +2273,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         *,
         refresh_measurements: bool,
     ) -> None:
+        previous = (self._start, self._end)
         self._start, self._end = _updated_profile_bounds(
             self._start,
             self._end,
@@ -2230,13 +2281,16 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             sample=sample,
             n_points=self.profile.size,
         )
+        if (self._start, self._end) != previous:
+            self._adjust_bounds = (
+                self._saved_adjust_bounds if (self._start, self._end) == self._saved_bounds else False
+            )
         self._start_line.set_xdata([self._start, self._start])
         self._end_line.set_xdata([self._end, self._end])
         self._update_closed_boundary()
-        self._update_selection_label()
+        self._update_action_states()
         if refresh_measurements:
             self._refresh_measurements()
-            self.apply_status_var.set("Unsaved change")
 
     def _on_press(self, event) -> None:
         if getattr(event, "button", None) != 1:
@@ -2251,17 +2305,13 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
                 <= abs(float(event.xdata) - self._end)
                 else "end"
             )
-            sample, intensity = _nearest_profile_sample(self.profile, event.xdata)
+            sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
             self._move_boundary(boundary, sample, refresh_measurements=True)
-            self.cursor_var.set(
-                f"{boundary.title()} set to sample {sample} "
-                f"({self._format_intensity(intensity)})"
-            )
             self.canvas.draw_idle()
             return
         self._drag_boundary = boundary
+        self._drag_view = (self.ax.get_xlim(), self.ax.get_ylim(), self.ax.get_box_aspect())
         self._set_crosshair_visible(False)
-        self.cursor_var.set(f"Dragging {boundary.title()} boundary")
         try:
             self.canvas.get_tk_widget().configure(cursor="sb_h_double_arrow")
         except tk.TclError:
@@ -2272,29 +2322,63 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         if boundary is None:
             return
         self._drag_boundary = None
+        self._drag_view = None
         current = self._start if boundary == "start" else self._end
         x_value = event.xdata if event.inaxes is self.ax and event.xdata is not None else current
-        sample, intensity = _nearest_profile_sample(self.profile, x_value)
+        sample, _intensity = _nearest_profile_sample(self.profile, x_value)
         self._move_boundary(boundary, sample, refresh_measurements=True)
-        self.cursor_var.set(
-            f"{boundary.title()} set to sample {sample} "
-            f"({self._format_intensity(intensity)})"
-        )
         try:
             self.canvas.get_tk_widget().configure(cursor="")
         except tk.TclError:
             pass
         self.canvas.draw_idle()
 
+    def _selection_matches(self, bounds, adjust_bounds: bool) -> bool:
+        return (self._start, self._end) == bounds and self._adjust_bounds == adjust_bounds
+
+    def _has_pending_changes(self) -> bool:
+        return not self._selection_matches(self._applied_bounds, self._applied_adjust_bounds)
+
+    def _update_action_states(self) -> None:
+        state = ["!disabled"] if not self._actions_busy and self._has_pending_changes() else ["disabled"]
+        for button in (self.save_button, self.apply_button):
+            button.state(state)
+
     def _apply(self) -> None:
-        self.apply_button.state(["disabled"])
+        if self._actions_busy or not self._has_pending_changes():
+            return
+        self._actions_busy = True
+        self._update_action_states()
+        applied = False
+        try:
+            applied = bool(self._on_apply_callback(
+                self.roi_index, self._start, self._end, adjust_bounds=self._adjust_bounds,
+            ))
+            if applied:
+                self._applied_bounds = (self._start, self._end)
+                self._applied_adjust_bounds = self._adjust_bounds
+        finally:
+            self._actions_busy = False
+            self._update_action_states()
+
+    def _save(self) -> None:
+        if self._actions_busy or not self._has_pending_changes():
+            return
+        self._actions_busy = True
+        self._update_action_states()
         saved = False
         try:
-            saved = bool(self._on_apply_callback(self.roi_index, self._start, self._end))
+            saved = bool(self._on_save_callback(
+                self.roi_index, self._start, self._end, adjust_bounds=self._adjust_bounds,
+            ))
+            if saved:
+                self._saved_bounds = self._applied_bounds = (self._start, self._end)
+                self._saved_adjust_bounds = self._applied_adjust_bounds = self._adjust_bounds
         finally:
-            self.apply_button.state(["!disabled"])
+            self._actions_busy = False
+            self._update_action_states()
         if saved:
-            self.apply_status_var.set("Changes applied")
+            self.close()
 
     def close(self) -> None:
         if self._closing:
@@ -2336,6 +2420,7 @@ class Step4Frame(SidebarStepFrame):
         self._flashing_updated_rois: set[str] = set()
         self._roi_update_animation_jobs: dict[str, str] = {}
         self.roi_clicks: dict[str, list[float]] = {}
+        self._roi_adjust_bounds: dict[str, bool] = {}
         self.profile_clicks: list[float] = []
         self.figure = None
         self.canvas = None
@@ -2871,6 +2956,7 @@ class Step4Frame(SidebarStepFrame):
         self.completed.clear()
         self.auto_detection_reviews.clear()
         self.roi_clicks.clear()
+        self._roi_adjust_bounds = {}
         self.profile_clicks.clear()
         self.current_roi_idx = 0
         self.start_var.set("")
@@ -3119,11 +3205,15 @@ class Step4Frame(SidebarStepFrame):
                 "completed": {},
                 "auto_detection_reviews": {},
                 "roi_clicks": {},
+                "roi_adjust_bounds": {},
                 "current_roi_idx": 0,
                 "profile_clicks": [],
                 "complete": False,
             }
-            frame = notebook.add(text=self._batch_roi_tab_text(state))
+            frame = notebook.add(
+                text=self._batch_roi_tab_text(state),
+                tooltip=str(path.resolve()),
+            )
             self.batch_roi_tab_states[str(frame)] = state
 
         first_tab = notebook.tabs()[0] if notebook.tabs() else None
@@ -3216,6 +3306,7 @@ class Step4Frame(SidebarStepFrame):
         state["completed"] = dict(self.completed)
         state["auto_detection_reviews"] = dict(getattr(self, "auto_detection_reviews", {}))
         state["roi_clicks"] = {key: list(value) for key, value in self.roi_clicks.items()}
+        state["roi_adjust_bounds"] = dict(getattr(self, "_roi_adjust_bounds", {}))
         state["current_roi_idx"] = int(self.current_roi_idx)
         state["profile_clicks"] = list(self.profile_clicks[:2])
         state["volume"] = self.volume
@@ -3232,6 +3323,7 @@ class Step4Frame(SidebarStepFrame):
 
     def _activate_batch_roi_tab(self, tab) -> None:
         self._close_profile_zoom()
+        self._hide_roi_grid_hint()
         self._cancel_roi_update_animations(redraw=True)
         self._sync_active_batch_roi_state()
         previous_tab_key = self._active_batch_roi_tab
@@ -3277,11 +3369,13 @@ class Step4Frame(SidebarStepFrame):
         self.figure = figure
         self.ax_profile = state.get("ax_profile")
         self.ax_roi_grid = state.get("ax_roi_grid")
+        self._hide_roi_grid_hint()
         self.empty_placeholder = state.get("empty_placeholder")
         self._current_profile = state.get("current_profile")
         self.completed = dict(state.get("completed") or {})
         self.auto_detection_reviews = dict(state.get("auto_detection_reviews") or {})
         self.roi_clicks = {key: list(value) for key, value in (state.get("roi_clicks") or {}).items()}
+        self._roi_adjust_bounds = dict(state.get("roi_adjust_bounds") or {})
         self.current_roi_idx = int(state.get("current_roi_idx") or 0)
         self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
         self.profile_clicks = list((state.get("profile_clicks") or [])[:2])
@@ -3425,6 +3519,7 @@ class Step4Frame(SidebarStepFrame):
         self.completed.clear()
         self.auto_detection_reviews.clear()
         self.roi_clicks.clear()
+        self._roi_adjust_bounds = {}
         self.current_roi_idx = 0
         self.profile_clicks.clear()
         self._set_slice_zero(render=restore_state is None)
@@ -3434,6 +3529,7 @@ class Step4Frame(SidebarStepFrame):
             self.completed = dict(restore_state.get("completed") or {})
             self.auto_detection_reviews = dict(restore_state.get("auto_detection_reviews") or {})
             self.roi_clicks = {key: list(value) for key, value in (restore_state.get("roi_clicks") or {}).items()}
+            self._roi_adjust_bounds = dict(restore_state.get("roi_adjust_bounds") or {})
             self.current_roi_idx = int(restore_state.get("current_roi_idx") or 0)
             self.current_roi_idx = max(0, min(len(self.rois) - 1, self.current_roi_idx))
             self._load_current_roi_clicks()
@@ -3468,6 +3564,7 @@ class Step4Frame(SidebarStepFrame):
         self.image = np.asarray(self.volume[0])
         self.profile_clicks.clear()
         self.roi_clicks.clear()
+        self._roi_adjust_bounds = {}
         self.auto_detection_reviews.clear()
         self.start_var.set("")
         self.end_var.set("")
@@ -3507,6 +3604,18 @@ class Step4Frame(SidebarStepFrame):
 
     def _current_roi_suffix(self) -> str:
         return self.rois[self.current_roi_idx].suffix
+
+    def _should_adjust_roi_bounds(self, suffix: str) -> bool:
+        modes = getattr(self, "_roi_adjust_bounds", {})
+        if suffix in modes:
+            return modes[suffix]
+        result = getattr(self, "completed", {}).get(suffix)
+        return getattr(result, "manual_bounds", False) is not True
+
+    def _set_roi_adjustment(self, suffix: str, adjust_bounds: bool) -> None:
+        if not hasattr(self, "_roi_adjust_bounds"):
+            self._roi_adjust_bounds = {}
+        self._roi_adjust_bounds[suffix] = bool(adjust_bounds)
 
     def _remember_current_roi_clicks(self) -> None:
         suffix = self._current_roi_suffix()
@@ -3574,6 +3683,7 @@ class Step4Frame(SidebarStepFrame):
 
     def _render_empty_canvas(self) -> None:
         self._close_profile_zoom()
+        self._hide_roi_grid_hint()
         self._hide_grid_notice()
         if self.canvas is not None:
             self.canvas.get_tk_widget().destroy()
@@ -3610,6 +3720,8 @@ class Step4Frame(SidebarStepFrame):
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_holder)
         self.canvas.mpl_connect("button_press_event", self._on_profile_click)
         self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
+        self.canvas.mpl_connect("axes_leave_event", self._on_plot_axes_leave)
+        self.canvas.mpl_connect("figure_leave_event", self._hide_roi_grid_hint)
         self.canvas.get_tk_widget().bind("<Configure>", self._on_plot_canvas_configure, add="+")
         self.canvas.get_tk_widget().configure(
             background=palette["figure"],
@@ -3619,10 +3731,49 @@ class Step4Frame(SidebarStepFrame):
     def _on_plot_motion(self, event) -> None:
         if self.canvas is None:
             return
+        index = self._roi_grid_index_at_event(event) if event.inaxes is self.ax_roi_grid else None
         try:
-            self.canvas.get_tk_widget().configure(cursor="hand2" if event.inaxes is self.ax_roi_grid else "")
+            self.canvas.get_tk_widget().configure(cursor="hand2" if index is not None else "")
         except tk.TclError:
             pass
+        hint = getattr(self.ax_roi_grid, "_aidas_hover_hint", None)
+        if hint is None:
+            return
+        if index is None:
+            if hint.get_visible():
+                hint.set_visible(False)
+                self.canvas.draw_idle()
+            return
+        position = (index % 7 + 0.5, 2 - index // 7 + 0.08)
+        text = (
+            "Double-click to zoom"
+            if index in self.ax_roi_grid._aidas_preview_cells else "Click to select"
+        )
+        if hint.get_visible() and hint.get_position() == position and hint.get_text() == text:
+            return
+        hint.set_position(position)
+        hint.set_text(text)
+        hint.set_visible(True)
+        self.canvas.draw_idle()
+
+    def _on_plot_axes_leave(self, event) -> None:
+        if event.inaxes is not self.ax_roi_grid:
+            return
+        self._hide_roi_grid_hint()
+
+    def _hide_roi_grid_hint(self, _event=None) -> None:
+        hint = getattr(getattr(self, "ax_roi_grid", None), "_aidas_hover_hint", None)
+        if hint is None:
+            return
+        if hint.get_visible():
+            hint.set_visible(False)
+            if self.canvas is not None:
+                self.canvas.draw_idle()
+        if self.canvas is not None:
+            try:
+                self.canvas.get_tk_widget().configure(cursor="")
+            except tk.TclError:
+                pass
 
     def _on_plot_canvas_configure(self, event) -> None:
         if self.figure is None:
@@ -3709,33 +3860,12 @@ class Step4Frame(SidebarStepFrame):
             return None
 
         try:
-            profile = intensity_profile(self.image, roi)
-            start = _clamp_profile_index(clicks[0], profile.size)
-            end = _clamp_profile_index(clicks[1], profile.size)
-            if start > end:
-                start, end = end, start
-            adj_start, adj_end, slope = adjust_isez_bounds(profile, start, end, right_click_x=max(clicks))
-            data = rotated_rescaled_isez(profile, adj_start, adj_end)
+            return analyze_and_save_roi(
+                self.image, roi, start_click=clicks[0], end_click=clicks[1],
+                adjust_bounds=self._should_adjust_roi_bounds(roi.suffix),
+            )
         except Exception:
             return None
-
-        center = (start + end) / 2.0
-        return ISezResult(
-            roi=roi,
-            start=start,
-            end=end,
-            adjusted_start=adj_start,
-            adjusted_end=adj_end,
-            center=center,
-            slope=slope,
-            max_index=int(data["max_index"]),
-            min_intensity=float(data["min_intensity"]),
-            max_intensity=float(data["max_intensity"]),
-            normalized_x=np.asarray(data["x"], dtype=np.float64),
-            normalized_y=np.asarray(data["y"], dtype=np.float64),
-            baseline_x=np.asarray(data["baseline_x"], dtype=np.float64),
-            baseline_y=np.asarray(data["baseline_y"], dtype=np.float64),
-        )
 
     def _draw_roi_overview_grid(self) -> None:
         ax = self.ax_roi_grid
@@ -3748,6 +3878,8 @@ class Step4Frame(SidebarStepFrame):
         ax.set_ylim(0, 3)
         ax.set_axis_off()
         ax.set_facecolor(palette["axes"])
+        # Keep hover artists with their axes, including canvases cached per file.
+        ax._aidas_preview_cells = set()
 
         for index in range(21):
             col = index % 7
@@ -3760,10 +3892,12 @@ class Step4Frame(SidebarStepFrame):
                 face = palette["success_soft"]
             elif needs_review:
                 face = palette["warning_soft"]
+            elif active:
+                face = palette["primary_soft"]
             else:
                 face = palette["axes"]
-            edge = palette["text"] if active else palette["grid"]
-            width = 1.2 if active else 0.6
+            edge = palette["primary"] if active else palette["grid"]
+            width = 1.5 if active else 0.6
             ax.add_patch(
                 Rectangle(
                     (col, row),
@@ -3772,6 +3906,8 @@ class Step4Frame(SidebarStepFrame):
                     facecolor=face,
                     edgecolor=edge,
                     linewidth=width,
+                    zorder=2 if active else 1,
+                    clip_on=False,
                 )
             )
 
@@ -3792,7 +3928,7 @@ class Step4Frame(SidebarStepFrame):
                 va="top",
                 fontsize=7,
                 color=palette["text"],
-                weight="normal",
+                weight="bold" if active else "normal",
             )
             ax.text(
                 col + 0.96,
@@ -3808,6 +3944,7 @@ class Step4Frame(SidebarStepFrame):
             result = self._roi_overview_result(index)
             if result is None:
                 continue
+            ax._aidas_preview_cells.add(index)
 
             center = float(result.center)
             x_min = center - MATLAB_ISEZ_X_HALF_WIDTH
@@ -3835,6 +3972,12 @@ class Step4Frame(SidebarStepFrame):
             x_base, y_base = to_cell(result.baseline_x, result.baseline_y)
             if x_base.size >= 2:
                 ax.plot(x_base, y_base, color=palette["muted"], linewidth=0.55)
+
+        ax._aidas_hover_hint = ax.text(
+            0, 0, "", ha="center", va="bottom", fontsize=6,
+            color=palette["muted"], visible=False, zorder=5,
+            bbox={"facecolor": palette["axes"], "edgecolor": "none", "pad": 1.5},
+        )
 
     def _redraw_roi_update_flash(self) -> None:
         if self.ax_roi_grid is None:
@@ -3910,6 +4053,7 @@ class Step4Frame(SidebarStepFrame):
 
         self._close_profile_zoom()
         click, intensity = _nearest_local_minimum(self._current_profile, event.xdata)
+        self._set_roi_adjustment(self._current_roi_suffix(), True)
         if len(self.profile_clicks) >= 2:
             start, end = sorted(self.profile_clicks[:2])
             boundary = (
@@ -3982,6 +4126,7 @@ class Step4Frame(SidebarStepFrame):
             clicks = list(self.profile_clicks[:2])
             if len(clicks) < 2:
                 clicks = [float(result.start), float(result.end)]
+            confirmed = self.completed.get(self.rois[index].suffix)
             self._profile_zoom_dialog = Step4ProfileZoomDialog(
                 self,
                 roi_index=index,
@@ -3991,7 +4136,11 @@ class Step4Frame(SidebarStepFrame):
                 end=clicks[1],
                 on_preview=self._profile_zoom_measurements,
                 on_apply=self._apply_profile_zoom_clicks,
+                on_save=self._save_profile_zoom_clicks,
                 on_close=self._profile_zoom_closed,
+                saved_bounds=(confirmed.start, confirmed.end) if confirmed is not None else None,
+                adjust_bounds=self._should_adjust_roi_bounds(self.rois[index].suffix),
+                saved_adjust_bounds=(getattr(confirmed, "manual_bounds", False) is not True) if confirmed is not None else None,
             )
         except Exception as exc:
             self._profile_zoom_dialog = None
@@ -3999,7 +4148,9 @@ class Step4Frame(SidebarStepFrame):
         if error is not None:
             messagebox.showerror("Profile Detail", f"Could not open the detailed profile.\n{error}", parent=self)
 
-    def _profile_zoom_measurements(self, index: int, start: int, end: int) -> dict[str, float]:
+    def _profile_zoom_measurements(
+        self, index: int, start: int, end: int, *, adjust_bounds: bool = True,
+    ) -> dict[str, float]:
         if self.image is None or index != self.current_roi_idx:
             raise ValueError("The selected ROI is no longer active.")
         result = analyze_and_save_roi(
@@ -4007,10 +4158,13 @@ class Step4Frame(SidebarStepFrame):
             self.rois[index],
             start_click=start,
             end_click=end,
+            adjust_bounds=adjust_bounds,
         )
         return imagej_shape_measurements_from_frame(make_isez_plot_image(result))
 
-    def _apply_profile_zoom_clicks(self, index: int, start: int, end: int) -> bool:
+    def _apply_profile_zoom_clicks(
+        self, index: int, start: int, end: int, *, adjust_bounds: bool = False,
+    ) -> bool:
         if self.image is None or index != self.current_roi_idx:
             messagebox.showwarning(
                 "Profile Detail",
@@ -4019,23 +4173,39 @@ class Step4Frame(SidebarStepFrame):
             )
             return False
         self.profile_clicks = [float(start), float(end)]
+        self._set_roi_adjustment(self.rois[index].suffix, adjust_bounds)
         self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
-        return self._save_current_roi(auto_advance=False)
+        self._render_current_roi()
+        return True
 
-    def _select_roi_from_grid_click(self, event) -> None:
-        """Select a grid ROI and open completed previews in the detail editor."""
+    def _save_profile_zoom_clicks(
+        self, index: int, start: int, end: int, *, adjust_bounds: bool = False,
+    ) -> bool:
+        if not self._apply_profile_zoom_clicks(index, start, end, adjust_bounds=adjust_bounds):
+            return False
+        return self._save_current_roi(auto_advance=False, apply_entry_values=False)
+
+    def _roi_grid_index_at_event(self, event) -> int | None:
+        """Map the 7-by-3 overview to a real ROI, ignoring unused cells."""
         if event.xdata is None or event.ydata is None:
-            return
+            return None
         x = float(event.xdata)
         y = float(event.ydata)
         if not (0.0 <= x < 7.0 and 0.0 <= y < 3.0):
-            return
+            return None
 
         column = int(math.floor(x))
         row_from_bottom = int(math.floor(y))
         index = (2 - row_from_bottom) * 7 + column
-        if not (0 <= index < len(self.rois)):
+        return index if 0 <= index < len(self.rois) else None
+
+    def _select_roi_from_grid_click(self, event) -> None:
+        """Select on a single click; open an available preview on a double click."""
+        if getattr(event, "button", 1) != 1:
+            return
+        index = self._roi_grid_index_at_event(event)
+        if index is None:
             return
 
         has_drawn_preview = self._roi_overview_result(index) is not None
@@ -4049,7 +4219,7 @@ class Step4Frame(SidebarStepFrame):
             self._load_current_roi_clicks()
         self._select_roi_in_list()
         self._render_current_roi()
-        if has_drawn_preview:
+        if getattr(event, "dblclick", False) and has_drawn_preview:
             self._open_profile_zoom(index)
 
     def _current_profile_size(self) -> int:
@@ -4100,6 +4270,8 @@ class Step4Frame(SidebarStepFrame):
         if clicks is None:
             return None
 
+        if clicks != self.profile_clicks:
+            self._set_roi_adjustment(self._current_roi_suffix(), True)
         self.profile_clicks = clicks
         self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
@@ -4120,6 +4292,7 @@ class Step4Frame(SidebarStepFrame):
         self.roi_clicks.pop(suffix, None)
         self.completed.pop(suffix, None)
         self.auto_detection_reviews.pop(suffix, None)
+        getattr(self, "_roi_adjust_bounds", {}).pop(suffix, None)
         self.start_var.set("")
         self.end_var.set("")
         self._refresh_roi_list()
@@ -4378,6 +4551,8 @@ class Step4Frame(SidebarStepFrame):
             self.roi_clicks.pop(suffix, None)
         self.roi_clicks.update(result.roi_clicks)
         self.completed.update(result.completed)
+        for suffix in set(result.roi_clicks) | result.removed_clicks | set(result.completed):
+            self._set_roi_adjustment(suffix, True)
         self.current_roi_idx = result.current_roi_idx
         self._load_current_roi_clicks()
         self._refresh_roi_list()
@@ -4516,8 +4691,11 @@ class Step4Frame(SidebarStepFrame):
         if start > end:
             start, end = end, start
         try:
-            adj_start, adj_end, slope = adjust_isez_bounds(profile, start, end, right_click_x=max(self.profile_clicks[:2]))
-            data = rotated_rescaled_isez(profile, adj_start, adj_end)
+            adjust_bounds = self._should_adjust_roi_bounds(roi.suffix)
+            data = _profile_selection_plot_data(
+                profile, self.profile_clicks[0], self.profile_clicks[1], adjust_bounds=adjust_bounds,
+            )
+            adj_start, adj_end, slope = data["adjusted_start"], data["adjusted_end"], data["slope"]
         except Exception as exc:
             self.profile_status_var.set(str(exc))
             return
@@ -4530,6 +4708,8 @@ class Step4Frame(SidebarStepFrame):
                 f"ROI {roi.suffix}: automatic bounds {start}-{end} need review "
                 f"(confidence {confidence:.0%}). {reason}. Drag a line in the grid detail or click a boundary to confirm."
             )
+        elif not adjust_bounds:
+            self.profile_status_var.set(f"ROI {roi.suffix}: manual bounds {start}-{end}.")
         else:
             self.profile_status_var.set(
                 f"ROI {roi.suffix}: local-minimum bounds {start}-{end}; adjusted {adj_start}-{adj_end}. "
@@ -4586,6 +4766,7 @@ class Step4Frame(SidebarStepFrame):
                 roi,
                 start_click=self.profile_clicks[0],
                 end_click=self.profile_clicks[1],
+                adjust_bounds=self._should_adjust_roi_bounds(roi.suffix),
             )
             self.completed[roi.suffix] = result
             self.roi_clicks[roi.suffix] = [float(result.start), float(result.end)]

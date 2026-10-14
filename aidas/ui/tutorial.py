@@ -103,7 +103,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             (
                 "Each processed folder receives a two-slice, 16-bit light.hdr and light.img Analyze pair.",
                 "Completed queue rows identify the folders that are ready for segmentation.",
-                "Go to Step 2 opens those completed folders in a preloaded review; confirm the selected rows and choose Continue.",
+                "Go to Step 2 opens those completed folders in a preloaded review; confirm the selected rows and choose Run.",
             ),
         ),
         tips=(
@@ -2084,7 +2084,7 @@ class TutorialDialog(ctk.CTkToplevel):
         self.close_button = AppButton(
             footer,
             text="Close",
-            variant="secondary",
+            variant="danger",
             width=104,
             command=self.close,
         )

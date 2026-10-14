@@ -13,6 +13,7 @@ import shutil
 # Keep the original workflow active until the optimized version's release.
 OPTIMIZED_R_SCRIPTS_ENABLED = False
 OPTIMIZED_R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R"
+OPTIMIZED_R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited_optimized.R"
 
 
 @dataclass(frozen=True)

@@ -7,8 +7,7 @@ import tkinter as tk
 from typing import TYPE_CHECKING, Callable
 
 import customtkinter as ctk
-from PIL import Image, ImageChops, ImageDraw
-
+from PIL import Image, ImageDraw
 from aidas.ui.theme import COLOR_PAIRS, COLORS, CONTROLS, SHAPES, TYPOGRAPHY, resolve_color
 
 if TYPE_CHECKING:
@@ -18,26 +17,6 @@ if TYPE_CHECKING:
 TabCallback = Callable[["ClosableTabView", ctk.CTkFrame], None]
 
 
-def _close_icon_image(color: str, size: int = 12) -> Image.Image:
-    """Draw a centered cross without a font's baseline or side bearings."""
-
-    scale = 4
-    extent = size * scale
-    image = Image.new("RGBA", (extent, extent), color)
-    image.putalpha(0)
-    draw = ImageDraw.Draw(image)
-    start, end = 2 * scale, extent - 2 * scale - 1
-    draw.line((start, start, end, end), fill=color, width=2 * scale)
-    draw.line((start, end, end, start), fill=color, width=2 * scale)
-    # Pillow's even-width strokes can differ by a subpixel on opposing sides.
-    # Mirror the alpha mask to keep the visible ink symmetric about both axes.
-    alpha = image.getchannel("A")
-    alpha = ImageChops.lighter(alpha, alpha.transpose(Image.Transpose.FLIP_LEFT_RIGHT))
-    alpha = ImageChops.lighter(alpha, alpha.transpose(Image.Transpose.FLIP_TOP_BOTTOM))
-    image.putalpha(alpha)
-    return image
-
-
 class _TabModel:
     """Display-independent tab identity, order, label, and selection state."""
 
@@ -45,18 +24,24 @@ class _TabModel:
         self.order: list[str] = []
         self.pages: dict[str, object] = {}
         self.labels: dict[str, str] = {}
+        self.tooltips: dict[str, str | None] = {}
         self.selected: str | None = None
 
-    def add(self, page: object, text: object) -> str:
+    def add(self, page: object, text: object, tooltip: object | None = None) -> str:
         page_id = str(page)
         if page_id in self.pages:
             raise ValueError(f"Tab page already exists: {page_id}")
         self.order.append(page_id)
         self.pages[page_id] = page
         self.labels[page_id] = str(text)
+        self.tooltips[page_id] = None if tooltip is None else str(tooltip)
         if self.selected is None:
             self.selected = page_id
         return page_id
+
+    def tooltip_text(self, page_id: str) -> str:
+        tooltip = self.tooltips[page_id]
+        return self.labels[page_id] if tooltip is None else tooltip
 
     def resolve(self, tab: object) -> str:
         for page_id, page in self.pages.items():
@@ -81,6 +66,7 @@ class _TabModel:
         index = self.order.index(page_id)
         page = self.pages.pop(page_id)
         self.labels.pop(page_id)
+        self.tooltips.pop(page_id)
         self.order.pop(index)
         was_selected = self.selected == page_id
         if was_selected:
@@ -95,14 +81,34 @@ class _TabWidgets:
     close: ctk.CTkButton
     close_hovered: bool = False
     title_tooltip: HoverToolTip | None = None
+    body_tooltip: HoverToolTip | None = None
+    close_tooltip: HoverToolTip | None = None
     active: bool = False
     bottom_join: ctk.CTkFrame | None = None
     hovered: bool = False
     hover_after_id: str | None = None
 
 
+class _PixelAlignedTabFrame(ctk.CTkFrame):
+    """Paint the full allocated bounds, including odd and scaled pixel sizes."""
+
+    def __init__(self, master, **kwargs) -> None:
+        super().__init__(master, **kwargs)
+        self._draw_engine.set_round_to_even_numbers(False, False)
+        self._draw()
+
+    def _update_dimensions_event(self, event) -> None:
+        # Retain fractional logical sizes. CTk can truncate integer Configure
+        # dimensions when converting them back from physical display pixels.
+        scale = self._get_widget_scaling()
+        width, height = event.width / scale, event.height / scale
+        if self._current_width != width or self._current_height != height:
+            self._current_width, self._current_height = width, height
+            self._draw(no_color_updates=True)
+
+
 class ClosableTabView(ctk.CTkFrame):
-    """Notebook-like content pages with dedicated, theme-native close buttons.
+    """Rounded, theme-aware tabs with connected pages and simple close icons.
 
     Page IDs are the immutable Tk widget paths returned by :meth:`tabs`, never
     the user-facing labels.  A close click delegates to ``close_command`` so a
@@ -110,11 +116,16 @@ class ClosableTabView(ctk.CTkFrame):
     """
 
     _MAX_TITLE_WIDTH = 360
-    _TAB_HEIGHT = CONTROLS.height_lg
-    _CLOSE_SIZE = CONTROLS.height_sm
+    _TAB_HEIGHT = 38
+    _CLOSE_SIZE = 24
+    _CLOSE_WIDTH = _CLOSE_SIZE
+    _CLOSE_ICON_SIZE = 12
     _CLOSE_PADDING = CONTROLS.gap
+    _TITLE_PADDING = CONTROLS.padding_x
     _TAB_RADIUS = CONTROLS.gap
-    _SCROLLBAR_HEIGHT = 8
+    _TAB_GAP = CONTROLS.gap // 2
+    _SCROLLBAR_HEIGHT = 4
+    _BORDER_PIXELS = 1
 
     def __init__(
         self,
@@ -152,15 +163,7 @@ class ClosableTabView(ctk.CTkFrame):
             size=TYPOGRAPHY.body_size + 1,
             weight=TYPOGRAPHY.semibold_weight,
         )
-        self._close_images = {
-            name: ctk.CTkImage(
-                light_image=_close_icon_image(COLOR_PAIRS[name][0]),
-                dark_image=_close_icon_image(COLOR_PAIRS[name][1]),
-                size=(12, 12),
-            )
-            for name in ("text", "danger")
-        }
-
+        self._close_icon = self._create_close_icon()
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
@@ -177,7 +180,7 @@ class ClosableTabView(ctk.CTkFrame):
         # leave both the selected-tab join and the image geometry unchanged.
         self._scrollbar_slot = ctk.CTkFrame(
             self._header,
-            height=self._SCROLLBAR_HEIGHT + 2,
+            height=self._SCROLLBAR_HEIGHT,
             corner_radius=0,
             border_width=0,
             fg_color=COLOR_PAIRS["sidebar"],
@@ -189,7 +192,7 @@ class ClosableTabView(ctk.CTkFrame):
 
         self._header_canvas = tk.Canvas(
             self._header,
-            height=self._TAB_HEIGHT + CONTROLS.gap // 2,
+            height=self._TAB_HEIGHT + self._TAB_GAP,
             borderwidth=0,
             highlightthickness=0,
             takefocus=False,
@@ -205,17 +208,17 @@ class ClosableTabView(ctk.CTkFrame):
             border_spacing=0,
             command=self._header_canvas.xview,
             fg_color=COLOR_PAIRS["sidebar"],
-            button_color=COLOR_PAIRS["muted_text"],
-            button_hover_color=COLOR_PAIRS["primary"],
+            button_color=COLOR_PAIRS["tab_inactive_text"],
+            button_hover_color=COLOR_PAIRS["tab_selected_text"],
         )
-        self._header_scrollbar.grid(row=0, column=0, sticky="ew", padx=CONTROLS.gap, pady=1)
+        self._header_scrollbar.grid(row=0, column=0, sticky="ew")
         self._header_scrollbar.grid_remove()
         self._header_canvas.configure(xscrollcommand=self._on_xscroll)
 
         self._tab_row = ctk.CTkFrame(
             self._header_canvas,
             width=1,
-            height=self._TAB_HEIGHT + CONTROLS.gap // 2,
+            height=self._TAB_HEIGHT + self._TAB_GAP,
             corner_radius=0,
             border_width=0,
             bg_color=COLOR_PAIRS["sidebar"],
@@ -234,7 +237,7 @@ class ClosableTabView(ctk.CTkFrame):
         for widget in (self._header, self._scrollbar_slot, self._header_canvas, self._tab_row):
             self._bind_horizontal_scroll(widget)
 
-        self._join_frame = ctk.CTkFrame(
+        self._join_frame = _PixelAlignedTabFrame(
             self,
             height=SHAPES.border_width,
             corner_radius=0,
@@ -253,18 +256,44 @@ class ClosableTabView(ctk.CTkFrame):
             self,
             corner_radius=0,
             border_width=0,
-            bg_color=COLOR_PAIRS["tab_border"],
-            fg_color=COLOR_PAIRS["tab_border"],
+            bg_color=COLOR_PAIRS["surface"],
+            fg_color=COLOR_PAIRS["surface"],
         )
         self._content.grid(row=2, column=0, sticky="nsew")
         self._content.grid_rowconfigure(0, weight=1)
         self._content.grid_columnconfigure(0, weight=1)
         self._apply_aidas_theme()
 
-    def add(self, *, text: str = "") -> ctk.CTkFrame:
-        """Create, register, and return a new content page."""
+    @classmethod
+    def _create_close_icon(cls) -> ctk.CTkImage:
+        """Draw a symmetric X without the baseline padding of a font glyph."""
+
+        scale = 4
+        side = cls._CLOSE_ICON_SIZE * scale
+        inset = round(2.5 * scale)
+        far = side - inset - 1
+
+        def draw_icon(color):
+            icon = Image.new("RGBA", (side, side))
+            draw = ImageDraw.Draw(icon)
+            stroke = round(1.75 * scale)
+            draw.line((inset, inset, far, far), fill=color, width=stroke)
+            draw.line((inset, far, far, inset), fill=color, width=stroke)
+            return icon
+
+        icon = ctk.CTkImage(
+            light_image=draw_icon(COLOR_PAIRS["on_primary"][0]),
+            dark_image=draw_icon(COLOR_PAIRS["on_primary"][1]),
+            size=(cls._CLOSE_ICON_SIZE, cls._CLOSE_ICON_SIZE),
+        )
+        icon._aidas_monochrome_action = True
+        return icon
+
+    def add(self, *, text: str = "", tooltip: str | None = None) -> ctk.CTkFrame:
+        """Create a page with an independent full-path hover description."""
 
         # The UI package also initializes while shared helpers import theme.
+        from aidas.ui.components import AppButton
         from aidas.utils.ui_utils import HoverToolTip
 
         page = ctk.CTkFrame(
@@ -273,10 +302,10 @@ class ClosableTabView(ctk.CTkFrame):
             border_width=0,
             fg_color=COLOR_PAIRS["surface"],
         )
-        page.grid(row=0, column=0, sticky="nsew", padx=SHAPES.border_width, pady=(0, SHAPES.border_width))
-        page_id = self._model.add(page, text)
+        page.grid(row=0, column=0, sticky="nsew")
+        page_id = self._model.add(page, text, tooltip)
 
-        tab_frame = ctk.CTkFrame(
+        tab_frame = _PixelAlignedTabFrame(
             self._tab_row,
             height=self._TAB_HEIGHT,
             corner_radius=self._TAB_RADIUS,
@@ -286,8 +315,8 @@ class ClosableTabView(ctk.CTkFrame):
         )
         tab_frame.pack(
             side="left", anchor="s",
-            padx=(CONTROLS.gap if len(self._model.order) == 1 else CONTROLS.gap // 2, 0),
-            pady=(CONTROLS.gap // 2, 0),
+            padx=(CONTROLS.gap if len(self._model.order) == 1 else self._TAB_GAP, 0),
+            pady=(self._TAB_GAP, 0),
         )
         tab_frame.pack_propagate(False)
 
@@ -295,56 +324,75 @@ class ClosableTabView(ctk.CTkFrame):
             tab_frame,
             text=str(text),
             height=self._TAB_HEIGHT,
-            corner_radius=SHAPES.corner_radius_sm,
+            corner_radius=0,
             border_width=0,
-            border_spacing=CONTROLS.gap // 2,
+            border_spacing=0,
             hover=False,
-            hover_color=COLOR_PAIRS["surface_subtle"],
+            hover_color=COLOR_PAIRS["tab_inactive_hover"],
             font=self._tab_font,
             anchor="w",
             command=lambda tab_id=page_id: self._select_id(tab_id, notify=True),
         )
-        title_button.pack(side="left", fill="y", padx=(CONTROLS.gap, 0), pady=CONTROLS.gap // 2)
+        title_button.pack(
+            side="left", fill="y", padx=(self._TITLE_PADDING, 0), pady=self._TAB_GAP,
+        )
         # Keep a long label inside its capped title area, leaving room for
         # the close button even when the header needs horizontal scrolling.
         title_button.grid_propagate(False)
 
-        close_button = ctk.CTkButton(
+        close_button = AppButton(
             tab_frame,
             text="",
-            image=self._close_images["text"],
+            image=self._close_icon,
+            compound="top",
+            variant="ghost",
             anchor="center",
-            width=self._CLOSE_SIZE,
-            height=self._CLOSE_SIZE,
-            corner_radius=SHAPES.corner_radius_sm,
+            corner_radius=4,
             border_width=0,
-            fg_color=COLOR_PAIRS["surface"],
-            hover_color=COLOR_PAIRS["danger_soft"],
-            text_color=COLOR_PAIRS["text"],
-            text_color_disabled=COLOR_PAIRS["disabled_text"],
+            border_spacing=0,
+            width=self._CLOSE_WIDTH,
+            height=self._CLOSE_SIZE,
             command=lambda tab_id=page_id: self._request_close(tab_id),
         )
         close_button.pack(
             side="left", padx=(0, self._CLOSE_PADDING),
             pady=(self._TAB_HEIGHT - self._CLOSE_SIZE) // 2,
         )
-        HoverToolTip(close_button, "Close tab")
 
-        bottom_join = ctk.CTkFrame(
+        bottom_join = _PixelAlignedTabFrame(
             tab_frame, height=self._TAB_RADIUS, corner_radius=0, border_width=0,
             bg_color=COLOR_PAIRS["tab_selected"],
             fg_color=COLOR_PAIRS["tab_selected"],
         )
+        tooltip_text = self._model.tooltip_text(page_id)
+        body_tooltip = HoverToolTip(tab_frame, tooltip_text, wraplength=0)
+        bottom_join.bind("<Enter>", body_tooltip._schedule_show, add="+")
+        bottom_join.bind("<Leave>", body_tooltip._hide, add="+")
         self._tab_widgets[page_id] = _TabWidgets(
             tab_frame, title_button, close_button,
-            title_tooltip=HoverToolTip(title_button, str(text)),
+            title_tooltip=HoverToolTip(title_button, tooltip_text, wraplength=0),
+            body_tooltip=body_tooltip,
+            close_tooltip=HoverToolTip(
+                close_button, tooltip_text if tooltip is not None and tooltip_text else "Close tab", wraplength=0,
+            ),
             bottom_join=bottom_join,
+        )
+        tab_frame.bind(
+            "<Configure>",
+            lambda _event, tab_id=page_id: self._update_tab_border_geometry(tab_id),
+            add="+",
         )
         self._size_tab(page_id)
         self._bind_horizontal_scroll(tab_frame)
         self._bind_horizontal_scroll(title_button)
         self._bind_horizontal_scroll(close_button)
         self._bind_horizontal_scroll(bottom_join)
+        for widget in (tab_frame, bottom_join):
+            widget.bind(
+                "<Button-1>",
+                lambda _event, tab_id=page_id: self._select_id(tab_id, notify=True),
+                add="+",
+            )
         for widget in (tab_frame, title_button, close_button, bottom_join):
             widget.bind(
                 "<Enter>",
@@ -391,7 +439,7 @@ class ClosableTabView(ctk.CTkFrame):
                 raise tk.TclError(f"Invalid tab identifier: {name!r}") from exc
 
     def tab(self, tab: object, option: str | None = None, **options):
-        """Read or update tab options; ``text`` is the supported option."""
+        """Read or update the visible title and its independent hover text."""
 
         page_id = self._resolve_page_id(tab)
         if option is not None:
@@ -399,9 +447,11 @@ class ClosableTabView(ctk.CTkFrame):
                 raise TypeError("tab() cannot combine an option query with option updates")
             if option == "text":
                 return self._model.labels[page_id]
+            if option == "tooltip":
+                return self._model.tooltip_text(page_id)
             raise tk.TclError(f"Unsupported tab option: {option!r}")
 
-        unknown = set(options) - {"text"}
+        unknown = set(options) - {"text", "tooltip"}
         if unknown:
             name = sorted(unknown)[0]
             raise tk.TclError(f"Unsupported tab option: {name!r}")
@@ -410,12 +460,32 @@ class ClosableTabView(ctk.CTkFrame):
             self._model.labels[page_id] = text
             widgets = self._tab_widgets[page_id]
             widgets.title.configure(text=text)
-            if widgets.title_tooltip is not None:
-                widgets.title_tooltip.text = text
             self._size_tab(page_id)
             self.after_idle(self._sync_header_geometry)
+        if "tooltip" in options:
+            tooltip = options["tooltip"]
+            self._model.tooltips[page_id] = None if tooltip is None else str(tooltip)
+        if options:
+            self._update_tab_tooltips(page_id)
             return None
-        return {"text": self._model.labels[page_id]}
+        return {"text": self._model.labels[page_id], "tooltip": self._model.tooltip_text(page_id)}
+
+    def _update_tab_tooltips(self, page_id: str) -> None:
+        widgets = self._tab_widgets[page_id]
+        tooltip_text = self._model.tooltip_text(page_id)
+        for tooltip in (widgets.title_tooltip, widgets.body_tooltip):
+            if tooltip is not None:
+                tooltip.text = tooltip_text
+        if widgets.close_tooltip is not None:
+            widgets.close_tooltip.text = (
+                tooltip_text if self._model.tooltips[page_id] is not None and tooltip_text else "Close tab"
+            )
+
+    @staticmethod
+    def _hide_tab_tooltips(widgets: _TabWidgets) -> None:
+        for tooltip in (widgets.title_tooltip, widgets.body_tooltip, widgets.close_tooltip):
+            if tooltip is not None:
+                tooltip._hide()
 
     def forget(self, tab: object) -> None:
         """Remove and destroy a page, silently displaying a nearby survivor."""
@@ -424,6 +494,7 @@ class ClosableTabView(ctk.CTkFrame):
         page, replacement_id, was_selected = self._model.forget(page_id)
         widgets = self._tab_widgets.pop(page_id)
         self._cancel_tab_hover(widgets)
+        self._hide_tab_tooltips(widgets)
         widgets.frame.destroy()
         try:
             page.destroy()
@@ -493,7 +564,7 @@ class ClosableTabView(ctk.CTkFrame):
 
     def _show_selected_page(self, page_id: str) -> None:
         page = self._model.pages[page_id]
-        page.grid(row=0, column=0, sticky="nsew", padx=SHAPES.border_width, pady=(0, SHAPES.border_width))
+        page.grid(row=0, column=0, sticky="nsew")
         page.tkraise()
         # Every non-selected tab is styled when it is added or when it stops
         # being active in ``_select_id``. Repainting the full header here made
@@ -511,34 +582,61 @@ class ClosableTabView(ctk.CTkFrame):
             return
         widgets.active = active
         background = self._tab_background(widgets)
-        title_hover = COLOR_PAIRS["tab_selected_hover"] if active else COLOR_PAIRS["button_hover"]
+        title_hover = COLOR_PAIRS["tab_selected_hover"] if active else COLOR_PAIRS["tab_inactive_hover"]
         widgets.frame.configure(
             fg_color=background,
             border_color=COLOR_PAIRS["tab_selected_border"] if active else COLOR_PAIRS["tab_border"],
-            border_width=SHAPES.border_width,
         )
-        widgets.title.configure(
-            fg_color=background,
-            hover_color=title_hover,
-            text_color=COLOR_PAIRS["tab_selected_text"] if active else COLOR_PAIRS["text"],
-            text_color_disabled=COLOR_PAIRS["disabled_text"],
-            font=self._selected_tab_font if active else self._tab_font,
-        )
+        title_options = {
+            "fg_color": background,
+            "hover_color": title_hover,
+            "text_color": COLOR_PAIRS["tab_selected_text"] if active else COLOR_PAIRS["tab_inactive_text"],
+            "text_color_disabled": COLOR_PAIRS["disabled_text"],
+        }
+        font = self._selected_tab_font if active else self._tab_font
+        # Resetting an unchanged CTk font temporarily unmaps the title canvas,
+        # which would dismiss a tooltip just as the pointer enters the tab.
+        if widgets.title.cget("font") is not font:
+            title_options["font"] = font
+        widgets.title.configure(**title_options)
         if widgets.bottom_join is not None:
             widgets.bottom_join.configure(fg_color=background, bg_color=background)
-            if active:
-                widgets.bottom_join.place(x=SHAPES.border_width, rely=1, y=-self._TAB_RADIUS)
-                widgets.close.tkraise()
-            else:
-                widgets.bottom_join.place_forget()
+        self._update_tab_border_geometry(page_id)
         self._set_close_hover(page_id, widgets.close_hovered)
+        self._draw_content_join()
+
+    def _update_tab_border_geometry(self, page_id: str) -> None:
+        """Align the open lower corners to a single physical-pixel outline."""
+
+        widgets = self._tab_widgets.get(page_id)
+        if widgets is None:
+            return
+        scale = self._get_widget_scaling()
+        inset = self._BORDER_PIXELS / scale
+        sidebar = COLOR_PAIRS["sidebar"]
+        lower_corner = COLOR_PAIRS["tab_selected_border"] if widgets.active else sidebar
+        widgets.frame.configure(
+            border_width=inset,
+            background_corner_colors=(sidebar, sidebar, lower_corner, lower_corner),
+        )
+        if widgets.bottom_join is None:
+            return
+        if not widgets.active:
+            widgets.bottom_join.place_forget()
+            return
+        width = widgets.frame.winfo_width()
+        if width <= 1:
+            width = round(widgets.frame.cget("width") * scale)
+        widgets.bottom_join.configure(width=max(1, width - 2 * self._BORDER_PIXELS) / scale)
+        widgets.bottom_join.place(x=inset, rely=1, y=-self._TAB_RADIUS)
+        widgets.close.tkraise()
         self._draw_content_join()
 
     @staticmethod
     def _tab_background(widgets: _TabWidgets):
         if widgets.active:
             return COLOR_PAIRS["tab_selected_hover" if widgets.hovered else "tab_selected"]
-        return COLOR_PAIRS["button_hover" if widgets.hovered else "button"]
+        return COLOR_PAIRS["tab_inactive_hover" if widgets.hovered else "tab_inactive"]
 
     def _set_tab_hover(self, page_id: str, hovered: bool) -> None:
         widgets = self._tab_widgets.get(page_id)
@@ -603,12 +701,21 @@ class ClosableTabView(ctk.CTkFrame):
             return
         widgets.close_hovered = bool(hovered)
         background = self._tab_background(widgets)
-        widgets.close.configure(
-            fg_color=COLOR_PAIRS["danger_soft"] if hovered else background,
-            hover_color=COLOR_PAIRS["danger_soft"],
-            text_color=COLOR_PAIRS["danger"] if hovered else COLOR_PAIRS["text"],
-            image=self._close_images["danger" if hovered else "text"],
+        foreground = (
+            COLOR_PAIRS["tab_close_hover_text"] if hovered else
+            COLOR_PAIRS["tab_selected_text"] if widgets.active else COLOR_PAIRS["tab_inactive_text"]
         )
+        widgets.close.configure(
+            bg_color=background,
+            fg_color=background,
+            hover_color=COLOR_PAIRS["tab_close_hover"],
+            border_width=0,
+            text_color=foreground,
+        )
+        if hovered:
+            widgets.close._on_enter()
+        else:
+            widgets.close._on_leave()
 
     def _size_tab(self, page_id: str) -> None:
         widgets = self._tab_widgets[page_id]
@@ -619,28 +726,30 @@ class ClosableTabView(ctk.CTkFrame):
             measured = len(text) * max(7, TYPOGRAPHY.body_size // 2)
         title_width = min(
             self._MAX_TITLE_WIDTH,
-            max(CONTROLS.height_lg * 2, measured + CONTROLS.padding_x * 2),
+            max(48, measured + CONTROLS.gap),
         )
         widgets.title.configure(width=title_width)
-        frame_width = title_width + CONTROLS.gap + self._CLOSE_SIZE + self._CLOSE_PADDING
+        frame_width = title_width + self._TITLE_PADDING + self._CLOSE_WIDTH + self._CLOSE_PADDING + SHAPES.border_width
         widgets.frame.configure(width=frame_width)
-        if widgets.bottom_join is not None:
-            widgets.bottom_join.configure(width=frame_width - SHAPES.border_width * 2)
+        self._update_tab_border_geometry(page_id)
 
     def _draw_content_join(self, _event=None) -> None:
         """Open the panel's top border directly beneath the selected tab."""
 
         try:
-            self._join_canvas.configure(background=COLORS.tab_border)
-            self._join_canvas.delete("selected_join")
             widgets = self._tab_widgets.get(self._model.selected)
+            border = COLOR_PAIRS["tab_selected_border" if widgets is not None else "tab_border"]
+            self._join_frame.configure(
+                height=self._BORDER_PIXELS / self._get_widget_scaling(), fg_color=border,
+            )
+            self._join_canvas.configure(background=resolve_color(border))
+            self._join_canvas.delete("selected_join")
             if widgets is None:
                 return
             left = widgets.frame.winfo_rootx() - self._join_canvas.winfo_rootx()
             right = left + widgets.frame.winfo_width()
-            inset = max(1, round(widgets.title.winfo_x() / CONTROLS.gap))
-            left = max(0, left + inset)
-            right = min(self._join_canvas.winfo_width(), right - inset)
+            left = max(0, left + self._BORDER_PIXELS)
+            right = min(self._join_canvas.winfo_width(), right - self._BORDER_PIXELS)
             if right <= left:
                 return
             self._join_canvas.create_rectangle(
@@ -766,6 +875,7 @@ class ClosableTabView(ctk.CTkFrame):
         self._cancel_header_hover()
         for widgets in self._tab_widgets.values():
             self._cancel_tab_hover(widgets)
+            self._hide_tab_tooltips(widgets)
         super().destroy()
 
     def _apply_aidas_theme(self) -> None:
@@ -775,12 +885,14 @@ class ClosableTabView(ctk.CTkFrame):
             self._header_canvas.configure(background=COLORS.sidebar)
         except tk.TclError:
             pass
-        for name, icon in self._close_images.items():
-            icon.configure(
-                light_image=_close_icon_image(COLOR_PAIRS[name][0]),
-                dark_image=_close_icon_image(COLOR_PAIRS[name][1]),
-            )
+        for widget in (self._header, self._scrollbar_slot, self._tab_row):
+            widget.configure(fg_color=COLOR_PAIRS["sidebar"])
+        self._tab_row.configure(bg_color=COLOR_PAIRS["sidebar"])
+        self._content.configure(
+            fg_color=COLOR_PAIRS["surface"], bg_color=COLOR_PAIRS["surface"],
+        )
         for page_id in self._model.order:
+            self._model.pages[page_id].configure(fg_color=COLOR_PAIRS["surface"])
             self._style_tab(page_id, active=page_id == self._model.selected)
         self._draw_content_join()
 

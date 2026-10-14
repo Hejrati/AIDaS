@@ -12,7 +12,9 @@ import numpy as np
 from aidas.canvas.image_canvas import ImageCanvas
 from aidas.core.config import Config
 from aidas.steps.step2_annotate import BOUNDARY_NAMES, FOVEA_BOUNDARY_NAME, Step2Frame
-from aidas.utils.ui_layout import LAYOUT
+from aidas.ui.theme import (
+    COLOR_PAIRS, apply_appearance_mode, get_interface_mode, resolve_color, set_interface_mode,
+)
 
 
 class _Var:
@@ -327,25 +329,50 @@ class ManualAnnotationTests(unittest.TestCase):
 
 
 class AnnotationTutorialTests(unittest.TestCase):
-    def test_inset_canvas_guide_waits_for_visible_image_and_remembers_dismissal(self):
+    def test_canvas_banner_waits_for_visible_image_and_remembers_dismissal(self):
         root = None
         original_widget_scaling = ctk.ScalingTracker.widget_scaling
+        original_interface = get_interface_mode()
+        original_appearance = ctk.get_appearance_mode()
+        original_source = ctk.AppearanceModeTracker.appearance_mode_set_by
         with tempfile.TemporaryDirectory() as temporary_directory, mock.patch.object(
             Config, "CONFIG_DIR", Path(temporary_directory)
         ), mock.patch.object(
             Config, "CONFIG_FILE", Path(temporary_directory) / "preferences.json"
         ), mock.patch.object(Step2Frame, "_start_ai_device_probe"):
             try:
+                set_interface_mode("Modern", redraw=False)
+                ctk.set_appearance_mode("Light")
+                ctk.set_widget_scaling(1)
                 try:
                     root = ctk.CTk()
                     root.withdraw()
                     root.attributes("-alpha", 0)
-                    root.geometry("1024x680+0+0")
+                    root.geometry("1024x680+10000+10000")
                 except tk.TclError as exc:
                     self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
 
                 root.deiconify()
+                apply_appearance_mode("Light", root=root, style=ttk.Style(root))
                 image = np.zeros((32, 96), dtype=np.int16)
+
+                def finish_current_segmentation(frame):
+                    frame._ensure_fovea_line(48)
+                    state = frame._capture_current_editor_state()
+                    state.update(
+                        source_image=frame.image_data, source_file=frame.current_file,
+                        boundary_names=[BOUNDARY_NAMES[0]],
+                    )
+                    traces, _order = frame._boundary_traces_from_rows(
+                        np.ones((6, 96)), image.shape,
+                    )
+                    frame._on_current_image_segmentation_done(
+                        {"results": [{"traces": traces}]}, state,
+                    )
+
+                def show_segmented_image(frame, path):
+                    frame._show_image(image, path)
+                    finish_current_segmentation(frame)
 
                 def visible_tutorial(frame):
                     banner = frame.annotation_tutorial
@@ -359,17 +386,47 @@ class AnnotationTutorialTests(unittest.TestCase):
                 def assert_guide_layout(frame):
                     banner = frame.annotation_tutorial
                     canvas = frame.image_canvas.canvas
-                    border = sum(canvas.winfo_pixels(str(canvas.cget(option)))
-                                 for option in ("borderwidth", "highlightthickness"))
-                    inset = border + round(LAYOUT.space_sm * frame._get_widget_scaling())
-                    self.assertAlmostEqual(banner.winfo_rootx(),
-                                           canvas.winfo_rootx() + inset, delta=1)
+                    scale = frame._get_widget_scaling()
+                    expected_width = canvas.winfo_width()
+                    self.assertIs(banner.master, canvas)
+                    self.assertAlmostEqual(banner.winfo_width(), expected_width, delta=1)
+                    self.assertAlmostEqual(banner.winfo_rootx(), canvas.winfo_rootx(), delta=1)
                     self.assertAlmostEqual(banner.winfo_rooty(),
-                                           canvas.winfo_rooty() + inset, delta=1)
-                    self.assertAlmostEqual(banner.winfo_rootx() + banner.winfo_width(),
-                                           canvas.winfo_rootx() + canvas.winfo_width() - inset, delta=1)
+                                           canvas.winfo_rooty(), delta=1)
+                    self.assertLessEqual(banner.winfo_rootx() + banner.winfo_width(),
+                                         canvas.winfo_rootx() + canvas.winfo_width() + 1)
                     self.assertLessEqual(banner.winfo_rooty() + banner.winfo_height(),
-                                         canvas.winfo_rooty() + canvas.winfo_height() - inset)
+                                         canvas.winfo_rooty() + canvas.winfo_height())
+                    logical_width = expected_width / scale
+                    columns = 4 if logical_width >= 940 else 2 if logical_width >= 520 else 1
+                    headings = list(frame.annotation_tutorial_heading_labels.values())
+                    for index, heading in enumerate(headings):
+                        row, column = divmod(index, columns)
+                        self.assertAlmostEqual(heading.winfo_rooty(),
+                                               headings[row * columns].winfo_rooty(), delta=1)
+                        if column:
+                            self.assertGreater(heading.winfo_rootx(), headings[index - 1].winfo_rootx())
+                        elif row:
+                            self.assertAlmostEqual(heading.winfo_rootx(), headings[0].winfo_rootx(), delta=1)
+                            self.assertGreater(heading.winfo_rooty(), headings[index - columns].winfo_rooty())
+                    content = (
+                        frame.annotation_tutorial_title,
+                        *frame.annotation_tutorial_heading_labels.values(),
+                        *frame.annotation_tutorial_labels.values(),
+                        frame.annotation_tutorial_info_icon,
+                        frame.annotation_tutorial_opt_out_btn,
+                        frame.annotation_tutorial_ok_btn,
+                    )
+                    for widget in content:
+                        self.assertTrue(widget.winfo_viewable())
+                        self.assertGreaterEqual(widget.winfo_rootx(), banner.winfo_rootx())
+                        self.assertGreaterEqual(widget.winfo_rooty(), banner.winfo_rooty())
+                        self.assertLessEqual(widget.winfo_rootx() + widget.winfo_width(),
+                                             banner.winfo_rootx() + banner.winfo_width())
+                        self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(),
+                                             banner.winfo_rooty() + banner.winfo_height())
+                    for label in frame.annotation_tutorial_labels.values():
+                        self.assertGreaterEqual(label.winfo_height(), label.winfo_reqheight() - 1)
                     instruction_bottom = max(label.winfo_rooty() + label.winfo_height()
                                              for label in frame.annotation_tutorial_labels.values())
                     for button in (frame.annotation_tutorial_opt_out_btn,
@@ -377,6 +434,16 @@ class AnnotationTutorialTests(unittest.TestCase):
                         self.assertGreater(button.winfo_rooty(), instruction_bottom)
                         self.assertLessEqual(button.winfo_rooty() + button.winfo_height(),
                                              banner.winfo_rooty() + banner.winfo_height())
+                    opt_out = frame.annotation_tutorial_opt_out_btn
+                    ok = frame.annotation_tutorial_ok_btn
+                    self.assertAlmostEqual(opt_out.winfo_rooty(), ok.winfo_rooty(), delta=1)
+                    self.assertAlmostEqual(opt_out.winfo_height(), ok.winfo_height(), delta=1)
+                    self.assertAlmostEqual(ok.winfo_rootx() - opt_out.winfo_rootx() - opt_out.winfo_width(),
+                                           round(8 * scale), delta=1)
+                    self.assertEqual(banner.cget("corner_radius"), 0)
+                    self.assertFalse(hasattr(banner, "close_button"))
+                    self.assertFalse(hasattr(frame, "annotation_tutorial_close_btn"))
+                    self.assertIsNone(root.grab_current())
 
                 preferences = Config()
                 frame = Step2Frame(root, preferences=preferences)
@@ -389,10 +456,40 @@ class AnnotationTutorialTests(unittest.TestCase):
                 self.assertFalse(visible_tutorial(frame))
                 frame._show_image(image, "Step 1 output")
                 root.update()
+                self.assertFalse(visible_tutorial(frame))
+                frame._ensure_fovea_line(48)
+                frame._queue_annotation_tutorial()
+                root.update()
+                self.assertEqual(set(frame.boundary_traces), {FOVEA_BOUNDARY_NAME})
+                self.assertFalse(visible_tutorial(frame))
+                manually_completed, _order = frame._boundary_traces_from_rows(
+                    np.ones((6, 96)), image.shape,
+                )
+                frame.boundary_traces[BOUNDARY_NAMES[0]] = manually_completed[BOUNDARY_NAMES[0]]
+                frame._queue_annotation_tutorial()
+                root.update()
+                self.assertFalse(visible_tutorial(frame))
+                frame.boundary_traces.pop(BOUNDARY_NAMES[0])
+                frame._set_segmentation_running(True, animate_progress=False)
+                root.update()
+                self.assertFalse(visible_tutorial(frame))
+                finish_current_segmentation(frame)
+                root.update()
                 self.assertTrue(visible_tutorial(frame))
                 self.assertEqual(canvas_geometry(frame), empty_geometry)
                 self.assertFalse(hasattr(frame, "annotation_help_panel"))
                 self.assertFalse(hasattr(frame, "content_status_bar"))
+
+                # Running AI again hides an already-visible guide immediately;
+                # its completed result makes the guide eligible again.
+                frame._set_segmentation_running(True, animate_progress=False)
+                self.assertFalse(visible_tutorial(frame))
+                frame._queue_annotation_tutorial()
+                root.update()
+                self.assertFalse(visible_tutorial(frame))
+                finish_current_segmentation(frame)
+                root.update()
+                self.assertTrue(visible_tutorial(frame))
 
                 def sidebar_labels(widget):
                     for child in widget.winfo_children():
@@ -405,17 +502,133 @@ class AnnotationTutorialTests(unittest.TestCase):
                 canvas = frame.image_canvas.canvas
                 self.assertEqual(set(frame.annotation_tutorial_labels),
                                  {"Draw", "Edit", "Add point", "Remove point"})
-                self.assertLess(banner.winfo_height(), canvas.winfo_height() / 3)
                 assert_guide_layout(frame)
                 self.assertTrue(frame.annotation_tutorial_info_icon.winfo_viewable())
-                self.assertEqual(frame.annotation_tutorial_opt_out_btn.cget("text"), "Do not show again")
+                self.assertEqual(frame.annotation_tutorial_title.cget("text"), "Manual annotation")
+                self.assertEqual(frame.annotation_tutorial_opt_out_btn.cget("text"), "Do not show")
                 self.assertEqual(frame.annotation_tutorial_ok_btn.cget("text"), "OK")
 
-                # The guide follows the drawing viewport while preserving
-                # its inset, the canvas border, and scrollbar clearance.
-                root.geometry("1280x820+0+0")
+                # The embedded guide leaves normal canvas drawing available.
+                frame._start_boundary_for_name(BOUNDARY_NAMES[-1])
+                click_x, click_y = frame.image_canvas._i2c(40, 16)
+                self.assertGreater(click_y, banner.winfo_height())
+                canvas.event_generate("<Button-1>", x=round(click_x), y=round(click_y))
+                root.update()
+                self.assertEqual(frame.image_canvas.get_active_line(), [(40, 16)])
+                frame.image_canvas.set_active_line([])
+                frame.active_boundary = None
+                frame._sync_boundary_canvas_state()
+
+                # A visible guide follows theme changes without changing the
+                # image, zoom, or space available to the annotation canvas.
+                displayed_image = frame.image_data
+                zoom = frame.image_canvas.get_zoom()
+                for interface, mode in (("Modern", "Dark"), ("Modern", "Light"),
+                                        ("Classic", "Light"), ("Classic", "Dark"),
+                                        ("Modern", "Dark")):
+                    with self.subTest(guide_interface=interface, guide_appearance=mode):
+                        set_interface_mode(interface, redraw=False)
+                        apply_appearance_mode(mode, root=root, style=ttk.Style(root))
+                        root.update()
+                        self.assertTrue(visible_tutorial(frame))
+                        self.assertIs(frame.image_data, displayed_image)
+                        self.assertEqual(frame.image_canvas.get_zoom(), zoom)
+                        geometry = canvas_geometry(frame)
+                        self.assertEqual(geometry[:2], empty_geometry[:2])
+                        # Classic's native scrollbar border changes the
+                        # viewport by two pixels; the banner reserves no row.
+                        for actual, expected in zip(geometry[2:], empty_geometry[2:]):
+                            self.assertAlmostEqual(actual, expected, delta=2)
+                        self.assertEqual(banner.title._label.cget("foreground"),
+                                         resolve_color(COLOR_PAIRS["text"], mode))
+                        self.assertEqual(banner.info_icon.cget("background"),
+                                         resolve_color(COLOR_PAIRS["surface"], mode))
+                        self.assertEqual(banner.opt_out_button._canvas.itemcget("inner_parts", "fill"),
+                                         resolve_color(COLOR_PAIRS["primary"], mode))
+                        self.assertEqual(banner.ok_button._canvas.itemcget("inner_parts", "fill"),
+                                         resolve_color(COLOR_PAIRS["success"], mode))
+                        assert_guide_layout(frame)
+
+                # OK dismisses only this session, and Settings
+                # can reopen it without changing the displayed annotation.
+                frame.annotation_tutorial_ok_btn.invoke()
+                root.update()
+                self.assertFalse(visible_tutorial(frame))
+                self.assertTrue(Config().get("show_step2_annotation_tutorial"))
+                frame._queue_annotation_tutorial()
+                root.update()
+                self.assertFalse(visible_tutorial(frame))
+                frame.set_annotation_tutorial_enabled(True)
+                root.update()
+                self.assertTrue(visible_tutorial(frame))
+                self.assertIs(frame.image_data, displayed_image)
+                self.assertEqual(frame.image_canvas.get_zoom(), zoom)
+                self.assertEqual(canvas_geometry(frame), empty_geometry)
+                assert_guide_layout(frame)
+
+                # Escape belongs to the guide's focused controls rather than
+                # intercepting keyboard input from the annotation canvas.
+                button_canvas = frame.annotation_tutorial_ok_btn._canvas
+                button_canvas.focus_force()
+                root.update()
+                button_canvas.event_generate("<Escape>")
+                root.update()
+                self.assertFalse(visible_tutorial(frame))
+                self.assertTrue(Config().get("show_step2_annotation_tutorial"))
+                frame.set_annotation_tutorial_enabled(True)
+                root.update()
+                self.assertTrue(visible_tutorial(frame))
+                self.assertIs(frame.image_data, displayed_image)
+                self.assertEqual(frame.image_canvas.get_zoom(), zoom)
+                assert_guide_layout(frame)
+
+                # The banner follows the drawing viewport while preserving
+                # its flush edges and keeping the two actions together.
+                root.geometry("1280x820+10000+10000")
                 root.update()
                 assert_guide_layout(frame)
+                root.geometry("1600x820+10000+10000")
+                root.update()
+                assert_guide_layout(frame)
+                self.assertAlmostEqual(frame.annotation_tutorial_heading_labels["Draw"].winfo_rooty(),
+                                       frame.annotation_tutorial_heading_labels["Remove point"].winfo_rooty(),
+                                       delta=1)
+
+                # Selecting another result moves the banner to that tab's
+                # actual drawing viewport, below the tab strip and clear of
+                # its scrollbars. The previous viewport owns no stale guide.
+                with mock.patch.object(frame, "_read_image_for_annotation",
+                                       return_value=(image, None, False)):
+                    frame._open_aidas_batch_results_viewer([
+                        {"input": "First.img", "boundaries": np.ones((6, 96))},
+                        {"input": "Second.img", "boundaries": np.ones((6, 96))},
+                    ])
+                self.assertEqual(
+                    [frame.batch_results_notebook.tab(tab, "tooltip")
+                     for tab in frame.batch_results_notebook.tabs()],
+                    [str(Path(filename).resolve()) for filename in ("First.img", "Second.img")],
+                )
+                root.update()
+                self.assertTrue(visible_tutorial(frame))
+                assert_guide_layout(frame)
+                first_banner = frame.annotation_tutorial
+                first_canvas = frame.image_canvas.canvas
+                first_canvas_geometry = canvas_geometry(frame)
+                second_tab = frame.batch_results_notebook.tabs()[1]
+                frame.batch_results_notebook.select(second_tab)
+                root.update()
+                self.assertTrue(visible_tutorial(frame))
+                self.assertIsNot(frame.image_canvas.canvas, first_canvas)
+                self.assertFalse(first_banner.winfo_exists())
+                assert_guide_layout(frame)
+                self.assertEqual((first_canvas.winfo_rootx(), first_canvas.winfo_rooty(),
+                                  first_canvas.winfo_width(), first_canvas.winfo_height()),
+                                 first_canvas_geometry)
+                show_segmented_image(frame, "Step 1 output")
+                root.update()
+                self.assertTrue(visible_tutorial(frame))
+                assert_guide_layout(frame)
+                banner = frame.annotation_tutorial
                 for widget in (frame.annotation_tutorial_info_icon,
                                frame.annotation_tutorial_opt_out_btn,
                                frame.annotation_tutorial_ok_btn):
@@ -425,11 +638,11 @@ class AnnotationTutorialTests(unittest.TestCase):
                                          banner.winfo_rootx() + banner.winfo_width())
                     self.assertLessEqual(widget.winfo_rooty() + widget.winfo_height(),
                                          banner.winfo_rooty() + banner.winfo_height())
-                root.geometry("1024x160+0+0")
+                root.geometry("1024x160+10000+10000")
                 root.update()
                 if visible_tutorial(frame):
                     assert_guide_layout(frame)
-                root.geometry("1024x680+0+0")
+                root.geometry("1024x680+10000+10000")
                 root.update()
                 self.assertTrue(visible_tutorial(frame))
                 assert_guide_layout(frame)
@@ -445,11 +658,14 @@ class AnnotationTutorialTests(unittest.TestCase):
                 self.assertFalse(visible_tutorial(frame))
                 self.assertEqual(canvas_geometry(frame), empty_geometry)
 
-                # Explicitly enabling the guide also reopens an OK-dismissed
-                # guide without replacing the image or changing its zoom.
+                # Enabling the guide on a fresh image still waits for its
+                # completed result, preserving the image and current zoom.
                 displayed_image = frame.image_data
                 zoom = frame.image_canvas.get_zoom()
                 frame.set_annotation_tutorial_enabled(True)
+                root.update()
+                self.assertFalse(visible_tutorial(frame))
+                finish_current_segmentation(frame)
                 root.update()
                 self.assertTrue(visible_tutorial(frame))
                 self.assertIs(frame.image_data, displayed_image)
@@ -462,7 +678,7 @@ class AnnotationTutorialTests(unittest.TestCase):
                 # with enlarged display scaling and initial text wrapping.
                 ctk.set_widget_scaling(1.5)
                 frame = Step2Frame(root, preferences=Config())
-                frame._show_image(image, "Step 1 output")
+                show_segmented_image(frame, "Step 1 output")
                 root.update()
                 self.assertFalse(visible_tutorial(frame))
                 frame.pack(fill="both", expand=True)
@@ -488,7 +704,7 @@ class AnnotationTutorialTests(unittest.TestCase):
 
                 frame = Step2Frame(root, preferences=Config())
                 frame.pack(fill="both", expand=True)
-                frame._show_image(image, "Step 1 output")
+                show_segmented_image(frame, "Step 1 output")
                 root.update()
                 self.assertFalse(visible_tutorial(frame))
                 frame.pack_forget()
@@ -506,6 +722,8 @@ class AnnotationTutorialTests(unittest.TestCase):
                 ctk.set_widget_scaling(original_widget_scaling)
                 if root is not None:
                     root.destroy()
+                set_interface_mode(original_interface, redraw=False)
+                ctk.set_appearance_mode("System" if original_source == "system" else original_appearance)
 
 
 class PolylineDoubleClickTests(unittest.TestCase):

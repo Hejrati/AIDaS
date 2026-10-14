@@ -16,7 +16,11 @@ from typing import Mapping, TypeAlias
 
 import customtkinter as ctk
 
+from aidas.ui.rendering import install_smooth_borders
 from aidas.ui.windowing import synchronize_window_chrome
+
+
+install_smooth_borders()
 
 
 class _LiveColorPair(list[str]):
@@ -69,16 +73,22 @@ MODERN_COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
         "border": ("#D7E0E9", "#293847"),
         "border_strong": ("#B8C5D1", "#3B4C5C"),
         "tab_border": ("#D7E0E9", "#293847"),
+        "tab_inactive": ("#E5EDF5", "#202D39"),
+        "tab_inactive_hover": ("#D7E7F2", "#17384D"),
+        "tab_inactive_text": ("#152235", "#F2F6FA"),
         "tab_selected": ("#FFF0B3", "#55421B"),
         "tab_selected_hover": ("#FFE58D", "#6C5420"),
         "tab_selected_text": ("#493600", "#FFF1C2"),
         "tab_selected_border": ("#9B6B0C", "#D1AC4A"),
+        "tab_close_hover": ("#FCE7E9", "#49242A"),
+        "tab_close_hover_text": ("#B4232E", "#FF98A1"),
         "text": ("#152235", "#F2F6FA"),
         "muted_text": ("#637487", "#9FB0C0"),
         "disabled_text": ("#98A5B2", "#667787"),
         "primary": ("#0B67A3", "#3294D1"),
         "primary_hover": ("#085584", "#55A9DD"),
         "primary_soft": ("#DDEFFA", "#17384D"),
+        "version_badge_text": ("#0B67A3", "#65B8EC"),
         "on_primary": ("#FFFFFF", "#07131C"),
         "success": ("#157A43", "#4FD18B"),
         "success_hover": ("#106534", "#72DFA2"),
@@ -87,6 +97,7 @@ MODERN_COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
         "warning_soft": ("#FFF1D6", "#493716"),
         "danger": ("#B4232E", "#FF7581"),
         "danger_hover": ("#8F1D26", "#FF98A1"),
+        "caption_close_hover_text": ("#FFFFFF", "#07131C"),
         "danger_soft": ("#FCE7E9", "#49242A"),
         "link": ("#0969A8", "#65B8EC"),
         "institution": ("#C0002B", "#FF6F82"),
@@ -116,16 +127,22 @@ CLASSIC_COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
         "border": ("#C9D2DC", "#C9D2DC"),
         "border_strong": ("#A7ADB3", "#A7ADB3"),
         "tab_border": ("#C9D2DC", "#C9D2DC"),
+        "tab_inactive": ("#F0F0F0", "#F0F0F0"),
+        "tab_inactive_hover": ("#E5F1F9", "#E5F1F9"),
+        "tab_inactive_text": ("#17212B", "#17212B"),
         "tab_selected": ("#FFF0B3", "#FFF0B3"),
         "tab_selected_hover": ("#FFE58D", "#FFE58D"),
         "tab_selected_text": ("#493600", "#493600"),
         "tab_selected_border": ("#9B6B0C", "#9B6B0C"),
+        "tab_close_hover": ("#FCE7E9", "#FCE7E9"),
+        "tab_close_hover_text": ("#B4232E", "#B4232E"),
         "text": ("#17212B", "#17212B"),
         "muted_text": ("#5D6B78", "#5D6B78"),
         "disabled_text": ("#8B9298", "#8B9298"),
         "primary": ("#0B5F9E", "#0B5F9E"),
         "primary_hover": ("#084B7D", "#084B7D"),
         "primary_soft": ("#E5F1F9", "#E5F1F9"),
+        "version_badge_text": ("#0B5F9E", "#0B5F9E"),
         "on_primary": ("#FFFFFF", "#FFFFFF"),
         "success": ("#1F6B35", "#1F6B35"),
         "success_hover": ("#18562A", "#18562A"),
@@ -134,6 +151,7 @@ CLASSIC_COLOR_PAIRS: Mapping[str, ColorPair] = MappingProxyType(
         "warning_soft": ("#FFF1D6", "#FFF1D6"),
         "danger": ("#A1262F", "#A1262F"),
         "danger_hover": ("#811E26", "#811E26"),
+        "caption_close_hover_text": ("#FFFFFF", "#FFFFFF"),
         "danger_soft": ("#F7E4E6", "#F7E4E6"),
         "link": ("#0066CC", "#0066CC"),
         "institution": ("#C0002B", "#C0002B"),
@@ -623,12 +641,15 @@ def refresh_interface_widgets(root: tk.Misc) -> int:
     pair.  Corner radii are scalar values, so Classic temporarily stores each
     widget's exact Modern value and restores it on the return trip.  This also
     handles widgets created while Classic is active: their canonical radius is
-    captured before the widget is flattened.
+    captured before the widget is flattened. Explicit shared action styles can
+    retain their corners in both interfaces.
     """
 
     classic = get_interface_mode() == "Classic"
     changed = 0
     for widget in (root, *_walk_widgets(root)):
+        if getattr(widget, "_aidas_preserve_corner_radius", False):
+            continue
         try:
             current = widget.cget("corner_radius")
         except (AttributeError, KeyError, tk.TclError, TypeError, ValueError):

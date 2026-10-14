@@ -36,11 +36,12 @@ from aidas.utils.log_paths import app_log_dir
 from aidas.utils.r_script_library import (
     OPTIMIZED_R_SCRIPTS_ENABLED,
     OPTIMIZED_R_SCRIPT_NAME,
+    OPTIMIZED_R_OUTPUT_SCRIPT_NAME,
     discover_r_scripts,
     import_r_script,
     user_r_script_dir,
 )
-from aidas.ui.components import AppButton
+from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
@@ -48,7 +49,6 @@ from aidas.utils.ui_utils import (
     NativeNumericSpinbox,
     SidebarStepFrame,
     action_button,
-    load_color_close_icon,
     load_action_icon,
     load_ctk_image,
     resource_path,
@@ -1986,15 +1986,11 @@ class RBatchSelectionPanel(ttk.Frame):
         action_row = ttk.Frame(run_box)
         action_row.pack(side="bottom", fill="x")
         action_button(action_row, self, "Cancel", self._cancel, "cancel").pack(side="left")
-        self.next_button = action_button(
+        self.next_button = AppRunButton(
             action_row,
-            self,
-            "Run selected folders",
-            self._run_selected,
-            "process",
-            tooltip="Start the configured R scripts for the selected folders.",
-            style="AIDaS.PrimaryAction.TButton",
+            command=self._run_selected,
         )
+        HoverToolTip(self.next_button, "Run the configured R scripts for the selected folders.")
         self.next_button.pack(side="right")
         self.next_button.state(["disabled"])
 
@@ -2347,14 +2343,12 @@ class RBatchRunPanel(ttk.Frame):
             padding=(11, 6),
         )
         self.stop_button.pack(side="left", padx=(6, 0))
-        self.close_icon = load_color_close_icon(self)
-        self.close_button = ttk.Button(
+        self.close_button = AppButton(
             action_box,
             text="Close",
+            variant="danger",
+            width=88,
             command=self._close,
-            image=self.close_icon,
-            compound="left",
-            style="AIDaS.Action.TButton",
         )
         self.close_button.pack(side="left", padx=(6, 0))
         self.cancel_button = self.stop_button
@@ -2616,7 +2610,7 @@ class Step3ResultZoomDialog(tk.Toplevel):
 
         footer = ttk.Frame(self, padding=(10, 0, 10, 10))
         footer.pack(fill="x")
-        ttk.Button(footer, text="Close", command=self.destroy).pack(side="right")
+        AppButton(footer, text="Close", variant="danger", width=88, command=self.destroy).pack(side="right")
 
         self.bind("<Escape>", lambda _event: self.destroy(), add="+")
         self.protocol("WM_DELETE_WINDOW", self.destroy)
@@ -2674,6 +2668,7 @@ class Step3Frame(SidebarStepFrame):
     RESULT_SIDE_ORDER = ("temporal", "nasal")
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
     R_OPTIMIZED_SCRIPT_NAME = OPTIMIZED_R_SCRIPT_NAME
+    R_OPTIMIZED_OUTPUT_SCRIPT_NAME = OPTIMIZED_R_OUTPUT_SCRIPT_NAME
     R_OPTIMIZED_ENABLED = OPTIMIZED_R_SCRIPTS_ENABLED
     R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
     R_OUTPUT_MODE_PARALLEL = "parallel"
@@ -2987,8 +2982,9 @@ class Step3Frame(SidebarStepFrame):
         return [choice for choice in choices if self._r_script_is_enabled(role, choice.path)]
 
     def _r_script_is_enabled(self, role, path):
-        if role == "main" and not self.R_OPTIMIZED_ENABLED:
-            optimized = self._script_path(role).with_name(self.R_OPTIMIZED_SCRIPT_NAME)
+        if not self.R_OPTIMIZED_ENABLED:
+            optimized_name = self.R_OPTIMIZED_SCRIPT_NAME if role == "main" else self.R_OPTIMIZED_OUTPUT_SCRIPT_NAME
+            optimized = self._script_path(role).with_name(optimized_name)
             return Path(path).resolve() != optimized.resolve()
         return True
 
@@ -4972,6 +4968,9 @@ class Step3Frame(SidebarStepFrame):
         on_click=None,
         on_image_layout=None,
         align_top=False,
+        plot_bounds=None,
+        plot_margins=None,
+        plot_box_aspect=None,
     ):
         parent = self.plot_holder if parent is None else parent
         label = tk.Label(
@@ -4990,9 +4989,15 @@ class Step3Frame(SidebarStepFrame):
                 return
             if width <= 1 or height <= 1:
                 return
-            fitted = ImageOps.contain(source, (width, height), Image.Resampling.LANCZOS)
-            left = (width - fitted.width) // 2
-            top = 0 if align_top else (height - fitted.height) // 2
+            if plot_bounds is not None and plot_margins is not None:
+                left, top, fitted_width, fitted_height = self._result_preview_layout(
+                    source.size, plot_bounds, plot_margins, (width, height), plot_box_aspect,
+                )
+                fitted = source.resize((fitted_width, fitted_height), Image.Resampling.LANCZOS)
+            else:
+                fitted = ImageOps.contain(source, (width, height), Image.Resampling.LANCZOS)
+                left = (width - fitted.width) // 2
+                top = 0 if align_top else (height - fitted.height) // 2
             canvas = Image.new("RGB", (width, height), background)
             canvas.paste(fitted, (left, top))
             label.preview_photo = ImageTk.PhotoImage(canvas)
@@ -5105,6 +5110,50 @@ class Step3Frame(SidebarStepFrame):
             return full_image
         return left, top, right, bottom
 
+    @staticmethod
+    def _result_plot_margins(image, bounds):
+        """Express axis margins relative to the inner plot's width and height."""
+        left, top, right, bottom = bounds
+        width, height = max(1, right - left), max(1, bottom - top)
+        return left / width, top / height, (image.width - right) / width, (image.height - bottom) / height
+
+    @staticmethod
+    def _result_preview_layout(source_size, bounds, margins, target_size, box_aspect):
+        """Align paired plot areas while retaining room for all PNG axis labels."""
+        target_width, target_height = target_size
+        margin_left, margin_top, margin_right, margin_bottom = margins
+        plot_width = target_width / (1 + margin_left + margin_right)
+        plot_height = target_height / (1 + margin_top + margin_bottom)
+        # Share the Vertex chart's shape instead of stretching tall viewports.
+        plot_width = min(plot_width, plot_height / box_aspect)
+        plot_height = plot_width * box_aspect
+        offset_x = (target_width - plot_width * (1 + margin_left + margin_right)) / 2
+        left, top, right, bottom = bounds
+        scale_x = plot_width / max(1, right - left)
+        scale_y = plot_height / max(1, bottom - top)
+        source_width, source_height = source_size
+        return (
+            round(offset_x + margin_left * plot_width - left * scale_x),
+            round(margin_top * plot_height - top * scale_y),
+            max(1, round(source_width * scale_x)),
+            max(1, round(source_height * scale_y)),
+        )
+
+    @staticmethod
+    def _set_result_frame_path(frame, folder, prefix=None):
+        """Use a wrapping full-path header without widening the preview grid."""
+        path = str(Path(folder).expanduser().resolve())
+        label = ttk.Label(
+            frame, text=f"{prefix} — {path}" if prefix else path,
+            wraplength=400, justify="left", font=("", 10, "bold"),
+        )
+        frame.configure(labelwidget=label)
+        frame.bind(
+            "<Configure>",
+            lambda event: label.configure(wraplength=max(1, event.width - 24)),
+            add="+",
+        )
+
     def _open_result_zoom(self, image, title):
         current = getattr(self, "_result_zoom_dialog", None)
         if current is not None:
@@ -5204,7 +5253,8 @@ class Step3Frame(SidebarStepFrame):
         )
 
         for group_index, group in enumerate(groups):
-            subject = ttk.LabelFrame(grid, text=group["label"], padding=(10, 6, 10, 10))
+            subject = ttk.LabelFrame(grid, padding=(10, 6, 10, 10))
+            self._set_result_frame_path(subject, group["root"])
             subject.grid(row=group_index, column=0, sticky="nsew", pady=(0, 10))
             grid.rowconfigure(group_index, weight=1, uniform="result-subject")
             subject.columnconfigure(0, weight=1)
@@ -5222,15 +5272,26 @@ class Step3Frame(SidebarStepFrame):
                     result_pair = subject
                 else:
                     result_pair = ttk.LabelFrame(
-                        subject, text=side_title, padding=(5, 4, 5, 5)
+                        subject, padding=(5, 4, 5, 5)
                     )
+                    self._set_result_frame_path(result_pair, folder, prefix=side_title)
                     result_pair.grid(
                         row=side_index, column=0, sticky="nsew", pady=(0, 5)
                     )
                     subject.rowconfigure(side_index, weight=1, uniform="result-side-row")
                 result_pair.rowconfigure(1, weight=1)
 
-                for column_index, (result_title, filename) in enumerate(self.RESULT_IMAGE_ROWS):
+                previews = []
+                for result_title, filename in self.RESULT_IMAGE_ROWS:
+                    image = self._load_result_preview(folder, filename)
+                    bounds = self._result_plot_bounds(image)
+                    previews.append((result_title, image, bounds))
+                margins = [self._result_plot_margins(image, bounds) for _title, image, bounds in previews]
+                shared_margins = tuple(max(values) for values in zip(*margins))
+                first_bounds = previews[0][2]
+                plot_box_aspect = (first_bounds[3] - first_bounds[1]) / max(1, first_bounds[2] - first_bounds[0])
+
+                for column_index, (result_title, image, plot_bounds) in enumerate(previews):
                     result_pair.columnconfigure(
                         column_index, weight=1, uniform="result-image-column"
                     )
@@ -5240,8 +5301,6 @@ class Step3Frame(SidebarStepFrame):
                         anchor="center",
                         font=("", 10, "bold"),
                     ).grid(row=0, column=column_index, sticky="ew", padx=5, pady=(0, 4))
-                    image = self._load_result_preview(folder, filename)
-                    plot_bounds = self._result_plot_bounds(image)
                     zoom_parts = [group["label"], side_title, result_title]
                     zoom_title = " — ".join(part for part in zoom_parts if part)
                     image_host = ttk.Frame(result_pair)
@@ -5299,9 +5358,9 @@ class Step3Frame(SidebarStepFrame):
                             button.place_forget()
                             return
                         button.place(
-                            x=preview.winfo_x() + panel_right - inset,
-                            y=preview.winfo_y() + panel_top + inset,
-                            anchor="ne",
+                            x=preview.winfo_x() + panel_left + inset,
+                            y=preview.winfo_y() + panel_bottom - inset,
+                            anchor="sw",
                         )
                         button.lift()
 
@@ -5312,6 +5371,9 @@ class Step3Frame(SidebarStepFrame):
                         on_click=open_zoom,
                         on_image_layout=position_expand_button,
                         align_top=True,
+                        plot_bounds=plot_bounds,
+                        plot_margins=shared_margins,
+                        plot_box_aspect=plot_box_aspect,
                     )
                     HoverToolTip(preview, f"Click to maximize {zoom_title}.")
                     HoverToolTip(expand_button, f"Maximize {result_title} preview.")

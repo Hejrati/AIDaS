@@ -16,14 +16,12 @@ from aidas.services.step4_compiler import (
     DEFAULT_OUTPUT_FILENAME,
     compile_step4_results,
 )
-from aidas.ui.components import AppButton
-from aidas.ui.theme import COLOR_PAIRS, COLORS, CONTROLS
+from aidas.ui.components import AppButton, AppRunButton
+from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import centered_logical_geometry, synchronize_window_chrome
 from aidas.utils.ui_utils import (
     action_button,
     apply_app_icon_to,
-    load_color_close_ctk_icon,
-    load_ctk_image,
 )
 
 
@@ -219,30 +217,17 @@ class Step4CompilerDialog(ctk.CTkToplevel):
 
         footer = ttk.Frame(panel)
         footer.grid(row=6, column=0, sticky="ew", pady=(10, 0))
-        self.close_button_icon = load_color_close_ctk_icon(self, size=CONTROLS.icon_size)
         self.close_button = AppButton(
             footer,
             text="Close",
-            variant="secondary",
+            variant="danger",
             command=self.close,
-            image=self.close_button_icon,
-            compound="left",
             width=104,
         )
         self.close_button.pack(side="right")
-        self.run_button_icon = load_ctk_image(
-            self,
-            "flat-color-icons--process.png",
-            size=CONTROLS.icon_size,
-        )
-        self.run_button = AppButton(
+        self.run_button = AppRunButton(
             footer,
-            text="Run compiler",
-            variant="primary",
             command=self._run_clicked,
-            image=self.run_button_icon,
-            compound="left",
-            width=142,
         )
         self.run_button.pack(side="right", padx=(0, 6))
 
@@ -403,7 +388,6 @@ class Step4CompilerDialog(ctk.CTkToplevel):
             control.configure(state=state)
         self.run_button.configure(
             state=state,
-            text="Compiling…" if running else "Run compiler",
         )
         if running:
             self.status_var.set("Compiling measurements…")

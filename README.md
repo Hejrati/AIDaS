@@ -67,6 +67,19 @@ saved outputs** filter. **Save** and **Go to Step 2** are grouped at the bottom
 of the sidebar; the latter sends every completed folder to Step 2 batch
 segmentation, where results open in tabs named for their source folders.
 
+When an SDB opens, Step 1 checks its signed intensity histogram in overlapping
+horizontal bands and offers to smooth unusually bright pixels. This check runs
+before a crop is selected, including when using **Entire Image**. Corrections
+are kept in a working copy through crop and width changes.
+An amber notice spans the canvas from its top edge. Choose the green **Fix**
+button to replace only the detected pixels with values from nearby unaffected
+pixels, or the red **Cancel** button to keep the
+current image open. Saved crops are also checked when opened. **Crop & Scale**
+checks for additional candidates inside the selected region. Detection uses
+the signed 16-bit values saved in the
+Analyze output and runs before horizontal pixel replication. Every other
+saved pixel value stays exactly the same, and the source SDB is untouched.
+
 Optional sidecar files (if available):
 - `.hdr` files with matching names
 
