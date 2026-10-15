@@ -635,7 +635,7 @@ def _walk_widgets(widget: tk.Misc):
         yield from _walk_widgets(child)
 
 
-def refresh_interface_widgets(root: tk.Misc) -> int:
+def refresh_interface_widgets(root: tk.Misc, *, recursive: bool = True) -> int:
     """Flatten or restore existing CTk corners for the active interface.
 
     Color tokens update live because every widget holds the same mutable color
@@ -648,7 +648,8 @@ def refresh_interface_widgets(root: tk.Misc) -> int:
 
     classic = get_interface_mode() == "Classic"
     changed = 0
-    for widget in (root, *_walk_widgets(root)):
+    widgets = (root, *_walk_widgets(root)) if recursive else (root,)
+    for widget in widgets:
         if getattr(widget, "_aidas_preserve_corner_radius", False):
             continue
         try:

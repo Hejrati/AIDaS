@@ -13,7 +13,6 @@ import math
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, label, median_filter
-from scipy.signal import find_peaks
 
 
 @dataclass(frozen=True)
@@ -139,6 +138,10 @@ def _has_interior_contrast(profile: np.ndarray, upper: int, lower: int) -> bool:
 
 def _center_seed(smoothed: np.ndarray, block: int, height: int):
     """Locate a compact group of layer transitions in middle scan stripes."""
+    # Signal processing is only needed when proposing an image-based crop.
+    # Keep its substantial import cost out of application startup.
+    from scipy.signal import find_peaks
+
     columns = smoothed.shape[1]
     for middle in (0.50, 0.30, 0.70):
         candidates = []

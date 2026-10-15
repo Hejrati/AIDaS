@@ -91,7 +91,14 @@ class Step3ResultZoomUITests(unittest.TestCase):
                 return (dialog.winfo_width(), dialog.winfo_height(), label.winfo_width(), label.winfo_height())
 
             try:
-                with mock.patch.object(tk.Toplevel, '__init__', invisible_init):
+                # Include a small work area even on a large developer display:
+                # CI may have less room than the requested 1000x700 client.
+                from contextlib import nullcontext
+                bounds_patch = (
+                    mock.patch('aidas.steps.step3_flatten.work_area_bounds', return_value=(0, 0, 1024, 720))
+                    if sys.argv[2] == 'small' else nullcontext()
+                )
+                with mock.patch.object(tk.Toplevel, '__init__', invisible_init), bounds_patch:
                     for source_size in ((3600, 2400), (1200, 3600)):
                         source = Image.new('RGB', source_size, (201, 53, 16))
                         dialog = Step3ResultZoomDialog(root, source, 'Hidden diagnostic viewer test')
@@ -101,6 +108,10 @@ class Step3ResultZoomUITests(unittest.TestCase):
                         dialog.state('normal')
                         settle()
                         for width, height in ((1000, 700), (720, 480), (640, 480)):
+                            minimum = dialog.minsize()
+                            maximum = dialog.maxsize()
+                            width = max(minimum[0], min(width, maximum[0]))
+                            height = max(minimum[1], min(height, maximum[1]))
                             dialog.geometry(f'{width}x{height}+10000+10000')
                             before = assert_layout(dialog)
                             assert before[0:2] == (width, height), 'Image changed the requested window size.'
@@ -145,10 +156,10 @@ class Step3ResultZoomUITests(unittest.TestCase):
                 root.destroy()
             """
         )
-        for scale in (1.0, 1.25, 2.0):
-            with self.subTest(scale=scale):
+        for scale, work_area in ((1.0, 'actual'), (1.25, 'actual'), (2.0, 'actual'), (1.0, 'small')):
+            with self.subTest(scale=scale, work_area=work_area):
                 result = subprocess.run(
-                    [sys.executable, "-c", script, str(scale)],
+                    [sys.executable, "-c", script, str(scale), work_area],
                     cwd=Path(__file__).resolve().parents[1],
                     capture_output=True,
                     text=True,

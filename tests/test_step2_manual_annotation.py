@@ -599,9 +599,13 @@ class AnnotationTutorialTests(unittest.TestCase):
                 root.geometry("1600x820+10000+10000")
                 root.update()
                 assert_guide_layout(frame)
-                self.assertAlmostEqual(frame.annotation_tutorial_heading_labels["Draw"].winfo_rooty(),
-                                       frame.annotation_tutorial_heading_labels["Remove point"].winfo_rooty(),
-                                       delta=1)
+                # Windows may clamp this request to a smaller runner display.
+                # assert_guide_layout above checks the responsive row grouping
+                # against the actual viewport rather than the requested size.
+                if frame.image_canvas.canvas.winfo_width() / frame._get_widget_scaling() >= 940:
+                    self.assertAlmostEqual(frame.annotation_tutorial_heading_labels["Draw"].winfo_rooty(),
+                                           frame.annotation_tutorial_heading_labels["Remove point"].winfo_rooty(),
+                                           delta=1)
 
                 # Selecting another result moves the banner to that tab's
                 # actual drawing viewport, below the tab strip and clear of

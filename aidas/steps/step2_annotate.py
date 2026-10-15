@@ -45,7 +45,7 @@ from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS, SHAPES, TYPOGRAPHY
 from aidas.utils.batch_summary import format_batch_summary
-from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
+from aidas.utils.filesystem import find_candidate_directories, skipped_directories_warning
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_layout import LAYOUT
@@ -361,16 +361,15 @@ class Step2BatchSegmentationTable(ttk.Frame):
         if self.tree.exists(self._placeholder_iid):
             self.tree.delete(self._placeholder_iid)
 
-        visible_count = 0
-        for iid, row in self._row_by_iid.items():
-            if self._hide_processed and row.get("locked"):
-                self.tree.detach(iid)
-            else:
-                # Moving a detached entry restores its checkbox and values.
-                self.tree.move(iid, "", "end")
-                visible_count += 1
+        visible = tuple(
+            iid for iid, row in self._row_by_iid.items()
+            if not (self._hide_processed and row.get("locked"))
+        )
+        # Replace the child list in one Tcl call, preserving detached items
+        # and their checkbox state for the next filter change.
+        self.tree.set_children("", *visible)
 
-        if not visible_count:
+        if not visible:
             message = (
                 "No unprocessed folders to show."
                 if self.rows and self._hide_processed
@@ -402,9 +401,14 @@ class Step2BatchSegmentationTable(ttk.Frame):
 
     def _measure_text(self, text, *, heading=False, padding=18):
         font = self._heading_font if heading else self._tree_font
-        return int(font.measure(str(text or ""))) + int(padding)
+        key = (heading, str(text or ""), int(padding))
+        cache = self.__dict__.setdefault("_text_width_cache", {})
+        if key not in cache:
+            cache[key] = int(font.measure(key[1])) + key[2]
+        return cache[key]
 
     def _fit_columns_to_content(self):
+        self._text_width_cache = {}
         widths = {
             "folder": self._measure_text("Folder", heading=True),
             "status": self._measure_text("Status", heading=True),
@@ -819,6 +823,7 @@ class Step2Frame(SidebarStepFrame):
         self.batch_results_notebook = None
         self.batch_segmentation_panel = None
         self._batch_result_canvases = []
+        self._batch_result_fit_after_id = None
         self._batch_result_tab_canvases = {}
         self._batch_result_states = {}
         self._active_batch_result_tab = None
@@ -1101,6 +1106,7 @@ class Step2Frame(SidebarStepFrame):
             self._queue_annotation_tutorial()
 
     def destroy(self):
+        self._cancel_batch_result_fit()
         self._cancel_progress_animation()
         self._watch_annotation_tutorial_canvas(None)
         self._hide_annotation_tutorial()
@@ -1495,11 +1501,9 @@ class Step2Frame(SidebarStepFrame):
         """Return folder rows showing ready and already-segmented Light inputs."""
         root_dir = os.path.abspath(root_dir)
         rows = []
-        scanned = 0
-        skipped = 0
-        folders, access_errors = walk_accessible_directories(root_dir)
+        folders, scanned, access_errors = find_candidate_directories(root_dir, (("light.img",),))
+        skipped = scanned - len(folders)
         for folder_path in folders:
-            scanned += 1
             try:
                 row = self._step2_batch_segmentation_row(folder_path)
             except OSError as exc:
@@ -5077,6 +5081,7 @@ class Step2Frame(SidebarStepFrame):
             self._single_editor_state = self._capture_current_editor_state()
 
         previous_notebook = getattr(self, "batch_results_notebook", None)
+        self._cancel_batch_result_fit()
         if previous_notebook is not None:
             previous_notebook.destroy()
 
@@ -5177,7 +5182,7 @@ class Step2Frame(SidebarStepFrame):
         if notebook.tabs():
             notebook.select(notebook.tabs()[0])
         self.status_var.set(f"AI batch results opened: {len(viewable_results)} image(s). Select a tab to edit its boundaries.")
-        self.after(100, self._fit_batch_result_canvases)
+        self._batch_result_fit_after_id = self.after(100, self._run_batch_result_fit)
 
     @staticmethod
     def _batch_result_tab_text(title):
@@ -5231,6 +5236,20 @@ class Step2Frame(SidebarStepFrame):
             canvas,
             status_message=f"Editing batch result: {os.path.basename(state.get('input') or '')}",
         )
+
+    def _cancel_batch_result_fit(self):
+        job = self.__dict__.get("_batch_result_fit_after_id")
+        self._batch_result_fit_after_id = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _run_batch_result_fit(self):
+        self._batch_result_fit_after_id = None
+        if self.winfo_exists():
+            self._fit_batch_result_canvases()
 
     def _fit_batch_result_canvases(self):
         for canvas in list(getattr(self, "_batch_result_canvases", [])):
@@ -5288,6 +5307,7 @@ class Step2Frame(SidebarStepFrame):
 
     def _finish_batch_results_session(self, notebook, status_message):
         """Return Step 2 to its reusable empty state after its last result closes."""
+        self._cancel_batch_result_fit()
         if notebook is not None:
             try:
                 notebook.destroy()

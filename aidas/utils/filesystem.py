@@ -3,10 +3,39 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 
 DirectoryScanError = tuple[Path, str]
+
+
+def find_candidate_directories(
+    root: str | os.PathLike,
+    required_name_groups: Iterable[Iterable[str]],
+) -> tuple[list[Path], int, list[DirectoryScanError]]:
+    """Prefilter batch inputs using filenames already returned by os.walk.
+
+    Each group contains alternative filenames; every group must match. Callers
+    retain their existing file/type, pair, and freshness checks. No results are
+    cached between scans.
+    """
+    root = Path(root)
+    groups = tuple({name.lower() for name in group} for group in required_name_groups)
+    candidates = []
+    errors = []
+    scanned = 0
+
+    def record_error(exc):
+        errors.append((Path(exc.filename) if exc.filename else root, str(exc)))
+
+    for folder, dirnames, filenames in os.walk(root, topdown=True, onerror=record_error):
+        dirnames.sort(key=str.lower)
+        scanned += 1
+        names = {name.lower() for name in filenames}
+        if all(names.intersection(group) for group in groups):
+            candidates.append(Path(folder))
+    return candidates, scanned, errors
 
 
 def find_sdb_directories(

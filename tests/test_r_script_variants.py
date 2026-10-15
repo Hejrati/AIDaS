@@ -164,6 +164,14 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         self.assertEqual(self.originals["main"].name, "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R")
         self.assertEqual(self.defaults["main"].name, "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R")
 
+    def test_script_paths_and_saved_selections_resolve_directory_aliases(self):
+        bundled = self.root / "bundled" / ".." / "bundled"
+        with mock.patch("aidas.steps.step3_flatten.resource_path",
+                        side_effect=lambda name: str(bundled / name)):
+            self.assertEqual(Step3Frame._script_path(), self.defaults["main"])
+        self.frame.preferences.values["r_main_script_path"] = str(bundled / self.defaults["main"].name)
+        self.assertEqual(self.frame._selected_r_script_path(), self.defaults["main"])
+
     def test_disable_flag_can_restore_original_defaults(self):
         with mock.patch.object(Step3Frame,"R_OPTIMIZED_ENABLED",False), \
                 mock.patch("aidas.steps.step3_flatten.resource_path",

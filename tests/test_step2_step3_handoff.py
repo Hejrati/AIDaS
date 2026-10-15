@@ -281,7 +281,8 @@ class Step2Step3HandoffTests(unittest.TestCase):
                 panel._scan_worker()
                 panel._poll_scan_events()
 
-                self.assertEqual([row["folder"] for row in scan_results], output_folders)
+                self.assertEqual([row["folder"].resolve() for row in scan_results],
+                                 [folder.resolve() for folder in output_folders])
                 for row in scan_results:
                     self.assertEqual(row["status"], "Ready")
                     self.assertTrue(row["include"])

@@ -12,6 +12,7 @@ import sys
 import time
 import tkinter as tk
 import webbrowser
+import weakref
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
@@ -1965,6 +1966,21 @@ class AIDaSApp(ctk.CTk):
         # work, so running an idle refresh for every intermediate map would
         # make the menu command block while hundreds of canvases redraw.
         if self.__dict__.get("_interface_switching", False):
+            return
+        widget = getattr(_event, "widget", None)
+        if isinstance(widget, ctk.CTkBaseClass):
+            # Map is delivered for every descendant when a tab or dialog is
+            # shown. Only new CTk widgets need their scalar corners settled;
+            # explicit interface changes still refresh the complete tree.
+            settled = self.__dict__.get("_mapped_interface_widgets")
+            if settled is None:
+                settled = self._mapped_interface_widgets = weakref.WeakKeyDictionary()
+            mode = self.__dict__.get("interface_mode", "Modern")
+            if settled.get(widget) != mode:
+                refresh_interface_widgets(widget, recursive=False)
+                settled[widget] = mode
+            return
+        if widget is not None:
             return
         self._queue_interface_widget_refresh(
             include_splash=self.__dict__.get("_splash") is not None

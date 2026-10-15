@@ -29,7 +29,11 @@ except Exception:
 
 from aidas.utils.io_utils import read_analyze
 from aidas.utils.batch_summary import format_batch_summary
-from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
+from aidas.utils.filesystem import (
+    find_candidate_directories,
+    skipped_directories_warning,
+    walk_accessible_directories,
+)
 from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
 )
@@ -1661,14 +1665,12 @@ class RBatchSelectionTable(ttk.Frame):
         placeholder_iid = "_empty"
         if self.tree.exists(placeholder_iid):
             self.tree.delete(placeholder_iid)
-        visible_count = 0
-        for iid, row in self._row_by_iid.items():
-            if self._hide_processed and row.get("locked"):
-                self.tree.detach(iid)
-            else:
-                self.tree.move(iid, "", visible_count)
-                visible_count += 1
-        if not visible_count:
+        visible = tuple(
+            iid for iid, row in self._row_by_iid.items()
+            if not (self._hide_processed and row.get("locked"))
+        )
+        self.tree.set_children("", *visible)
+        if not visible:
             message = (
                 "No unprocessed folders to show."
                 if self.rows and self._hide_processed
@@ -1697,9 +1699,14 @@ class RBatchSelectionTable(ttk.Frame):
 
     def _measure_text(self, text, *, heading=False, padding=18):
         font = self._heading_font if heading else self._tree_font
-        return int(font.measure(str(text or ""))) + int(padding)
+        key = (heading, str(text or ""), int(padding))
+        cache = self.__dict__.setdefault("_text_width_cache", {})
+        if key not in cache:
+            cache[key] = int(font.measure(key[1])) + key[2]
+        return cache[key]
 
     def _fit_columns_to_content(self):
+        self._text_width_cache = {}
         if self._manual_column_widths is not None:
             self._apply_manual_columns_to_view()
             self._schedule_xscroll_visibility_update()
@@ -2133,7 +2140,13 @@ class RBatchSelectionPanel(ttk.Frame):
         missing = 0
         try:
             if self.input_folders is None:
-                folders, access_errors = walk_accessible_directories(self.root_dir)
+                groups = tuple(
+                    tuple(name + suffix for name in names)
+                    for _label, names, *_rest in self.step_frame.REQUIRED_INPUTS
+                    for suffix in (".hdr", ".img")
+                )
+                folders, total, access_errors = find_candidate_directories(self.root_dir, groups)
+                scanned = missing = total - len(folders)
             else:
                 folders = list(self.input_folders)
                 access_errors = []
@@ -3025,7 +3038,9 @@ class Step3Frame(SidebarStepFrame):
             script_name = Step3Frame.R_OPTIMIZED_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_SCRIPT_NAME
         else:
             script_name = Step3Frame.R_OPTIMIZED_OUTPUT_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_OUTPUT_SCRIPT_NAME
-        return Path(resource_path(script_name))
+        # Resolve short Windows temp paths (RUNNER~1) in the same way as the
+        # discovery library so default and selected paths share one identity.
+        return Path(resource_path(script_name)).resolve()
 
     @staticmethod
     def _user_r_script_dir(role="main"):
@@ -3098,7 +3113,7 @@ class Step3Frame(SidebarStepFrame):
         preference_key = "r_main_script_path" if role == "main" else "r_output_script_path"
         configured = None if self.preferences is None else self.preferences.get(preference_key)
         if configured:
-            configured_path = Path(configured)
+            configured_path = Path(configured).resolve()
             if not self._r_script_is_enabled(role, configured_path):
                 return self._script_path(role)
             if configured_path.is_file():

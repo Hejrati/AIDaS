@@ -66,7 +66,7 @@ from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
 from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.io_utils import read_analyze, read_tiff
-from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
+from aidas.utils.filesystem import find_candidate_directories, skipped_directories_warning
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
@@ -1525,16 +1525,15 @@ class Step4BatchROITable(ttk.Frame):
         if self.tree.exists(self._placeholder_iid):
             self.tree.delete(self._placeholder_iid)
 
-        visible_count = 0
-        for iid, row in self._row_by_iid.items():
-            if self._hide_processed and row.get("locked"):
-                self.tree.detach(iid)
-            else:
-                # Restore the same entry, including its checkbox state.
-                self.tree.move(iid, "", "end")
-                visible_count += 1
+        visible = tuple(
+            iid for iid, row in self._row_by_iid.items()
+            if not (self._hide_processed and row.get("locked"))
+        )
+        # Replace the child list in one Tcl call, preserving detached items
+        # and their checkbox state for the next filter change.
+        self.tree.set_children("", *visible)
 
-        if not visible_count:
+        if not visible:
             message = (
                 "No unprocessed folders to show."
                 if self.rows and self._hide_processed
@@ -1560,9 +1559,14 @@ class Step4BatchROITable(ttk.Frame):
 
     def _measure_text(self, text, *, heading=False, padding=18):
         font = self._heading_font if heading else self._tree_font
-        return int(font.measure(str(text or ""))) + int(padding)
+        key = (heading, str(text or ""), int(padding))
+        cache = self.__dict__.setdefault("_text_width_cache", {})
+        if key not in cache:
+            cache[key] = int(font.measure(key[1])) + key[2]
+        return cache[key]
 
     def _fit_columns_to_content(self):
+        self._text_width_cache = {}
         widths = {
             "folder": self._measure_text("Folder", heading=True),
             "status": self._measure_text("Status", heading=True),
@@ -3131,10 +3135,12 @@ class Step4Frame(SidebarStepFrame):
 
     def _scan_batch_roi_folders(self, root_dir: str | os.PathLike) -> tuple[list[dict], int, int, list]:
         root = Path(root_dir)
-        candidate_dirs, access_errors = walk_accessible_directories(root)
+        candidate_dirs, scanned, access_errors = find_candidate_directories(
+            root, (("_flat_LIGHT.img", "_flat_LIGHT.hdr"),)
+        )
 
         rows: list[dict] = []
-        skipped_without_flat_light = 0
+        skipped_without_flat_light = scanned - len(candidate_dirs)
         for folder in sorted(candidate_dirs, key=lambda path: str(path).lower()):
             try:
                 flat_light = self._flat_light_path_for_folder(folder)
@@ -3146,7 +3152,7 @@ class Step4Frame(SidebarStepFrame):
                 continue
             try:
                 output_count = self._step4_output_count(folder)
-                outputs_complete = self._step4_outputs_complete(folder)
+                outputs_complete = output_count == len(STEP4_OUTPUT_GROUPS)
             except OSError as exc:
                 access_errors.append((folder, str(exc)))
                 continue
@@ -3172,7 +3178,7 @@ class Step4Frame(SidebarStepFrame):
                     "outputs": f"{output_count}/3",
                 }
             )
-        return rows, len(candidate_dirs), skipped_without_flat_light, access_errors
+        return rows, scanned, skipped_without_flat_light, access_errors
 
     def _browse_batch_roi_root(self) -> None:
         folder = filedialog.askdirectory(

@@ -89,6 +89,31 @@ class _TtkStateControlStub:
 
 
 class Step2ResultLifecycleTests(unittest.TestCase):
+    def test_destroy_cancels_the_deferred_batch_canvas_fit(self):
+        root = ctk.CTk()
+        root.withdraw()
+        try:
+            with mock.patch.object(Step2Frame, "_start_ai_device_probe"):
+                frame = Step2Frame(root)
+            job = frame.after(1000, frame._run_batch_result_fit)
+            frame._batch_result_fit_after_id = job
+            self.assertIn(job, root.tk.call("after", "info"))
+            frame.destroy()
+            self.assertIsNone(frame._batch_result_fit_after_id)
+            self.assertNotIn(job, root.tk.call("after", "info"))
+            root.update()
+        finally:
+            root.destroy()
+
+    def test_finishing_a_batch_cancels_the_deferred_fit(self):
+        frame = self._session_frame()
+        frame._batch_result_fit_after_id = "pending-fit"
+        frame.after_cancel = mock.Mock()
+        notebook = _NotebookStub()
+        frame._finish_batch_results_session(notebook, "Done")
+        frame.after_cancel.assert_called_once_with("pending-fit")
+        self.assertIsNone(frame._batch_result_fit_after_id)
+
     def test_loaded_results_start_at_the_canvas_and_failed_results_show_the_error(self):
         root = None
         try:
