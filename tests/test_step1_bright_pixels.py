@@ -128,6 +128,7 @@ class Step1BrightPixelTests(unittest.TestCase):
             frame._source_roi = (0, y, width, min(128, height - y))
 
         frame._set_default_roi = set_default_roi
+        frame._set_initial_roi = set_default_roi
         return frame, incoming, source
 
     def _reopened_saved_frame(self, folder):

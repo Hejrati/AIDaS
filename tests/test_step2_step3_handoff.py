@@ -1,16 +1,20 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import queue
 import tempfile
+import tkinter as tk
 import unittest
 from unittest import mock
 
+import customtkinter as ctk
 import numpy as np
 
 from aidas.app import AIDaSApp
 from aidas.steps.step2_annotate import Step2Frame
 from aidas.steps.step3_flatten import RBatchSelectionPanel, Step3Frame
+from aidas.utils.io_utils import write_analyze
 
 
 class Step2Step3HandoffTests(unittest.TestCase):
@@ -211,6 +215,80 @@ class Step2Step3HandoffTests(unittest.TestCase):
         frame._save_all_and_continue_to_step3_button()
 
         self.assertEqual(received, [])
+
+    def test_real_segmented_handoff_saves_inputs_and_lists_folders_with_old_rdata(self):
+        root = None
+        try:
+            try:
+                root = ctk.CTk()
+                root.withdraw()
+                root.attributes("-alpha", 0)
+                root.geometry("1024x680+0+0")
+            except tk.TclError as exc:
+                self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
+
+            with tempfile.TemporaryDirectory() as temp_dir:
+                source_folder = Path(temp_dir) / "sample"
+                source_folder.mkdir()
+                source_base = source_folder / "Light"
+                image = np.arange(160, dtype=np.int16).reshape(16, 10)
+                write_analyze(str(source_base), np.stack([image, image]))
+                output_folders = [source_folder / "nasal", source_folder / "temporal"]
+                for folder in output_folders:
+                    folder.mkdir()
+                    old_result = folder / "_done_DARK__and__LIGHT.RData"
+                    old_result.write_bytes(b"old Step 3 result")
+                    os.utime(old_result, (1_600_000_000, 1_600_000_000))
+
+                traces, _ = Step2Frame._boundary_traces_from_rows(
+                    np.repeat(np.arange(2, 8)[:, None], image.shape[1], axis=1),
+                    image.shape,
+                )
+                received = []
+                with mock.patch.object(Step2Frame, "_start_ai_device_probe"):
+                    frame = Step2Frame(root, on_continue_to_step3=received.append)
+                    frame.pack(fill="both", expand=True)
+                    root.deiconify()
+                    frame._open_aidas_batch_results_viewer([
+                        {"input": str(source_base) + ".img", "traces": traces, "fovea_x": 5}
+                    ])
+                    root.update()
+
+                    frame._save_all_and_continue_to_step3_button()
+
+                self.assertEqual(received, [[str(folder.resolve()) for folder in output_folders]])
+                self.assertFalse(frame._batch_result_states)
+                step3 = Step3Frame.__new__(Step3Frame)
+                for folder in output_folders:
+                    for basename in ("Light", "Light_MARKED"):
+                        for suffix in (".hdr", ".img"):
+                            self.assertTrue((folder / (basename + suffix)).is_file())
+                    input_paths = step3._find_input_paths(folder)
+                    input_info, read_errors = step3._read_available_input_info(input_paths)
+                    self.assertEqual(read_errors, {})
+                    self.assertEqual(step3._input_requirement_issues(input_paths, input_info), [])
+                    step3._validate_input_stack_shapes(input_info)
+
+                panel = RBatchSelectionPanel.__new__(RBatchSelectionPanel)
+                panel.step_frame = step3
+                panel.root_dir = source_folder
+                panel.input_folders = tuple(Path(folder) for folder in received[0])
+                panel._scan_events = queue.Queue()
+                scan_results = []
+                panel._scan_done = lambda rows, *_rest: scan_results.extend(rows)
+                panel._scan_failed = self.fail
+
+                panel._scan_worker()
+                panel._poll_scan_events()
+
+                self.assertEqual([row["folder"] for row in scan_results], output_folders)
+                for row in scan_results:
+                    self.assertEqual(row["status"], "Ready")
+                    self.assertTrue(row["include"])
+                    self.assertFalse(row["locked"])
+        finally:
+            if root is not None:
+                root.destroy()
 
     def test_step3_normalizes_existing_handoff_folders(self):
         with tempfile.TemporaryDirectory() as temp_dir:

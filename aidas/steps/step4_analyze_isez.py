@@ -64,6 +64,7 @@ from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
+from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.ui_layout import LAYOUT
@@ -1422,8 +1423,9 @@ class Step4BatchROITable(ttk.Frame):
 
     COLUMNS = ("folder", "status", "outputs")
 
-    def __init__(self, parent):
+    def __init__(self, parent, *, on_selection_changed=None):
         super().__init__(parent)
+        self.on_selection_changed = on_selection_changed
         self.rows = []
         self._row_by_iid = {}
         self._hide_processed = False
@@ -1512,10 +1514,12 @@ class Step4BatchROITable(ttk.Frame):
             self._fit_columns_to_content()
         self._apply_processed_filter()
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
 
     def set_hide_processed(self, hide_processed):
         self._hide_processed = bool(hide_processed)
         self._apply_processed_filter()
+        self._notify_selection_changed()
 
     def _apply_processed_filter(self):
         if self.tree.exists(self._placeholder_iid):
@@ -1619,6 +1623,7 @@ class Step4BatchROITable(ttk.Frame):
         row["include"] = not bool(row.get("include"))
         self._refresh_row(iid, row)
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
         return "break"
 
     def _toggle_all_ready(self):
@@ -1632,9 +1637,15 @@ class Step4BatchROITable(ttk.Frame):
             row["include"] = include
             self._refresh_row(iid, row)
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
 
     def selected_rows(self):
         return [row for row in self.rows if row.get("include") and not row.get("locked")]
+
+    def _notify_selection_changed(self):
+        callback = getattr(self, "on_selection_changed", None)
+        if callback is not None:
+            callback(len(self.selected_rows()))
 
 
 class Step4BatchROISelectionPanel(ttk.Frame):
@@ -1648,6 +1659,7 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         self.root_dir = Path(root_dir)
         self.table = None
         self.rows = []
+        self._scan_summary_counts = None
         self._scan_events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._build_ui()
         self._start_scan()
@@ -1672,7 +1684,7 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         self.action_footer = run_box
         self.summary_row = ttk.Frame(run_box)
         self.summary_row.pack(side="top", fill="x", pady=(0, 8))
-        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        self.summary_var = tk.StringVar(value="Scanning folders...")
         self.more_label = ttk.Label(
             self.summary_row, text="", style="AIDaS.Link.TLabel", cursor="hand2",
         )
@@ -1751,7 +1763,7 @@ class Step4BatchROISelectionPanel(ttk.Frame):
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set("Scan failed. Move the mouse over More for details.")
+        self.summary_var.set("Scan failed.")
         self.more_label.configure(text="More")
         self.more_tooltip.text = f"Could not scan folders.\n{exc}"
         self.step_frame.status_var.set("Batch ROI scan failed.")
@@ -1763,11 +1775,17 @@ class Step4BatchROISelectionPanel(ttk.Frame):
                 child.destroy()
             except tk.TclError:
                 pass
-        table = Step4BatchROITable(self.table_host)
+        table = Step4BatchROITable(self.table_host, on_selection_changed=self._on_selection_changed)
         table.set_rows(rows)
         table.set_hide_processed(self.hide_processed_var.get())
         table.pack(fill="both", expand=True)
         self.table = table
+
+    def _on_selection_changed(self, selected):
+        if self._scan_summary_counts is None:
+            return
+        self.summary_var.set(format_batch_summary(**self._scan_summary_counts, selected=selected))
+        self.process_button.state(["!disabled"] if selected else ["disabled"])
 
     def _scan_done(self, rows, scanned, skipped, access_errors):
         if not self.winfo_exists():
@@ -1785,23 +1803,17 @@ class Step4BatchROISelectionPanel(ttk.Frame):
                 "status": row.get("status", ""),
                 "outputs": row.get("outputs", ""),
             }
-        self._show_results_table(rows)
-
         ready = sum(1 for row in rows if not row.get("locked"))
         complete = sum(1 for row in rows if row.get("locked"))
-        summary = (
-            f"Scanned {scanned} folder(s). Found {ready} ready folder(s), "
-            f"{complete} already complete, {skipped} without _flat_LIGHT. "
-            f"{len(access_errors)} inaccessible folder(s) skipped."
+        self._scan_summary_counts = dict(
+            scanned=scanned, ready=ready, processed=complete,
+            skipped=skipped, unavailable=len(access_errors),
         )
-        self.summary_var.set(summary)
+        self._show_results_table(rows)
         self.more_label.configure(text="More" if access_errors else "")
         self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         self.step_frame.status_var.set("Batch ROI scan complete. Select folders to process.")
-        if ready:
-            self.process_button.state(["!disabled"])
-        else:
-            self.process_button.state(["disabled"])
+
     def _process_selected(self):
         if self.table is None:
             return
@@ -2434,6 +2446,10 @@ class Step4Frame(SidebarStepFrame):
         self._stack_build_complete = False
         self._auto_detection_events = None
         self._stack_build_events = None
+        self._roi_context_generation = 0
+        self._auto_save_after_id = None
+        self._auto_detection_after_id = None
+        self._stack_build_after_id = None
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
@@ -2457,6 +2473,7 @@ class Step4Frame(SidebarStepFrame):
         self.stats_var = tk.StringVar(value="")
         self.start_var = tk.StringVar(value="")
         self.end_var = tk.StringVar(value="")
+        self.disable_line_positioning_var = tk.BooleanVar(master=self, value=False)
         self.confirm_button = None
         self.auto_detect_button = None
         self.build_stacks_button = None
@@ -2946,9 +2963,112 @@ class Step4Frame(SidebarStepFrame):
                 parent=self,
             )
 
+    def _invalidate_roi_work(self) -> None:
+        """Detach pending work before changing or resetting the active file."""
+
+        self._roi_context_generation = getattr(self, "_roi_context_generation", 0) + 1
+        for name in ("_auto_save_after_id", "_auto_detection_after_id", "_stack_build_after_id"):
+            job = getattr(self, name, None)
+            setattr(self, name, None)
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+        self._auto_detection_events = None
+        self._stack_build_events = None
+        self._auto_detecting = False
+        self._auto_saving_roi = False
+        self._stack_building = False
+
+    @staticmethod
+    def _dispose_roi_plot(canvas, figure) -> None:
+        """Release a discarded plot and its pending Tk/Matplotlib callbacks."""
+
+        if canvas is not None:
+            widget = canvas.get_tk_widget()
+            for name in ("_idle_draw_id", "_event_loop_id"):
+                job = getattr(canvas, name, None)
+                if job is not None:
+                    try:
+                        widget.after_cancel(job)
+                    except tk.TclError:
+                        pass
+                    setattr(canvas, name, None)
+            if figure is not None:
+                for callbacks in tuple(canvas.callbacks.callbacks.values()):
+                    for callback_id in tuple(callbacks):
+                        canvas.mpl_disconnect(callback_id)
+            try:
+                widget.destroy()
+            except tk.TclError:
+                pass
+        if figure is not None and figure.canvas is not None:
+            figure.clear()
+            figure.set_canvas(None)
+
+    def _clear_current_roi_state(self) -> None:
+        """Drop every reference to the active file without changing saved files."""
+
+        self._invalidate_roi_work()
+        self._close_profile_zoom()
+        self._hide_roi_grid_hint()
+        self._hide_grid_notice()
+        self._cancel_roi_update_animations(redraw=False)
+        self._dispose_roi_plot(self.canvas, self.figure)
+        self.volume = None
+        self.image = None
+        self.current_path = None
+        self.current_stem = "_flat_LIGHT"
+        self.current_roi_idx = 0
+        self.completed = {}
+        self.auto_detection_reviews = {}
+        self.roi_clicks = {}
+        self._roi_adjust_bounds = {}
+        self.profile_clicks = []
+        self.canvas = None
+        self.figure = None
+        self.ax_profile = None
+        self.ax_roi_grid = None
+        self._current_profile = None
+        self._last_results_dir = None
+        self._stack_build_complete = False
+        if self.empty_placeholder is not None:
+            try:
+                self.empty_placeholder.destroy()
+            except tk.TclError:
+                pass
+            self.empty_placeholder = None
+        self.start_var.set("")
+        self.end_var.set("")
+        self.stats_var.set("")
+        self.image_label_var.set("No image loaded")
+        self.profile_status_var.set("Load a flattened OCT image to begin.")
+
+    def _clear_batch_roi_session(self) -> None:
+        """Release both active and inactive file caches when replacing a run."""
+
+        active_canvas = self.canvas
+        self._clear_current_roi_state()
+        for state in self.batch_roi_tab_states.values():
+            if state.get("canvas") is not active_canvas:
+                self._dispose_roi_plot(state.get("canvas"), state.get("figure"))
+            state.clear()
+        self.batch_roi_tab_states.clear()
+        self._active_batch_roi_tab = None
+        self.batch_roi_paths = []
+        self.batch_roi_index = -1
+        self.batch_roi_skipped = 0
+        self.batch_roi_root = None
+        if self.batch_roi_notebook is not None:
+            self.batch_roi_notebook.destroy()
+            self.batch_roi_notebook = None
+        self.plot_holder = self.plot_container
+
     def _restart_current_file(self) -> None:
         """Clear the active file's ROI state so it can be processed again."""
 
+        self._invalidate_roi_work()
         self._hide_grid_notice()
         self._close_profile_zoom()
         self._cancel_roi_update_animations(redraw=False)
@@ -2958,6 +3078,9 @@ class Step4Frame(SidebarStepFrame):
         self.roi_clicks.clear()
         self._roi_adjust_bounds = {}
         self.profile_clicks.clear()
+        self._last_results_dir = None
+        self._current_profile = None
+        self.stats_var.set("")
         self.current_roi_idx = 0
         self.start_var.set("")
         self.end_var.set("")
@@ -2967,11 +3090,12 @@ class Step4Frame(SidebarStepFrame):
             state = self.batch_roi_tab_states.get(tab_key)
             if state is not None:
                 state["complete"] = False
-        self._sync_active_batch_roi_state()
         self._refresh_roi_list()
         self._select_roi_in_list()
         if self.image is not None:
             self._render_current_roi()
+        self._sync_active_batch_roi_state()
+        self._update_confirm_button_state()
         self._update_active_batch_roi_tab_progress()
         self._update_build_stack_button_state()
         self._update_continue_to_step5_button_state()
@@ -3108,16 +3232,8 @@ class Step4Frame(SidebarStepFrame):
 
     def _open_batch_roi_panel(self, root_dir: Path) -> None:
         self._close_batch_roi_panel(restore_previous=False)
+        self._clear_batch_roi_session()
         self._hide_canvas_actions()
-        if self.canvas is not None:
-            self.canvas.get_tk_widget().destroy()
-            self.canvas = None
-        if self.batch_roi_notebook is not None:
-            try:
-                self.batch_roi_notebook.destroy()
-            except tk.TclError:
-                pass
-            self.batch_roi_notebook = None
         for child in self.plot_container.winfo_children():
             try:
                 child.destroy()
@@ -3138,6 +3254,9 @@ class Step4Frame(SidebarStepFrame):
         self._set_batch_folder_label(self.batch_roi_root)
         self.batch_roi_panel = Step4BatchROISelectionPanel(self, self.plot_container, self.batch_roi_root)
         self.batch_roi_panel.pack(fill="both", expand=True)
+        self._refresh_roi_list()
+        self._update_confirm_button_state()
+        self._update_continue_to_step5_button_state()
 
     def _close_batch_roi_panel(self, *, restore_previous: bool) -> None:
         panel = self.batch_roi_panel
@@ -3166,6 +3285,10 @@ class Step4Frame(SidebarStepFrame):
         self._open_batch_roi_tabs(paths)
 
     def _open_batch_roi_tabs(self, paths: list[Path]) -> None:
+        root = self.batch_roi_root
+        self._clear_batch_roi_session()
+        self.batch_roi_root = root
+        self.batch_roi_paths = list(paths)
         self._show_canvas_actions()
         for child in self.plot_container.winfo_children():
             try:
@@ -3319,18 +3442,23 @@ class Step4Frame(SidebarStepFrame):
         state["ax_roi_grid"] = self.ax_roi_grid
         state["empty_placeholder"] = self.empty_placeholder
         state["current_profile"] = self._current_profile
+        state["last_results_dir"] = getattr(self, "_last_results_dir", None)
         state["plot_theme_signature"] = self._plot_theme_signature()
 
     def _activate_batch_roi_tab(self, tab) -> None:
+        tab_key = str(tab)
+        state = self.batch_roi_tab_states.get(tab_key)
+        if state is None:
+            return
+        if tab_key != self._active_batch_roi_tab:
+            if getattr(self, "_auto_detecting", False) or getattr(self, "_stack_building", False):
+                self._hide_grid_notice()
+            self._invalidate_roi_work()
         self._close_profile_zoom()
         self._hide_roi_grid_hint()
         self._cancel_roi_update_animations(redraw=True)
         self._sync_active_batch_roi_state()
         previous_tab_key = self._active_batch_roi_tab
-        tab_key = str(tab)
-        state = self.batch_roi_tab_states.get(tab_key)
-        if state is None:
-            return
         self._active_batch_roi_tab = tab_key
         self._stack_build_complete = bool(state.get("complete"))
         self._refresh_batch_roi_tab_labels(
@@ -3357,7 +3485,8 @@ class Step4Frame(SidebarStepFrame):
             return False
         try:
             widget = canvas.get_tk_widget()
-            widget.winfo_exists()
+            if not widget.winfo_exists():
+                return False
         except tk.TclError:
             return False
 
@@ -3372,6 +3501,7 @@ class Step4Frame(SidebarStepFrame):
         self._hide_roi_grid_hint()
         self.empty_placeholder = state.get("empty_placeholder")
         self._current_profile = state.get("current_profile")
+        self._last_results_dir = state.get("last_results_dir")
         self.completed = dict(state.get("completed") or {})
         self.auto_detection_reviews = dict(state.get("auto_detection_reviews") or {})
         self.roi_clicks = {key: list(value) for key, value in (state.get("roi_clicks") or {}).items()}
@@ -3398,37 +3528,36 @@ class Step4Frame(SidebarStepFrame):
                 self._update_profile_status(self._current_profile)
             self._update_confirm_button_state()
         self.status_var.set(
-            f"Loaded {self.current_path}. Click near the start/end minima on the profile."
+            f"Loaded {self.current_path}. {self._line_positioning_hint()}"
         )
         self._refresh_completion_notice_progress()
         return True
 
     def _close_batch_roi_tab(self, notebook, tab) -> None:
         tab_key = str(tab)
-        if tab_key == self._active_batch_roi_tab:
-            self._cancel_roi_update_animations(redraw=False)
-            self._sync_active_batch_roi_state()
-        self.batch_roi_tab_states.pop(tab_key, None)
+        state = self.batch_roi_tab_states.pop(tab_key, None)
+        was_active = tab_key == self._active_batch_roi_tab
+        if was_active:
+            self._clear_current_roi_state()
+            self._active_batch_roi_tab = None
+        elif state is not None:
+            self._dispose_roi_plot(state.get("canvas"), state.get("figure"))
+        if state is not None:
+            closed_path = state.get("path")
+            self.batch_roi_paths = [path for path in self.batch_roi_paths if path != closed_path]
+            state.clear()
         try:
             notebook.forget(tab)
         except tk.TclError:
             return
-        if tab_key == self._active_batch_roi_tab:
-            self._active_batch_roi_tab = None
-            if self.canvas is not None:
-                try:
-                    self.canvas.get_tk_widget().destroy()
-                except tk.TclError:
-                    pass
-                self.canvas = None
-            tabs = notebook.tabs()
-            if tabs:
-                notebook.select(tabs[0])
-            else:
-                notebook.destroy()
-                self.batch_roi_notebook = None
-                self.plot_holder = self.plot_container
-                self._render_empty_canvas()
+        tabs = notebook.tabs()
+        if not tabs:
+            self._clear_batch_roi_session()
+            self._refresh_roi_list()
+            self._render_empty_canvas()
+            self.status_var.set("Ready - load a flattened OCT image to begin.")
+        elif was_active:
+            notebook.select(notebook.select() or tabs[0])
         self._update_continue_to_step5_button_state()
 
     def _update_active_batch_roi_tab_progress(self) -> None:
@@ -3498,16 +3627,25 @@ class Step4Frame(SidebarStepFrame):
         self._load_path(path)
 
     def _load_path(self, path: str | os.PathLike, *, restore_state: dict | None = None) -> None:
-        self._close_profile_zoom()
-        self._cancel_roi_update_animations(redraw=False)
-        self._hide_grid_notice()
-        self._stack_build_complete = bool((restore_state or {}).get("complete"))
+        self._clear_current_roi_state()
         try:
             volume = load_oct_volume(path)
         except Exception as exc:
+            if restore_state is not None:
+                self._dispose_roi_plot(restore_state.get("canvas"), restore_state.get("figure"))
+                metadata = {
+                    key: restore_state[key]
+                    for key in ("path", "folder", "base_label") if key in restore_state
+                }
+                restore_state.clear()
+                restore_state.update(metadata, loaded=False, complete=False)
+            self._refresh_roi_list()
+            self._render_empty_canvas()
+            self._update_continue_to_step5_button_state()
             messagebox.showerror("Open error", str(exc))
             return
 
+        self._stack_build_complete = bool((restore_state or {}).get("complete"))
         self.volume = volume
         self.current_path = Path(path)
         self.current_stem = self.current_path.stem
@@ -3553,7 +3691,7 @@ class Step4Frame(SidebarStepFrame):
                 f"{volume.shape[2]} x {volume.shape[1]}, {volume.dtype}"
             )
         self.status_var.set(
-            f"Loaded {self.current_path}. Click near the start/end minima on the profile."
+            f"Loaded {self.current_path}. {self._line_positioning_hint()}"
         )
         self._update_continue_to_step5_button_state()
 
@@ -3727,6 +3865,48 @@ class Step4Frame(SidebarStepFrame):
             background=palette["figure"],
             highlightthickness=0,
         )
+        widget = self.canvas.get_tk_widget()
+        widget._aidas_line_positioning_checkbox = ctk.CTkCheckBox(
+            widget,
+            text="Disable automatic line positioning",
+            variable=self.disable_line_positioning_var,
+            command=self._on_line_positioning_changed,
+            height=24,
+            checkbox_width=18,
+            checkbox_height=18,
+            bg_color=COLOR_PAIRS["surface"],
+        )
+        widget._aidas_line_positioning_tooltip = HoverToolTip(
+            widget._aidas_line_positioning_checkbox,
+            "Checked: keep Start and End where you place them. "
+            "Unchecked: position them at nearby minima. "
+            "Applies to new placements and corrections on this plot.",
+        )
+
+    def _place_line_positioning_checkbox(self) -> None:
+        """Keep the native control in the gap between the two plot axes."""
+        if self.canvas is None or self.ax_roi_grid is None or self.ax_profile is None:
+            return
+        checkbox = self.canvas.get_tk_widget().__dict__.get("_aidas_line_positioning_checkbox")
+        if checkbox is None:
+            return
+        grid_bounds = self.ax_roi_grid.get_position()
+        profile_bounds = self.ax_profile.get_position()
+        gap_middle = (grid_bounds.y0 + profile_bounds.y1) / 2.0
+        checkbox.place(relx=profile_bounds.x0, rely=1.0 - gap_middle, anchor="w")
+
+    def _line_positioning_disabled(self) -> bool:
+        variable = self.__dict__.get("disable_line_positioning_var")
+        return bool(variable.get()) if variable is not None else False
+
+    def _line_positioning_hint(self) -> str:
+        if self._line_positioning_disabled():
+            return "Click the exact Start and End positions on the profile."
+        return "Click near the Start and End minima on the profile."
+
+    def _on_line_positioning_changed(self) -> None:
+        """Change future placements without moving or resaving existing lines."""
+        self.profile_status_var.set(self._line_positioning_hint())
 
     def _on_plot_motion(self, event) -> None:
         if self.canvas is None:
@@ -3838,6 +4018,7 @@ class Step4Frame(SidebarStepFrame):
         canvas_widget = self.canvas.get_tk_widget()
         if not canvas_widget.winfo_manager():
             canvas_widget.pack(fill="both", expand=True)
+        self._place_line_positioning_checkbox()
         self._update_profile_status(profile)
         self._update_confirm_button_state()
 
@@ -4052,8 +4233,12 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self._close_profile_zoom()
-        click, intensity = _nearest_local_minimum(self._current_profile, event.xdata)
-        self._set_roi_adjustment(self._current_roi_suffix(), True)
+        manual_positioning = self._line_positioning_disabled()
+        if manual_positioning:
+            click, intensity = _nearest_profile_sample(self._current_profile, event.xdata)
+        else:
+            click, intensity = _nearest_local_minimum(self._current_profile, event.xdata)
+        self._set_roi_adjustment(self._current_roi_suffix(), not manual_positioning)
         if len(self.profile_clicks) >= 2:
             start, end = sorted(self.profile_clicks[:2])
             boundary = (
@@ -4080,15 +4265,16 @@ class Step4Frame(SidebarStepFrame):
         self._remember_current_roi_clicks()
         if len(self.profile_clicks) == 1:
             self._render_current_roi()
+            position_kind = "sample" if manual_positioning else "local minimum"
+            end_hint = "Click the End position." if manual_positioning else "Click near the end minimum."
             self.profile_status_var.set(
-                f"{selection_action}: local minimum {click} ({intensity:.4f}). "
-                "Click near the end minimum."
+                f"{selection_action}: {position_kind} {click} ({intensity:.4f}). {end_hint}"
             )
         else:
-            # Render the snapped End line before yielding back to Tk. The idle
+            # Render the selected End line before yielding back to Tk. The idle
             # save runs immediately afterward and advances to the next ROI.
             self._render_current_roi()
-            self.after_idle(self._auto_save_current_roi)
+            self._queue_roi_auto_save()
 
     def _profile_zoom_closed(self, dialog) -> None:
         if self._profile_zoom_dialog is dialog:
@@ -4271,13 +4457,13 @@ class Step4Frame(SidebarStepFrame):
             return None
 
         if clicks != self.profile_clicks:
-            self._set_roi_adjustment(self._current_roi_suffix(), True)
+            self._set_roi_adjustment(self._current_roi_suffix(), not self._line_positioning_disabled())
         self.profile_clicks = clicks
         self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
         self._render_current_roi()
         if auto_save and len(self.profile_clicks) >= 2:
-            self.after_idle(self._auto_save_current_roi)
+            self._queue_roi_auto_save()
         return "break"
 
     def _apply_entry_clicks_if_complete(self, _event=None) -> None:
@@ -4304,13 +4490,25 @@ class Step4Frame(SidebarStepFrame):
     def _update_confirm_button_state(self) -> None:
         self._update_clear_button_state()
         self._update_auto_detect_button_state()
+        for button in (getattr(self, "previous_roi_button", None), getattr(self, "next_roi_button", None)):
+            if button is not None:
+                button.state(["!disabled"] if self.image is not None else ["disabled"])
+
+    def _has_current_roi_input(self) -> bool:
+        """Require an open file, including its live tab when using a batch."""
+
+        if getattr(self, "image", None) is None or getattr(self, "current_path", None) is None:
+            return False
+        if getattr(self, "batch_roi_notebook", None) is not None:
+            return getattr(self, "_active_batch_roi_tab", None) in self.batch_roi_tab_states
+        return True
 
     def _update_auto_detect_button_state(self) -> None:
         button = getattr(self, "auto_detect_button", None)
         if button is None:
             return
         enabled = (
-            self.image is not None
+            self._has_current_roi_input()
             and not getattr(self, "_stack_building", False)
             and not getattr(self, "_stack_build_complete", False)
             and not getattr(self, "_auto_detecting", False)
@@ -4579,11 +4777,12 @@ class Step4Frame(SidebarStepFrame):
 
         if events is not getattr(self, "_auto_detection_events", None):
             return
+        self._auto_detection_after_id = None
         try:
             kind, payload = events.get_nowait()
         except queue.Empty:
             try:
-                self.after(
+                self._auto_detection_after_id = self.after(
                     self.BACKGROUND_POLL_MS,
                     lambda: self._poll_auto_detection_events(events),
                 )
@@ -4612,7 +4811,7 @@ class Step4Frame(SidebarStepFrame):
     def _auto_detect_all_rois(self) -> None:
         """Detect and save high-confidence boundaries without blocking Tk."""
 
-        if self.image is None:
+        if not self._has_current_roi_input():
             messagebox.showwarning("MCP/AR", "Load a flattened OCT image first.", parent=self)
             return
         if getattr(self, "_auto_detecting", False):
@@ -4652,12 +4851,31 @@ class Step4Frame(SidebarStepFrame):
 
         self._start_background_worker(worker)
         try:
-            self.after(
+            self._auto_detection_after_id = self.after(
                 self.BACKGROUND_POLL_MS,
                 lambda: self._poll_auto_detection_events(events),
             )
         except tk.TclError:
             pass
+
+    def _queue_roi_auto_save(self) -> None:
+        """Save only if the originating file and ROI are still active at idle."""
+
+        previous = getattr(self, "_auto_save_after_id", None)
+        if previous is not None:
+            self.after_cancel(previous)
+        generation = getattr(self, "_roi_context_generation", 0)
+        image = self.image
+        roi_index = self.current_roi_idx
+
+        def save() -> None:
+            if generation != getattr(self, "_roi_context_generation", 0):
+                return
+            self._auto_save_after_id = None
+            if self.image is image and self.current_roi_idx == roi_index:
+                self._auto_save_current_roi()
+
+        self._auto_save_after_id = self.after_idle(save)
 
     def _auto_save_current_roi(self) -> None:
         if self._auto_saving_roi or self.image is None:
@@ -4681,7 +4899,7 @@ class Step4Frame(SidebarStepFrame):
         roi = self.rois[self.current_roi_idx]
         if len(self.profile_clicks) < 2:
             self.profile_status_var.set(
-                f"ROI {roi.suffix}: click near the start and end minima on the profile."
+                f"ROI {roi.suffix}: {self._line_positioning_hint()}"
             )
             self.stats_var.set("")
             return
@@ -4849,11 +5067,12 @@ class Step4Frame(SidebarStepFrame):
 
         if events is not getattr(self, "_stack_build_events", None):
             return
+        self._stack_build_after_id = None
         try:
             kind, payload = events.get_nowait()
         except queue.Empty:
             try:
-                self.after(
+                self._stack_build_after_id = self.after(
                     self.BACKGROUND_POLL_MS,
                     lambda: self._poll_stack_build_events(events, outdir),
                 )
@@ -4912,7 +5131,7 @@ class Step4Frame(SidebarStepFrame):
 
         self._start_background_worker(worker)
         try:
-            self.after(
+            self._stack_build_after_id = self.after(
                 self.BACKGROUND_POLL_MS,
                 lambda: self._poll_stack_build_events(events, outdir),
             )

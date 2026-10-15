@@ -43,6 +43,7 @@ from aidas.ui.components import (
     WorkflowProgressStrip,
 )
 from aidas.ui.menu_bar import ApplicationMenuBar
+from aidas.ui.scrolling import SettingsScrollableFrame
 from aidas.ui.splash import SplashWindow
 from aidas.ui.theme import (
     APPEARANCE_MODES,
@@ -441,7 +442,7 @@ class SettingsDialog(ctk.CTkToplevel):
 
     @classmethod
     def _r_script_options(cls, role):
-        if role == "main" and OPTIMIZED_R_SCRIPTS_ENABLED:
+        if OPTIMIZED_R_SCRIPTS_ENABLED:
             return cls.SCRIPT_OPTIONS
         return ("Original script", "Custom script")
 
@@ -504,6 +505,10 @@ class SettingsDialog(ctk.CTkToplevel):
         super().__init__(parent)
         self.withdraw()
         self.title("AIDaS Settings")
+        # Allocate the final viewport before any controls request layout. The
+        # centering helper settles idle work, so sizing only at the end first
+        # paints a narrow, very tall provisional settings panel.
+        self.geometry("720x720")
         self.configure(fg_color=COLOR_PAIRS["application"])
         self.resizable(False, False)
         self.transient(parent)
@@ -524,6 +529,9 @@ class SettingsDialog(ctk.CTkToplevel):
         self._annotation_tutorial_dirty = False
         self._presentation_mode = normalize_interface_mode(interface_mode)
         self._classic_settings = self._presentation_mode == "Classic"
+        # CTk option menus flush pending paints while being constructed. Let
+        # this window settle its full layout before rendering those surfaces.
+        self._aidas_defer_canvas_updates = not self._classic_settings
         self._presentation_refresh_after_id = None
         self._presentation_refresh_pending = False
         self._applying_changes = False
@@ -564,7 +572,7 @@ class SettingsDialog(ctk.CTkToplevel):
             self._schedule_modal_activation()
             return
 
-        self.settings_panel = ctk.CTkScrollableFrame(
+        self.settings_panel = SettingsScrollableFrame(
             self,
             fg_color=COLOR_PAIRS["surface"],
             corner_radius=SHAPES.corner_radius_lg,
@@ -838,6 +846,7 @@ class SettingsDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
         self.geometry(_center_geometry(self, 720, 720, parent=parent))
+        self._aidas_defer_canvas_updates = False
         self.deiconify()
         synchronize_window_chrome(
             self,

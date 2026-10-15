@@ -178,13 +178,20 @@ def _schedule(canvas: CTkCanvas) -> None:
             pass
 
 
+def _canvas_configured(canvas: CTkCanvas, event) -> None:
+    # Moving a canvas does not change any pixels in its local surface.
+    size = event.width, event.height
+    if getattr(canvas, "_aidas_configured_size", None) != size:
+        canvas._aidas_configured_size = size
+        _schedule(canvas)
+
+
 def _rgb(canvas: CTkCanvas, color: str) -> tuple[int, int, int]:
     values = canvas.winfo_rgb(color)
     return tuple(round(value / 257) for value in values)
 
 
-def _part(canvas: CTkCanvas, item: int) -> str:
-    tags = canvas.gettags(item)
+def _part(tags: tuple[str, ...], item: int) -> str:
     return next((tag for tag in _PART_TAGS if tag in tags), str(item))
 
 
@@ -256,7 +263,9 @@ def _clear_hit_regions(canvas: CTkCanvas) -> None:
     canvas._aidas_hit_ids = set()
 
 
-def _sync_hit_regions(canvas: CTkCanvas, base: Image.Image, items: list[int]) -> None:
+def _sync_hit_regions(canvas: CTkCanvas, base: Image.Image, items: list[int],
+                      item_tags: dict[int, tuple[str, ...]],
+                      item_masks: dict[int, Image.Image]) -> None:
     """Retain native tag bindings on dropdown segments and scrollbar thumbs.
 
     Canvas images hit-test their complete bounds. Crops of the final surface
@@ -268,11 +277,21 @@ def _sync_hit_regions(canvas: CTkCanvas, base: Image.Image, items: list[int]) ->
     canvas._aidas_hit_regions = regions
     anchor = canvas.find_withtag(_SURFACE_TAG)[0]
     for tag in getattr(canvas, "_aidas_bound_tags", {}):
-        members = [item for item in items if tag in canvas.gettags(item)]
-        mask = Image.new("L", base.size, 0)
-        for item in members:
-            mask = ImageChops.lighter(mask, _item_mask(canvas, item, base.size))
-        bounds = mask.getbbox()
+        bounds = None
+        for item in items:
+            if tag not in item_tags[item]:
+                continue
+            # The hit region needs only the union of nonzero bounds. Reuse
+            # this paint's masks instead of rasterizing every shape twice or
+            # allocating an additional full-surface mask for each binding.
+            if item not in item_masks:
+                item_masks[item] = _item_mask(canvas, item, base.size)
+            item_bounds = item_masks[item].getbbox()
+            if item_bounds is not None:
+                bounds = item_bounds if bounds is None else (
+                    min(bounds[0], item_bounds[0]), min(bounds[1], item_bounds[1]),
+                    max(bounds[2], item_bounds[2]), max(bounds[3], item_bounds[3]),
+                )
         existing = regions.get(tag)
         if bounds is None:
             if existing and canvas.type(existing[0]):
@@ -299,10 +318,12 @@ def _repaint(canvas: CTkCanvas) -> None:
             return
         vectors = getattr(canvas, "_aidas_vectors", {})
         items = [item for item in canvas.find_all() if item in vectors and vectors[item] != "hidden"]
+        item_tags = {item: canvas.gettags(item) for item in items}
+        all_tags = {tag for tags in item_tags.values() for tag in tags}
         smoothing = any(
             canvas.type(item) in ("line", "oval")
             or (canvas.type(item) == "polygon" and float(canvas.itemcget(item, "width") or 0) > 0)
-            or ("border_parts" in canvas.gettags(item) and "inner_parts" in tuple(tag for other in items for tag in canvas.gettags(other)))
+            or ("border_parts" in item_tags[item] and "inner_parts" in all_tags)
             for item in items
         )
         canvas._aidas_painting = True
@@ -318,12 +339,14 @@ def _repaint(canvas: CTkCanvas) -> None:
         size = max(1, int(canvas.winfo_width())), max(1, int(canvas.winfo_height()))
         base = Image.new("RGB", size, _rgb(canvas, canvas.cget("background")))
         groups = {}
+        item_masks = {}
         for item in items:
             color = canvas.itemcget(item, "fill")
             if not color:
                 continue
-            key = _part(canvas, item), color
+            key = _part(item_tags[item], item), color
             mask = _item_mask(canvas, item, size)
+            item_masks[item] = mask
             groups[key] = ImageChops.lighter(groups[key], mask) if key in groups else mask
         consumed = set()
         for key, mask in groups.items():
@@ -344,7 +367,7 @@ def _repaint(canvas: CTkCanvas) -> None:
         else:
             tk.Canvas.create_image(canvas, 0, 0, anchor="nw", image=canvas._aidas_surface_photo, tags=(_SURFACE_TAG,))
         canvas.tag_lower(_SURFACE_TAG)
-        _sync_hit_regions(canvas, base, items)
+        _sync_hit_regions(canvas, base, items, item_tags, item_masks)
     except tk.TclError:
         pass
     finally:
@@ -385,9 +408,24 @@ def install_smooth_borders() -> None:
         # Canvas allocation can change even when its owning CTk widget keeps
         # exactly its requested dimensions. Repaint after the canvas itself
         # receives its final size instead of keeping an initial 1-pixel image.
-        self.bind("<Configure>", lambda event: _schedule(self), add="+")
+        self.bind("<Configure>", lambda event: _canvas_configured(self, event), add="+")
 
     CTkCanvas.__init__ = canvas_init
+    original_update_idletasks = CTkCanvas.update_idletasks
+
+    @wraps(original_update_idletasks)
+    def update_canvas_idletasks(self):
+        # Large dialogs can build their controls before settling layout once.
+        # CTk option menus and scrollbars otherwise drain this shared idle
+        # queue inside every individual _draw, defeating paint coalescing.
+        try:
+            if self.winfo_toplevel().__dict__.get("_aidas_defer_canvas_updates", False):
+                return None
+        except (KeyError, tk.TclError):
+            pass
+        return original_update_idletasks(self)
+
+    CTkCanvas.update_idletasks = update_canvas_idletasks
     original_tag_bind = CTkCanvas.tag_bind
 
     @wraps(original_tag_bind)

@@ -94,7 +94,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "Select the parent directory; AIDaS discovers its nested .sdb image folders.",
                 "Choose a discovered folder and image. The first image previews automatically; enable Exclude saved cropped folders to show only unfinished work.",
                 "Verify Width, Height, Offset, and Little-endian. Height, Offset, and byte order reread the source; Width crops or pads the preview and becomes the decode width for the next image.",
-                "Define the ROI by dragging on the image or entering X, Y, Width, and Height; Default Region and Entire Image are available as presets.",
+                "Define the ROI by dragging on the image or entering X, Y, Width, and Height; the crop menu offers Auto OCT Region and Whole Image.",
             ),
             (
                 "Choose Crop & Scale to create the Target view. AIDaS repeats the crop three times horizontally and once vertically; Undo returns to the editable Source view.",
@@ -211,7 +211,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "Use the Step 3 handoff or Select folders for ROI; the scanner selects complete _flat_LIGHT pairs and locks folders whose final outputs already exist.",
                 "Open a folder tab; Step 4 analyzes slice 0 of the flattened stack.",
                 "Select one of 21 ROIs from the table or overview grid: 20 peripheral 120-column bands plus the foveal ROI.",
-                "Use Auto-detect ROIs 1-20 to propose Start positions in 70-90 and End positions in 90-110. ROI 21 has a different shape and always requires manual Start and End selection. Manual clicks snap within a fixed ±6-sample window.",
+                "Use Auto-detect ROIs 1-20 to propose Start positions in 70-90 and End positions in 90-110. ROI 21 has a different shape and always requires manual Start and End selection. Plot clicks snap within a fixed ±6-sample window by default. Check Disable automatic line positioning between the grid and bottom plot to keep the lines where you place them.",
             ),
             (
                 "For ROIs 1-20, automatic detection smooths each profile with a degree-2 Savitzky-Golay filter, finds two minima around an internal maximum, validates peak prominence and quadratic fit, and checks agreement across those ROIs. High-confidence results are accepted; ROI 21 and other amber ! cells require review.",

@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from collections import deque
 import math
+from types import SimpleNamespace
+import tkinter as tk
 import unittest
+from unittest.mock import patch
 
 from customtkinter.windows.widgets.core_rendering import CTkCanvas, DrawEngine
 import numpy as np
-from PIL import Image, ImageChops, ImageOps
+from PIL import Image, ImageChops, ImageOps, ImageTk
 
 from aidas.ui import rendering
 
@@ -334,6 +337,98 @@ class SmoothBorderInstallationTests(unittest.TestCase):
                 for tag, mask in initial.items():
                     self.assertEqual(len(canvas.find_withtag(tag)), initial_counts[tag])
                     self.assertEqual(coverage(tag).tobytes(), mask.tobytes())
+
+
+class SmoothSurfacePerformanceTests(unittest.TestCase):
+    def test_canvas_moves_do_not_repaint_but_size_changes_do(self):
+        canvas = SimpleNamespace()
+        with patch.object(rendering, "_schedule") as schedule:
+            rendering._canvas_configured(canvas, SimpleNamespace(width=180, height=40, x=0, y=0))
+            rendering._canvas_configured(canvas, SimpleNamespace(width=180, height=40, x=0, y=-20))
+            rendering._canvas_configured(canvas, SimpleNamespace(width=225, height=50, x=0, y=-20))
+            rendering._canvas_configured(canvas, SimpleNamespace(width=225, height=50, x=10, y=-20))
+        self.assertEqual(schedule.call_count, 2)
+
+    def setUp(self):
+        rendering.install_smooth_borders()
+        try:
+            self.root = tk.Tk()
+        except tk.TclError as exc:
+            self.skipTest(f"Tk is unavailable: {exc}")
+        self.root.withdraw()
+        self.addCleanup(self.root.destroy)
+
+    @staticmethod
+    def _paint(canvas):
+        pending = getattr(canvas, "_aidas_paint_pending", None)
+        if pending is not None:
+            canvas.after_cancel(pending)
+        rendering._repaint(canvas)
+
+    def test_scrollbar_hit_regions_reuse_masks_preserve_pixels_and_survive_hover_and_motion(self):
+        for scale in (1, 1.25, 2):
+            with self.subTest(scale=scale):
+                width, height = math.ceil(14 * scale), math.ceil(120 * scale)
+                canvas = CTkCanvas(self.root, width=width, height=height, bg="#112233")
+                engine = DrawEngine(canvas)
+                canvas.tag_bind("border_parts", "<Button-1>", lambda _event: None)
+                canvas.tag_bind("scrollbar_parts", "<Enter>", lambda _event: None)
+                with patch.object(canvas, "winfo_width", return_value=width), patch.object(
+                    canvas, "winfo_height", return_value=height,
+                ):
+                    prior_ids = None
+                    for start, end, fill in ((0.1, 0.4, "#4488AA"), (0.1, 0.4, "#66AACC"), (0.3, 0.6, "#4488AA")):
+                        engine.draw_rounded_scrollbar(
+                            14 * scale, 120 * scale, 6 * scale, 2 * scale, start, end, "vertical",
+                        )
+                        canvas.itemconfigure("border_parts", fill="#112233", outline="#112233")
+                        canvas.itemconfigure("scrollbar_parts", fill=fill, outline=fill)
+                        with patch.object(rendering, "_item_mask", wraps=rendering._item_mask) as masks:
+                            self._paint(canvas)
+                        visible = [item for item, state in canvas._aidas_vectors.items() if state != "hidden"]
+                        self.assertEqual(masks.call_count, len(visible), "Each primitive must be rasterized only once")
+                        surface = ImageTk.getimage(canvas._aidas_surface_photo).convert("RGB")
+                        ids = {}
+                        for tag in ("border_parts", "scrollbar_parts"):
+                            # Independently combine coverage to check the exact
+                            # extent of the antialiased interaction region.
+                            combined = Image.new("L", (width, height), 0)
+                            for item in canvas.find_withtag(tag):
+                                combined = ImageChops.lighter(
+                                    combined, rendering._item_mask(canvas, item, (width, height)),
+                                )
+                            expected_bounds = combined.getbbox()
+                            item, photo = canvas._aidas_hit_regions[tag]
+                            ids[tag] = item
+                            self.assertEqual(tk.Canvas.bbox(canvas, item), expected_bounds)
+                            actual = ImageTk.getimage(photo).convert("RGB")
+                            self.assertEqual(actual.tobytes(), surface.crop(expected_bounds).tobytes())
+                        if prior_ids is not None:
+                            self.assertEqual(ids, prior_ids, "Hover and movement must retain native binding targets")
+                        prior_ids = ids
+                canvas.destroy()
+
+    def test_canvas_idle_deferral_is_scoped_and_normal_idle_updates_resume(self):
+        flagged = tk.Toplevel(self.root)
+        flagged.withdraw()
+        other = tk.Toplevel(self.root)
+        other.withdraw()
+        canvas = CTkCanvas(flagged)
+        other_canvas = CTkCanvas(other)
+        self.root.update_idletasks()
+        calls = []
+        flagged._aidas_defer_canvas_updates = True
+        canvas.after_idle(lambda: calls.append("pending"))
+
+        canvas.update_idletasks()
+        self.assertEqual(calls, [])
+        other_canvas.update_idletasks()
+        self.assertEqual(calls, ["pending"])
+
+        canvas.after_idle(lambda: calls.append("resumed"))
+        flagged._aidas_defer_canvas_updates = False
+        canvas.update_idletasks()
+        self.assertEqual(calls, ["pending", "resumed"])
 
 
 if __name__ == "__main__":

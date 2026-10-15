@@ -96,6 +96,8 @@ class Config:
         "rscript_path": "",
         "r_main_script_path": "",
         "r_output_script_path": "",
+        "r_main_script_defaults_version": 0,
+        "r_output_script_defaults_version": 0,
         "check_for_updates": True,
         "last_successful_update_check": 0,
         **STEP4_AUTO_DETECTION_DEFAULTS,

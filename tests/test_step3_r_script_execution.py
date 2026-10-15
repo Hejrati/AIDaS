@@ -671,9 +671,9 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertEqual(panel._max_worker_count(3), 3)
         self.assertEqual(
             panel._worker_limit_text(7),
-            "Max jobs: 7 (shared with Step 2)",
+            "Max jobs: 7",
         )
-        self.assertEqual(panel._worker_limit_text(1), "Max jobs: 1 (shared with Step 2)")
+        self.assertEqual(panel._worker_limit_text(1), "Max jobs: 1")
 
         panel.step_frame._step2_core_allocation.return_value = 3
         self.assertEqual(

@@ -1,4 +1,4 @@
-"""Step 3 - batch OCT flattening with the original R workflow."""
+"""Step 3 - batch OCT flattening with the optimized R workflow."""
 
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ except Exception:
     pyreadr = None
 
 from aidas.utils.io_utils import read_analyze
+from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
@@ -40,6 +41,12 @@ from aidas.utils.r_script_library import (
     discover_r_scripts,
     import_r_script,
     user_r_script_dir,
+)
+from aidas.core.display import (
+    centered_decorated_position,
+    centered_position,
+    fit_size_to_bounds,
+    work_area_bounds,
 )
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
@@ -1519,9 +1526,10 @@ class RBatchSelectionTable(ttk.Frame):
     # from body-cell padding so the trailing Progress glyph is never clipped.
     HEADING_WIDTH_PADDING = 30
 
-    def __init__(self, parent, *, status_width_values=None):
+    def __init__(self, parent, *, status_width_values=None, on_selection_changed=None):
         super().__init__(parent)
         self.rows = []
+        self._on_selection_changed = on_selection_changed
         self._row_by_iid = {}
         self._hide_processed = False
         self._xscroll_visible = False
@@ -1641,11 +1649,13 @@ class RBatchSelectionTable(ttk.Frame):
             )
         self._apply_processed_filter()
         self._fit_columns_to_content()
+        self._notify_selection_changed()
 
     def set_hide_processed(self, hide_processed):
         """Hide completed folders without rebuilding rows or column geometry."""
         self._hide_processed = bool(hide_processed)
         self._apply_processed_filter()
+        self._notify_selection_changed()
 
     def _apply_processed_filter(self):
         placeholder_iid = "_empty"
@@ -1926,6 +1936,7 @@ class RBatchSelectionTable(ttk.Frame):
         row["include"] = not bool(row.get("include"))
         self._refresh_row(iid, row)
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
         return "break"
 
     def _toggle_all_ready(self):
@@ -1939,6 +1950,12 @@ class RBatchSelectionTable(ttk.Frame):
             row["include"] = include
             self._refresh_row(iid, row)
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
+
+    def _notify_selection_changed(self):
+        callback = getattr(self, "_on_selection_changed", None)
+        if callback is not None:
+            callback(len(self.selected_rows()))
 
     def selected_rows(self):
         return [row for row in self.rows if row.get("include") and not row.get("locked")]
@@ -2045,7 +2062,7 @@ class RBatchSelectionPanel(ttk.Frame):
 
         self.summary_row = ttk.Frame(run_box)
         self.summary_row.pack(side="bottom", fill="x", pady=(0, 8))
-        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        self.summary_var = tk.StringVar(value="Scanning folders...")
         self.more_label = ttk.Label(
             self.summary_row, text="", style="AIDaS.Link.TLabel", cursor="hand2",
         )
@@ -2083,6 +2100,15 @@ class RBatchSelectionPanel(ttk.Frame):
         if self.table is not None:
             self.table.set_hide_processed(self.hide_processed_var.get())
 
+    def _on_selection_changed(self, selected):
+        counts = getattr(self, "_scan_summary_counts", None)
+        if counts is not None:
+            self.summary_var.set(format_batch_summary(**counts, selected=selected))
+        try:
+            self.next_button.state(["!disabled"] if selected else ["disabled"])
+        except tk.TclError:
+            pass
+
     def _max_worker_count(self, ready_count=None):
         core_limit = self.step_frame._available_r_worker_limit()
         if ready_count is None:
@@ -2094,7 +2120,7 @@ class RBatchSelectionPanel(ttk.Frame):
         if step2_used:
             unit = "core" if step2_used == 1 else "cores"
             return f"Max jobs: {max_workers} ({step2_used} {unit} used by Step 2)"
-        return f"Max jobs: {max_workers} (shared with Step 2)"
+        return f"Max jobs: {max_workers}"
 
     def _start_scan(self):
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
@@ -2171,7 +2197,7 @@ class RBatchSelectionPanel(ttk.Frame):
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set("Scan failed. Move the mouse over More for details.")
+        self.summary_var.set("Scan failed.")
         self.more_label.configure(text="More")
         self.more_tooltip.text = f"Could not scan folders.\n{exc}"
         self.step_frame.status_var.set("Batch scan failed.")
@@ -2188,7 +2214,9 @@ class RBatchSelectionPanel(ttk.Frame):
             except tk.TclError:
                 pass
 
-        table = RBatchSelectionTable(self.table_host)
+        table = RBatchSelectionTable(
+            self.table_host, on_selection_changed=self._on_selection_changed,
+        )
         table.set_rows(rows)
         table.set_hide_processed(self.hide_processed_var.get())
         table.pack(fill="both", expand=True)
@@ -2198,15 +2226,17 @@ class RBatchSelectionPanel(ttk.Frame):
         if not self.winfo_exists():
             return
         self.rows = rows
-        self._show_results_table(rows)
         ready = sum(1 for row in rows if not row["locked"])
-        skipped = sum(1 for row in rows if row["locked"])
-        summary = (
-            f"Scanned {scanned} folders. Found {ready} ready folder(s), {skipped} skipped folder(s) with RData. "
-            f"{missing} folder(s) did not contain both required Light inputs. "
-            f"{len(access_errors)} inaccessible folder(s) skipped."
-        )
-        self.summary_var.set(summary)
+        processed = sum(1 for row in rows if row["locked"])
+        self._scan_summary_counts = {
+            "scanned": scanned,
+            "ready": ready,
+            "processed": processed,
+            "skipped": missing,
+            "unavailable": len(access_errors),
+        }
+        self._show_results_table(rows)
+        self._on_selection_changed(len(self.table.selected_rows()))
         self.more_label.configure(text="More" if access_errors else "")
         self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         max_workers = self._max_worker_count(ready)
@@ -2216,10 +2246,8 @@ class RBatchSelectionPanel(ttk.Frame):
         self.step_frame.status_var.set("Batch scan complete. Select folders to process.")
         try:
             if ready:
-                self.next_button.state(["!disabled"])
                 self.workers_spin.configure(state="normal")
             else:
-                self.next_button.state(["disabled"])
                 self.workers_spin.configure(state="disabled")
         except tk.TclError:
             pass
@@ -2309,17 +2337,7 @@ class RBatchRunPanel(ttk.Frame):
         # region.  Tk's packer allocates geometry in packing order; keeping the
         # footer first means the table shrinks and scrolls instead of clipping
         # Restart, Stop, or Close when the window height is constrained.
-        output_parallelism = (
-            f"up to {self.workers} in parallel as folders finish the first script"
-            if self.output_mode == self.step_frame.R_OUTPUT_MODE_PARALLEL
-            else "sequentially after all first scripts finish"
-        )
-        self.summary_var = tk.StringVar(
-            value=(
-                f"Running {len(self.folders)} folder(s). First script: up to {self.workers} in parallel; "
-                f"second script: {output_parallelism}."
-            )
-        )
+        self.summary_var = tk.StringVar(value="")
         summary_row = ttk.Frame(wrapper)
         summary_row.pack(side="bottom", fill="x", pady=(8, 0))
         self.action_footer = summary_row
@@ -2363,16 +2381,6 @@ class RBatchRunPanel(ttk.Frame):
         summary_row.bind("<Configure>", self._resize_summary_footer, add="+")
 
         ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w")
-        ttk.Label(
-            wrapper,
-            text=(
-                f"Main script: {self.main_script_path.name}\n"
-                f"Output script: {self.output_script_path.name}\n"
-                f"Output scheduling: {output_parallelism}"
-            ),
-            wraplength=760,
-            justify="left",
-        ).pack(anchor="w", pady=(4, 10))
 
         # Step details have their own scrollbar and a bounded requested height.
         # Pack them above the already-reserved footer and before the table so
@@ -2591,41 +2599,86 @@ class Step3ResultZoomDialog(tk.Toplevel):
         super().__init__(owner)
         self.withdraw()
         self.title(title)
-        self.minsize(640, 480)
-        self.geometry("1000x700")
+        bounds = work_area_bounds(self, monitor_window=owner.winfo_toplevel())
+        width, height, _scale = fit_size_to_bounds(bounds, 1000, 700)
+        self.minsize(min(640, width), min(480, height))
+        x, y = centered_position(bounds, width, height)
+        self.geometry(f"{width}x{height}+{x}+{y}")
         self.transient(owner.winfo_toplevel())
         self._source_image = image.convert("RGB")
         self._photo = None
+        self._redraw_after_id = None
+        self._redraw_signature = None
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
 
         body = ttk.Frame(self, padding=(10, 10, 10, 6))
-        body.pack(fill="both", expand=True)
+        body.grid(row=0, column=0, sticky="nsew")
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+        # A rendered image must not increase the window's requested size and
+        # take the space reserved for Close on the next layout pass.
+        body.grid_propagate(False)
         self.image_label = tk.Label(
             body,
             bg=resolve_color(COLOR_PAIRS["surface"]),
             borderwidth=0,
             highlightthickness=0,
+            width=1,
+            height=1,
         )
-        self.image_label.pack(fill="both", expand=True)
-        self.image_label.bind("<Configure>", self._redraw, add="+")
+        self.image_label.grid(row=0, column=0, sticky="nsew")
+        self.image_label.bind("<Configure>", self._queue_redraw, add="+")
 
-        footer = ttk.Frame(self, padding=(10, 0, 10, 10))
-        footer.pack(fill="x")
-        AppButton(footer, text="Close", variant="danger", width=88, command=self.destroy).pack(side="right")
+        self.footer = ttk.Frame(self, padding=(10, 0, 10, 10))
+        self.footer.grid(row=1, column=0, sticky="ew")
+        self.close_button = AppButton(
+            self.footer, text="Close", variant="danger", width=88, command=self.destroy,
+        )
+        self.close_button.pack(side="right")
 
         self.bind("<Escape>", lambda _event: self.destroy(), add="+")
         self.protocol("WM_DELETE_WINDOW", self.destroy)
         self.deiconify()
-        try:
-            self.state("zoomed")
-        except tk.TclError:
-            try:
-                self.attributes("-zoomed", True)
-            except tk.TclError:
-                pass
+        self._fit_restored_geometry(bounds)
         self.lift()
-        self.after_idle(self._redraw)
+        self._queue_redraw()
+
+    def _fit_restored_geometry(self, bounds):
+        """Keep the restored window, including its native caption, on screen."""
+
+        self.update_idletasks()
+        frame_left = max(0, self.winfo_rootx() - self.winfo_x())
+        frame_top = max(0, self.winfo_rooty() - self.winfo_y())
+        left, top, right, bottom = bounds
+        client_bounds = (
+            left + frame_left, top + frame_top,
+            right - frame_left, bottom - frame_left,
+        )
+        width, height, _scale = fit_size_to_bounds(client_bounds, 1000, 700)
+        self.minsize(min(640, width), min(480, height))
+        # Tk's default maximum can include the taskbar on Windows. Limit the
+        # client area explicitly so a later native maximize keeps Close visible.
+        self.maxsize(
+            max(1, client_bounds[2] - client_bounds[0]),
+            max(1, client_bounds[3] - client_bounds[1]),
+        )
+        x, y = centered_decorated_position(
+            bounds, width, height,
+            frame_left=frame_left, frame_top=frame_top,
+        )
+        # An explicit '+' keeps negative coordinates absolute rather than
+        # interpreting them as offsets from the opposite screen edge.
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _queue_redraw(self, _event=None):
+        if self._redraw_after_id is None:
+            self._redraw_after_id = self.after_idle(self._redraw)
 
     def _redraw(self, _event=None):
+        if self._redraw_after_id is not None:
+            self.after_cancel(self._redraw_after_id)
+            self._redraw_after_id = None
         try:
             width = max(1, self.image_label.winfo_width())
             height = max(1, self.image_label.winfo_height())
@@ -2634,6 +2687,9 @@ class Step3ResultZoomDialog(tk.Toplevel):
         if width <= 1 or height <= 1:
             return
         background = resolve_color(COLOR_PAIRS["surface"])
+        signature = (width, height, background)
+        if signature == self._redraw_signature:
+            return
         fitted = ImageOps.contain(
             self._source_image,
             (width, height),
@@ -2641,11 +2697,20 @@ class Step3ResultZoomDialog(tk.Toplevel):
         )
         canvas = Image.new("RGB", (width, height), background)
         canvas.paste(fitted, ((width - fitted.width) // 2, (height - fitted.height) // 2))
-        self._photo = ImageTk.PhotoImage(canvas)
+        self._photo = ImageTk.PhotoImage(canvas, master=self.image_label)
         try:
             self.image_label.configure(image=self._photo, bg=background)
+            self._redraw_signature = signature
         except tk.TclError:
             pass
+
+    def destroy(self):
+        if self._redraw_after_id is not None:
+            self.after_cancel(self._redraw_after_id)
+            self._redraw_after_id = None
+        super().destroy()
+        self._photo = None
+        self._source_image = None
 
 
 class Step3Frame(SidebarStepFrame):
@@ -2670,6 +2735,7 @@ class Step3Frame(SidebarStepFrame):
     R_OPTIMIZED_SCRIPT_NAME = OPTIMIZED_R_SCRIPT_NAME
     R_OPTIMIZED_OUTPUT_SCRIPT_NAME = OPTIMIZED_R_OUTPUT_SCRIPT_NAME
     R_OPTIMIZED_ENABLED = OPTIMIZED_R_SCRIPTS_ENABLED
+    R_SCRIPT_DEFAULTS_VERSION = 1
     R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
     R_OUTPUT_MODE_PARALLEL = "parallel"
     R_OUTPUT_MODE_SEQUENTIAL = "sequential"
@@ -2742,6 +2808,7 @@ class Step3Frame(SidebarStepFrame):
     ):
         super().__init__(parent)
         self.preferences = preferences
+        self._migrate_r_script_defaults()
         self.get_step2_core_usage = get_step2_core_usage
         self.on_continue_to_step4 = on_continue_to_step4
 
@@ -2957,7 +3024,7 @@ class Step3Frame(SidebarStepFrame):
         if role == "main":
             script_name = Step3Frame.R_OPTIMIZED_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_SCRIPT_NAME
         else:
-            script_name = Step3Frame.R_OUTPUT_SCRIPT_NAME
+            script_name = Step3Frame.R_OPTIMIZED_OUTPUT_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_OUTPUT_SCRIPT_NAME
         return Path(resource_path(script_name))
 
     @staticmethod
@@ -2972,7 +3039,9 @@ class Step3Frame(SidebarStepFrame):
             if self.R_OPTIMIZED_ENABLED:
                 bundled_versions[default_script.with_name(self.R_OPTIMIZED_SCRIPT_NAME)] = "optimized"
         else:
-            bundled_versions = {default_script: "original"}
+            bundled_versions = {default_script.with_name(self.R_OUTPUT_SCRIPT_NAME): "original"}
+            if self.R_OPTIMIZED_ENABLED:
+                bundled_versions[default_script.with_name(self.R_OPTIMIZED_OUTPUT_SCRIPT_NAME)] = "optimized"
         choices = discover_r_scripts(
             default_script,
             self._user_r_script_dir(role),
@@ -3000,6 +3069,30 @@ class Step3Frame(SidebarStepFrame):
         """Import a user script selected from centralized Settings."""
 
         return self._import_user_r_script(source_path, role)
+
+    def _migrate_r_script_defaults(self):
+        """Upgrade saved bundled defaults once, preserving later user choices."""
+
+        if self.preferences is None or not self.R_OPTIMIZED_ENABLED:
+            return
+        for role in ("main", "output"):
+            version_key = f"r_{role}_script_defaults_version"
+            if self.preferences.get(version_key, 0) not in (None, 0):
+                continue
+            default = self._script_path(role)
+            if not default.is_file():
+                # Retry after an optimized bundle becomes available.
+                continue
+            preference_key = f"r_{role}_script_path"
+            configured = self.preferences.get(preference_key)
+            original_name = self.R_SCRIPT_NAME if role == "main" else self.R_OUTPUT_SCRIPT_NAME
+            original = default.with_name(original_name)
+            old_defaults = {original.resolve()}
+            if role == "main":
+                old_defaults.add(original.with_name(original.stem + "_original.R").resolve())
+            if configured and Path(configured).resolve() in old_defaults:
+                self.preferences.set(preference_key, str(default.resolve()))
+            self.preferences.set(version_key, self.R_SCRIPT_DEFAULTS_VERSION)
 
     def _selected_r_script_path(self, role="main"):
         preference_key = "r_main_script_path" if role == "main" else "r_output_script_path"
@@ -3029,6 +3122,7 @@ class Step3Frame(SidebarStepFrame):
         preference_key = "r_main_script_path" if role == "main" else "r_output_script_path"
         if self.preferences is not None:
             self.preferences.set(preference_key, str(selected))
+            self.preferences.set(f"r_{role}_script_defaults_version", self.R_SCRIPT_DEFAULTS_VERSION)
         return selected
 
     def _resolve_rscript_executable(self):
@@ -4069,10 +4163,31 @@ class Step3Frame(SidebarStepFrame):
             self._render()
 
     def _folder_has_r_data(self, folder):
+        """Skip existing RData only while it is current for the Analyze inputs."""
         folder = Path(folder)
-        if any((folder / name).is_file() for name in self.R_WORKSPACE_FILES):
+        rdata_paths = [
+            path
+            for path in (folder / name for name in self.R_WORKSPACE_FILES)
+            if path.is_file()
+        ]
+        rdata_paths.extend(path for path in folder.glob("*.RData") if path.is_file())
+        if not rdata_paths:
+            return False
+        try:
+            latest_rdata = max(path.stat().st_mtime_ns for path in rdata_paths)
+            for base_path in self._find_input_paths(folder).values():
+                if base_path is None:
+                    continue
+                for suffix in (".hdr", ".img"):
+                    if Path(str(base_path) + suffix).stat().st_mtime_ns > latest_rdata:
+                        # Step 2 overwrites the input pairs when annotations are
+                        # saved again. Their older RData must not hide or lock
+                        # the freshly segmented folders in the Step 3 selector.
+                        return False
+        except OSError:
+            # Preserve the existing skip behavior if freshness cannot be read.
             return True
-        return any(path.is_file() for path in folder.glob("*.RData"))
+        return True
 
     def _r_script_config_for_folder(self, folder):
         folder = Path(folder)
@@ -5274,7 +5389,10 @@ class Step3Frame(SidebarStepFrame):
                     result_pair = ttk.LabelFrame(
                         subject, padding=(5, 4, 5, 5)
                     )
-                    self._set_result_frame_path(result_pair, folder, prefix=side_title)
+                    side_label = ttk.Label(
+                        result_pair, text=side_title, font=("", 10, "bold")
+                    )
+                    result_pair.configure(labelwidget=side_label)
                     result_pair.grid(
                         row=side_index, column=0, sticky="nsew", pady=(0, 5)
                     )

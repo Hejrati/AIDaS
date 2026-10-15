@@ -44,13 +44,13 @@ from aidas.ui.annotation_guide import AnnotationGuide
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS, SHAPES, TYPOGRAPHY
+from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.filesystem import skipped_directories_warning, walk_accessible_directories
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
-    NativeNumericSpinbox,
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
@@ -246,9 +246,10 @@ class Step2BatchSegmentationTable(ttk.Frame):
 
     COLUMNS = ("folder", "status", "images")
 
-    def __init__(self, parent):
+    def __init__(self, parent, *, on_selection_changed=None):
         super().__init__(parent)
         self.rows = []
+        self._on_selection_changed = on_selection_changed
         self._row_by_iid = {}
         self._hide_processed = False
         self._placeholder_iid = "no_visible_folders"
@@ -314,14 +315,14 @@ class Step2BatchSegmentationTable(ttk.Frame):
             image.put("#6b7280", to=(2, 2, 3, 14))
             image.put("#6b7280", to=(13, 2, 14, 14))
 
-        checked = images["checked"]
-        for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
-            checked.put("#111827", to=(x, y, x + 1, y + 1))
-            checked.put("#111827", to=(x, y + 1, x + 1, y + 2))
-
         locked = images["locked"]
         locked.put("#e5e7eb", to=(3, 3, 13, 13))
-        locked.put("#9ca3af", to=(5, 7, 11, 9))
+        # A disabled check marks completed segmentation without selecting it
+        # for another run. Locked rows keep their independent include=False.
+        for state, color in (("checked", "#111827"), ("locked", "#9ca3af")):
+            for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
+                images[state].put(color, to=(x, y, x + 1, y + 1))
+                images[state].put(color, to=(x, y + 1, x + 1, y + 2))
         return images
 
     def set_rows(self, rows):
@@ -349,10 +350,12 @@ class Step2BatchSegmentationTable(ttk.Frame):
             self._fit_columns_to_content()
         self._apply_processed_filter()
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
 
     def set_hide_processed(self, hide_processed):
         self._hide_processed = bool(hide_processed)
         self._apply_processed_filter()
+        self._notify_selection_changed()
 
     def _apply_processed_filter(self):
         if self.tree.exists(self._placeholder_iid):
@@ -469,6 +472,7 @@ class Step2BatchSegmentationTable(ttk.Frame):
         row["include"] = not bool(row.get("include"))
         self._refresh_row(iid, row)
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
         return "break"
 
     def _toggle_all_ready(self):
@@ -482,6 +486,12 @@ class Step2BatchSegmentationTable(ttk.Frame):
             row["include"] = include
             self._refresh_row(iid, row)
         self._refresh_header_checkbox()
+        self._notify_selection_changed()
+
+    def _notify_selection_changed(self):
+        callback = getattr(self, "_on_selection_changed", None)
+        if callback is not None:
+            callback(len(self.selected_rows()))
 
     def selected_rows(self):
         return [row for row in self.rows if row.get("include") and not row.get("locked")]
@@ -503,11 +513,6 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         else:
             rows = list(initial_rows)
             self._scan_done(rows, len(rows), 0, [])
-            ready = sum(1 for row in rows if not row.get("locked"))
-            self.summary_var.set(
-                f"Received {len(rows)} folder(s) from Step 1; "
-                f"{ready} ready for AI segmentation."
-            )
             self.step_frame.status_var.set(
                 "Confirm the Step 1 folders for AI segmentation."
             )
@@ -537,7 +542,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.action_footer = run_box
         self.summary_row = ttk.Frame(run_box)
         self.summary_row.pack(side="top", fill="x", pady=(0, 8))
-        self.summary_var = tk.StringVar(value=f"Scanning: {self.root_dir}")
+        self.summary_var = tk.StringVar(value="Scanning folders...")
         self.more_label = ttk.Label(
             self.summary_row,
             text="",
@@ -573,39 +578,6 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             "cancel",
         ).pack(side="left")
 
-        self.core_row = ttk.Frame(run_box)
-        self._core_row_pack_options = {
-            "side": "bottom",
-            "fill": "x",
-            "pady": (0, 8),
-        }
-        self.core_row.pack(**self._core_row_pack_options)
-        _total_cores, _step3_used, free_cores = self.step_frame._shared_core_budget()
-        max_cores = max(1, free_cores)
-        self._last_shared_core_max = max_cores
-        self.core_limit_var = tk.IntVar(value=max_cores)
-        ttk.Label(
-            self.core_row,
-            text="Maximum Step 2 cores for GPU fallback:",
-        ).pack(side="left")
-        self.core_limit_spin = NativeNumericSpinbox(
-            self.core_row,
-            textvariable=self.core_limit_var,
-            minimum=1,
-            maximum=max_cores,
-            width=5,
-        )
-        self.core_limit_spin.pack(side="left", padx=(6, 8))
-        self.core_budget_var = tk.StringVar()
-        self.core_budget_label = ttk.Label(
-            self.core_row,
-            textvariable=self.core_budget_var,
-            style="AIDaS.Muted.TLabel",
-        )
-        self.core_budget_label.pack(side="left")
-        self._sync_shared_core_budget()
-        self._sync_device_controls()
-
         # Pack the flexible table after the fixed footer. When vertical space
         # becomes constrained, the table shrinks first and the actions remain
         # visible at the bottom of the panel.
@@ -639,7 +611,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set("Scan failed. Move the mouse over More for details.")
+        self.summary_var.set("Scan failed.")
         self.more_label.configure(text="More")
         self.more_tooltip.text = f"Could not scan folders.\n{exc}"
         self.step_frame.status_var.set("Batch segmentation scan failed.")
@@ -655,7 +627,9 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             except tk.TclError:
                 pass
 
-        table = Step2BatchSegmentationTable(self.table_host)
+        table = Step2BatchSegmentationTable(
+            self.table_host, on_selection_changed=self._on_selection_changed,
+        )
         table.set_rows(rows)
         table.set_hide_processed(self.hide_processed_var.get())
         table.pack(fill="both", expand=True)
@@ -664,6 +638,15 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     def _on_hide_processed_changed(self):
         if self.table is not None:
             self.table.set_hide_processed(self.hide_processed_var.get())
+
+    def _on_selection_changed(self, selected):
+        counts = getattr(self, "_scan_summary_counts", None)
+        if counts is not None:
+            self.summary_var.set(format_batch_summary(**counts, selected=selected))
+        try:
+            self.next_button.state(["!disabled"] if selected else ["disabled"])
+        except tk.TclError:
+            pass
 
     def _scan_done(self, rows, scanned, skipped, access_errors):
         if not self.winfo_exists():
@@ -681,78 +664,20 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
                 "status": row.get("status", ""),
                 "images": str(len(row.get("image_paths") or [])),
             }
-        self._show_results_table(rows)
-
         ready = sum(1 for row in rows if not row["locked"])
         already_segmented = sum(1 for row in rows if row["locked"])
-        ready_images = sum(len(row.get("image_paths") or []) for row in rows if not row["locked"])
-        summary = (
-            f"Scanned {scanned} folder(s). Found {ready} ready folder(s) with {ready_images} image(s) to segment, "
-            f"{already_segmented} folder(s) already segmented. {skipped} folder(s) did not contain Light.img. "
-            f"{len(access_errors)} inaccessible folder(s) skipped."
-        )
-        self.summary_var.set(summary)
+        self._scan_summary_counts = {
+            "scanned": scanned,
+            "ready": ready,
+            "processed": already_segmented,
+            "skipped": skipped,
+            "unavailable": len(access_errors),
+        }
+        self._show_results_table(rows)
+        self._on_selection_changed(len(self.table.selected_rows()))
         self.more_label.configure(text="More" if access_errors else "")
         self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
-        try:
-            if ready:
-                self.next_button.state(["!disabled"])
-            else:
-                self.next_button.state(["disabled"])
-        except tk.TclError:
-            pass
-
-    def _sync_shared_core_budget(self):
-        """Refresh the Step 2 limit from the currently active Step 3 batch."""
-
-        total, step3_used, free = self.step_frame._shared_core_budget()
-        maximum = max(1, free)
-        previous_maximum = getattr(self, "_last_shared_core_max", maximum)
-        try:
-            current = int(self.core_limit_var.get())
-        except (TypeError, ValueError, tk.TclError):
-            current = previous_maximum
-        follow_available_maximum = current == previous_maximum
-        self.core_limit_spin.configure(maximum=maximum)
-        if follow_available_maximum or current > maximum:
-            self.core_limit_var.set(maximum)
-        elif current < 1:
-            self.core_limit_var.set(1)
-        self._last_shared_core_max = maximum
-
-        if free <= 0:
-            unit = "core" if total == 1 else "cores"
-            text = (
-                f"No free cores: Step 3 is using all {total} {unit}; "
-                "Step 2 can share 1 core."
-            )
-        elif step3_used:
-            free_unit = "core" if free == 1 else "cores"
-            used_unit = "core" if step3_used == 1 else "cores"
-            text = (
-                f"Available: {free} {free_unit} of {total} "
-                f"({step3_used} {used_unit} used by Step 3)"
-            )
-        else:
-            unit = "core" if total == 1 else "cores"
-            text = f"Available: all {total} {unit}"
-        self.core_budget_var.set(text)
-        return total, step3_used, free
-
-    def _sync_device_controls(self):
-        """Show fallback-core controls only when GPU execution is unavailable."""
-
-        show_core_controls = not self.step_frame._gpu_execution_available()
-        try:
-            manager = self.core_row.winfo_manager()
-            if show_core_controls and manager != "pack":
-                self.core_row.pack(**self._core_row_pack_options)
-            elif not show_core_controls and manager == "pack":
-                self.core_row.pack_forget()
-        except tk.TclError:
-            pass
-        return show_core_controls
 
     def _run_selected(self):
         if self.table is None:
@@ -761,16 +686,9 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         if not rows:
             messagebox.showwarning("Batch Step 2", "Select at least one ready folder.", parent=self)
             return
-        _total, _step3_used, free = self._sync_shared_core_budget()
-        try:
-            core_limit = int(self.core_limit_var.get())
-        except (TypeError, ValueError, tk.TclError):
-            core_limit = max(1, free)
-        core_limit = max(1, min(core_limit, max(1, free)))
         self.step_frame._start_step2_batch_segmentation_from_rows(
             rows,
             self.root_dir,
-            core_limit=core_limit,
         )
 
     def _cancel(self):
@@ -852,6 +770,7 @@ class Step2Frame(SidebarStepFrame):
         self._segmenter_running = False  # True while AI segmentation is executing
         self._batch_fovea_picker_active = False
         self._segmenter_progress_target = 0.0
+        self._segmenter_progress_maximum = len(BOUNDARY_NAMES)
         self._drawing_locked = False  # True if foveal center is locked (prevents other drawing)
         self._updating_fovea_entry = False  # Flag to avoid feedback loop when updating entry widget
         self._syncing_boundary_selection = False  # Flag to avoid feedback loop when selecting boundaries
@@ -926,12 +845,104 @@ class Step2Frame(SidebarStepFrame):
         self.image_canvas.enable_vertical_line(False)
         self.image_canvas.pack(fill="both", expand=True)
 
+        self._build_segmentation_progress()
         self._build_controls()
         self.after(100, self._start_ai_device_probe)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
     # ═══════════════════════════════════════════════════════════════════════
+    def _build_segmentation_progress(self):
+        """Create fixed progress UI on a blank layer above the image editor."""
+        self.segmenter_progress_var = tk.StringVar(value="Preparing segmentation...")
+        self.segmenter_progress_percent_var = tk.StringVar(value="0%")
+        self.segmentation_progress_surface = ctk.CTkFrame(
+            self.canvas_area,
+            corner_radius=0,
+            border_width=0,
+            fg_color=COLOR_PAIRS["canvas"],
+        )
+        card = ctk.CTkFrame(
+            self.segmentation_progress_surface,
+            width=420,
+            height=140,
+            corner_radius=SHAPES.corner_radius_lg,
+            border_width=SHAPES.border_width,
+            border_color=COLOR_PAIRS["border"],
+            fg_color=COLOR_PAIRS["surface_elevated"],
+            bg_color=COLOR_PAIRS["canvas"],
+        )
+        self.segmentation_progress_card = card
+        self.segmentation_progress_title = ctk.CTkLabel(
+            card,
+            text="Segmenting boundaries",
+            anchor="w",
+            width=300,
+            height=28,
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.subtitle_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        )
+        self.segmentation_progress_title.place(x=20, y=14)
+        self.segmentation_progress_title.grid_propagate(False)
+        ctk.CTkLabel(
+            card,
+            textvariable=self.segmenter_progress_percent_var,
+            width=60,
+            height=28,
+            anchor="e",
+            text_color=COLOR_PAIRS["primary"],
+            font=ctk.CTkFont(
+                family=TYPOGRAPHY.family,
+                size=TYPOGRAPHY.subtitle_size,
+                weight=TYPOGRAPHY.semibold_weight,
+            ),
+        ).place(x=340, y=14)
+        self.segmenter_progress = ctk.CTkProgressBar(
+            card,
+            width=380,
+            height=10,
+            corner_radius=SHAPES.corner_radius_sm,
+            fg_color=COLOR_PAIRS["primary_soft"],
+            progress_color=COLOR_PAIRS["primary"],
+            mode="determinate",
+        )
+        self.segmenter_progress.set(0)
+        self.segmenter_progress.place(x=20, y=54)
+        self.segmentation_progress_status = ctk.CTkLabel(
+            card,
+            textvariable=self.segmenter_progress_var,
+            anchor="w",
+            justify="left",
+            width=380,
+            height=44,
+            wraplength=380,
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+        )
+        self.segmentation_progress_status.place(x=20, y=76)
+        self.segmentation_progress_status.grid_propagate(False)
+        card.place(relx=0.5, rely=0.5, anchor="center")
+
+    def _position_segmentation_progress(self, _event=None):
+        """Show the blank progress layer once, independent of image redraws."""
+        surface = getattr(self, "segmentation_progress_surface", None)
+        if surface is None or not getattr(self, "_segmenter_running", False):
+            return
+        if not surface.winfo_manager():
+            surface.place(x=0, y=0, relwidth=1, relheight=1)
+        surface.lift()
+
+    def _set_segmentation_status(self, message):
+        """Keep the progress stage independent of mouse/zoom status updates."""
+        self.status_var.set(message)
+        progress_status = getattr(self, "segmenter_progress_var", None)
+        if progress_status is not None:
+            progress_status.set(message)
+
     def _build_annotation_tutorial(self):
         """Build the help banner inside the active drawing viewport."""
         card = AnnotationGuide(
@@ -1090,6 +1101,7 @@ class Step2Frame(SidebarStepFrame):
             self._queue_annotation_tutorial()
 
     def destroy(self):
+        self._cancel_progress_animation()
         self._watch_annotation_tutorial_canvas(None)
         self._hide_annotation_tutorial()
         super().destroy()
@@ -1169,10 +1181,6 @@ class Step2Frame(SidebarStepFrame):
             button.pack(fill="x", pady=2)
             HoverToolTip(button, tooltip)
             setattr(self, attribute, button)
-        self.segmenter_progress_var = tk.StringVar(value="Idle")
-        self.segmenter_progress = ttk.Progressbar(workflow, mode="determinate", maximum=6, value=0)
-        self.segmenter_progress.pack(fill="x", pady=(6, 4))
-
         self.active_trace_var = tk.StringVar(value="No active boundary")
         self.boundary_workflow_status_var = tk.StringVar(value="Select a boundary to make it active.")
 
@@ -1429,62 +1437,78 @@ class Step2Frame(SidebarStepFrame):
             self.status_var.set("Batch segmentation selection closed.")
         self._update_batch_ai_button_state()
 
+    def _step2_batch_segmentation_row(self, folder):
+        """Recognize saved segmentation beside Light or in its side folders."""
+        folder = os.path.abspath(folder)
+        with os.scandir(folder) as entries:
+            lower_files = {}
+            side_folders = {}
+            for entry in entries:
+                if entry.is_file():
+                    lower_files[entry.name.lower()] = entry.name
+                elif entry.name.lower() in {"nasal", "temporal"} and entry.is_dir():
+                    side_folders[entry.name.lower()] = entry.path
+
+        source_name = lower_files.get("light.img")
+        if source_name is None:
+            return None
+
+        segmented_sides = []
+        for side in ("nasal", "temporal"):
+            side_folder = side_folders.get(side)
+            if side_folder is None:
+                continue
+            with os.scandir(side_folder) as entries:
+                if any(entry.name.lower() == "light_marked.img" and entry.is_file() for entry in entries):
+                    segmented_sides.append(side)
+
+        directly_segmented = "light_marked.img" in lower_files
+        current_side = os.path.basename(folder).lower()
+        if directly_segmented and not segmented_sides and current_side in {"nasal", "temporal"}:
+            segmented_sides.append(current_side)
+
+        locked = directly_segmented or len(segmented_sides) == 2
+        if len(segmented_sides) == 2:
+            status = "Already segmented: nasal and temporal"
+        elif segmented_sides:
+            prefix = "Already segmented" if locked else "Ready: Light; segmented"
+            status = f"{prefix}: {segmented_sides[0]} only"
+        elif directly_segmented:
+            status = "Already segmented: Light"
+        else:
+            status = "Ready: Light"
+
+        return {
+            "folder": folder,
+            "include": not locked,
+            "locked": locked,
+            "status": status,
+            "image_paths": [] if locked else [
+                self._preferred_analyze_pair_path(os.path.join(folder, source_name))
+            ],
+            "pending": [] if locked else ["Light"],
+            "completed": ["Light"] if locked else [],
+            "segmented_sides": segmented_sides,
+        }
+
     def _scan_step2_batch_segmentation_folders(self, root_dir):
         """Return folder rows showing ready and already-segmented Light inputs."""
         root_dir = os.path.abspath(root_dir)
         rows = []
         scanned = 0
         skipped = 0
-        targets = (("Light", "light.img", "light_marked.img"),)
-
         folders, access_errors = walk_accessible_directories(root_dir)
         for folder_path in folders:
-            folder = str(folder_path)
+            scanned += 1
             try:
-                with os.scandir(folder) as entries:
-                    filenames = [entry.name for entry in entries if entry.is_file()]
+                row = self._step2_batch_segmentation_row(folder_path)
             except OSError as exc:
                 access_errors.append((folder_path, str(exc)))
                 continue
-            scanned += 1
-            lower_files = {name.lower(): name for name in filenames}
-            pending = []
-            completed = []
-            image_paths = []
-
-            for label, source_name, marked_name in targets:
-                source_file = lower_files.get(source_name)
-                if source_file is None:
-                    continue
-                if marked_name in lower_files:
-                    completed.append(label)
-                    continue
-                pending.append(label)
-                image_paths.append(self._preferred_analyze_pair_path(os.path.join(folder, source_file)))
-
-            if not pending and not completed:
+            if row is None:
                 skipped += 1
                 continue
-
-            locked = not pending
-            if locked:
-                status = f"Already segmented: {', '.join(completed)}"
-            elif completed:
-                status = f"Ready: {', '.join(pending)} pending; {', '.join(completed)} done"
-            else:
-                status = f"Ready: {', '.join(pending)}"
-
-            rows.append(
-                {
-                    "folder": folder,
-                    "include": not locked,
-                    "locked": locked,
-                    "status": status,
-                    "image_paths": image_paths,
-                    "pending": pending,
-                    "completed": completed,
-                }
-            )
+            rows.append(row)
 
         rows.sort(key=lambda row: os.path.relpath(row["folder"], root_dir).lower())
         return rows, scanned, skipped, access_errors
@@ -1561,19 +1585,17 @@ class Step2Frame(SidebarStepFrame):
         return max(0, min(used, self._available_core_count()))
 
     def _shared_core_budget(self):
-        """Return total, Step 3 allocation, and free cores for Step 2."""
+        """Return the Step 2 budget after reserving one core for the app."""
 
         total = self._available_core_count()
         step3_used = self._step3_core_allocation()
-        return total, step3_used, max(0, total - step3_used)
+        return total, step3_used, max(0, total - 1 - step3_used)
 
-    def _normalized_shared_core_limit(self, value):
+    def _normalized_shared_core_limit(self, value=None):
+        """Always use the automatic CPU fallback budget, with at least one core."""
+
         _total, _step3_used, free = self._shared_core_budget()
-        try:
-            selected = int(value)
-        except (TypeError, ValueError, tk.TclError):
-            selected = max(1, free)
-        return max(1, min(selected, max(1, free)))
+        return max(1, free)
 
     def _confirm_shared_core_contention(self, total_cores, step3_used):
         """Warn before Step 2 shares a core when Step 3 occupies all of them."""
@@ -1610,16 +1632,6 @@ class Step2Frame(SidebarStepFrame):
             return bool(runtime_using_gpu)
         return getattr(self, "_ai_gpu_compatible", None) is True
 
-    def _sync_batch_device_controls(self):
-        panel = getattr(self, "batch_segmentation_panel", None)
-        if panel is None:
-            return
-        try:
-            if panel.winfo_exists():
-                panel._sync_device_controls()
-        except tk.TclError:
-            pass
-
     def start_batch_segmentation_for_folders(self, folders):
         """Run the existing Step 2 batch workflow for explicit Step 1 folders."""
         if self._segmenter_running:
@@ -1643,32 +1655,12 @@ class Step2Frame(SidebarStepFrame):
             seen.add(key)
             normalized_folders.append(folder)
             try:
-                with os.scandir(folder) as entries:
-                    lower_files = {
-                        entry.name.lower(): entry.name
-                        for entry in entries
-                        if entry.is_file()
-                    }
+                row = self._step2_batch_segmentation_row(folder)
             except OSError:
                 continue
-
-            source_name = lower_files.get("light.img")
-            if source_name is None:
+            if row is None:
                 continue
-            source_path = self._preferred_analyze_pair_path(
-                os.path.join(folder, source_name)
-            )
-            rows.append(
-                {
-                    "folder": folder,
-                    "include": True,
-                    "locked": False,
-                    "status": "Ready: Light",
-                    "image_paths": [source_path],
-                    "pending": ["Light"],
-                    "completed": [],
-                }
-            )
+            rows.append(row)
 
         if not rows:
             messagebox.showwarning(
@@ -2103,6 +2095,7 @@ class Step2Frame(SidebarStepFrame):
         if self.single_image_canvas.winfo_manager() != "pack":
             self.single_image_canvas.pack(fill="both", expand=True)
         self._queue_annotation_tutorial()
+        self._position_segmentation_progress()
         return True
 
     def _show_batch_results_canvas(self):
@@ -2205,6 +2198,7 @@ class Step2Frame(SidebarStepFrame):
         if status_message:
             self.status_var.set(status_message)
         self._queue_annotation_tutorial()
+        self._position_segmentation_progress()
 
     def _notify_output_folder_changed(self):
         if not self.current_file or self.current_file == "Step 1 output":
@@ -2364,6 +2358,7 @@ class Step2Frame(SidebarStepFrame):
         if status_message:
             self.status_var.set(status_message)
         self._queue_annotation_tutorial()
+        self._position_segmentation_progress()
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Boundary tracing actions
@@ -2790,11 +2785,12 @@ class Step2Frame(SidebarStepFrame):
         return next_name
 
     def _update_boundary_progress_bar(self):
-        """Update progress bar to show completed boundaries out of 6."""
+        """Reset idle progress without overwriting an active AI batch."""
+        if getattr(self, "_segmenter_running", False):
+            return
         completed_count = len(self._completed_boundary_names())
         if hasattr(self, "segmenter_progress"):
-            self.segmenter_progress.configure(maximum=len(BOUNDARY_NAMES), mode="determinate")
-            self.segmenter_progress["value"] = completed_count
+            self.segmenter_progress.set(completed_count / len(BOUNDARY_NAMES))
 
     def _next_incomplete_boundary(self, current_name=None):
         """Get the next incomplete boundary in priority order.
@@ -4121,7 +4117,6 @@ class Step2Frame(SidebarStepFrame):
             self.ai_device_status_var.set(text)
         except tk.TclError:
             pass
-        self._sync_batch_device_controls()
 
     def _set_runtime_ai_device_status(
         self,
@@ -4151,7 +4146,6 @@ class Step2Frame(SidebarStepFrame):
             self.ai_device_status_var.set(text)
         except tk.TclError:
             pass
-        self._sync_batch_device_controls()
 
     def _aidas_worker_env(self):
         """Return an environment for AI_ForAIDAS worker subprocesses."""
@@ -4473,14 +4467,21 @@ class Step2Frame(SidebarStepFrame):
             if hasattr(self, "segmenter_progress"):
                 self._cancel_progress_animation()
                 maximum = progress_max if progress_max is not None else len(BOUNDARY_NAMES)
-                self.segmenter_progress.configure(maximum=max(1, int(maximum)), mode="determinate")
-                self.segmenter_progress["value"] = 0
+                self._segmenter_progress_maximum = max(1, int(maximum))
+                self.segmenter_progress.configure(mode="determinate")
+                self.segmenter_progress.set(0)
+                self.segmenter_progress_percent_var.set("0%")
+                self.segmenter_progress_var.set(status_message or "Preparing segmentation...")
                 self._segmenter_progress_target = 0.0
+                self._position_segmentation_progress()
                 if animate_progress:
                     self._animate_progress_bar()
         else:
             # Stop animation and show actual boundary count
             self._cancel_progress_animation()
+            surface = getattr(self, "segmentation_progress_surface", None)
+            if surface is not None:
+                surface.place_forget()
             if hasattr(self, "segmenter_progress") and restore_boundary_progress:
                 self._update_boundary_progress_bar()
             # Update button states after segmentation finishes
@@ -4492,9 +4493,12 @@ class Step2Frame(SidebarStepFrame):
         self._sync_boundary_canvas_state()
 
         if status_message:
-            self.status_var.set(status_message)
+            self._set_segmentation_status(status_message)
 
     def _cancel_progress_animation(self):
+        progress = getattr(self, "segmenter_progress", None)
+        if progress is not None:
+            progress.stop()
         job = getattr(self, "_progress_animation_job", None)
         if job is None:
             return
@@ -4508,15 +4512,28 @@ class Step2Frame(SidebarStepFrame):
         if not hasattr(self, "segmenter_progress"):
             return
         if maximum is not None:
-            self.segmenter_progress.configure(maximum=max(1, int(maximum)), mode="determinate")
-        max_value = float(self.segmenter_progress.cget("maximum") or 1)
+            self._segmenter_progress_maximum = max(1, int(maximum))
+        max_value = float(self._segmenter_progress_maximum)
         target = max(0.0, min(float(value), max_value))
+        if self._segmenter_running:
+            # Worker startup and per-image events can repeat an earlier stage.
+            # Keep visible progress from moving backwards within a run.
+            target = max(target, self._segmenter_progress_target)
         self._segmenter_progress_target = target
         if smooth and self._segmenter_running:
             if getattr(self, "_progress_animation_job", None) is None:
                 self._animate_progress_bar()
             return
-        self.segmenter_progress["value"] = target
+        self._render_segmenter_progress(target)
+
+    def _render_segmenter_progress(self, value):
+        """Render actual worker progress as a rounded bar and percentage."""
+        fraction = max(0.0, min(float(value) / self._segmenter_progress_maximum, 1.0))
+        self.segmenter_progress.set(fraction)
+        percent = 100 if fraction >= 1 else min(99, int(fraction * 100))
+        percentage = f"{percent}%"
+        if self.segmenter_progress_percent_var.get() != percentage:
+            self.segmenter_progress_percent_var.set(percentage)
 
     def _animate_progress_bar(self):
         """Gradually fill progress bar during segmentation to show activity."""
@@ -4524,13 +4541,13 @@ class Step2Frame(SidebarStepFrame):
             self._progress_animation_job = None
             return
         
-        current = float(self.segmenter_progress["value"])
-        maximum = float(self.segmenter_progress.cget("maximum") or len(BOUNDARY_NAMES))
+        maximum = float(self._segmenter_progress_maximum)
+        current = float(self.segmenter_progress.get()) * maximum
         target = max(0.0, min(float(getattr(self, "_segmenter_progress_target", current)), maximum))
 
         if current < target:
             step = max(0.01, (target - current) * 0.18)
-            self.segmenter_progress["value"] = min(current + step, target)
+            self._render_segmenter_progress(min(current + step, target))
 
         self._progress_animation_job = self.after(80, self._animate_progress_bar)
 
@@ -4831,7 +4848,7 @@ class Step2Frame(SidebarStepFrame):
             name = os.path.basename(path)
             self.after(0, lambda i=index, t=total: self._set_segmenter_progress_value(i - 1, t))
             label = "AI segmentation" if current_image_state is not None else f"AI_ForAIDAS batch {index}/{total}"
-            self.after(0, lambda: self.status_var.set(f"{label}: {name}"))
+            self.after(0, lambda: self._set_segmentation_status(f"{label}: {name}"))
             self.after(0, lambda: self._append_segmenter_log(f"Batch {index}/{total}: {path}"))
 
         def report_model_progress(index, total, path, fraction, stage):
@@ -4840,7 +4857,7 @@ class Step2Frame(SidebarStepFrame):
             name = os.path.basename(path)
             prefix = "AI segmentation" if current_image_state is not None else f"AI_ForAIDAS batch {index}/{total}"
             self.after(0, lambda v=progress_value, t=total: self._set_segmenter_progress_value(v, t))
-            self.after(0, lambda: self.status_var.set(f"{prefix}: {name} - {label}"))
+            self.after(0, lambda: self._set_segmentation_status(f"{prefix}: {name} - {label}"))
 
         try:
             worker_client = AIWorkerClient(

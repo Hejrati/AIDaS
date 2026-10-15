@@ -739,10 +739,142 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         frame._auto_save_current_roi.assert_not_called()
         frame.after_idle.assert_called_once()
         callback = frame.after_idle.call_args.args[0]
-        self.assertIs(callback, frame._auto_save_current_roi)
+        self.assertTrue(callable(callback))
 
         callback()
 
+        frame._auto_save_current_roi.assert_called_once_with()
+
+    @staticmethod
+    def _line_positioning_frame(*, disabled=True, profile=None):
+        if profile is None:
+            profile = np.full(30, 10.0)
+            profile[4], profile[13], profile[23] = 2.0, 0.5, 1.0
+        frame = Step4Frame.__new__(Step4Frame)
+        frame.ax_roi_grid = object()
+        frame.ax_profile = object()
+        frame.image = object()
+        frame._current_profile = np.asarray(profile, dtype=np.float64)
+        frame.current_roi_idx = 0
+        frame.rois = [SimpleNamespace(suffix="01")]
+        frame._roi_adjust_bounds = {}
+        frame.profile_clicks = []
+        frame.roi_clicks = {}
+        frame.completed = {}
+        frame.disable_line_positioning_var = mock.Mock()
+        frame.disable_line_positioning_var.get.return_value = disabled
+        frame.profile_status_var = mock.Mock()
+        frame.status_var = mock.Mock()
+        frame._close_profile_zoom = mock.Mock()
+        frame._sync_entry_vars_from_clicks = mock.Mock()
+        frame._render_current_roi = mock.Mock()
+        frame._auto_save_current_roi = mock.Mock()
+        frame.after_idle = mock.Mock()
+        frame.after_cancel = mock.Mock()
+        return frame
+
+    @staticmethod
+    def _click_main_profile(frame, x_value):
+        frame._on_profile_click(
+            SimpleNamespace(inaxes=frame.ax_profile, xdata=x_value, button=1)
+        )
+
+    def test_disabling_line_positioning_keeps_first_and_second_clicked_samples(self):
+        frame = self._line_positioning_frame()
+
+        with mock.patch(
+            "aidas.steps.step4_analyze_isez._nearest_local_minimum",
+            side_effect=AssertionError("Manual positioning must not search for a minimum."),
+        ):
+            self._click_main_profile(frame, 6.2)
+            self._click_main_profile(frame, 22.3)
+
+        self.assertEqual(frame.profile_clicks, [6.0, 22.0])
+        self.assertEqual(frame.roi_clicks["01"], [6.0, 22.0])
+        self.assertFalse(frame._should_adjust_roi_bounds("01"))
+        self.assertEqual(frame._render_current_roi.call_count, 2)
+        frame.after_idle.assert_called_once()
+        frame.after_idle.call_args.args[0]()
+        frame._auto_save_current_roi.assert_called_once_with()
+
+    def test_disabling_line_positioning_corrects_either_existing_boundary_exactly(self):
+        for click, expected in ((8.2, [8.0, 24.0]), (21.2, [5.0, 21.0])):
+            with self.subTest(click=click):
+                frame = self._line_positioning_frame()
+                frame.profile_clicks = [5.0, 24.0]
+                frame._set_roi_adjustment("01", True)
+
+                self._click_main_profile(frame, click)
+
+                self.assertEqual(frame.profile_clicks, expected)
+                self.assertEqual(frame.roi_clicks["01"], expected)
+                self.assertFalse(frame._should_adjust_roi_bounds("01"))
+                frame.after_idle.assert_called_once()
+                frame.after_idle.call_args.args[0]()
+                frame._auto_save_current_roi.assert_called_once_with()
+
+    def test_checked_line_positions_survive_preview_and_actual_roi_save(self):
+        profile = self._flat_tailed_bell_profile()
+        frame = self._line_positioning_frame(profile=profile)
+        frame.image = np.repeat((profile * 3)[:, None], 4, axis=1)
+        frame.rois = [ISezROI("01", left=1, right=4, low=1, high=140)]
+        frame.auto_detection_reviews = {}
+        frame.batch_roi_notebook = None
+        frame.canvas = None
+        for attribute in (
+            "_refresh_roi_list", "_start_roi_update_animation", "_select_roi_in_list",
+            "_draw_roi_overview_grid", "_update_build_stack_button_state",
+        ):
+            setattr(frame, attribute, mock.Mock())
+        automatic = analyze_and_save_roi(
+            frame.image, frame.rois[0], start_click=25, end_click=110,
+        )
+        self.assertNotEqual(automatic.adjusted_start, 25)
+
+        self._click_main_profile(frame, 25)
+        self._click_main_profile(frame, 110)
+        with mock.patch(
+            "aidas.steps.step4_analyze_isez.adjust_isez_bounds",
+            side_effect=AssertionError("Manual positions must not be adjusted later."),
+        ):
+            preview = frame._roi_overview_result(0)
+            self.assertIsNotNone(preview)
+            self.assertTrue(frame._save_current_roi(auto_advance=False, apply_entry_values=False))
+            saved = frame.completed["01"]
+
+        self.assertTrue(saved.manual_bounds)
+        self.assertEqual((saved.start, saved.end), (25, 110))
+        self.assertEqual((saved.adjusted_start, saved.adjusted_end), (25, 110))
+        np.testing.assert_array_equal(saved.baseline_x, [25, 110])
+        np.testing.assert_array_equal(preview.baseline_x, saved.baseline_x)
+        np.testing.assert_allclose(preview.normalized_y, saved.normalized_y)
+        frame._roi_adjust_bounds.clear()
+        self.assertFalse(frame._should_adjust_roi_bounds("01"))
+
+    def test_toggling_only_changes_future_placement_and_restores_automatic_minimum(self):
+        frame = self._line_positioning_frame()
+        self._click_main_profile(frame, 6.2)
+        self._click_main_profile(frame, 22.3)
+        before = list(frame.profile_clicks)
+        remembered = list(frame.roi_clicks["01"])
+        frame._render_current_roi.reset_mock()
+        frame.after_idle.reset_mock()
+        frame._update_profile_status = mock.Mock()
+
+        for disabled in (False, True, False):
+            frame.disable_line_positioning_var.get.return_value = disabled
+            frame._on_line_positioning_changed()
+            self.assertEqual(frame.profile_clicks, before)
+            self.assertEqual(frame.roi_clicks["01"], remembered)
+            self.assertFalse(frame._should_adjust_roi_bounds("01"))
+            frame.after_idle.assert_not_called()
+            frame._auto_save_current_roi.assert_not_called()
+        self._click_main_profile(frame, 6.2)
+
+        self.assertEqual(frame.profile_clicks, [5.0, 22.0])
+        self.assertTrue(frame._should_adjust_roi_bounds("01"))
+        frame.after_idle.assert_called_once()
+        frame.after_idle.call_args.args[0]()
         frame._auto_save_current_roi.assert_called_once_with()
 
     @staticmethod

@@ -110,6 +110,7 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
     def test_auto_detect_accepts_confident_roi_and_marks_uncertain_roi(self):
         frame = object.__new__(Step4Frame)
         frame.image = object()
+        frame.current_path = Path("study") / "_flat_LIGHT.hdr"
         frame.rois = [ISezROI("01", 1, 2), ISezROI("02", 3, 4)]
         frame.completed = {}
         frame.auto_detection_reviews = {}
@@ -186,6 +187,7 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
     def test_auto_detect_never_processes_roi_21(self):
         frame = object.__new__(Step4Frame)
         frame.image = object()
+        frame.current_path = Path("study") / "_flat_LIGHT.hdr"
         frame.rois = [ISezROI(f"{index + 1:02d}", index * 2 + 1, index * 2 + 2) for index in range(21)]
         frame.completed = {}
         frame.auto_detection_reviews = {}

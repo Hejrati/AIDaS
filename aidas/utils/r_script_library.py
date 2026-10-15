@@ -10,8 +10,8 @@ from pathlib import Path
 import shutil
 
 
-# Keep the original workflow active until the optimized version's release.
-OPTIMIZED_R_SCRIPTS_ENABLED = False
+# Use the optimized workflows by default in Step 3 and Settings.
+OPTIMIZED_R_SCRIPTS_ENABLED = True
 OPTIMIZED_R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R"
 OPTIMIZED_R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited_optimized.R"
 

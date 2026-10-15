@@ -19,7 +19,7 @@ from aidas.steps.step3_flatten import (
     RSetupWizard,
     Step3Frame,
 )
-from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel, Step4Frame
+from aidas.steps.step4_analyze_isez import Step4BatchROISelectionPanel
 from aidas.steps.step5_compile import Step5Frame
 from aidas.ui.components import (
     AppButton,
@@ -392,12 +392,13 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn('text="Batch size:"', source)
         self.assertNotIn('text="Timeout per script (min):"', source)
 
-    def test_step2_exposes_the_maximum_fallback_core_limit(self):
+    def test_step2_omits_the_automatic_fallback_core_controls(self):
         source = inspect.getsource(Step2BatchSegmentationSelectionPanel._build_ui)
 
-        self.assertIn("NativeNumericSpinbox(", source)
-        self.assertIn("Maximum Step 2 cores for GPU fallback", source)
-        self.assertIn("_shared_core_budget()", source)
+        self.assertNotIn("NativeNumericSpinbox(", source)
+        self.assertNotIn("Maximum Step 2 cores for GPU fallback", source)
+        self.assertNotIn("core_limit_var", source)
+        self.assertNotIn("core_budget_var", source)
         self.assertNotIn("ai_device_status_var", source)
         self.assertNotIn("CPU reserved", source)
 

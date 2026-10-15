@@ -21,6 +21,8 @@ from aidas.utils.bright_pixels import (
 )
 from aidas.utils.filesystem import find_sdb_directories, skipped_directories_warning
 from aidas.utils.io_utils import read_analyze, read_raw_oct, scale_image, write_analyze
+from aidas.utils.oct_crop import detect_oct_crop, map_oct_crop_to_raw
+from aidas.utils.sdb_reader import detect_sdb_image, read_sdb_retinal_contours
 from aidas.ui.components import AppButton, AppSplitButton
 from aidas.ui.bright_pixel_notice import BrightPixelNotice
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS
@@ -111,7 +113,16 @@ class Step1Frame(SidebarStepFrame):
         self._processed_image_saved = False
         self.current_file = None       # path of opened raw file
         self._source_roi = None        # ROI coordinates in the source image
+        self._crop_contours = None     # optional layer hints in the analysis region
+        self._crop_oct_layout = None   # native OCT words inside the full raw view
+        self._source_crop_contours = None
+        self._source_crop_oct_layout = None
         self.raw_import_params = None  # validated import parameters
+        self._sdb_image_info = None
+        self._sdb_manual_import = False
+        self._sdb_showing_saved_crop = False
+        self._sdb_import_error = None
+        self._setting_detected_import_params = False
         self._updating_roi_entries = False
         self._updating_target_size_entries = False
         self._target_size_edit_active = False
@@ -200,17 +211,17 @@ class Step1Frame(SidebarStepFrame):
 
         # Update these assignments in _build_controls
         self.width_stepper, self.width_reset_btn = self._param_stepper_row(
-            self.sdb_params_frame, 0, "Width (px):", self.width_var, lambda: self.default_raw_width,
+            self.sdb_params_frame, 0, "Width (px):", self.width_var, lambda: self._import_reset_value("width"),
             step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
         )
         
         self.height_stepper, self.height_reset_btn = self._param_stepper_row(
-            self.sdb_params_frame, 1, "Height (px):", self.height_var, lambda: self.default_raw_height,
+            self.sdb_params_frame, 1, "Height (px):", self.height_var, lambda: self._import_reset_value("height"),
             step=1, minimum=1, maximum=10000, validatecommand=numeric_vcmd
         )
         
         self.offset_stepper, self.offset_reset_btn = self._param_stepper_row(
-            self.sdb_params_frame, 2, "Offset (bytes):", self.offset_var, lambda: self.default_raw_offset,
+            self.sdb_params_frame, 2, "Offset (bytes):", self.offset_var, lambda: self._import_reset_value("offset"),
             step=2, minimum=0, maximum=10_000_000, validatecommand=numeric_vcmd
         )
 
@@ -362,7 +373,7 @@ class Step1Frame(SidebarStepFrame):
             textvariable=self.sdb_params_summary_var,
             style="AIDaS.Muted.TLabel",
             justify="left",
-            wraplength=0,
+            wraplength=300,
         )
         self.sdb_params_summary_label.pack(
             fill="x",
@@ -374,6 +385,18 @@ class Step1Frame(SidebarStepFrame):
             self.sdb_params_summary_label,
             "W/H: image width and height in pixels. Offset: skipped bytes.\n"
             "LE: little-endian; BE: big-endian.",
+        )
+        self.crop_region_summary_var = tk.StringVar(value="")
+        self.crop_region_summary_label = ttk.Label(
+            self.sdb_params_section,
+            textvariable=self.crop_region_summary_var,
+            style="AIDaS.Muted.TLabel",
+            justify="left",
+            wraplength=300,
+        )
+        self.crop_region_summary_label.pack(
+            fill="x", padx=LAYOUT.space_sm, pady=(0, LAYOUT.space_sm),
+            after=self.sdb_params_summary_label,
         )
         self._update_import_settings_summary()
         self.sdb_params_section.toggle()
@@ -547,11 +570,11 @@ class Step1Frame(SidebarStepFrame):
         self.crop_options_btn.configure(state="disabled")
         self.crop_options_menu = tk.Menu(self.crop_options_btn, tearoff=False)
         self.crop_options_menu.add_command(
-            label="Default Region",
-            command=self._set_default_roi,
+            label="Auto OCT Region",
+            command=self._set_initial_roi,
         )
         self.crop_options_menu.add_command(
-            label="Entire Image",
+            label="Whole Image",
             command=self._select_all_roi,
         )
         HoverToolTip(self.crop_options_btn, "Choose a crop region preset")
@@ -724,6 +747,7 @@ class Step1Frame(SidebarStepFrame):
             return False
 
         self._processed_image_saved = True
+        self._set_crop_region_summary("saved")
         if source_file:
             if not hasattr(self, "_saved_crop_previews"):
                 self._saved_crop_previews = {}
@@ -944,26 +968,151 @@ class Step1Frame(SidebarStepFrame):
     # ═══════════════════════════════════════════════════════════════════════
 
     def _set_default_import_params(self):
-        """Restore default SDB import parameters and apply them."""
-        self.width_var.set(str(self.default_raw_width))
-        self.height_var.set(str(self.default_raw_height))
-        self.offset_var.set(str(self.default_raw_offset))
-        self.endian_var.set(self.default_little_endian)
+        """Restore the full-file view, retaining the manual pixel importer."""
+        info = self.__dict__.get("_sdb_image_info")
+        params = self._native_full_view_params(info) if info is not None else {
+            "width": self.default_raw_width,
+            "height": self.default_raw_height,
+            "offset": self.default_raw_offset,
+            "bit_depth": DEFAULT_RAW_BIT_DEPTH,
+            "little_endian": self.default_little_endian,
+        }
+        params["little_endian"] = self.default_little_endian
+        self._set_import_control_values(params)
         return self._apply_import_params()
+
+    def _import_reset_value(self, name):
+        info = self.__dict__.get("_sdb_image_info")
+        if info is not None:
+            return self._native_full_view_params(info)[name]
+        return {
+            "width": self.default_raw_width,
+            "height": self.default_raw_height,
+            "offset": self.default_raw_offset,
+        }[name]
+
+    def _commit_sdb_import_params(self, info, params):
+        """Set accepted per-file metadata without triggering form reloads."""
+        self._sdb_image_info = info
+        self._sdb_manual_import = False
+        self._sdb_showing_saved_crop = False
+        self._sdb_import_error = None
+        self.raw_import_params = dict(params)
+        self._set_import_control_values(params)
+        self._update_import_settings_summary()
+
+    def _set_import_control_values(self, params):
+        """Set controls together without reloading a partially updated form."""
+        self._setting_detected_import_params = True
+        try:
+            for name, variable in (("width", "width_var"), ("height", "height_var"),
+                                   ("offset", "offset_var"), ("little_endian", "endian_var")):
+                var = self.__dict__.get(variable)
+                if var is not None and name in params:
+                    value = params[name] if name == "little_endian" else str(params[name])
+                    var.set(value)
+        finally:
+            self._setting_detected_import_params = False
+
+    def _read_sdb_source(self, path):
+        """Prepare one source import without replacing the current editor."""
+        info = detect_sdb_image(path)
+        if info is not None:
+            params = self._native_full_view_params(info)
+            params["little_endian"] = self._current_import_byte_order()
+            return read_raw_oct(path, **params), info, params
+        if self.__dict__.get("_sdb_image_info") is not None:
+            # A native pixel offset belongs only to its own container. An
+            # unrecognized raw file starts from the configured raw defaults.
+            params = {
+                "width": self.default_raw_width,
+                "height": self.default_raw_height,
+                "offset": self.default_raw_offset,
+                "bit_depth": DEFAULT_RAW_BIT_DEPTH,
+                "little_endian": self._current_import_byte_order(),
+            }
+        else:
+            previous_params = self.raw_import_params
+            previous_flags = {
+                name: self.__dict__.get(name)
+                for name in ("_sdb_manual_import", "_sdb_showing_saved_crop", "_sdb_import_error")
+            }
+            try:
+                if not self._apply_import_params(skip_reload=True):
+                    return None, None, None
+                params = dict(self.raw_import_params)
+            finally:
+                self.raw_import_params = previous_params
+                self.__dict__.update(previous_flags)
+                self._update_import_settings_summary()
+        return read_raw_oct(path, **params), None, params
+
+    def _native_full_view_params(self, info):
+        """Use native row width while keeping the configured full raw view.
+
+        The OCT pixel offset locates the box, rather than becoming the display
+        offset. Preserve the manual leading offset and height when they cover
+        the file; extend the height if necessary to include all stored bytes.
+        """
+        offset = self.default_raw_offset if self.default_raw_offset <= info.offset else 0
+        rows = (max(0, info.file_size - offset) + info.width * 2 - 1) // (info.width * 2)
+        return {
+            "width": info.width,
+            "height": max(self.default_raw_height, rows),
+            "offset": offset,
+            "bit_depth": DEFAULT_RAW_BIT_DEPTH,
+            "little_endian": self.default_little_endian,
+        }
+
+    @staticmethod
+    def _sdb_crop_hints(path, info, params):
+        """Locate native OCT words in the unchanged full-file raw array."""
+        if info is None:
+            return None, None
+        delta = info.offset - params["offset"]
+        start = delta // 2
+        if (delta < 0 or delta % 2 or params["width"] != info.width or
+                start + info.width * info.height > params["width"] * params["height"]):
+            # Recognized metadata with an incompatible manual layout should
+            # not cause the infrared image to be mistaken for a retinal scan.
+            return None, ()
+        try:
+            contours = read_sdb_retinal_contours(path, info)
+        except (OSError, ValueError, RuntimeError):
+            contours = None
+        return contours, (start, info.width, info.height)
+
+    def _current_import_byte_order(self):
+        """Keep the manual byte-order selection when detecting dimensions."""
+        variable = self.__dict__.get("endian_var")
+        if variable is not None:
+            return bool(variable.get())
+        return bool(self.__dict__.get("default_little_endian", True))
 
     def _on_import_param_changed(self):
         """Auto-apply import parameters when UI values change."""
+        if self.__dict__.get("_setting_detected_import_params", False):
+            return
         self._apply_import_params(show_errors=False)
 
     def _on_width_changed(self):
         """Store the requested width and resize the current image view without rereading the raw file."""
-        self._apply_import_params(show_errors=False, skip_reload=True)
-        self._apply_width_preview_adjustment()
+        if self.__dict__.get("_setting_detected_import_params", False):
+            return
+        if self._apply_import_params(show_errors=False, skip_reload=True):
+            self._apply_width_preview_adjustment()
 
     def _update_import_settings_summary(self):
         """Show validated import settings even while their controls are hidden."""
         summary = self.__dict__.get("sdb_params_summary_var")
         if summary is None:
+            return
+        tooltip = self.__dict__.get("_sdb_params_summary_tooltip")
+        if self.__dict__.get("_sdb_showing_saved_crop", False) and self.processed_image is not None:
+            height, width = self.processed_image.shape
+            summary.set(f"Saved crop: {width:,} × {height:,} pixels")
+            if tooltip is not None:
+                tooltip.text = "The saved Light image is displayed. Undo reads the original SDB before removing its crop."
             return
         params = self.raw_import_params or {
             "width": self.default_raw_width,
@@ -973,10 +1122,41 @@ class Step1Frame(SidebarStepFrame):
             "little_endian": self.default_little_endian,
         }
         byte_order = "LE" if params["little_endian"] else "BE"
-        summary.set(
+        details = (
             f"W: {params['width']:,} · H: {params['height']:,} · "
             f"Offset: {params['offset']:,} B · {params['bit_depth']}-bit · {byte_order}"
         )
+        info = self.__dict__.get("_sdb_image_info")
+        if info is None:
+            text = "Manual import\n" + details
+            if self.__dict__.get("_sdb_import_error"):
+                text += "\nImport adjustment rejected: " + self._sdb_import_error
+            summary.set(text)
+            if tooltip is not None:
+                tooltip.text = (
+                    "W/H: image width and height in pixels. Offset: skipped bytes.\n"
+                    "LE: little-endian; BE: big-endian. No supported native SDB metadata was detected."
+                )
+            return
+        label = "Manual adjustment" if self.__dict__.get("_sdb_manual_import", False) else "Auto-detected"
+        count = info.frame_count
+        scans = f"{count} scan" + ("s" if count != 1 else "")
+        selection = "" if count == 1 else " · crop guide: scan 1"
+        text = (
+            f"{label} OCT: {info.width:,} × {info.height:,} · {scans} · "
+            f"{info.edb_status}{selection}\nFull SDB view · {details}"
+        )
+        if self.__dict__.get("_sdb_import_error"):
+            text += "\nImport adjustment rejected: " + self._sdb_import_error
+        summary.set(text)
+        if tooltip is not None:
+            tooltip.text = (
+                f"{info.edb_status}. Original 16-bit pixels use the same display as manual import.\n"
+                f"File size: {info.file_size:,} bytes. Pixel offset: {info.offset:,} bytes.\n"
+                "Width adjustments crop or pad the view, as in manual import."
+            )
+            if info.axial_spacing_mm is not None:
+                tooltip.text += f"\nDepth spacing: {info.axial_spacing_mm * 1000:.3f} micrometers/pixel."
 
     def _apply_width_preview_adjustment(self):
         """Crop or pad the loaded image to match the requested width."""
@@ -1017,6 +1197,15 @@ class Step1Frame(SidebarStepFrame):
             )
 
         self.raw_image = adjusted
+        source_layout = self.__dict__.get("_source_crop_oct_layout")
+        if requested_width == source_width:
+            self._crop_oct_layout = source_layout
+            self._crop_contours = self.__dict__.get("_source_crop_contours")
+        else:
+            # Centered width edits change the word layout of the full raw view.
+            # An invalid marker prevents infrared content being used as OCT.
+            self._crop_oct_layout = () if source_layout is not None else None
+            self._crop_contours = None
         self._raw_bright_pixel_mask = adjusted_mask
         self.processed_image = None
         self._processed_image_saved = False
@@ -1024,7 +1213,7 @@ class Step1Frame(SidebarStepFrame):
         self.view_mode_var.set("source")
         self.image_canvas.set_image(adjusted)
         self.image_canvas.enable_roi(True)
-        self._set_default_roi()
+        self._set_initial_roi()
         self._update_zoom_label()
         self._update_processing_controls()
         self._update_image_status()
@@ -1127,43 +1316,62 @@ class Step1Frame(SidebarStepFrame):
             off = int(self.offset_var.get())
             le = self.endian_var.get()
         except ValueError:
+            self._sdb_import_error = "Width, height and offset must be valid integers."
+            self._update_import_settings_summary()
             if show_errors:
                 messagebox.showerror("Error", "Invalid import parameter (must be integers).")
             return False
 
         if w <= 0 or h <= 0 or off < 0:
+            self._sdb_import_error = "Width and height must be positive; offset cannot be negative."
+            self._update_import_settings_summary()
             if show_errors:
                 messagebox.showerror("Error", "Width/Height must be > 0 and Offset must be >= 0.")
             return False
 
-        self.raw_import_params = {
+        params = {
             "width": w,
             "height": h,
             "offset": off,
             "bit_depth": DEFAULT_RAW_BIT_DEPTH,
             "little_endian": le,
         }
-        self._update_import_settings_summary()
-
         # If an image is already open, immediately re-read it with new params.
         # Width changes are handled separately as a display-only crop/pad step.
+        info = self.__dict__.get("_sdb_image_info")
         if self.current_file and not skip_reload:
             try:
-                img = read_raw_oct(self.current_file, **self.raw_import_params)
+                if info is not None:
+                    # Validate recognized containers before any raw-view
+                    # reload. Padding the manual view must not conceal a
+                    # damaged native OCT record.
+                    info = detect_sdb_image(self.current_file)
+                    if info is None:
+                        raise ValueError("The source no longer has its detected SDB header.")
+                img = read_raw_oct(self.current_file, **params)
             except (OSError, ValueError, RuntimeError) as exc:
-                messagebox.showerror(
-                    "Error reading file",
-                    f"Parameters applied, but reloading current image failed:\n{exc}",
-                )
+                self._sdb_import_error = str(exc)
+                self._update_import_settings_summary()
+                if show_errors:
+                    messagebox.showerror("Error reading file", f"Could not apply import parameters:\n{exc}")
                 return False
-            return self._load_image(img, self.current_file)
-
-        if self.current_file and skip_reload:
-            return True
-
+            contours, layout = self._sdb_crop_hints(self.current_file, info, params)
+            if not self._load_image(img, self.current_file,
+                                    crop_contours=contours, crop_oct_layout=layout):
+                self._set_import_control_values(self.raw_import_params)
+                return False
+            self._sdb_image_info = info
+        self.raw_import_params = params
+        self._sdb_import_error = None
+        self._sdb_manual_import = info is not None and params != self._native_full_view_params(info)
+        self._sdb_showing_saved_crop = False
+        self._update_import_settings_summary()
         return True
 
-    def _load_image(self, img, path, *, check_bright_pixels=True, source_check=None):
+    def _load_image(
+        self, img, path, *, check_bright_pixels=True, source_check=None,
+        crop_contours=None, crop_oct_layout=None,
+    ):
         """Load image data into UI state and refresh display widgets.
 
         Args:
@@ -1190,6 +1398,10 @@ class Step1Frame(SidebarStepFrame):
         self._source_raw_image = np.array(img, copy=True)
         self._working_source_raw_image = prepared.astype(img.dtype, copy=True)
         self.raw_image = np.array(self._working_source_raw_image, copy=True)
+        self._source_crop_contours = None if crop_contours is None else np.array(crop_contours, copy=True)
+        self._source_crop_oct_layout = crop_oct_layout
+        self._crop_contours = self._source_crop_contours
+        self._crop_oct_layout = crop_oct_layout
         self._source_bright_pixel_mask = None if detection is None else detection.mask
         self._raw_bright_pixel_mask = self._source_bright_pixel_mask
         self._source_bright_pixel_threshold = None if detection is None else detection.threshold
@@ -1203,7 +1415,7 @@ class Step1Frame(SidebarStepFrame):
 
         self.image_canvas.set_image(self.raw_image)
         self.image_canvas.enable_roi(True)
-        self._set_default_roi()
+        self._set_initial_roi()
         self._update_zoom_label()
         self._update_processing_controls()
         self._set_sdb_parameters_enabled(True)
@@ -1251,9 +1463,27 @@ class Step1Frame(SidebarStepFrame):
         self._bright_pixel_source_checked = False
         self._source_bright_pixels_smoothed = False
         self._source_roi = None
+        self._crop_contours = None
+        self._crop_oct_layout = None
+        self._source_crop_contours = None
+        self._source_crop_oct_layout = None
         self.processed_image = np.array(prepared, copy=True)
+        self._set_crop_region_summary("saved")
         self._processed_image_saved = not corrected
         self.current_file = path
+        if self.__dict__.get("_sdb_image_info") is not None:
+            self._commit_sdb_import_params(None, {
+                "width": self.default_raw_width,
+                "height": self.default_raw_height,
+                "offset": self.default_raw_offset,
+                "bit_depth": DEFAULT_RAW_BIT_DEPTH,
+                "little_endian": self._current_import_byte_order(),
+            })
+        self._sdb_image_info = None
+        self._sdb_manual_import = False
+        self._sdb_showing_saved_crop = True
+        self._sdb_import_error = None
+        self._update_import_settings_summary()
         self.view_mode_var.set("target")
         self.image_canvas.enable_roi(False)
         self.image_canvas.set_image(self.processed_image)
@@ -1304,17 +1534,19 @@ class Step1Frame(SidebarStepFrame):
             if saved_crop is not None:
                 return self._load_saved_crop(saved_crop, path)
 
-        # Re-apply before opening so current form values are always used.
-        if not self._apply_import_params(skip_reload=True):
-            return
-
         try:
-            img = read_raw_oct(path, **self.raw_import_params)
+            img, info, params = self._read_sdb_source(path)
         except (OSError, ValueError, RuntimeError) as exc:
             messagebox.showerror("Error reading file", str(exc))
-            return
+            return False
 
-        return self._load_image(img, path)
+        if img is None:
+            return False
+        contours, layout = self._sdb_crop_hints(path, info, params)
+        if not self._load_image(img, path, crop_contours=contours, crop_oct_layout=layout):
+            return False
+        self._commit_sdb_import_params(info, params)
+        return True
 
     def _browse_sdb_dir(self):
         """Prompt for a parent folder and recursively discover SDB folders."""
@@ -1725,6 +1957,81 @@ class Step1Frame(SidebarStepFrame):
                 self._render_sdb_directories()
 
     # ── ROI ──
+    def _set_initial_roi(self):
+        """Propose an editable OCT box without changing the displayed pixels."""
+        if self.raw_image is None or self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
+        ih, iw = self.raw_image.shape
+        layout = self.__dict__.get("_crop_oct_layout")
+        analysis_image = self.raw_image
+        if layout is not None:
+            if len(layout) != 3:
+                self._select_all_roi()
+                self._set_crop_region_summary("fallback")
+                return False
+            pixel_start, oct_width, oct_height = layout
+            pixel_end = pixel_start + oct_width * oct_height
+            if pixel_start < 0 or oct_width != iw or oct_height <= 0 or pixel_end > self.raw_image.size:
+                self._select_all_roi()
+                self._set_crop_region_summary("fallback")
+                return False
+            analysis_image = self.raw_image.ravel()[pixel_start:pixel_end].reshape(oct_height, oct_width)
+        try:
+            suggestion = detect_oct_crop(
+                analysis_image, contours=self.__dict__.get("_crop_contours")
+            )
+        except (ValueError, RuntimeError, ArithmeticError):
+            # Crop detection is optional; the original image remains usable.
+            self._select_all_roi()
+            self._set_crop_region_summary("fallback")
+            return False
+        x, y, w, h = suggestion.roi
+        if layout is not None:
+            mapped = map_oct_crop_to_raw(
+                suggestion.roi, pixel_start=pixel_start, oct_width=oct_width,
+                view_width=iw, view_height=ih,
+            )
+            if mapped is None:
+                self._select_all_roi()
+                self._set_crop_region_summary("fallback")
+                return False
+            x, y, w, h = mapped
+        self._set_roi_and_entries(x, y, w, h)
+        self._set_crop_region_summary(
+            "automatic" if suggestion.confident else ("oct_fallback" if layout is not None else "fallback"),
+            method=suggestion.method,
+        )
+        return suggestion.confident
+
+    def _set_crop_region_summary(self, kind, *, method=None):
+        """Keep the crop proposal visible while its box remains editable."""
+        summary = self.__dict__.get("crop_region_summary_var")
+        if summary is None:
+            return
+        if kind == "saved":
+            summary.set("Saved crop. Use Undo to select another region.")
+            return
+        roi = self.__dict__.get("_source_roi")
+        if roi is None:
+            summary.set("")
+            return
+        _x, _y, width, height = roi
+        if kind == "fallback":
+            text = "Full image selected: OCT edges were uncertain."
+        elif kind == "oct_fallback":
+            text = "OCT region selected: layer edges were uncertain."
+        else:
+            label = {
+                "automatic": "Proposed OCT box",
+                "manual": "Manual crop",
+                "default": "Default region",
+                "entire": "Entire image",
+            }.get(kind, "Crop region")
+            text = f"{label}: {width:,} × {height:,} pixels"
+            if kind == "automatic" and method:
+                text += f" · {method}"
+        summary.set(text + "\nAdjust the box, then Crop & Scale.")
+
     def _set_default_roi(self):
         """Set ROI to a full-width horizontal band on the opened image.
 
@@ -1739,6 +2046,7 @@ class Step1Frame(SidebarStepFrame):
         w = iw
         h = min(DEFAULT_ROI_HEIGHT, ih - y)
         self._set_roi_and_entries(x, y, w, h)
+        self._set_crop_region_summary("default")
 
     def _select_all_roi(self):
         """Set ROI to cover the entire current raw image."""
@@ -1746,6 +2054,7 @@ class Step1Frame(SidebarStepFrame):
             return
         ih, iw = self.raw_image.shape
         self._set_roi_and_entries(0, 0, iw, ih)
+        self._set_crop_region_summary("entire")
 
     def _apply_roi_entries(self):
         """Apply ROI values entered manually in the form fields."""
@@ -1781,6 +2090,7 @@ class Step1Frame(SidebarStepFrame):
         self._source_roi = roi
         self._update_roi_entries(*roi)
         self._set_canvas_roi_from_source()
+        self._set_crop_region_summary("manual")
 
     def _on_target_size_entry_changed(self, *_):
         """Update source ROI size when the user edits final target dimensions."""
@@ -1829,6 +2139,7 @@ class Step1Frame(SidebarStepFrame):
         self._source_roi = roi
         self._update_roi_entries(*roi)
         self._set_canvas_roi_from_source()
+        self._set_crop_region_summary("manual")
 
     def _source_to_view_roi(self, roi):
         """Convert source ROI coordinates to the active view coordinates."""
@@ -1931,6 +2242,7 @@ class Step1Frame(SidebarStepFrame):
             h,
             update_target=not self._target_size_edit_active,
         )
+        self._set_crop_region_summary("manual")
 
     def _build_target_view_image(self):
         """Build the full scaled target work view before cropping."""
@@ -2314,13 +2626,15 @@ class Step1Frame(SidebarStepFrame):
             return False
         original = self.raw_image
         source_check = None
+        source_info = None
+        source_params = None
         if original is None:
-            if not self._apply_import_params(skip_reload=True):
-                return False
             try:
-                original = read_raw_oct(self.current_file, **self.raw_import_params)
+                original, source_info, source_params = self._read_sdb_source(self.current_file)
             except (OSError, ValueError, RuntimeError) as exc:
                 messagebox.showerror("Error reading source image", str(exc))
+                return False
+            if original is None:
                 return False
             signed = original.astype(np.int16, copy=True)
             detection = detect_bright_pixels_in_bands(signed)
@@ -2352,7 +2666,11 @@ class Step1Frame(SidebarStepFrame):
 
         self._invalidate_saved_crop(self.current_file)
         if self.raw_image is None:
-            self._load_image(original, self.current_file, source_check=source_check)
+            contours, layout = self._sdb_crop_hints(self.current_file, source_info, source_params)
+            if not self._load_image(original, self.current_file, source_check=source_check,
+                                    crop_contours=contours, crop_oct_layout=layout):
+                return False
+            self._commit_sdb_import_params(source_info, source_params)
         else:
             self._restore_raw_view()
         self._active_sdb_directory = directory
@@ -2369,7 +2687,7 @@ class Step1Frame(SidebarStepFrame):
         self.view_mode_var.set("source")
         self.image_canvas.set_image(self.raw_image)
         self.image_canvas.enable_roi(True)
-        self._set_default_roi()
+        self._set_initial_roi()
         self._update_zoom_label()
         self._update_processing_controls()
         self._set_sdb_parameters_enabled(True)

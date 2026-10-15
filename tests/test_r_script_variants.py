@@ -135,12 +135,15 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         bundled = self.root / "bundled"
-        self.defaults = {
+        self.originals = {
             "main": _write_script(bundled / Step3Frame.R_SCRIPT_NAME),
             "output": _write_script(bundled / Step3Frame.R_OUTPUT_SCRIPT_NAME),
         }
-        self.dormant_optimized = _write_script(bundled / Step3Frame.R_OPTIMIZED_SCRIPT_NAME)
-        self.removed_output_variant = bundled / (Path(Step3Frame.R_OUTPUT_SCRIPT_NAME).stem + "_optimized.R")
+        self.defaults = {
+            "main": _write_script(bundled / Step3Frame.R_OPTIMIZED_SCRIPT_NAME),
+            "output": _write_script(bundled / Step3Frame.R_OPTIMIZED_OUTPUT_SCRIPT_NAME),
+        }
+        self.missing_output_variant = bundled / "more_outputs_afterRAW_OCT_PROCESSING_removed.R"
         self.historical = {
             "main": _write_script(bundled / "RAW_OCT_PROCESSING_2020_legacy.R"),
             "output": _write_script(bundled / "more_outputs_afterRAW_OCT_PROCESSING_2020_legacy.R"),
@@ -151,40 +154,40 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         self.frame._script_path = lambda role="main": self.defaults[role]
         self.frame._user_r_script_dir = lambda role="main": self.root / "user" / role
 
-    def test_actual_bundled_script_paths_use_original_default_with_optimization_disabled(self):
+    def test_actual_bundled_script_paths_use_optimized_defaults(self):
         with mock.patch("aidas.steps.step3_flatten.resource_path",
                         side_effect=lambda name: str(self.root / "bundled" / name)):
             self.assertEqual(Step3Frame._script_path("main"), self.defaults["main"])
             self.assertEqual(Step3Frame._script_path("output"), self.defaults["output"])
 
-        self.assertFalse(Step3Frame.R_OPTIMIZED_ENABLED)
-        self.assertEqual(self.defaults["main"].name, "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R")
-        self.assertEqual(self.dormant_optimized.name, "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R")
+        self.assertTrue(Step3Frame.R_OPTIMIZED_ENABLED)
+        self.assertEqual(self.originals["main"].name, "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R")
+        self.assertEqual(self.defaults["main"].name, "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R")
 
-    def test_future_enable_flag_can_restore_separate_optimized_default(self):
-        with mock.patch.object(Step3Frame,"R_OPTIMIZED_ENABLED",True), \
+    def test_disable_flag_can_restore_original_defaults(self):
+        with mock.patch.object(Step3Frame,"R_OPTIMIZED_ENABLED",False), \
                 mock.patch("aidas.steps.step3_flatten.resource_path",
                            side_effect=lambda name: str(self.root / "bundled" / name)):
-            self.assertEqual(Step3Frame._script_path("main"),self.dormant_optimized)
-            self.assertEqual(Step3Frame._script_path("output"),self.defaults["output"])
+            self.assertEqual(Step3Frame._script_path("main"),self.originals["main"])
+            self.assertEqual(Step3Frame._script_path("output"),self.originals["output"])
 
     def test_legacy_original_alias_preference_selects_the_original_base_file(self):
-        legacy_original = self.defaults["main"].with_name(
-            self.defaults["main"].stem + "_original.R")
+        legacy_original = self.originals["main"].with_name(
+            self.originals["main"].stem + "_original.R")
         self.frame.preferences.values["r_main_script_path"] = str(legacy_original)
         dialog = _settings(self.frame)
 
         self.assertFalse(legacy_original.exists())
-        self.assertEqual(self.frame._selected_r_script_path("main"), self.defaults["main"])
+        self.assertEqual(self.frame._selected_r_script_path("main"), self.originals["main"])
         dialog._refresh_r_script_choices("main")
 
         self.assertEqual(dialog._script_vars["main"].get(), "Original script")
         self.assertEqual(dialog._script_by_label["main"]["Original script"].path,
-                         self.defaults["main"])
+                         self.originals["main"])
         self.assertEqual(self.frame.preferences.writes, [])
 
     def test_existing_external_optimized_name_remains_a_supported_custom_choice(self):
-        external = _write_script(self.root / "external" / self.dormant_optimized.name)
+        external = _write_script(self.root / "external" / self.defaults["main"].name)
         self.frame.preferences.values["r_main_script_path"] = str(external)
         dialog = _settings(self.frame)
 
@@ -194,30 +197,30 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         self.assertEqual(dialog._script_by_label["main"]["Custom script"].path, external)
         self.assertEqual(self.frame.preferences.writes, [])
 
-    def test_both_roles_list_original_default_without_bundled_optimized_choice(self):
+    def test_both_roles_list_optimized_defaults_and_original_alternatives(self):
         for role in ("main", "output"):
             with self.subTest(role=role):
                 choices = self.frame.available_r_scripts(role)
                 by_path = {choice.path: choice for choice in choices}
                 self.assertEqual(choices[0].path, self.defaults[role])
-                self.assertEqual(choices[0].version, "original")
+                self.assertEqual(choices[0].version, "optimized")
                 self.assertTrue(choices[0].is_default)
-                self.assertTrue(all(choice.version != "optimized" for choice in choices))
-                self.assertNotIn(self.dormant_optimized, by_path)
+                self.assertEqual(by_path[self.originals[role]].version, "original")
+                self.assertFalse(by_path[self.originals[role]].is_default)
                 self.assertIsNone(by_path[self.historical[role]].version)
                 self.assertNotIn(self.defaults["output" if role == "main" else "main"], by_path)
                 self.assertEqual(self.frame._selected_r_script_path(role), self.defaults[role])
         self.assertEqual(self.frame.preferences.writes, [])
 
-    def test_absent_dormant_optimized_sibling_does_not_change_original_defaults(self):
-        self.dormant_optimized.unlink()
-
+    def test_absent_optimized_scripts_fall_back_to_originals(self):
         for role in ("main", "output"):
             with self.subTest(role=role):
+                self.defaults[role].unlink()
+                self.historical[role].unlink()
                 choices = self.frame.available_r_scripts(role)
                 self.assertEqual([choice.path for choice in choices],
-                                 [self.defaults[role], self.historical[role]])
-                self.assertEqual(self.frame._selected_r_script_path(role), self.defaults[role])
+                                 [self.originals[role]])
+                self.assertEqual(self.frame._selected_r_script_path(role), self.originals[role])
 
     def test_existing_saved_custom_choices_remain_active_and_are_not_rewritten(self):
         saved = {}
@@ -233,42 +236,43 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
             self.assertIsNone(custom.version)
         self.assertEqual(self.frame.preferences.writes, [])
 
-    def test_saved_bundled_optimized_selection_safely_falls_back_to_original(self):
-        self.frame.preferences.values["r_main_script_path"] = str(self.dormant_optimized)
+    def test_saved_bundled_optimized_selection_remains_active(self):
+        self.frame.preferences.values["r_main_script_path"] = str(self.defaults["main"])
         dialog = _settings(self.frame)
 
-        self.assertTrue(self.dormant_optimized.is_file())
+        self.assertTrue(self.defaults["main"].is_file())
         self.assertEqual(self.frame._selected_r_script_path("main"), self.defaults["main"])
         dialog._refresh_r_script_choices("main")
 
-        self.assertEqual(dialog._script_vars["main"].get(), "Original script")
-        self.assertEqual(set(dialog._script_by_label["main"]), {"Original script"})
+        self.assertEqual(dialog._script_vars["main"].get(), "Optimized version")
+        self.assertEqual(set(dialog._script_by_label["main"]), {"Original script", "Optimized version"})
         self.assertEqual(self.frame.preferences.writes, [])
 
-    def test_disabled_bundled_optimized_script_cannot_be_selected_directly(self):
-        with self.assertRaises(ValueError):
-            self.frame.select_r_script("main",self.dormant_optimized)
-
-        self.assertEqual(self.frame.preferences.writes, [])
-        self.assertEqual(self.frame._selected_r_script_path("main"),self.defaults["main"])
+    def test_bundled_optimized_scripts_can_be_selected_directly(self):
+        for role in ("main", "output"):
+            with self.subTest(role=role):
+                selected = self.defaults[role]
+                self.assertEqual(self.frame.select_r_script(role, selected), selected)
+                self.assertEqual(self.frame.preferences.get(f"r_{role}_script_path"), str(selected))
+                self.assertEqual(self.frame._selected_r_script_path(role), selected)
 
     def test_selecting_original_and_custom_paths_persists_exact_paths_and_preserves_history(self):
         for role in ("main", "output"):
-            paths = [self.defaults[role], self.historical[role]]
+            paths = [self.defaults[role], self.originals[role], self.historical[role]]
             for path in paths:
                 with self.subTest(role=role, path=path.name):
                     self.assertEqual(self.frame.select_r_script(role, path), path)
                     self.assertEqual(self.frame.preferences.get(f"r_{role}_script_path"), str(path))
                     self.assertEqual(self.frame._selected_r_script_path(role), path)
                     listed = [choice.path for choice in self.frame.available_r_scripts(role)]
-                    self.assertNotIn(self.dormant_optimized, listed)
                     self.assertIn(self.defaults[role], listed)
+                    self.assertIn(self.originals[role], listed)
                     self.assertIn(self.historical[role], listed)
 
     def test_imports_named_like_bundled_variants_remain_user_choices(self):
         for role in ("main", "output"):
             with self.subTest(role=role):
-                builtin = self.dormant_optimized if role == "main" else self.defaults[role]
+                builtin = self.defaults[role]
                 source = _write_script(self.root / "imports" / builtin.name,
                                        "# independently edited user script\n")
                 imported = self.frame.import_r_script_for_role(source, role)
@@ -282,13 +286,10 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
                 self.assertEqual(self.frame._selected_r_script_path(role), self.defaults[role])
 
     def test_settings_refresh_shows_active_versions_without_rewriting_preferences(self):
-        for role in ("main", "output"):
-            self.frame.preferences.values[f"r_{role}_script_path"] = str(
-                self.defaults[role])
         dialog = _settings(self.frame)
 
-        for role, expected_label in (("main", "Original script"),
-                                     ("output", "Original script")):
+        for role, expected_label in (("main", "Optimized version"),
+                                     ("output", "Optimized version")):
             with self.subTest(role=role):
                 dialog._refresh_r_script_choices(role)
                 self.assertEqual(dialog._script_vars[role].get(), expected_label)
@@ -296,19 +297,19 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
                     "Active: " + expected_label
                 ))
                 self.assertEqual(set(dialog._script_by_label[role]),
-                                 {"Original script"})
+                                 {"Original script", "Optimized version"})
         self.assertEqual(self.frame.preferences.writes, [])
         dialog._mark_dirty.assert_not_called()
 
-    def test_saved_removed_output_variant_falls_back_to_original(self):
-        self.frame.preferences.values["r_output_script_path"] = str(self.removed_output_variant)
+    def test_saved_missing_output_variant_falls_back_to_optimized_default(self):
+        self.frame.preferences.values["r_output_script_path"] = str(self.missing_output_variant)
         dialog = _settings(self.frame)
 
         self.assertEqual(self.frame._selected_r_script_path("output"), self.defaults["output"])
         dialog._refresh_r_script_choices("output")
 
-        self.assertEqual(dialog._script_vars["output"].get(), "Original script")
-        self.assertEqual(set(dialog._script_by_label["output"]), {"Original script"})
+        self.assertEqual(dialog._script_vars["output"].get(), "Optimized version")
+        self.assertEqual(set(dialog._script_by_label["output"]), {"Original script", "Optimized version"})
         self.assertEqual(self.frame.preferences.writes, [])
 
     def test_active_custom_script_uses_fixed_label_and_keeps_filename_in_status(self):
@@ -320,7 +321,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
 
         self.assertEqual(dialog._script_vars["main"].get(), "Custom script")
         self.assertEqual(set(dialog._script_by_label["main"]),
-                         {"Original script", "Custom script"})
+                         {"Original script", "Optimized version", "Custom script"})
         self.assertEqual(dialog._script_by_label["main"]["Custom script"].path, custom)
         self.assertIn(custom.name, dialog._script_status_vars["main"].get())
         self.assertEqual(self.frame.preferences.writes, [])
@@ -355,14 +356,14 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
 
         dialog._apply_changes()
 
-        for role, label in (("main", "Original script"), ("output", "Original script")):
+        for role, label in (("main", "Optimized version"), ("output", "Optimized version")):
             selected = self.defaults[role]
             self.assertEqual(self.frame._selected_r_script_path(role), selected)
             self.assertEqual(self.frame.preferences.get(f"r_{role}_script_path"),
                              str(selected))
             self.assertTrue(dialog._script_status_vars[role].get().startswith("Active: " + label))
 
-    def test_original_and_custom_choices_reach_actual_main_and_output_r_commands(self):
+    def test_optimized_original_and_custom_choices_reach_actual_r_commands(self):
         self.frame._r_cancel_event = threading.Event()
         self.frame.after = mock.Mock()
         self.frame._r_run_env_for_config = mock.Mock(return_value={})
@@ -375,7 +376,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         }
 
         for role in ("main", "output"):
-            selections = [self.defaults[role]]
+            selections = [self.defaults[role], self.originals[role]]
             selections.append(_write_script(self.root / "user" / role / f"custom_{role}.R"))
             for selected in selections:
                 with self.subTest(role=role, selected=selected.name):

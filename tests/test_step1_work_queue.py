@@ -108,6 +108,7 @@ class Step1WorkQueueTests(unittest.TestCase):
         frame._set_sdb_parameters_enabled = lambda _enabled: None
         frame._set_roi_controls_enabled = lambda _enabled: None
         frame._set_default_roi = lambda: None
+        frame._set_initial_roi = lambda: None
         frame._refresh_sdb_progress_colors = lambda: None
         frame._render_sdb_directories = lambda: None
         frame._on_processed_image = None
@@ -813,6 +814,7 @@ class Step1WorkQueueTests(unittest.TestCase):
                 _segmenter_running = False
                 aidas_model_path = str(model)
                 status_var = _StringVarStub()
+                _step2_batch_segmentation_row = Step2Frame._step2_batch_segmentation_row
                 _preferred_analyze_pair_path = staticmethod(
                     Step2Frame._preferred_analyze_pair_path
                 )
@@ -838,6 +840,9 @@ class Step1WorkQueueTests(unittest.TestCase):
                 {ready, already_marked},
             )
             self.assertEqual(Path(rows[0]["image_paths"][0]), ready / "Light.img")
+            self.assertTrue(rows[1]["locked"])
+            self.assertFalse(rows[1]["include"])
+            self.assertEqual(rows[1]["image_paths"], [])
             self.assertEqual(Path(batch_root), root)
 
     def test_step2_light_result_tab_uses_its_folder_name(self):

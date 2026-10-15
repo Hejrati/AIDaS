@@ -67,9 +67,45 @@ saved outputs** filter. **Save** and **Go to Step 2** are grouped at the bottom
 of the sidebar; the latter sends every completed folder to Step 2 batch
 segmentation, where results open in tabs named for their source folders.
 
+Step 1 displays the full raw `.sdb` image using the manual importer's original
+16-bit pixels, byte-order selection, display normalization, and crop processing.
+For supported Heidelberg CMDb files, metadata supplies the row width. The
+configured leading offset and full-view height are retained when they cover the
+file; the height grows when necessary to include the remaining file. The
+native OCT pixel offset locates a crop guide within this full view rather than
+extracting that block for display. The summary shows both the full-view settings
+and detected OCT dimensions and scan count. A matching `.edb` beside the SDB confirms
+the dimensions only when its scan identifiers also match. Missing or mismatched
+companions are reported in the summary; `.pdb` is not needed for image dimensions.
+If the SDB contains multiple OCT scans, the first scan in series order supplies
+the crop guide; the full raw view still includes the file's other content.
+
+Opening an image proposes an editable **Auto OCT Region**. Matching EDB ILM/BM
+boundaries define a padded retinal envelope. Without usable contours, intensity
+changes in the middle and neighboring columns locate the retinal band. Its
+upper and lower transitions are followed across the scan to fit a local box
+with a small margin; unrelated distant reflections and background changes do
+not enlarge it. Analysis works on temporary arrays and does not change imported
+or saved pixels. Only constant background columns are removed from the sides.
+Uncertain detection retains the whole detected OCT
+region, or the whole image when its location cannot be mapped to the manual
+view. Check and adjust the box before **Crop & Scale**; proposing a box does not
+save or segment the image. The crop menu offers only **Auto OCT Region** and
+**Whole Image**. Source reloads, width adjustments, and Undo propose a new box;
+ordinary display/zoom changes preserve manual adjustments.
+
+Legacy raw SDB files without a supported native header use the configured manual
+import settings. Recognized native files with invalid headers or incomplete
+image blocks report an error before displaying the full raw view. Padding at
+the bottom of that view follows the original manual importer.
+Advanced controls remain available: width changes crop or pad the view, and
+height/offset adjustments retain their manual behavior. The reset
+buttons restore the full-view defaults when metadata is available. Undo reads the
+original SDB with the same detection before removing a saved crop.
+
 When an SDB opens, Step 1 checks its signed intensity histogram in overlapping
 horizontal bands and offers to smooth unusually bright pixels. This check runs
-before a crop is selected, including when using **Entire Image**. Corrections
+before a crop is selected, including when using **Whole Image**. Corrections
 are kept in a working copy through crop and width changes.
 An amber notice spans the canvas from its top edge. Choose the green **Fix**
 button to replace only the detected pixels with values from nearby unaffected
@@ -130,6 +166,15 @@ zoom edits do not snap to a nearby minimum. **Build
 stack** remains disabled until every amber result has been reviewed. The final
 TIFF stacks and `rr_MCPAR.xlsx` are still written only when **Build stack** is
 pressed.
+
+The **Disable automatic line positioning** checkbox sits between the overview
+grid and the bottom profile. It starts unchecked, so plot clicks position Start
+and End at nearby minima within the existing six-sample window. Check it to keep
+each line at the selected sample, including in the preview and saved ROI,
+without later automatic boundary adjustments. Toggling the checkbox affects
+future placements and corrections; it does not move existing lines. The choice
+is shared across open file tabs for the session. The explicit **Auto-detect
+ROIs 1-20** action remains available.
 
 ## 6. Run the App (From Source)
 From the project root:
@@ -427,11 +472,11 @@ separate conda environment.
 
 Step 3 still requires the R interpreter and its required R packages. The app's
 **Setup R and Packages** wizard detects or installs those runtime dependencies;
-the workflow `.R` files are bundled with the application automatically. In the
-The Step 3 sidebar groups both selectors in one **R Scripts** frame:
-**Process Raw OCT (Step 1)** and **More Process (Step 2)**. Each selector shows
-its active version, uses its corresponding embedded script by default, and has
-a separate button for adding user versions. Added scripts are copied to the
+the workflow `.R` files are bundled with the application automatically.
+**Settings > Step 3 R scripts** selects the main and output processing scripts.
+Both use their bundled **Optimized version** by default. Existing saved bundled
+original defaults upgrade once; later selections of Original or Custom remain
+saved. Custom scripts can be added through each selector and are copied to the
 user's persistent AIDaS script library for reuse in later sessions.
 
 Batch Step 3 runs each R process without interactive standard input. The batch
@@ -446,15 +491,15 @@ Run details are retained in the Step 3 logs.
 
 Step 2 model segmentation remains available while a Step 3 R batch is running.
 The two steps share the logical cores available to the AIDaS process: every
-active Step 3 folder job reserves one core, and Step 2 limits its automatic GPU
-fallback to the remaining cores. If no core is free, AIDaS warns before Step 2
-shares a busy core. Step 2 also reports DirectML GPU compatibility and the
-provider actually selected by its isolated AI worker. Its fallback-core selector
-is hidden when compatible GPU execution is confirmed and returns if the live
-worker must use core processing. A Step 2 handoff made during an R batch is
-queued and opens after that batch finishes. Step 2 may save unrelated folders at
-the same time, but AIDaS blocks saves into a folder actively being read by Step 3
-to avoid replacing Analyze inputs midway through an R run.
+active Step 3 folder job reserves one core, and Step 2 automatically uses the
+remaining cores minus one for CPU fallback, with a minimum of one core. Its
+fallback CPU count has no manual selector. If all cores are busy, AIDaS warns
+before Step 2 shares a busy core. Step 2 also reports DirectML GPU compatibility
+and the provider actually selected by its isolated AI worker. A Step 2 handoff
+made during an R batch is queued and opens after that batch finishes. Step 2 may
+save unrelated folders at the same time, but AIDaS blocks saves into a folder
+actively being read by Step 3 to avoid replacing Analyze inputs midway through
+an R run.
 
 Do not use a minimal PyInstaller command for release builds; it does not include
 the model/data files or the reliable one-directory layout defined in
