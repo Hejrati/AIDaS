@@ -53,8 +53,13 @@ class ResultGridCanvas(tk.Canvas):
         self.bind("<Motion>", self._on_motion, add="+")
         self.bind("<Leave>", self._on_leave, add="+")
         self.bind("<Tab>", self._on_tab)
-        self.bind("<Shift-Tab>", lambda event: self._on_tab(event, reverse=True))
-        self.bind("<ISO_Left_Tab>", lambda event: self._on_tab(event, reverse=True))
+        previous_action = lambda event: self._on_tab(event, reverse=True)
+        self.bind("<Shift-Tab>", previous_action, add="+")
+        try:
+            self.bind("<ISO_Left_Tab>", previous_action, add="+")
+        except tk.TclError:
+            # Some Tk builds, including Windows CI, lack this X11 keysym.
+            pass
         self.bind("<Return>", self._activate_focused)
         self.bind("<space>", self._activate_focused)
         self.bind("<FocusIn>", self._on_focus_in, add="+")

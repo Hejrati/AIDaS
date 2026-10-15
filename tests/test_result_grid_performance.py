@@ -340,6 +340,28 @@ class ResultGridPerformanceTests(unittest.TestCase):
         error.assert_called_once()
         self.assertIn("missing-result-folder", error.call_args.args[1])
 
+    def test_reverse_tab_works_when_tk_rejects_the_x11_keysym(self):
+        native_bind = tk.Canvas.bind
+        rejected = []
+
+        def windows_bind(canvas, sequence=None, func=None, add=None):
+            if sequence == "<ISO_Left_Tab>":
+                rejected.append(sequence)
+                raise tk.TclError('bad event type or keysym "ISO_Left_Tab"')
+            return native_bind(canvas, sequence, func, add)
+
+        with patch.object(module.ResultGridCanvas, "bind", new=windows_bind):
+            canvas = self.open_grid(count=3)
+        self.assertEqual(rejected, ["<ISO_Left_Tab>"])
+        actions = canvas._pages[0]["actions"]
+        canvas.focus_force()
+        self.settle()
+        canvas._focus_action(actions[1])
+        canvas.event_generate("<Shift-Tab>")
+        self.settle()
+        self.assertEqual(canvas._focus_key, actions[0]["key"])
+        self.assertEqual(canvas._on_tab(reverse=True), "break")
+
     def test_keyboard_traversal_retains_focus_and_scrolls_to_next_subject(self):
         canvas = self.open_grid(count=4)
         page_actions = canvas._pages[0]["actions"]
