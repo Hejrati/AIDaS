@@ -931,7 +931,6 @@ class Step2Frame(SidebarStepFrame):
         )
         self.segmentation_progress_status.place(x=20, y=76)
         self.segmentation_progress_status.grid_propagate(False)
-        card.place(relx=0.5, rely=0.5, anchor="center")
 
     def _position_segmentation_progress(self, _event=None):
         """Show the blank progress layer once, independent of image redraws."""
@@ -940,7 +939,20 @@ class Step2Frame(SidebarStepFrame):
             return
         if not surface.winfo_manager():
             surface.place(x=0, y=0, relwidth=1, relheight=1)
+        card = self.segmentation_progress_card
+        if not card.winfo_manager():
+            card.place(relx=0.5, rely=0.5, anchor="center")
         surface.lift()
+
+    def _hide_segmentation_progress_overlay(self):
+        """Unmap the overlay without changing the image workspace layout."""
+        self._cancel_progress_animation()
+        card = getattr(self, "segmentation_progress_card", None)
+        if card is not None:
+            card.place_forget()
+        surface = getattr(self, "segmentation_progress_surface", None)
+        if surface is not None:
+            surface.place_forget()
 
     def _set_segmentation_status(self, message):
         """Keep the progress stage independent of mouse/zoom status updates."""
@@ -4514,10 +4526,7 @@ class Step2Frame(SidebarStepFrame):
                     self._animate_progress_bar()
         else:
             # Stop animation and show actual boundary count
-            self._cancel_progress_animation()
-            surface = getattr(self, "segmentation_progress_surface", None)
-            if surface is not None:
-                surface.place_forget()
+            self._hide_segmentation_progress_overlay()
             if hasattr(self, "segmenter_progress") and restore_boundary_progress:
                 self._update_boundary_progress_bar()
             # Update button states after segmentation finishes

@@ -1,6 +1,7 @@
 """Rendered regressions for Step 2's in-canvas segmentation progress."""
 
 import tkinter as tk
+import time
 from tkinter import ttk
 import unittest
 from unittest import mock
@@ -64,10 +65,21 @@ class Step2CanvasProgressTests(unittest.TestCase):
             self.root.tk.call("after", "cancel", job)
         self.root.destroy()
 
-    def _settle_events(self):
+    def _settle_events(self, expected_size=None):
         # Native window geometry and the canvas resize debounce settle on
         # different event-loop turns. Let both finish before comparing bounds.
         self.root.update()
+        if expected_size is not None:
+            # Windows can acknowledge geometry() after the usual debounce.
+            # Never snapshot the preceding window size as the expected canvas.
+            deadline = time.monotonic() + 5
+            while (self.root.winfo_width(), self.root.winfo_height()) != expected_size:
+                if time.monotonic() >= deadline:
+                    self.fail(f"Window did not reach requested size {expected_size}")
+                resized = tk.BooleanVar(master=self.root, value=False)
+                self.root.after(20, lambda: resized.set(True))
+                self.root.wait_variable(resized)
+                self.root.update()
         settled = tk.BooleanVar(master=self.root, value=False)
         self.root.after(150, lambda: settled.set(True))
         self.root.wait_variable(settled)
@@ -120,6 +132,21 @@ class Step2CanvasProgressTests(unittest.TestCase):
         self.assertGreater(card.cget("corner_radius"), 0)
         self.assertGreater(frame.segmenter_progress.cget("corner_radius"), 0)
 
+    def test_geometry_wait_handles_a_delayed_native_window_resize(self):
+        frame = self._make_frame("Classic", "Light")
+        self.root.geometry("1800x1000+10000+10000")
+        self._settle_events(expected_size=(1800, 1000))
+        self.root.after(250, lambda: self.root.geometry("1280x820+10000+10000"))
+        self._settle_events(expected_size=(1280, 820))
+        previous_geometry = _bounds(frame.image_canvas.canvas)
+        frame._set_segmentation_running(True, animate_progress=False)
+        self.root.update()
+        self._assert_progress_contained(frame)
+        self.assertEqual(_bounds(frame.image_canvas.canvas), previous_geometry)
+        frame._set_segmentation_running(False)
+        self.root.update()
+        self.assertEqual(_bounds(frame.image_canvas.canvas), previous_geometry)
+
     def test_progress_appears_inside_canvas_without_resizing_image_or_sidebar(self):
         for interface, appearance in (
             ("Modern", "Light"), ("Modern", "Dark"), ("Classic", "Light"),
@@ -133,7 +160,7 @@ class Step2CanvasProgressTests(unittest.TestCase):
             for width, height in ((1800, 1000), (1280, 820), (1024, 680)):
                 with self.subTest(interface=interface, appearance=appearance, size=(width, height)):
                     self.root.geometry(f"{width}x{height}+10000+10000")
-                    self._settle_events()
+                    self._settle_events(expected_size=(width, height))
                     previous_geometry = _bounds(frame.image_canvas.canvas)
                     frame._set_segmentation_running(
                         True, status_message="Preparing segmentation…", animate_progress=False,
@@ -146,6 +173,8 @@ class Step2CanvasProgressTests(unittest.TestCase):
                     self.root.update()
                     self.assertFalse(frame.segmentation_progress_card.winfo_ismapped())
                     self.assertFalse(frame.segmentation_progress_surface.winfo_ismapped())
+                    self.assertEqual(frame.segmentation_progress_card.winfo_manager(), "")
+                    self.assertEqual(frame.segmentation_progress_surface.winfo_manager(), "")
                     self.assertEqual(_bounds(frame.image_canvas.canvas), previous_geometry)
 
             with self.subTest(interface=interface, appearance=appearance, scaling=1.5):
@@ -153,7 +182,7 @@ class Step2CanvasProgressTests(unittest.TestCase):
                 ctk.set_widget_scaling(1.5)
                 frame._sync_scaled_layout_values()
                 frame._apply_workspace_layout()
-                self._settle_events()
+                self._settle_events(expected_size=(1800, 1000))
                 frame._set_segmentation_running(True, animate_progress=False)
                 self.root.update()
                 self._assert_progress_contained(frame)
@@ -213,7 +242,7 @@ class Step2CanvasProgressTests(unittest.TestCase):
         for width, height in ((1280, 820), (1800, 1000), (1024, 680)):
             with self.subTest(size=(width, height)):
                 self.root.geometry(f"{width}x{height}+10000+10000")
-                self._settle_events()
+                self._settle_events(expected_size=(width, height))
                 self._assert_progress_contained(frame)
                 self.assertEqual(_bounds(card)[2:], original_card_size)
                 self.assertEqual(_bounds(frame.segmenter_progress)[2:], original_bar_size)
