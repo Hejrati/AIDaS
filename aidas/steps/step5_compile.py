@@ -90,12 +90,10 @@ class Step5Frame(SidebarStepFrame):
     def _build_ui(self) -> None:
         self.build_standard_layout(
             sidebar_width=self.SIDEBAR_WIDTH,
-            status_var=self.status_var,
-            status_bar_content_margin=True,
         )
 
         input_section = self.add_sidebar_section(
-            "Measurement folders",
+            "Input",
             pady=(0, LAYOUT.space_xs),
         )
         input_group = input_section.body
@@ -129,7 +127,7 @@ class Step5Frame(SidebarStepFrame):
         self.include_fovea_checkbox.pack(anchor="w", pady=(7, 0))
 
         output_section = self.add_sidebar_section(
-            "Excel file",
+            "Output",
             pady=(0, LAYOUT.space_xs),
         )
         output_group = output_section.body

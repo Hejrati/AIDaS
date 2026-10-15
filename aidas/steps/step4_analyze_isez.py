@@ -2005,6 +2005,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 
     def _focus_window(self) -> None:
         try:
+            self.deiconify()
             self.lift()
             self.focus_force()
         except tk.TclError:
@@ -2450,6 +2451,7 @@ class Step4Frame(SidebarStepFrame):
         self.ax_roi_grid = None
         self._current_profile = None
         self._profile_zoom_dialog = None
+        self._opening_profile_zoom = False
         self._last_results_dir = None
         self._stack_building = False
         self._stack_build_complete = False
@@ -2459,6 +2461,8 @@ class Step4Frame(SidebarStepFrame):
         self._auto_save_after_id = None
         self._auto_detection_after_id = None
         self._stack_build_after_id = None
+        self._batch_roi_open_after_id = None
+        self._batch_roi_loading_surface = None
         self._updating_roi_selection = False
         self._input_dir_user_selected = False
         self._output_dir_user_selected = False
@@ -3058,6 +3062,7 @@ class Step4Frame(SidebarStepFrame):
     def _clear_batch_roi_session(self) -> None:
         """Release both active and inactive file caches when replacing a run."""
 
+        self._cancel_batch_roi_open()
         active_canvas = self.canvas
         self._clear_current_roi_state()
         for state in self.batch_roi_tab_states.values():
@@ -3074,6 +3079,83 @@ class Step4Frame(SidebarStepFrame):
             self.batch_roi_notebook.destroy()
             self.batch_roi_notebook = None
         self.plot_holder = self.plot_container
+
+    def _cancel_batch_roi_open(self) -> None:
+        job = self.__dict__.get("_batch_roi_open_after_id")
+        self._batch_roi_open_after_id = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        self._hide_batch_roi_loading_canvas()
+
+    def _show_batch_roi_loading_canvas(self, total: int):
+        """Replace the plot area with centered loading text and a progress bar."""
+
+        self._hide_batch_roi_loading_canvas()
+        if self.empty_placeholder is not None:
+            self.empty_placeholder.destroy()
+            self.empty_placeholder = None
+        surface = ctk.CTkFrame(
+            self.plot_container,
+            corner_radius=0,
+            border_width=0,
+            fg_color=COLOR_PAIRS["surface"],
+        )
+        surface.place(x=0, y=0, relwidth=1, relheight=1)
+        self._batch_roi_loading_surface = surface
+        message = ctk.CTkLabel(
+            surface,
+            text="Please wait, files are getting ready…",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(size=15, weight="bold"),
+            justify="center",
+            wraplength=420,
+        )
+        message.place(relx=0.5, rely=0.5, anchor="center")
+        progress = ctk.CTkProgressBar(
+            surface,
+            mode="indeterminate",
+            width=320,
+            height=10,
+            indeterminate_speed=0.9,
+            fg_color=COLOR_PAIRS["border_strong"],
+            progress_color=COLOR_PAIRS["primary"],
+        )
+        progress.place(relx=0.5, rely=0.5, y=32, anchor="n")
+        progress.start()
+        count = ctk.CTkLabel(
+            surface,
+            text=f"0 of {total} files prepared",
+            text_color=COLOR_PAIRS["muted_text"],
+        )
+        count.place(relx=0.5, rely=0.5, y=50, anchor="n")
+        surface._step4_message_label = message
+        surface._step4_progress = progress
+        surface._step4_count_label = count
+        surface.lift()
+        try:
+            surface.grab_set()
+        except tk.TclError:
+            pass
+        return surface
+
+    def _hide_batch_roi_loading_canvas(self) -> None:
+        surface = self.__dict__.get("_batch_roi_loading_surface")
+        self._batch_roi_loading_surface = None
+        if surface is None:
+            return
+        try:
+            surface._step4_progress.stop()
+            surface.grab_release()
+            surface.destroy()
+        except tk.TclError:
+            pass
+
+    def destroy(self) -> None:
+        self._cancel_batch_roi_open()
+        super().destroy()
 
     def _restart_current_file(self) -> None:
         """Clear the active file's ROI state so it can be processed again."""
@@ -3296,9 +3378,12 @@ class Step4Frame(SidebarStepFrame):
         self.batch_roi_paths = paths
         self.batch_roi_index = -1
         self.batch_roi_skipped = 0
-        self._open_batch_roi_tabs(paths)
+        self._open_batch_roi_tabs(paths, show_progress=True)
 
-    def _open_batch_roi_tabs(self, paths: list[Path]) -> None:
+    def _open_batch_roi_tabs(self, paths: list[Path], *, show_progress: bool = False) -> None:
+        """Open file tabs, yielding between tabs when showing loading progress."""
+
+        paths = list(paths)
         root = self.batch_roi_root
         self._clear_batch_roi_session()
         self.batch_roi_root = root
@@ -3332,30 +3417,73 @@ class Step4Frame(SidebarStepFrame):
         )
         self.batch_roi_notebook = notebook
 
-        for idx, path in enumerate(paths, start=1):
-            folder = path.parent
-            state = {
-                "path": path,
-                "folder": folder,
-                "base_label": f"{idx}. {folder.name}",
-                "loaded": False,
-                "completed": {},
-                "auto_detection_reviews": {},
-                "roi_clicks": {},
-                "roi_adjust_bounds": {},
-                "current_roi_idx": 0,
-                "profile_clicks": [],
-                "complete": False,
-            }
-            frame = notebook.add(
-                text=self._batch_roi_tab_text(state),
-                tooltip=str(path.resolve()),
-            )
-            self.batch_roi_tab_states[str(frame)] = state
+        def create_tabs():
+            for idx, path in enumerate(paths, start=1):
+                folder = path.parent
+                state = {
+                    "path": path,
+                    "folder": folder,
+                    "base_label": f"{idx}. {folder.name}",
+                    "loaded": False,
+                    "completed": {},
+                    "auto_detection_reviews": {},
+                    "roi_clicks": {},
+                    "roi_adjust_bounds": {},
+                    "current_roi_idx": 0,
+                    "profile_clicks": [],
+                    "complete": False,
+                }
+                frame = notebook.add(
+                    text=self._batch_roi_tab_text(state),
+                    tooltip=str(path.resolve()),
+                )
+                self.batch_roi_tab_states[str(frame)] = state
+                yield idx
 
-        first_tab = notebook.tabs()[0] if notebook.tabs() else None
-        if first_tab:
-            notebook.select(first_tab)
+            first_tab = notebook.tabs()[0] if notebook.tabs() else None
+            if first_tab:
+                notebook.select(first_tab)
+
+        tab_loader = create_tabs()
+        if not show_progress:
+            for _ in tab_loader:
+                pass
+            return
+
+        loading_surface = self._show_batch_roi_loading_canvas(len(paths))
+
+        def finish_loading():
+            self._batch_roi_open_after_id = None
+            if self.batch_roi_notebook is notebook:
+                self._hide_batch_roi_loading_canvas()
+
+        def open_next_tab():
+            self._batch_roi_open_after_id = None
+            if self.batch_roi_notebook is not notebook or not notebook.winfo_exists():
+                return
+            try:
+                completed = next(tab_loader)
+            except StopIteration:
+                # Keep the loading canvas visible until the first plot's
+                # queued drawing and geometry updates have finished.
+                self._batch_roi_open_after_id = self.after_idle(finish_loading)
+                return
+            except Exception as exc:
+                self._clear_batch_roi_session()
+                self._render_empty_canvas()
+                messagebox.showerror("Batch ROI", f"Could not prepare files.\n{exc}", parent=self)
+                return
+            loading_surface._step4_count_label.configure(
+                text=f"{completed} of {len(paths)} files prepared"
+            )
+            loading_surface.lift()
+            self._batch_roi_open_after_id = self.after(1, open_next_tab)
+
+        # A timer alone does not flush Tk's pending geometry and CTk painting.
+        # Finish mapping and drawing the loading controls before file reading
+        # and the first Matplotlib render can block the event loop.
+        loading_surface.update_idletasks()
+        self._batch_roi_open_after_id = self.after(10, open_next_tab)
 
     def _batch_roi_tab_name_limit(self) -> int:
         notebook = self.batch_roi_notebook
@@ -4379,21 +4507,27 @@ class Step4Frame(SidebarStepFrame):
     def _open_profile_zoom(self, index: int) -> None:
         if self.image is None or index != self.current_roi_idx:
             return
-        existing = self._profile_zoom_dialog
-        if existing is not None:
-            try:
-                if existing.winfo_exists() and existing.roi_index == index:
-                    existing._focus_window()
-                    return
-            except tk.TclError:
-                pass
-            self._close_profile_zoom()
-
-        result = self._roi_overview_result(index)
-        if result is None:
+        if getattr(self, "_opening_profile_zoom", False):
             return
+
+        # Tk can process another click while the dialog is being initialized,
+        # before its constructor returns and _profile_zoom_dialog is assigned.
+        self._opening_profile_zoom = True
         error = None
         try:
+            existing = self._profile_zoom_dialog
+            if existing is not None:
+                try:
+                    if existing.winfo_exists() and existing.roi_index == index:
+                        existing._focus_window()
+                        return
+                except tk.TclError:
+                    pass
+                self._close_profile_zoom()
+
+            result = self._roi_overview_result(index)
+            if result is None:
+                return
             profile = intensity_profile(self.image, self.rois[index])
             clicks = list(self.profile_clicks[:2])
             if len(clicks) < 2:
@@ -4417,6 +4551,8 @@ class Step4Frame(SidebarStepFrame):
         except Exception as exc:
             self._profile_zoom_dialog = None
             error = exc
+        finally:
+            self._opening_profile_zoom = False
         if error is not None:
             messagebox.showerror("Profile Detail", f"Could not open the detailed profile.\n{error}", parent=self)
 

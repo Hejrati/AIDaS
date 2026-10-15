@@ -800,9 +800,9 @@ def _run_smoke(interface_mode="Modern") -> int:
                     assert not hasattr(step, "content_status_bar"), (
                         "Step 2 still reserves space for the removed instruction panel."
                     )
-                elif step_number == 3:
+                elif step_number in (3, 5):
                     assert not hasattr(step, "content_status_bar"), (
-                        "Step 3 still displays the removed status panel."
+                        f"Step {step_number} still displays the removed status panel."
                     )
                 else:
                     assert int(step.content_status_bar._label.cget("padx")) >= LAYOUT.space_sm, (

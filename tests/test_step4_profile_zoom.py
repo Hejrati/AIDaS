@@ -893,6 +893,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         frame.profile_clicks = [6.0, 30.0]
         frame.roi_clicks = {"02": [12.0, 42.0]}
         frame.completed = {"15": SimpleNamespace(start=25, end=65)}
+        frame._roi_adjust_bounds = {}
         frame._current_profile = np.arange(100, dtype=np.float64)
         frame.start_var = mock.Mock()
         frame.end_var = mock.Mock()
@@ -973,6 +974,55 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
                     frame._open_profile_zoom.assert_called_once_with(index)
                 else:
                     frame._open_profile_zoom.assert_not_called()
+
+    def test_repeated_grid_double_clicks_share_one_zoom_window_during_creation(self):
+        frame = self._grid_frame()
+        frame._open_profile_zoom = Step4Frame._open_profile_zoom.__get__(frame)
+        dialog = mock.Mock(roi_index=1)
+
+        def create_dialog(*_args, **_kwargs):
+            # Window setup can process another queued double-click before
+            # the constructor returns the dialog to its owner.
+            if constructor.call_count == 1:
+                self._grid_click(frame, 1.5, 2.5, double=True)
+            return dialog
+
+        with (
+            mock.patch("aidas.steps.step4_analyze_isez.intensity_profile", return_value=np.arange(100)),
+            mock.patch("aidas.steps.step4_analyze_isez.Step4ProfileZoomDialog", side_effect=create_dialog) as constructor,
+        ):
+            self._grid_click(frame, 1.5, 2.5, double=True)
+            self._grid_click(frame, 1.5, 2.5, double=True)
+
+            constructor.assert_called_once()
+            self.assertIs(frame._profile_zoom_dialog, dialog)
+            dialog._focus_window.assert_called_once_with()
+            dialog.close.assert_not_called()
+
+            frame._profile_zoom_closed(dialog)
+            self._grid_click(frame, 1.5, 2.5, double=True)
+            self.assertEqual(constructor.call_count, 2)
+
+    def test_grid_double_click_can_retry_after_zoom_creation_fails(self):
+        frame = self._grid_frame()
+        frame._open_profile_zoom = Step4Frame._open_profile_zoom.__get__(frame)
+        dialog = mock.Mock(roi_index=1)
+
+        with (
+            mock.patch("aidas.steps.step4_analyze_isez.intensity_profile", return_value=np.arange(100)),
+            mock.patch(
+                "aidas.steps.step4_analyze_isez.Step4ProfileZoomDialog",
+                side_effect=[ValueError("Could not create plot"), dialog],
+            ) as constructor,
+            mock.patch("aidas.steps.step4_analyze_isez.messagebox.showerror") as show_error,
+        ):
+            self._grid_click(frame, 1.5, 2.5, double=True)
+            self.assertIsNone(frame._profile_zoom_dialog)
+            self._grid_click(frame, 1.5, 2.5, double=True)
+
+        self.assertEqual(constructor.call_count, 2)
+        self.assertIs(frame._profile_zoom_dialog, dialog)
+        show_error.assert_called_once()
 
     def test_grid_nonleft_clicks_and_empty_cells_leave_selection_unchanged(self):
         for x, y, button, double in (

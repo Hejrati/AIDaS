@@ -553,13 +553,6 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         panel.summary_label.configure.assert_called_once_with(wraplength=120)
 
     def test_workflow_status_bars_align_to_their_content_margins(self):
-        for builder in (
-            Step5Frame._build_ui,
-        ):
-            with self.subTest(builder=builder.__qualname__):
-                source = inspect.getsource(builder)
-                self.assertIn("status_bar_content_margin=True", source)
-
         layout_source = inspect.getsource(SidebarStepFrame.build_standard_layout)
         self.assertIn("(content_padding[0], content_padding[2])", layout_source)
 
@@ -644,7 +637,7 @@ class WorkflowNavigationTests(unittest.TestCase):
                 "1  Load & Crop",
                 "2  Segment",
                 "3  Flatten",
-                "4  MCP/AR",
+                "4  rrMCP/AR",
                 "5  Create Excel File",
             ),
         )
@@ -679,7 +672,7 @@ class WorkflowNavigationTests(unittest.TestCase):
         )
 
         strip.workflow_progress_label.configure.assert_called_once_with(
-            text="Step 4 of 5: MCP/AR"
+            text="Step 4 of 5: rrMCP/AR"
         )
 
     def test_workflow_progress_can_show_all_steps_complete(self):

@@ -553,7 +553,7 @@ class WorkflowHeader(ctk.CTkFrame):
         "1  Load & Crop",
         "2  Segment",
         "3  Flatten",
-        "4  MCP/AR",
+        "4  rrMCP/AR",
         "5  Create Excel File",
     )
 
@@ -842,7 +842,7 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         "1  Load & Crop",
         "2  Segment",
         "3  Flatten",
-        "4  MCP/AR",
+        "4  rrMCP/AR",
         "5  Create Excel File",
     )
 
