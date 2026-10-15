@@ -96,7 +96,7 @@ class Step2Step3HandoffTests(unittest.TestCase):
         self.assertEqual(rendered[0][1], "visible.sdb")
         self.assertIsNone(frame._pending_external_image)
 
-    def test_app_defers_step1_crop_only_while_step2_is_hidden(self):
+    def test_step1_crop_does_not_load_step2_in_any_tab(self):
         calls = []
         step2 = type(
             "Step2",
@@ -127,11 +127,9 @@ class Step2Step3HandoffTests(unittest.TestCase):
         app.notebook.selected = "step2"
         app._on_step1_processed_image(image, "source.sdb")
 
-        self.assertTrue(calls[0][1]["defer_render"])
-        self.assertFalse(calls[1][1]["defer_render"])
-        self.assertEqual(calls[0][1]["source_path"], "source.sdb")
+        self.assertEqual(calls, [])
 
-    def test_selecting_step2_renders_its_pending_external_image(self):
+    def test_selecting_step2_does_not_render_a_pending_crop(self):
         events = []
         step2 = type(
             "Step2",
@@ -163,7 +161,7 @@ class Step2Step3HandoffTests(unittest.TestCase):
 
         app._on_workflow_tab_changed()
 
-        self.assertEqual(events, [("header", 1), "render"])
+        self.assertEqual(events, [("header", 1)])
         app.progress_strip.set_completed_steps.assert_not_called()
 
     def test_saved_pairs_are_converted_to_unique_step3_folders(self):

@@ -2613,14 +2613,6 @@ class AIDaSApp(ctk.CTk):
             except (tk.TclError, TypeError, ValueError):
                 pass
                 
-        step2 = self.__dict__.get("step2")
-        if step2 is not None:
-            try:
-                if selected_index == notebook.index(step2):
-                    step2.render_pending_external_image()
-            except (tk.TclError, TypeError, ValueError):
-                pass
-
         step5 = self.__dict__.get("step5")
         if step5 is not None:
             try:
@@ -2947,23 +2939,11 @@ class AIDaSApp(ctk.CTk):
             self.after_idle(step3.refresh_appearance)
 
     def _on_step1_processed_image(self, image, source_path) -> None:
-        """Receive a Step 1 crop without repainting a hidden Step 2 page."""
+        """Keep Step 1 crops out of the Step 2 review canvas.
 
-        step2 = getattr(self, "step2", None)
-        if step2 is None:
-            return
-        notebook = getattr(self, "notebook", None)
-        defer_render = True
-        if notebook is not None:
-            try:
-                defer_render = notebook.index(notebook.select()) != notebook.index(step2)
-            except (tk.TclError, TypeError, ValueError):
-                pass
-        step2.load_external_image(
-            image,
-            source_path=source_path,
-            defer_render=defer_render,
-        )
+        Images enter Step 2 through explicit loading or segmentation actions.
+        Finishing a crop must not replace an existing review session.
+        """
 
     def _on_step1_batch_segment_folders(self, folders) -> None:
         """Open Step 2 and batch-segment completed Step 1 folders."""
