@@ -1664,6 +1664,9 @@ class AIDaSApp(ctk.CTk):
         )
         self.requested_interface_mode = self.interface_mode
         super().__init__()
+        # Construct hidden controls without repeatedly rasterizing provisional
+        # sizes. The splash is a separate toplevel and continues to paint.
+        self._aidas_defer_canvas_updates = True
         self._interface_refresh_after_id = None
         self._interface_switching = False
         self._normal_logical_client_size = None
@@ -1905,6 +1908,8 @@ class AIDaSApp(ctk.CTk):
         self.geometry(_center_geometry(self, width, height))
         self.deiconify()
         self.update_idletasks()
+        from aidas.ui.rendering import finish_deferred_rendering
+        finish_deferred_rendering(self)
         if self.window_title_bar is not None:
             # Some Windows builds recalculate the captionless frame when it is
             # first mapped. Reassert the requested client size before centering.
