@@ -12,7 +12,6 @@ from dataclasses import dataclass
 import math
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, label, median_filter
 
 
 @dataclass(frozen=True)
@@ -234,6 +233,8 @@ def _follow_transition(gradient: np.ndarray, column: int, row: int, sign: int):
 
 def _sparse_seed(smoothed: np.ndarray, gradient: np.ndarray, height: int, block: int):
     """Use separated coherent edges when shadows hide the center profile."""
+    from scipy.ndimage import label, median_filter
+
     energy = np.abs(gradient)
     threshold = np.maximum(np.median(energy, axis=0) * 4,
                            np.percentile(energy, 95, axis=0) * 0.30)
@@ -281,6 +282,8 @@ def _sparse_seed(smoothed: np.ndarray, gradient: np.ndarray, height: int, block:
 
 
 def _image_envelope(image: np.ndarray):
+    from scipy.ndimage import gaussian_filter
+
     height, width = image.shape
     if height < 48 or width < 48:
         return None

@@ -51,11 +51,6 @@ from PIL import Image
 from PIL import ImageDraw
 from PIL import ImageFont
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
-from matplotlib.patches import Rectangle
-from matplotlib.transforms import Bbox
-
 from aidas.core.config import (
     STEP4_AUTO_DETECTION_DEFAULTS,
     validate_step4_auto_detection_preferences,
@@ -1969,6 +1964,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 
         chart_frame = ttk.Frame(self)
         chart_frame.pack(fill="both", expand=True, padx=10)
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
+
         self.figure = Figure(figsize=(8.8, 5.0), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.figure.subplots_adjust(left=0.09, right=0.97, bottom=0.12, top=0.95)
@@ -3881,6 +3879,9 @@ class Step4Frame(SidebarStepFrame):
         if self.canvas is not None and self.figure is not None:
             return
 
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        from matplotlib.figure import Figure
+
         palette = _plot_palette()
         self.figure = Figure(figsize=(8.5, 5.2), dpi=100, facecolor=palette["figure"])
         grid = self.figure.add_gridspec(2, 1, height_ratios=[1.35, 0.95])
@@ -3991,6 +3992,8 @@ class Step4Frame(SidebarStepFrame):
 
     @staticmethod
     def _cache_roi_grid_background(event) -> None:
+        from matplotlib.transforms import Bbox
+
         canvas = event.canvas
         ax = getattr(canvas, "_aidas_roi_grid_axes", None)
         if ax is None or canvas.supports_blit is not True:
@@ -4112,6 +4115,8 @@ class Step4Frame(SidebarStepFrame):
             return None
 
     def _draw_roi_overview_grid(self) -> None:
+        from matplotlib.patches import Rectangle
+
         ax = self.ax_roi_grid
         if ax is None:
             return

@@ -22,11 +22,6 @@ import zipfile
 
 from PIL import Image, ImageColor, ImageDraw, ImageOps, ImageTk
 
-try:
-    import pyreadr
-except Exception:
-    pyreadr = None
-
 from aidas.utils.io_utils import read_analyze
 from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.filesystem import (
@@ -3541,8 +3536,10 @@ class Step3Frame(SidebarStepFrame):
         return np.asarray(value)
 
     def _load_r_workspace_results(self, output_dir):
-        if pyreadr is None:
-            raise RuntimeError("pyreadr is not installed, so R workspace files cannot be loaded.")
+        try:
+            import pyreadr
+        except Exception as exc:
+            raise RuntimeError("pyreadr is not installed, so R workspace files cannot be loaded.") from exc
 
         output_dir = Path(output_dir)
         flat_rdata = output_dir / self.R_WORKSPACE_FILES[0]

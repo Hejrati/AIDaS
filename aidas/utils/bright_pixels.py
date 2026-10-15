@@ -8,7 +8,6 @@ No contrast normalization or filtering is applied to unmasked samples.
 from dataclasses import dataclass
 
 import numpy as np
-from scipy import ndimage
 
 
 @dataclass(frozen=True)
@@ -34,6 +33,8 @@ def _image_array(image):
 
 def _protect_bright_bands(mask):
     """Retain long, continuous bright structures such as anatomical layers."""
+    from scipy import ndimage
+
     labels, _ = ndimage.label(mask, structure=np.ones((3, 3), dtype=bool))
     height, width = mask.shape
     for label_id, region in enumerate(ndimage.find_objects(labels), start=1):
@@ -175,6 +176,8 @@ def smooth_bright_pixels(image, mask):
     result = np.array(data, copy=True)
     if not np.any(selected):
         return result
+    from scipy import ndimage
+
     known = ~selected & np.isfinite(data)
     if not np.any(known):
         raise ValueError("Cannot smooth bright pixels without unmasked finite neighbors.")
@@ -221,6 +224,8 @@ def smooth_bright_pixels(image, mask):
 
 def _fill_disconnected(data, selected, result):
     """Use the nearest finite unmasked sample when invalid values form a wall."""
+    from scipy import ndimage
+
     known = ~selected & np.isfinite(data)
     indices = ndimage.distance_transform_edt(
         ~known, return_distances=False, return_indices=True
