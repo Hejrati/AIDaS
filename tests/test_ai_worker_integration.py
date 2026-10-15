@@ -9,6 +9,8 @@ import unittest
 import numpy as np
 
 from aidas.ai.client import AIWorkerClient
+from aidas.ai.inference import AIForAIDASPredictor
+from release_tools.profile_ai import reference_normalize, reference_soft_argmax
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,6 +20,24 @@ HAS_ONNX_RUNTIME = importlib.util.find_spec("onnxruntime") is not None
 
 @unittest.skipUnless(HAS_ONNX_RUNTIME and MODEL_PATH.is_file(), "ONNX runtime model is unavailable")
 class AIWorkerIntegrationTests(unittest.TestCase):
+    def test_actual_model_boundaries_match_original_float32_pipeline(self):
+        predictor = AIForAIDASPredictor(
+            boundary_model_path=str(MODEL_PATH), provider_name="cpu", core_limit=2,
+        )
+        rng = np.random.default_rng(2731)
+        for shape in ((65, 127), (177, 257), (257, 513)):
+            with self.subTest(shape=shape):
+                image = rng.integers(0, 65536, size=shape, dtype=np.uint16)
+                original = image.tobytes()
+                normalized = reference_normalize(image)
+                logits = predictor._run_model(normalized[None, None])
+                expected = np.sort(reference_soft_argmax(logits)[0][:6], axis=0)
+                expected = np.clip(expected, 0, shape[0] - 1)
+                result = predictor.predict(image)
+                self.assertEqual(result.boundaries.dtype, np.float32)
+                self.assertEqual(result.boundaries.tobytes(), expected.tobytes())
+                self.assertEqual(image.tobytes(), original)
+
     def test_persistent_cpu_worker_reuses_one_process_for_dynamic_shapes(self):
         command = [sys.executable, "-m", "aidas.ai.worker"]
         with tempfile.TemporaryDirectory(prefix=".aidas_worker_test_", dir=PROJECT_ROOT) as temp_root:

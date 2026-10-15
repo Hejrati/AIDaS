@@ -334,7 +334,12 @@ def _normalize_for_model(image: np.ndarray) -> np.ndarray:
     hi = float(np.nanmax(arr))
     if hi <= lo:
         return np.zeros(arr.shape, dtype=np.float32)
-    return np.ascontiguousarray((arr - lo) / (hi - lo + 1e-8), dtype=np.float32)
+    # Subtraction owns this buffer even when the input already is float32.
+    # Reuse it for division without modifying the caller's image or changing
+    # the original float32 arithmetic and normalization denominator.
+    normalized = arr - lo
+    normalized /= hi - lo + 1e-8
+    return np.ascontiguousarray(normalized, dtype=np.float32)
 
 
 def _soft_argmax_y_numpy(logits: np.ndarray) -> np.ndarray:
@@ -342,11 +347,15 @@ def _soft_argmax_y_numpy(logits: np.ndarray) -> np.ndarray:
     if logits.ndim != 4:
         raise ValueError(f"Expected 4-D ONNX logits, got shape {logits.shape}.")
     height = logits.shape[2]
-    stable_logits = logits - np.max(logits, axis=2, keepdims=True)
-    probabilities = np.exp(stable_logits)
+    # Keep one private full-size buffer rather than separate shifted logits,
+    # probabilities and weighted probabilities. Preserve each operation and
+    # the height-axis reduction order so boundary coordinates stay identical.
+    probabilities = logits - np.max(logits, axis=2, keepdims=True)
+    np.exp(probabilities, out=probabilities)
     probabilities /= np.sum(probabilities, axis=2, keepdims=True)
     y_indices = np.arange(height, dtype=np.float32).reshape(1, 1, height, 1)
-    return np.sum(probabilities * y_indices, axis=2, dtype=np.float32)
+    probabilities *= y_indices
+    return np.sum(probabilities, axis=2, dtype=np.float32)
 
 
 def predict_boundaries_and_fovea(

@@ -4,9 +4,12 @@ from pathlib import Path
 import tempfile
 import types
 import unittest
+import warnings
 from unittest import mock
 
 import numpy as np
+
+from release_tools.profile_ai import reference_normalize, reference_soft_argmax
 
 from aidas.ai.inference import (
     AIForAIDASPredictor,
@@ -61,6 +64,59 @@ class ProviderSelectionTests(unittest.TestCase):
 
 
 class ArrayProcessingTests(unittest.TestCase):
+    def test_normalization_preserves_reference_bits_and_caller_owned_images(self):
+        rng = np.random.default_rng(731)
+        base = rng.normal(size=(37, 53)).astype(np.float32)
+        readonly = base.copy()
+        readonly.setflags(write=False)
+        cases = [
+            rng.integers(0, 256, size=(37, 53), dtype=np.uint8),
+            rng.integers(0, 65536, size=(37, 53), dtype=np.uint16),
+            np.array([[-32768, -10], [0, 32767]], dtype=">i2"),
+            base, base.astype(np.float64), np.asfortranarray(base),
+            base[::-1, ::2], readonly, np.full((7, 9), 123, dtype=np.uint16),
+            np.array([[-0.0, 0.0, 1.0], [np.nan, 3.0, -1.0]], dtype=np.float32),
+            np.full((3, 4), np.nan, dtype=np.float32),
+            np.array([[-np.inf, 0, np.inf], [np.nan, -1, 1]], dtype=np.float32),
+            np.array([[-1e38, 1e38], [1e-38, -1e-38]], dtype=np.float32),
+        ]
+        for image in cases:
+            with self.subTest(dtype=image.dtype, shape=image.shape, strides=image.strides):
+                original = image.tobytes()
+                with warnings.catch_warnings(), np.errstate(all="ignore"):
+                    warnings.simplefilter("ignore", RuntimeWarning)
+                    expected = reference_normalize(image)
+                    actual = _normalize_for_model(image)
+                self.assertEqual(actual.dtype, np.float32)
+                self.assertTrue(actual.flags.c_contiguous)
+                self.assertEqual(actual.tobytes(), expected.tobytes())
+                self.assertEqual(image.tobytes(), original)
+                self.assertFalse(np.shares_memory(actual, image))
+
+    def test_soft_argmax_preserves_reference_bits_without_mutating_logits(self):
+        rng = np.random.default_rng(1731)
+        base = rng.normal(size=(2, 7, 37, 53)).astype(np.float32)
+        readonly = base.copy()
+        readonly.setflags(write=False)
+        nonfinite = base.copy()
+        nonfinite[0, 0, 2, :3] = [np.nan, np.inf, -np.inf]
+        cases = [
+            base, base.astype(np.float64), np.asfortranarray(base),
+            base[:, :, ::-1, ::2], readonly, base[:, :, :1, :1],
+            np.zeros((1, 6, 41, 73), dtype=np.float32),
+            base * np.float32(1e4), nonfinite,
+        ]
+        for logits in cases:
+            with self.subTest(dtype=logits.dtype, shape=logits.shape, strides=logits.strides):
+                original = logits.tobytes()
+                with np.errstate(all="ignore"):
+                    expected = reference_soft_argmax(logits)
+                    actual = _soft_argmax_y_numpy(logits)
+                self.assertEqual(actual.dtype, np.float32)
+                self.assertEqual(actual.shape, expected.shape)
+                self.assertEqual(actual.tobytes(), expected.tobytes())
+                self.assertEqual(logits.tobytes(), original)
+
     def test_normalization_is_float32_contiguous_and_bounded(self):
         image = np.array([[10, 20], [30, 40]], dtype=">i2")
         normalized = _normalize_for_model(image)
