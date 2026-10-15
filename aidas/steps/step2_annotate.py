@@ -2223,6 +2223,8 @@ class Step2Frame(SidebarStepFrame):
             }
             if trace.get("handle_indices") is not None:
                 copied[name]["handle_indices"] = list(trace["handle_indices"])
+            if trace.get("user_modified"):
+                copied[name]["user_modified"] = True
         return copied
 
     @staticmethod
@@ -2545,13 +2547,24 @@ class Step2Frame(SidebarStepFrame):
         self._update_continue_to_step3_button_state()
 
     def _update_continue_to_step3_button_state(self):
-        """Enable the handoff only while segmented batch images are available."""
+        """Require complete boundaries in every image before allowing handoff."""
         button = getattr(self, "continue_to_step3_button", None)
         if button is None:
             return
-        has_segmented_images = bool(getattr(self, "_batch_result_states", {}))
         self._set_control_enabled(
-            button, has_segmented_images and not self._segmenter_running
+            button, self._all_batch_boundaries_complete()
+            and not getattr(self, "_segmenter_running", False)
+        )
+
+    def _all_batch_boundaries_complete(self):
+        states = getattr(self, "_batch_result_states", {})
+        if not states:
+            return False
+        active = getattr(self, "_active_batch_result_tab", None)
+        return all(
+            self._batch_state_complete({"traces": self.boundary_traces})
+            if key == active else self._batch_state_complete(state)
+            for key, state in states.items()
         )
 
     def _boundary_color(self, name):
@@ -2654,6 +2667,7 @@ class Step2Frame(SidebarStepFrame):
             "points": list(points),
             "pixels": pixels,
             "color": color,
+            "user_modified": True,
         }
         if name not in self.boundary_order:
             self.boundary_order.append(name)
@@ -2690,6 +2704,7 @@ class Step2Frame(SidebarStepFrame):
         name = self._selected_active_boundary_name()
         if name not in BOUNDARY_NAMES:
             return
+        self._cache_reverted_boundary(name)
         self.boundary_traces.pop(name, None)
         if name in self.boundary_order:
             self.boundary_order.remove(name)
@@ -2722,6 +2737,8 @@ class Step2Frame(SidebarStepFrame):
         ):
             return
         fovea_x = self.fovea_x
+        for name in BOUNDARY_NAMES:
+            self._cache_reverted_boundary(name)
         self.boundary_traces.clear()
         self.boundary_order.clear()
         self._reset_boundary_completion()
@@ -3086,13 +3103,17 @@ class Step2Frame(SidebarStepFrame):
     def _on_saved_line_edited(self, name, points):
         if self._segmenter_running or name not in self.boundary_traces or name not in BOUNDARY_NAMES:
             return
+        handles = self.image_canvas.get_line_handle_indices(name)
+        if (list(points) == self.boundary_traces[name].get("points")
+                and handles == self.boundary_traces[name].get("handle_indices")):
+            return
         color = self.boundary_traces[name].get("color") or self._boundary_color(name)
         self.boundary_traces[name] = {
             "points": list(points),
             "pixels": _polyline_pixels(points),
             "color": color,
+            "user_modified": True,
         }
-        handles = self.image_canvas.get_line_handle_indices(name)
         if handles is not None:
             self.boundary_traces[name]["handle_indices"] = handles
         self._sync_active_batch_result_state()
@@ -3111,6 +3132,7 @@ class Step2Frame(SidebarStepFrame):
 
         pixels = _polyline_pixels(points)
         name = self.active_boundary or self._selected_boundary_name()
+        self._boundary_restore_cache().pop(name, None)
         self.active_trace_var.set(
             f"Active: {name} | {len(points)} vertices | {len(pixels)} pixel(s) on line"
         )
@@ -3822,6 +3844,14 @@ class Step2Frame(SidebarStepFrame):
         if not getattr(self, "_batch_result_states", None):
             messagebox.showinfo("No segmented images", "There are no segmented images to send to Step 3.")
             self._update_continue_to_step3_button_state()
+            return
+
+        if getattr(self, "_segmenter_running", False) or not self._all_batch_boundaries_complete():
+            self._update_continue_to_step3_button_state()
+            messagebox.showwarning(
+                "Incomplete boundaries",
+                "Complete all six layer boundaries in every image before going to Step 3.",
+            )
             return
 
         # Preflight the whole handoff before writing anything.  Otherwise a
@@ -4566,6 +4596,44 @@ class Step2Frame(SidebarStepFrame):
         if name is not None:
             self._segment_current_image(boundary_names=[name])
 
+    def _boundary_restore_cache(self):
+        """Keep removed, unchanged lines with their own image canvas/tab."""
+        canvas = self.image_canvas
+        entry = vars(canvas).get("_step2_boundary_restore_cache")
+        if entry is None or entry[0] is not self.image_data:
+            entry = (self.image_data, {})
+            canvas._step2_boundary_restore_cache = entry
+        return entry[1]
+
+    def _cache_reverted_boundary(self, name):
+        trace = self.boundary_traces.get(name)
+        if trace is None:
+            return  # Repeated << presses must keep already hidden lines.
+        cache = self._boundary_restore_cache()
+        cache.pop(name, None)
+        if not trace.get("user_modified"):
+            cache.update(self._copy_trace_dict({name: trace}))
+
+    def _restore_cached_boundaries(self, requested):
+        cache = self._boundary_restore_cache()
+        # An unfinished manual drawing takes precedence over a hidden AI line.
+        drawing = self.active_boundary if self.image_canvas.get_active_line() else None
+        restored = [name for name in requested if name in cache and name != drawing]
+        if not restored:
+            return requested
+        self.boundary_traces.update(self._copy_trace_dict({name: cache[name] for name in restored}))
+        self.boundary_order[:] = list(dict.fromkeys(self.boundary_order + restored))
+        self._set_completion_from_traces()
+        self._rebuild_saved_overlays()
+        self._refresh_trace_list()
+        self._refresh_boundary_lists(select_completed_name=restored[-1], auto_select=False)
+        self.active_boundary = drawing or restored[-1]
+        self._sync_boundary_canvas_state()
+        self._update_boundary_action_buttons()
+        self._sync_active_batch_result_state()
+        self.status_var.set("Restored cached boundary lines.")
+        return [name for name in requested if name not in restored]
+
     def _segment_current_image(self, *, boundary_names=None):
         """Run the existing AI worker for this image without replacing other tabs."""
         if (
@@ -4575,8 +4643,11 @@ class Step2Frame(SidebarStepFrame):
             or (boundary_names is None and self._all_required_boundaries_complete())
         ):
             return
-        requested = list(BOUNDARY_NAMES if boundary_names is None else boundary_names)
+        requested = list(self._incomplete_boundary_names() if boundary_names is None else boundary_names)
         if not requested or any(name not in BOUNDARY_NAMES for name in requested):
+            return
+        requested = self._restore_cached_boundaries(requested)
+        if not requested:
             return
         model_path = self.aidas_model_path
         if not os.path.isfile(model_path):

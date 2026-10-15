@@ -136,11 +136,24 @@ def _has_interior_contrast(profile: np.ndarray, upper: int, lower: int) -> bool:
     return float(np.mean(sustained)) >= 0.75
 
 
+def _transition_peaks(energy: np.ndarray, threshold: float) -> np.ndarray:
+    """Local maxima with the crop detector's height and two-sample spacing.
+
+    Adjacent local maxima are already at least two samples apart. Flat peaks
+    use their midpoint rounded down, matching the previous find_peaks call.
+    """
+    edges = np.r_[0, np.flatnonzero(energy[1:] != energy[:-1]) + 1, energy.size]
+    starts, ends = edges[1:-2], edges[2:-1] - 1
+    selected = (
+        (energy[starts] > energy[starts - 1])
+        & (energy[ends] > energy[ends + 1])
+        & (energy[starts] >= threshold)
+    )
+    return ((starts + ends) // 2)[selected]
+
+
 def _center_seed(smoothed: np.ndarray, block: int, height: int):
     """Locate a compact group of layer transitions in middle scan stripes."""
-    # Signal processing is only needed when proposing an image-based crop.
-    # Keep its substantial import cost out of application startup.
-    from scipy.signal import find_peaks
 
     columns = smoothed.shape[1]
     for middle in (0.50, 0.30, 0.70):
@@ -153,7 +166,7 @@ def _center_seed(smoothed: np.ndarray, block: int, height: int):
         threshold = max(float(np.median(energy)) * 4,
                         float(np.percentile(energy, 95)) * 0.12,
                         np.finfo(np.float32).eps)
-        peaks, _ = find_peaks(energy, height=threshold, distance=2)
+        peaks = _transition_peaks(energy, threshold)
         groups = []
         group = []
         max_gap = max(4, int(math.ceil(height * 0.085 / block)))

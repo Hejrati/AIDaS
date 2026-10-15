@@ -847,7 +847,8 @@ class SettingsDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
         self.geometry(_center_geometry(self, 720, 720, parent=parent))
-        self._aidas_defer_canvas_updates = False
+        from .ui.rendering import finish_deferred_rendering
+        finish_deferred_rendering(self)
         self.deiconify()
         synchronize_window_chrome(
             self,

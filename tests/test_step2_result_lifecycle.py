@@ -210,7 +210,8 @@ class Step2ResultLifecycleTests(unittest.TestCase):
         frame = Step2Frame.__new__(Step2Frame)
         frame.active_boundary = None
         frame._segmenter_running = False
-        frame._batch_result_states = {"tab": {}}
+        from aidas.steps.step2_annotate import BOUNDARY_NAMES
+        frame._batch_result_states = {"tab": {"traces": dict.fromkeys(BOUNDARY_NAMES, {})}}
         frame._completed_boundary_names = lambda: []
         frame._incomplete_boundary_names = lambda: []
         frame._has_clearable_boundary_markers = lambda: False

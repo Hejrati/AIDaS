@@ -354,6 +354,22 @@ class ImageCanvas(ttk.Frame):
         return True
 
     def set_line_overlays(self, overlays):
+        # Restoring a tab often supplies the exact lines already on its canvas.
+        # Compare before cleaning thousands of vertices or recreating Tk items.
+        if isinstance(overlays, (list, tuple)) and len(overlays) == len(self._line_overlays):
+            unchanged = True
+            for incoming, current in zip(overlays, self._line_overlays):
+                if (not isinstance(incoming, dict)
+                        or not isinstance(incoming.get("points"), list)
+                        or not all(isinstance(point, tuple) for point in incoming["points"])
+                        or incoming["points"] != current["points"]
+                        or (incoming.get("color") or self._line_color) != current.get("color")
+                        or incoming.get("label") != current.get("label")
+                        or incoming.get("handle_indices") != current.get("handle_indices")):
+                    unchanged = False
+                    break
+            if unchanged:
+                return
         self._line_overlays.clear()
         for overlay in overlays:
             if isinstance(overlay, dict):
@@ -393,9 +409,11 @@ class ImageCanvas(ttk.Frame):
         self._redraw_overlays()
 
     def clear_active_line(self):
+        changed = bool(self._active_line) or self._line_preview is not None
         self._active_line.clear()
         self._line_preview = None
-        self._redraw_overlays()
+        if changed:
+            self._redraw_overlays()
         self._emit_line_change()
 
     def set_active_line(self, points):
@@ -513,7 +531,9 @@ class ImageCanvas(ttk.Frame):
     def fit_to_window(self):
         self._cancel_pending_zoom()
         self._auto_zoom()
-        self._redraw()
+        size = (id(self._data), self._zoom, self.canvas.winfo_width(), self.canvas.winfo_height())
+        if self._img_id is None or self._base_size != size:
+            self._redraw()
         self._emit_zoom_change()
 
     def _zoom_around_visible_center(self, zoom):

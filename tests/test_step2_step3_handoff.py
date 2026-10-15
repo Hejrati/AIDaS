@@ -12,7 +12,7 @@ import customtkinter as ctk
 import numpy as np
 
 from aidas.app import AIDaSApp
-from aidas.steps.step2_annotate import Step2Frame
+from aidas.steps.step2_annotate import BOUNDARY_NAMES, Step2Frame
 from aidas.steps.step3_flatten import RBatchSelectionPanel, Step3Frame
 from aidas.utils.io_utils import write_analyze
 
@@ -189,7 +189,7 @@ class Step2Step3HandoffTests(unittest.TestCase):
             ]
             received = []
             frame = Step2Frame.__new__(Step2Frame)
-            frame._batch_result_states = {"segmented": {}}
+            frame._batch_result_states = {"segmented": {"traces": dict.fromkeys(BOUNDARY_NAMES, {})}}
 
             def save_all():
                 frame._batch_result_states = {}
@@ -207,7 +207,7 @@ class Step2Step3HandoffTests(unittest.TestCase):
 
     def test_handoff_stays_in_step2_when_any_segmented_tab_failed_to_save(self):
         frame = Step2Frame.__new__(Step2Frame)
-        frame._batch_result_states = {"failed-tab": {}}
+        frame._batch_result_states = {"failed-tab": {"traces": dict.fromkeys(BOUNDARY_NAMES, {})}}
         frame._save_all_batch_result_tabs = lambda: [("nasal/Light_MARKED", "temporal/Light_MARKED")]
         received = []
         frame.on_continue_to_step3 = received.append

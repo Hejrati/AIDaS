@@ -8,6 +8,8 @@ Replicates the ImageJ macro "Step 1 resize raw.txt":
 """
 
 import os
+import queue
+import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -138,6 +140,10 @@ class Step1Frame(SidebarStepFrame):
         self._crop_notification_job = None
         self._saved_output_directories = set()
         self._sdb_directory_selection_locked = False
+        self._sdb_scan_cancel = None
+        self._sdb_scan_after_id = None
+        self._sdb_scan_pending = False
+        self._sdb_selection_after_id = None
         self._pending_mouse_status = None
         self._mouse_status_after_id = None
 
@@ -819,6 +825,11 @@ class Step1Frame(SidebarStepFrame):
         self._crop_notification_job = self.after(2000, self._dismiss_crop_notification)
 
     def destroy(self):
+        self._cancel_sdb_scan()
+        selection_job = self.__dict__.get("_sdb_selection_after_id")
+        if selection_job is not None:
+            self.after_cancel(selection_job)
+            self._sdb_selection_after_id = None
         self._dismiss_bright_pixel_notice()
         self._dismiss_crop_notification()
         super().destroy()
@@ -1565,37 +1576,86 @@ class Step1Frame(SidebarStepFrame):
         self.refresh_sdb_list(preview_first=True)
 
     def refresh_sdb_list(self, preview_first=False):
-        """Recursively scan the selected parent and rebuild the work queue."""
+        """Scan off the Tk thread so the sidebar remains usable."""
         if self.__dict__.get("_bright_pixel_notice_pending", False):
             return False
+        self._cancel_sdb_scan()
         previous_directory = self._active_sdb_directory
         self._active_sdb_directory = None
         self._sdb_directory_files.clear()
         self._saved_output_directories.clear()
-        self.sdb_scan_more_label.configure(text="")
+        self.sdb_scan_more_label.configure(text="Scanning...")
         self.sdb_scan_tooltip.text = ""
         root = self.sdb_dir_var.get()
-        if not root or not os.path.isdir(root):
-            self._render_sdb_directories()
+        self._render_sdb_directories()
+        if not root:
+            self.sdb_scan_more_label.configure(text="")
             return
 
+        cancelled = self._sdb_scan_cancel = threading.Event()
+        events = queue.Queue()
+        self._sdb_scan_pending = True
+
+        def worker():
+            try:
+                result = Step1Frame._scan_sdb_directory(root, cancelled)
+            except Exception as exc:
+                result = ({}, set(), [(root, str(exc))])
+            if not cancelled.is_set():
+                events.put(result)
+
+        threading.Thread(target=worker, daemon=True).start()
+        self._sdb_scan_after_id = self.after(
+            50, lambda: self._poll_sdb_scan(events, cancelled, root, previous_directory, preview_first)
+        )
+
+    @staticmethod
+    def _scan_sdb_directory(root, cancelled):
+        if cancelled.is_set() or not os.path.isdir(root):
+            return {}, set(), []
+        directory_files, errors = find_sdb_directories(root, cancel_event=cancelled)
+        files = {}
+        saved = set()
+        for directory, paths in directory_files.items():
+            if cancelled.is_set():
+                break
+            directory = os.path.abspath(str(directory))
+            files[directory] = [os.path.abspath(str(path)) for path in paths]
+            if Step1Frame._folder_has_all_saved_outputs(directory):
+                saved.add(Step1Frame._path_key(directory))
+        return files, saved, errors
+
+    def _cancel_sdb_scan(self):
+        cancelled = self.__dict__.get("_sdb_scan_cancel")
+        if cancelled is not None:
+            cancelled.set()
+        job = self.__dict__.get("_sdb_scan_after_id")
+        self._sdb_scan_after_id = None
+        self._sdb_scan_pending = False
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def _poll_sdb_scan(self, events, cancelled, root, previous_directory, preview_first):
+        if cancelled.is_set():
+            return
+        self._sdb_scan_after_id = None
+        if self.sdb_dir_var.get() != root:
+            self._cancel_sdb_scan()
+            return
         try:
-            directory_files, errors = find_sdb_directories(root)
-        except OSError as exc:
-            self.sdb_scan_more_label.configure(text="More")
-            self.sdb_scan_tooltip.text = skipped_directories_warning([(root, str(exc))])
-            self._render_sdb_directories()
+            directory_files, saved, errors = events.get_nowait()
+        except queue.Empty:
+            self._sdb_scan_after_id = self.after(
+                50, lambda: self._poll_sdb_scan(events, cancelled, root, previous_directory, preview_first)
+            )
             return
-
-        self._sdb_directory_files = {
-            os.path.abspath(str(directory)): [os.path.abspath(str(path)) for path in files]
-            for directory, files in directory_files.items()
-        }
-        self._saved_output_directories = {
-            self._path_key(directory)
-            for directory in self._sdb_directory_files
-            if self._folder_has_all_saved_outputs(directory)
-        }
+        self._sdb_scan_pending = False
+        self._sdb_directory_files = directory_files
+        self._saved_output_directories = saved
+        self.sdb_scan_more_label.configure(text="")
         if errors:
             self.sdb_scan_more_label.configure(text="Some folders skipped — More")
             self.sdb_scan_tooltip.text = skipped_directories_warning(errors)
@@ -1603,7 +1663,7 @@ class Step1Frame(SidebarStepFrame):
             self._active_sdb_directory = previous_directory
 
         self._render_sdb_directories()
-        if preview_first:
+        if preview_first and not self.__dict__.get("_bright_pixel_notice_pending", False):
             self._preview_selected_sdb()
 
     def _render_sdb_directories(self):
@@ -1630,6 +1690,7 @@ class Step1Frame(SidebarStepFrame):
         self._update_sdb_folder_count_summary()
 
         if not self._sdb_directories:
+            self._sdb_rendered_directory_layout = None
             self._active_sdb_directory = None
             self.sdb_directory_listbox.delete(0, "end")
             self._populate_sdb_files(None)
@@ -1645,25 +1706,45 @@ class Step1Frame(SidebarStepFrame):
     def _refresh_sdb_directory_rows(self):
         """Draw the active-folder symbol and completion colors."""
         self._sdb_directory_selection_locked = True
-        self.sdb_directory_listbox.delete(0, "end")
-        for index, (directory, label) in enumerate(
-            zip(self._sdb_directories, self._sdb_directory_labels)
-        ):
-            marker = "▶" if directory == self._active_sdb_directory else " "
-            self.sdb_directory_listbox.insert(
-                "end",
-                f"{marker} {label}",
-            )
-            if self._directory_is_complete(directory):
+        layout = tuple(zip(self._sdb_directories, self._sdb_directory_labels))
+        completed = tuple(self._directory_is_complete(directory) for directory, _label in layout)
+        previous = self.__dict__.get("_sdb_rendered_active_directory")
+        if (layout != self.__dict__.get("_sdb_rendered_directory_layout")
+                or completed != self.__dict__.get("_sdb_rendered_directory_completion")):
+            self.sdb_directory_listbox.delete(0, "end")
+            labels = [f"{'▶' if directory == self._active_sdb_directory else ' '} {label}"
+                      for directory, label in layout]
+            if labels:
+                self.sdb_directory_listbox.insert("end", *labels)
+            changed = range(len(layout))
+            self._sdb_rendered_directory_layout = layout
+            self._sdb_rendered_directory_completion = completed
+        else:
+            # Keep the existing list and update only the two folder markers.
+            changed = []
+            if previous != self._active_sdb_directory:
+                for index, (directory, label) in enumerate(layout):
+                    if directory in (previous, self._active_sdb_directory):
+                        marker = "▶" if directory == self._active_sdb_directory else " "
+                        self.sdb_directory_listbox.delete(index)
+                        self.sdb_directory_listbox.insert(index, f"{marker} {label}")
+                        changed.append(index)
+        for index in changed:
+            if completed[index]:
                 self._style_completed_row(self.sdb_directory_listbox, index)
+        self._sdb_rendered_active_directory = self._active_sdb_directory
 
         if self._active_sdb_directory in self._sdb_directories:
             selected_index = self._sdb_directories.index(self._active_sdb_directory)
             self.sdb_directory_listbox.selection_set(selected_index)
             self.sdb_directory_listbox.see(selected_index)
-        self.after_idle(self._unlock_sdb_directory_selection)
+        job = self.__dict__.get("_sdb_selection_after_id")
+        if job is not None:
+            self.after_cancel(job)
+        self._sdb_selection_after_id = self.after_idle(self._unlock_sdb_directory_selection)
 
     def _unlock_sdb_directory_selection(self):
+        self._sdb_selection_after_id = None
         self._sdb_directory_selection_locked = False
 
     def _on_sdb_directory_select(self, _event=None):
@@ -1683,8 +1764,9 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_listbox.delete(0, "end")
         self._sdb_files = list(self._sdb_directory_files.get(directory, []))
         folder_saved = self._directory_has_saved_outputs(directory)
+        if self._sdb_files:
+            self.sdb_listbox.insert("end", *(os.path.basename(path) for path in self._sdb_files))
         for index, path in enumerate(self._sdb_files):
-            self.sdb_listbox.insert("end", os.path.basename(path))
             if folder_saved or self._path_key(path) in self._cropped_sdb_files:
                 self._style_completed_row(self.sdb_listbox, index)
         if self._sdb_files and (select_first or self.current_file not in self._sdb_files):

@@ -260,6 +260,7 @@ jobs:
         run: |
           $installer = Join-Path "release" $env:INSTALLER_NAME
           $tag = "${{ inputs.tag || github.ref_name }}"
+          $notesFile = Join-Path "release_tools/notes" "$tag.md"
 
           # A rerun may find a draft or partially published release left by a
           # previous attempt. Reuse it and replace the generated assets instead
@@ -276,15 +277,24 @@ jobs:
               --draft=false `
               --prerelease=$env:IS_PRERELEASE
             if ($LASTEXITCODE -ne 0) { throw "Publishing the existing release failed." }
+            if (Test-Path -LiteralPath $notesFile) {
+              gh release edit $tag --notes-file $notesFile
+              if ($LASTEXITCODE -ne 0) { throw "Updating release notes failed." }
+            }
           }
           else {
             $arguments = @(
               "release", "create", $tag,
               $installer, "$installer.sha256",
               "--verify-tag",
-              "--generate-notes",
               "--title", "AIDaS $env:VERSION"
             )
+            if (Test-Path -LiteralPath $notesFile) {
+              $arguments += @("--notes-file", $notesFile)
+            }
+            else {
+              $arguments += "--generate-notes"
+            }
             if ($env:IS_PRERELEASE -eq "true") {
               $arguments += "--prerelease"
             }

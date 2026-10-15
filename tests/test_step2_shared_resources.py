@@ -138,6 +138,7 @@ class Step2SharedResourceTests(unittest.TestCase):
         frame.image_data = [[0]]
         frame._segmenter_running = False
         frame._all_required_boundaries_complete = lambda: False
+        frame.boundary_completion_vars = {}
         frame.aidas_model_path = "boundary-model.onnx"
         frame.fovea_x = 0
         frame.current_file = "scan-root/Light.img"

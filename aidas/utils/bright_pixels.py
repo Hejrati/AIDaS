@@ -55,6 +55,16 @@ def _protect_bright_bands(mask):
             region_mask[component] = False
 
 
+def _occupied_intensities(samples):
+    """Count exact 8/16-bit values without sorting every image sample."""
+    if np.issubdtype(samples.dtype, np.integer) and samples.dtype.itemsize <= 2:
+        low = int(samples.min())
+        counts = np.bincount(samples.astype(np.int64) - low)
+        occupied = np.flatnonzero(counts)
+        return (occupied + low).astype(samples.dtype), counts[occupied]
+    return np.unique(samples, return_counts=True)
+
+
 def detect_bright_pixels(image):
     """Find a small, clearly separated bright tail of the intensity histogram.
 
@@ -72,7 +82,7 @@ def detect_bright_pixels(image):
     if samples.size >= 16:
         # Exact occupied-value frequencies avoid bin-boundary sensitivity for
         # signed OCT data and retain gaps between sparse upper-tail samples.
-        values, frequencies = np.unique(samples, return_counts=True)
+        values, frequencies = _occupied_intensities(samples)
         if len(values) > 1:
             values_float = values.astype(np.float64)
             # Missing SDB rows are padded with zeros. They must not dominate

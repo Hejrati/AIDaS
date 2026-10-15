@@ -23,8 +23,8 @@ class _ListboxStub:
         self.items.clear()
         self.selection = ()
 
-    def insert(self, _where, value):
-        self.items.append(value)
+    def insert(self, _where, *values):
+        self.items.extend(values)
 
     def itemconfigure(self, index, **_options):
         self.configured_rows.append((index, _options))

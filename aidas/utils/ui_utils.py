@@ -11,6 +11,7 @@ import customtkinter as ctk
 from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
 
 from aidas.core.display import work_area_bounds
+from aidas.ui.scrolling import DeferredScrollbar
 from aidas.ui.theme import (
     COLOR_PAIRS,
     CONTROLS,
@@ -917,7 +918,7 @@ class ScrollableSidebar(ctk.CTkFrame):
             corner_radius=0,
         )
         self._scrollbar_slot.pack_propagate(False)
-        self.scrollbar = ctk.CTkScrollbar(
+        self.scrollbar = DeferredScrollbar(
             self._scrollbar_slot,
             orientation="vertical",
             command=self.canvas.yview,

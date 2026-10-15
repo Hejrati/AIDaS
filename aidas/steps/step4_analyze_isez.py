@@ -54,6 +54,7 @@ from PIL import ImageFont
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.patches import Rectangle
+from matplotlib.transforms import Bbox
 
 from aidas.core.config import (
     STEP4_AUTO_DETECTION_DEFAULTS,
@@ -299,9 +300,12 @@ def roi_bounds_for_image(roi: ISezROI, image_shape: tuple[int, int]) -> tuple[in
 def intensity_profile(image: np.ndarray, roi: ISezROI) -> np.ndarray:
     """Return MATLAB ``Int=mean(oct(low:450,left:right)/3,2)`` for one ROI."""
 
-    arr = np.asarray(image, dtype=np.float64) / 3.0
+    arr = np.asarray(image)
     left, right, low, high = roi_bounds_for_image(roi, arr.shape)
-    return np.nanmean(arr[low:high, left:right], axis=1)
+    # Convert and scale only the selected pixels. The full OCT may be much
+    # larger than this strip, and automatic detection visits twenty strips.
+    strip = np.asarray(arr[low:high, left:right], dtype=np.float64) / 3.0
+    return np.nanmean(strip, axis=1)
 
 
 def to_uint8_display(image: np.ndarray) -> np.ndarray:
@@ -1062,14 +1066,17 @@ def analyze_and_save_roi(
     start_click: float,
     end_click: float,
     adjust_bounds: bool = True,
+    profile: np.ndarray | None = None,
 ) -> ISezResult:
     """Run the MATLAB ISez analysis for one ROI without writing files.
 
     Confirming a ROI stores the data in memory. The ImageJ-style workbook and
     TIFF stacks are generated only by ``_build_stack_outputs``.
+    Automatic detection may pass the same ROI's already-computed profile.
     """
 
-    profile = intensity_profile(image, roi)
+    if profile is None:
+        profile = intensity_profile(image, roi)
     rescaled = _profile_selection_plot_data(profile, start_click, end_click, adjust_bounds=adjust_bounds)
 
     return ISezResult(
@@ -3652,6 +3659,7 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self._stack_build_complete = bool((restore_state or {}).get("complete"))
+        self._warm_auto_detection_tools()
         self.volume = volume
         self.current_path = Path(path)
         self.current_stem = self.current_path.stem
@@ -3804,24 +3812,42 @@ class Step4Frame(SidebarStepFrame):
         if result is None:
             return tuple("" for _name in RESULTS_HEADERS[1:])
         try:
+            # Measurements describe the rendered curve, independent of the
+            # selected tab or UI theme. Keep them with the result, so closing
+            # a tab releases its cache and replacing/editing a curve refreshes it.
+            signature = (float(result.center), *(
+                (array.shape, array.dtype.str, array.tobytes())
+                for array in map(np.asarray, (
+                    result.normalized_x, result.normalized_y,
+                    result.baseline_x, result.baseline_y,
+                ))
+            ))
+            cached = getattr(result, "_aidas_metric_values", None)
+            if cached is not None and cached[0] == signature:
+                return cached[1]
             measurements = imagej_shape_measurements_from_frame(make_isez_plot_image(result))
+            values = tuple(f"{float(measurements.get(name, 0.0)):.3f}" for name in RESULTS_HEADERS[1:])
+            result._aidas_metric_values = (signature, values)
         except Exception:
             return tuple("" for _name in RESULTS_HEADERS[1:])
-        return tuple(f"{float(measurements.get(name, 0.0)):.3f}" for name in RESULTS_HEADERS[1:])
+        return values
 
     def _refresh_roi_list(self) -> None:
         if self.roi_table is None:
             return
-        self.roi_table.delete(*self.roi_table.get_children(""))
+        existing = self.roi_table.get_children("")
+        reuse_rows = tuple(existing) == tuple(str(index) for index in range(len(self.rois)))
+        if not reuse_rows:
+            self.roi_table.delete(*existing)
         for index, roi in enumerate(self.rois):
             needs_review = roi.suffix in getattr(self, "auto_detection_reviews", {})
             roi_label = f"{roi.suffix} !" if needs_review else roi.suffix
-            self.roi_table.insert(
-                "",
-                "end",
-                iid=str(index),
-                values=(roi_label, *self._roi_metric_values(roi)),
-            )
+            values = (roi_label, *self._roi_metric_values(roi))
+            if reuse_rows:
+                if self.roi_table.item(str(index), "values") != values:
+                    self.roi_table.item(str(index), values=values)
+            else:
+                self.roi_table.insert("", "end", iid=str(index), values=values)
         self._select_roi_in_list()
         self._update_build_stack_button_state()
 
@@ -3866,6 +3892,8 @@ class Step4Frame(SidebarStepFrame):
         self.canvas.mpl_connect("motion_notify_event", self._on_plot_motion)
         self.canvas.mpl_connect("axes_leave_event", self._on_plot_axes_leave)
         self.canvas.mpl_connect("figure_leave_event", self._hide_roi_grid_hint)
+        self.canvas._aidas_roi_grid_axes = self.ax_roi_grid
+        self.canvas.mpl_connect("draw_event", self._cache_roi_grid_background)
         self.canvas.get_tk_widget().bind("<Configure>", self._on_plot_canvas_configure, add="+")
         self.canvas.get_tk_widget().configure(
             background=palette["figure"],
@@ -3928,7 +3956,7 @@ class Step4Frame(SidebarStepFrame):
         if index is None:
             if hint.get_visible():
                 hint.set_visible(False)
-                self.canvas.draw_idle()
+                self._redraw_roi_grid_hint()
             return
         position = (index % 7 + 0.5, 2 - index // 7 + 0.08)
         text = (
@@ -3940,7 +3968,7 @@ class Step4Frame(SidebarStepFrame):
         hint.set_position(position)
         hint.set_text(text)
         hint.set_visible(True)
-        self.canvas.draw_idle()
+        self._redraw_roi_grid_hint()
 
     def _on_plot_axes_leave(self, event) -> None:
         if event.inaxes is not self.ax_roi_grid:
@@ -3954,27 +3982,52 @@ class Step4Frame(SidebarStepFrame):
         if hint.get_visible():
             hint.set_visible(False)
             if self.canvas is not None:
-                self.canvas.draw_idle()
+                self._redraw_roi_grid_hint()
         if self.canvas is not None:
             try:
                 self.canvas.get_tk_widget().configure(cursor="")
             except tk.TclError:
                 pass
 
+    @staticmethod
+    def _cache_roi_grid_background(event) -> None:
+        canvas = event.canvas
+        ax = getattr(canvas, "_aidas_roi_grid_axes", None)
+        if ax is None or canvas.supports_blit is not True:
+            return
+        # Hints are not clipped to the axes; on a narrow/high-DPI viewport
+        # their text can extend past the left/right grid edges.
+        bounds = canvas.figure.bbox
+        region = Bbox.from_extents(
+            bounds.x0, max(bounds.y0, ax.bbox.y0 - canvas.figure.dpi * 0.24),
+            bounds.x1, bounds.y1,
+        )
+        ax._aidas_hover_region = region
+        ax._aidas_hover_background = canvas.copy_from_bbox(region)
+        hint = getattr(ax, "_aidas_hover_hint", None)
+        if hint is not None and hint.get_animated() and hint.get_visible():
+            ax.draw_artist(hint)
+
+    def _redraw_roi_grid_hint(self) -> None:
+        """Update hover text without rendering every grid cell and profile."""
+        ax = self.ax_roi_grid
+        background = getattr(ax, "_aidas_hover_background", None)
+        canvas = self.canvas
+        if (background is not None and canvas.supports_blit is True
+                and not canvas.figure.stale):
+            canvas.restore_region(background)
+            hint = ax._aidas_hover_hint
+            if hint.get_visible():
+                ax.draw_artist(hint)
+            canvas.blit(ax._aidas_hover_region)
+        else:
+            canvas.draw_idle()
+
     def _on_plot_canvas_configure(self, event) -> None:
-        if self.figure is None:
-            return
-        width = max(320, int(event.width))
-        height = max(260, int(event.height))
-        dpi = float(self.figure.dpi or 100)
-        current_w, current_h = self.figure.get_size_inches()
-        next_w = width / dpi
-        next_h = height / dpi
-        if abs(current_w - next_w) < 0.02 and abs(current_h - next_h) < 0.02:
-            return
-        self.figure.set_size_inches(next_w, next_h, forward=False)
-        if self.canvas is not None:
-            self.canvas.draw_idle()
+        # TkAgg already resizes the figure bound to the event's own widget.
+        # A hidden tab's Configure must never resize the active tab's figure.
+        if self.canvas is not None and event.widget is self.canvas.get_tk_widget():
+            self._place_line_positioning_checkbox()
 
     def _render_current_roi(self) -> None:
         if self.image is None:
@@ -3994,31 +4047,35 @@ class Step4Frame(SidebarStepFrame):
 
         xs = np.arange(1, profile.size + 1, dtype=np.float64)
         ymin = float(np.nanmin(profile))
-        self.ax_profile.clear()
         palette = _theme_matplotlib_figure(self.figure, self.ax_roi_grid, self.ax_profile)
-        self.ax_profile.plot(xs, profile, color=palette["line"], linewidth=1.2)
-        self.ax_profile.set_xlim(0, 140)
-        self.ax_profile.set_ylim(ymin, ymin + 20)
+        artists = getattr(self.ax_profile, "_aidas_profile_artists", None)
+        if artists is None or artists[0] not in self.ax_profile.lines:
+            self.ax_profile.clear()
+            line, = self.ax_profile.plot([], [], linewidth=1.2)
+            title = self.ax_profile.text(
+                0.01, 0.96, "", ha="left", va="top",
+                transform=self.ax_profile.transAxes, fontsize=9,
+                bbox={"facecolor": palette["axes"], "edgecolor": "none", "alpha": 0.82, "pad": 2},
+            )
+            start_line = self.ax_profile.axvline(0, linewidth=1.2)
+            end_line = self.ax_profile.axvline(0, linewidth=1.2)
+            artists = self.ax_profile._aidas_profile_artists = (line, title, start_line, end_line)
+            _theme_matplotlib_figure(self.figure, self.ax_profile)
+        line, title, *boundaries = artists
+        line.set_data(xs, profile)
+        line.set_color(palette["line"])
+        if self.ax_profile.get_xlim() != (0, 140):
+            self.ax_profile.set_xlim(0, 140)
+        if self.ax_profile.get_ylim() != (ymin, ymin + 20):
+            self.ax_profile.set_ylim(ymin, ymin + 20)
         self.ax_profile.set_position([0.12, 0.085, 0.78, 0.30])
-        self.ax_profile.text(
-            0.01,
-            0.96,
-            f"ROI {roi.suffix}",
-            ha="left",
-            va="top",
-            transform=self.ax_profile.transAxes,
-            fontsize=9,
-            color=palette["text"],
-            bbox={
-                "facecolor": palette["axes"],
-                "edgecolor": "none",
-                "alpha": 0.82,
-                "pad": 2,
-            },
-        )
-        for idx, click in enumerate(self.profile_clicks[:2]):
-            color = palette["primary"] if idx == 0 else palette["danger"]
-            self.ax_profile.axvline(click, color=color, linewidth=1.2)
+        title.set(text=f"ROI {roi.suffix}", color=palette["text"])
+        title.get_bbox_patch().set_facecolor(palette["axes"])
+        for idx, boundary in enumerate(boundaries):
+            boundary.set_color(palette["primary"] if idx == 0 else palette["danger"])
+            boundary.set_visible(idx < len(self.profile_clicks[:2]))
+            if idx < len(self.profile_clicks[:2]):
+                boundary.set_xdata([self.profile_clicks[idx]] * 2)
 
         self.canvas.draw()
         canvas_widget = self.canvas.get_tk_widget()
@@ -4059,7 +4116,12 @@ class Step4Frame(SidebarStepFrame):
         if ax is None:
             return
 
-        ax.clear()
+        cells = getattr(ax, "_aidas_grid_cells", None)
+        reuse = bool(cells) and cells[0]["box"] in ax.patches
+        if not reuse:
+            ax.clear()
+            cells = ax._aidas_grid_cells = []
+        ax._aidas_hover_background = None
         palette = _theme_matplotlib_figure(self.figure, ax)
         ax.set_xlim(0, 7)
         ax.set_ylim(0, 3)
@@ -4085,8 +4147,8 @@ class Step4Frame(SidebarStepFrame):
                 face = palette["axes"]
             edge = palette["primary"] if active else palette["grid"]
             width = 1.5 if active else 0.6
-            ax.add_patch(
-                Rectangle(
+            if not reuse:
+                box = Rectangle(
                     (col, row),
                     1,
                     1,
@@ -4096,7 +4158,27 @@ class Step4Frame(SidebarStepFrame):
                     zorder=2 if active else 1,
                     clip_on=False,
                 )
-            )
+                ax.add_patch(box)
+                number = ax.text(
+                    col + 0.04, row + 0.94, str(index + 1),
+                    ha="left", va="top", fontsize=7,
+                )
+                status = ax.text(
+                    col + 0.96, row + 0.94, "",
+                    ha="right", va="top", fontsize=7, weight="bold",
+                )
+                curve, = ax.plot([], [], linewidth=0.75)
+                baseline, = ax.plot([], [], linewidth=0.55)
+                cells.append(dict(box=box, number=number, status=status,
+                                  curve=curve, baseline=baseline))
+            cell = cells[index]
+            cell["box"].set(facecolor=face, edgecolor=edge, linewidth=width,
+                            zorder=2 if active else 1)
+            cell["number"].set(color=palette["text"], weight="bold" if active else "normal",
+                               visible=index < len(self.rois))
+            cell["status"].set_visible(index < len(self.rois))
+            cell["curve"].set(color=palette["line"], visible=False)
+            cell["baseline"].set(color=palette["muted"], visible=False)
 
             if index >= len(self.rois):
                 continue
@@ -4107,26 +4189,7 @@ class Step4Frame(SidebarStepFrame):
             status_color = (
                 palette["success"] if done else (palette["warning"] if needs_review else palette["danger"])
             )
-            ax.text(
-                col + 0.04,
-                row + 0.94,
-                str(index + 1),
-                ha="left",
-                va="top",
-                fontsize=7,
-                color=palette["text"],
-                weight="bold" if active else "normal",
-            )
-            ax.text(
-                col + 0.96,
-                row + 0.94,
-                status_symbol,
-                ha="right",
-                va="top",
-                fontsize=7,
-                color=status_color,
-                weight="bold",
-            )
+            cell["status"].set(text=status_symbol, color=status_color)
 
             result = self._roi_overview_result(index)
             if result is None:
@@ -4154,17 +4217,24 @@ class Step4Frame(SidebarStepFrame):
                 return x_scaled[mask], y_scaled[mask]
 
             x_curve, y_curve = to_cell(result.normalized_x, result.normalized_y)
+            cell["curve"].set_data(x_curve, y_curve)
             if x_curve.size >= 2:
-                ax.plot(x_curve, y_curve, color=palette["line"], linewidth=0.75)
+                cell["curve"].set_visible(True)
             x_base, y_base = to_cell(result.baseline_x, result.baseline_y)
+            cell["baseline"].set_data(x_base, y_base)
             if x_base.size >= 2:
-                ax.plot(x_base, y_base, color=palette["muted"], linewidth=0.55)
+                cell["baseline"].set_visible(True)
 
-        ax._aidas_hover_hint = ax.text(
-            0, 0, "", ha="center", va="bottom", fontsize=6,
-            color=palette["muted"], visible=False, zorder=5,
-            bbox={"facecolor": palette["axes"], "edgecolor": "none", "pad": 1.5},
-        )
+        if not reuse:
+            ax._aidas_hover_hint = ax.text(
+                0, 0, "", ha="center", va="bottom", fontsize=6,
+                color=palette["muted"], visible=False, zorder=5,
+                bbox={"facecolor": palette["axes"], "edgecolor": "none", "pad": 1.5},
+            )
+        hint = ax._aidas_hover_hint
+        hint.set(color=palette["muted"], visible=False,
+                 animated=getattr(self.canvas, "supports_blit", False) is True)
+        hint.get_bbox_patch().set_facecolor(palette["axes"])
 
     def _redraw_roi_update_flash(self) -> None:
         if self.ax_roi_grid is None:
@@ -4641,6 +4711,25 @@ class Step4Frame(SidebarStepFrame):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _warm_auto_detection_tools(self) -> None:
+        """Load the smoother while a valid OCT opens, keeping Tk responsive."""
+        signal = sys.modules.get("scipy.signal")
+        if callable(getattr(signal, "savgol_filter", None)):
+            return
+        if self.__dict__.get("_auto_detection_tools_preloading", False):
+            return
+        self._auto_detection_tools_preloading = True
+
+        def load_tools():
+            try:
+                from scipy.signal import savgol_filter  # noqa: F401
+            except Exception:
+                # This is optional preparation. The normal detection worker
+                # still reports an import failure through its existing UI.
+                pass
+
+        self._start_background_worker(load_tools)
+
     @staticmethod
     def _compute_auto_detection_run(
         image: np.ndarray,
@@ -4652,11 +4741,13 @@ class Step4Frame(SidebarStepFrame):
 
         detections_by_index: dict[int, ProfileBoundaryDetection] = {}
         detection_errors: dict[int, str] = {}
+        profiles_by_index: dict[int, np.ndarray] = {}
         for index, roi in enumerate(rois):
             if index == AUTO_MANUAL_ONLY_ROI_INDEX:
                 continue
             try:
                 profile = intensity_profile(image, roi)
+                profiles_by_index[index] = profile
                 detections_by_index[index] = detect_profile_boundaries(
                     profile,
                     start_range=(
@@ -4721,6 +4812,7 @@ class Step4Frame(SidebarStepFrame):
                     roi,
                     start_click=detection.start,
                     end_click=detection.end,
+                    profile=profiles_by_index[index],
                 )
             except Exception as exc:
                 reviews[roi.suffix] = replace(
@@ -4809,7 +4901,6 @@ class Step4Frame(SidebarStepFrame):
                 parent=self,
             )
         finally:
-            self._hide_grid_notice()
             self._auto_detecting = False
             self._update_auto_detect_button_state()
             self._update_build_stack_button_state()
@@ -4828,12 +4919,7 @@ class Step4Frame(SidebarStepFrame):
         self._auto_detecting = True
         self._stack_build_complete = False
         self._update_auto_detect_button_state()
-        self.status_var.set("Automatically detecting bell-shaped boundaries for ROIs 1-20. Please wait...")
-        self._show_grid_notice(
-            "Detecting ROI boundaries 1-20",
-            "Please wait while AIDaS finds and validates the bell-shaped curve in profiles 1-20. ROI 21 remains manual.",
-            busy=True,
-        )
+        self.status_var.set("Detecting ROI boundaries 1-20...")
 
         events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._auto_detection_events = events

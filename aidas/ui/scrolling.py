@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+import sys
 
 import customtkinter as ctk
 
@@ -53,6 +54,8 @@ class SettingsScrollableFrame(ctk.CTkScrollableFrame):
         self._scoped_bindings = []
         self._content_dimensions = None
         self._viewport_dimension = None
+        self._wheel_after_id = None
+        self._wheel_targets = {}
         super().__init__(master, **kwargs)
 
         original = self._scrollbar
@@ -103,7 +106,47 @@ class SettingsScrollableFrame(ctk.CTkScrollableFrame):
         self._viewport_dimension = dimension
         super()._fit_frame_dimensions_to_canvas(event)
 
+    def _mouse_wheel_all(self, event):
+        """Combine a burst of wheel input into one viewport move per idle turn."""
+        if not self._check_if_valid_scroll(event.widget):
+            return
+        axis = "x" if self._shift_pressed else "y"
+        canvas = self._parent_canvas
+        view = canvas.xview() if axis == "x" else canvas.yview()
+        if view == (0.0, 1.0):
+            return
+        if sys.platform.startswith("win"):
+            units = -int(event.delta / 6)
+        elif sys.platform == "darwin":
+            units = -event.delta
+        else:
+            units = -1 if event.num == 4 else 1
+        if not units:
+            return
+        bounds = tuple(float(value) for value in canvas.cget("scrollregion").split())
+        extent = bounds[2] - bounds[0] if axis == "x" else bounds[3] - bounds[1]
+        increment = float(canvas.cget(f"{axis}scrollincrement"))
+        if extent <= 0 or increment <= 0:
+            return
+        target = self._wheel_targets.get(axis, view[0]) + units * increment / extent
+        self._wheel_targets[axis] = max(0.0, min(1.0 - (view[1] - view[0]), target))
+        if self._wheel_after_id is None:
+            self._wheel_after_id = self.after_idle(self._flush_wheel)
+
+    def _flush_wheel(self):
+        self._wheel_after_id = None
+        targets, self._wheel_targets = self._wheel_targets, {}
+        for axis, target in targets.items():
+            if axis == "x":
+                self._parent_canvas.xview_moveto(target)
+            else:
+                self._parent_canvas.yview_moveto(target)
+
     def destroy(self):
+        if self._wheel_after_id is not None:
+            self.after_cancel(self._wheel_after_id)
+            self._wheel_after_id = None
+        self._wheel_targets.clear()
         for window, sequence, binding_id in self._scoped_bindings:
             try:
                 tk.Misc.unbind(window, sequence, binding_id)

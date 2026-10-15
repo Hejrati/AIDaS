@@ -6,6 +6,73 @@ import unittest
 
 
 class SettingsScrollingTests(unittest.TestCase):
+    def test_wheel_bursts_preserve_distance_and_limits_with_one_move(self):
+        self._run_tk_check(
+            """
+            from types import SimpleNamespace
+            panel = SettingsScrollableFrame(root)
+            panel.pack(fill='both', expand=True)
+            for row in range(50):
+                tk.Label(panel, text=str(row), height=2).pack()
+            root.deiconify()
+            settle()
+            canvas = panel._parent_canvas
+            for deltas in ([-120] * 8, [-120] * 500 + [120] * 3, [-120, 120] * 8):
+                events = [SimpleNamespace(widget=panel, delta=delta,
+                    num=5 if delta < 0 else 4) for delta in deltas]
+                canvas.yview_moveto(0)
+                for event in events:
+                    ctk.CTkScrollableFrame._mouse_wheel_all(panel, event)
+                expected = canvas.yview()
+                canvas.yview_moveto(0)
+                settle()
+                moves = []
+                original = canvas.yview_moveto
+                def move(value):
+                    moves.append(value)
+                    original(value)
+                canvas.yview_moveto = move
+                for event in events:
+                    panel._mouse_wheel_all(event)
+                assert not moves
+                settle()
+                assert len(moves) == 1, moves
+                assert all(abs(a - b) < .001 for a, b in zip(canvas.yview(), expected)), (
+                    canvas.yview(), expected)
+                canvas.yview_moveto = original
+            panel._mouse_wheel_all(events[0])
+            panel.destroy()
+            wait_for_callbacks()
+            assert_no_callback_errors()
+            """
+        )
+
+    def test_deferred_controls_render_identically_after_layout(self):
+        self._run_tk_check(
+            """
+            from PIL import ImageTk
+            from aidas.ui.rendering import finish_deferred_rendering, _repaint
+            root._aidas_defer_canvas_updates = True
+            controls = [ctk.CTkButton(root, text='Apply'), ctk.CTkEntry(root),
+                        ctk.CTkSwitch(root, text='Tutorial')]
+            for control in controls:
+                control.pack(padx=10, pady=10)
+            root.deiconify()
+            settle()
+            assert root._aidas_deferred_surfaces
+            finish_deferred_rendering(root)
+            settle()
+            assert not root._aidas_deferred_surfaces
+            for control in controls:
+                canvas = control._canvas
+                before = ImageTk.getimage(canvas._aidas_surface_photo).tobytes()
+                _repaint(canvas)
+                after = ImageTk.getimage(canvas._aidas_surface_photo).tobytes()
+                assert before == after
+            assert_no_callback_errors()
+            """
+        )
+
     def _run_tk_check(self, body):
         # CustomTkinter retains process-wide appearance and scaling callbacks.
         # Each check owns one isolated root with real, invisible Tk geometry.

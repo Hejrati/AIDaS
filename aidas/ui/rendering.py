@@ -11,6 +11,7 @@ from __future__ import annotations
 from functools import lru_cache, wraps
 import math
 import tkinter as tk
+import weakref
 
 from PIL import Image, ImageChops, ImageDraw, ImageTk
 from customtkinter.windows.widgets.core_rendering import CTkCanvas, DrawEngine
@@ -316,6 +317,13 @@ def _repaint(canvas: CTkCanvas) -> None:
     try:
         if not canvas.winfo_exists():
             return
+        window = canvas.winfo_toplevel()
+        if getattr(window, "_aidas_defer_canvas_updates", False):
+            pending = getattr(window, "_aidas_deferred_surfaces", None)
+            if pending is None:
+                pending = window._aidas_deferred_surfaces = weakref.WeakSet()
+            pending.add(canvas)
+            return
         vectors = getattr(canvas, "_aidas_vectors", {})
         items = [item for item in canvas.find_all() if item in vectors and vectors[item] != "hidden"]
         item_tags = {item: canvas.gettags(item) for item in items}
@@ -372,6 +380,17 @@ def _repaint(canvas: CTkCanvas) -> None:
         pass
     finally:
         canvas._aidas_painting = False
+
+
+def finish_deferred_rendering(window):
+    """Paint construction-time surfaces once, after final layout is known."""
+    window._aidas_defer_canvas_updates = False
+    pending = getattr(window, "_aidas_deferred_surfaces", ())
+    for canvas in tuple(pending):
+        if canvas.winfo_exists():
+            _schedule(canvas)
+    if pending:
+        pending.clear()
 
 
 def install_smooth_borders() -> None:

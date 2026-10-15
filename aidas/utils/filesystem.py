@@ -40,6 +40,8 @@ def find_candidate_directories(
 
 def find_sdb_directories(
     root: str | os.PathLike,
+    *,
+    cancel_event=None,
 ) -> tuple[dict[Path, list[Path]], list[DirectoryScanError]]:
     """Return folders below *root* that directly contain ``.sdb`` files.
 
@@ -57,6 +59,8 @@ def find_sdb_directories(
         errors.append((path, str(exc)))
 
     for folder, dirnames, filenames in os.walk(root, topdown=True, onerror=record_error):
+        if cancel_event is not None and cancel_event.is_set():
+            break
         dirnames.sort(key=str.lower)
         sdb_names = sorted(
             (name for name in filenames if name.lower().endswith(".sdb")),
