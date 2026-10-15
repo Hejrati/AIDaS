@@ -11,6 +11,7 @@ import customtkinter as ctk
 from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
 
 from aidas.core.display import work_area_bounds
+from aidas.ui.popups import PopupPanel
 from aidas.ui.scrolling import DeferredScrollbar
 from aidas.ui.theme import (
     COLOR_PAIRS,
@@ -674,7 +675,7 @@ def apply_app_icon_to(window):
 
 
 class HoverToolTip:
-    """Immediate, widget-centered tooltips with one visible popup at a time."""
+    """Immediate tooltips centered below a widget or a local anchor rectangle."""
 
     SHOW_DELAY_MS = 0
     POINTER_CHECK_MS = 100
@@ -689,10 +690,11 @@ class HoverToolTip:
         "<<AIDaSThemeChanged>>",
     )
 
-    def __init__(self, widget, text, *, wraplength=320):
+    def __init__(self, widget, text, *, wraplength=320, anchor_bounds=None):
         self.widget = widget
         self._text = str(text or "")
         self._wraplength = wraplength
+        self._anchor_bounds = anchor_bounds
         self.tipwindow = None
         self._show_after_id = None
         self._pointer_after_id = None
@@ -782,36 +784,37 @@ class HoverToolTip:
         tw.withdraw()
         tw.wm_overrideredirect(True)
         tw.transient(self.widget.winfo_toplevel())
-        tw.configure(background=COLORS.border_strong)
+        tw.configure(background=COLORS.menu_surface)
         try:
             tw.attributes("-topmost", True)
         except tk.TclError:
             pass
 
-        shell = ctk.CTkFrame(
-            tw,
-            corner_radius=SHAPES.corner_radius_sm,
-            border_width=SHAPES.border_width,
-            border_color=COLOR_PAIRS["border_strong"],
-            fg_color=COLOR_PAIRS["surface_elevated"],
-        )
+        shell = PopupPanel(tw)
         shell.pack(fill="both", expand=True)
         ctk.CTkLabel(
             shell,
             text=self.text,
+            height=0,
             justify="left",
             anchor="w",
             wraplength=self._wraplength,
             fg_color="transparent",
-            text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
-        ).pack(padx=8, pady=5)
+            text_color=COLOR_PAIRS["menu_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+        ).pack(padx=10, pady=6)
 
         tw.update_idletasks()
         width = max(1, tw.winfo_reqwidth())
         height = max(1, tw.winfo_reqheight())
-        x = self.widget.winfo_rootx() + (self.widget.winfo_width() - width) // 2
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + CONTROLS.gap // 2
+        anchor = (0, 0, self.widget.winfo_width(), self.widget.winfo_height())
+        if self._anchor_bounds is not None:
+            bounds = self._anchor_bounds()
+            if bounds is not None:
+                anchor = bounds
+        anchor_left, _anchor_top, anchor_right, anchor_bottom = anchor
+        x = self.widget.winfo_rootx() + int((anchor_left + anchor_right - width) // 2)
+        y = self.widget.winfo_rooty() + int(anchor_bottom) + CONTROLS.gap // 2
         left, top, right, bottom = work_area_bounds(tw)
         x = max(left, min(x, right - width))
         y = max(top, min(y, bottom - height))
@@ -1351,6 +1354,13 @@ class SidebarStepFrame(ctk.CTkFrame):
         kwargs.setdefault("fg_color", "transparent")
         kwargs.setdefault("corner_radius", 0)
         super().__init__(parent, *args, **kwargs)
+
+    def _notify_image_path_changed(self):
+        """Let the application refresh the address of its visible editor."""
+        try:
+            self.event_generate("<<AIDaSImagePathChanged>>", when="tail")
+        except (AttributeError, tk.TclError):
+            pass
 
     @staticmethod
     def _control_state(control):

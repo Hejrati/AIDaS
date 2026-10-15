@@ -42,6 +42,7 @@ from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.ui.annotation_guide import AnnotationGuide
 from aidas.ui.components import AppButton, AppRunButton
+from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS, SHAPES, TYPOGRAPHY
 from aidas.utils.batch_summary import format_batch_summary
@@ -1414,6 +1415,7 @@ class Step2Frame(SidebarStepFrame):
             initial_rows=initial_rows,
         )
         self.batch_segmentation_panel.pack(fill="both", expand=True)
+        self._notify_image_path_changed()
         if initial_rows is None:
             self.status_var.set(f"Scanning batch segmentation root: {os.path.abspath(root_dir)}")
         self._update_batch_ai_button_state()
@@ -1422,6 +1424,7 @@ class Step2Frame(SidebarStepFrame):
     def _close_step2_batch_segmentation_panel(self, restore_previous=True):
         panel = getattr(self, "batch_segmentation_panel", None)
         self.batch_segmentation_panel = None
+        self._notify_image_path_changed()
         if panel is not None:
             try:
                 panel.destroy()
@@ -1716,13 +1719,12 @@ class Step2Frame(SidebarStepFrame):
         # toolbar and can push the required actions outside the viewport.
         actions_frame = ttk.Frame(temp_frame)
         actions_frame.pack(side="right", fill="y")
-        prompt_label = ttk.Label(
+        prompt_label = ScrollingText(
             temp_frame,
             textvariable=prompt_label_var,
-            font=("", 10, "bold"),
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=13, weight="bold"),
             padding=4,
-            width=1,
-            anchor="w",
+            height=36,
         )
         
         def on_confirm_fovea():
@@ -1768,13 +1770,13 @@ class Step2Frame(SidebarStepFrame):
         )
         btn_set = AppButton(
             actions_frame,
-            text="Confirm fovea",
+            text="Set Fovea",
             variant="success",
             command=on_confirm_fovea,
             image=confirm_icon,
             compound="left",
         )
-        HoverToolTip(btn_set, "Confirm the foveal center for this image.")
+        HoverToolTip(btn_set, "Set the foveal center for this image.")
         btn_set.pack(side="right", padx=4, pady=4)
 
         overlay_frame = tk.Frame(self.image_canvas.canvas, bg="#333333", padx=15, pady=15, highlightthickness=2, highlightbackground="#555555")
@@ -1883,9 +1885,8 @@ class Step2Frame(SidebarStepFrame):
             overlay_frame.place_forget()
             self.image_canvas.canvas.delete("side_indicator")
             btn_set.pack(side="right", padx=4, pady=4)
-            msg = f"Step 1 of 2 - Specify fovea ({index}/{total}): {path}"
+            msg = f"Specify fovea ({index}/{total}): {path}"
             prompt_label_var.set(msg)
-            prompt_tooltip.text = msg
             self.status_var.set(msg)
 
         def show_side_stage(index, path):
@@ -1894,16 +1895,14 @@ class Step2Frame(SidebarStepFrame):
             _update_overlay_position()
 
             msg = (
-                f"Step 2 of 2 - Specify whether the image is Temporal or Nasal "
+                f"Specify Temporal or Nasal "
                 f"({index}/{total}): {path}"
             )
             prompt_label_var.set(msg)
-            prompt_tooltip.text = msg
             self.status_var.set(msg)
 
         # Pack the flexible label after every action has claimed its space.
         prompt_label.pack(side="left", fill="x", expand=True)
-        prompt_tooltip = HoverToolTip(prompt_label, "")
 
         self._batch_fovea_picker_active = True
         self._hide_annotation_tutorial()
@@ -2133,6 +2132,7 @@ class Step2Frame(SidebarStepFrame):
         self._pending_external_image = None
         self._annotation_tutorial_ready = False
         self.current_file = path
+        self._notify_image_path_changed()
         self.image_data = image
         self._last_status_mouse_sample = None
         self.active_boundary = None
@@ -2168,6 +2168,7 @@ class Step2Frame(SidebarStepFrame):
         self._pending_external_image = None
         self._show_single_image_canvas()
         self.current_file = None
+        self._notify_image_path_changed()
         self.image_data = None
         self._annotation_tutorial_ready = False
         self._last_status_mouse_sample = None
@@ -2305,6 +2306,7 @@ class Step2Frame(SidebarStepFrame):
 
         self.image_canvas = canvas
         self.current_file = state.get("input")
+        self._notify_image_path_changed()
         self.image_data = state.get("image")
         self._last_status_mouse_sample = None
         self.boundary_traces = state.setdefault("traces", {})

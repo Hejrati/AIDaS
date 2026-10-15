@@ -131,7 +131,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             (
                 "Use the Step 1 handoff or Select folders to segment, then review the discovered Light images and choose the ready rows.",
                 "Folders that already contain Light_MARKED are identified and skipped.",
-                "For each image, drag the foveal marker to the center, then choose Confirm fovea.",
+                "For each image, drag the foveal marker to the center, then choose Set Fovea.",
                 "Next identify the image as Temporal or Nasal. Both prompts are required; Exit cancels the batch.",
             ),
             (

@@ -203,6 +203,16 @@ class UIThemeTests(unittest.TestCase):
                     resolve_color(COLOR_PAIRS["menu_bar"], appearance_mode),
                 )
 
+    def test_modern_menus_share_the_application_palette(self):
+        for menu_token, app_token in (
+            ("menu_surface", "surface_elevated"), ("menu_text", "text"),
+            ("menu_muted_text", "muted_text"), ("menu_disabled_text", "disabled_text"),
+            ("menu_hover", "selection"), ("menu_hover_text", "text"),
+            ("menu_border", "border_strong"), ("menu_separator", "border"),
+        ):
+            with self.subTest(token=menu_token):
+                self.assertEqual(MODERN_COLOR_PAIRS[menu_token], MODERN_COLOR_PAIRS[app_token])
+
 
 if __name__ == "__main__":
     unittest.main()

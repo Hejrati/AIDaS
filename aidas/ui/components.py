@@ -7,6 +7,7 @@ import tkinter as tk
 from typing import Callable, Sequence
 
 import customtkinter as ctk
+from aidas.ui.scrolling_text import ScrollingText
 from PIL import Image, ImageDraw, ImageTk
 
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
@@ -760,10 +761,11 @@ class AppStatusBar(ctk.CTkFrame):
             text_color=COLOR_PAIRS["success"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=10),
         ).pack(side="left", padx=(10, 0))
-        self.label = ctk.CTkLabel(
+        self.label = ScrollingText(
             self,
             text=text,
-            anchor="w",
+            padding=0,
+            fg_color=COLOR_PAIRS["surface_subtle"],
             text_color=COLOR_PAIRS["muted_text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
         )

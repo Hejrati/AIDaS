@@ -3028,6 +3028,7 @@ class Step4Frame(SidebarStepFrame):
         self.volume = None
         self.image = None
         self.current_path = None
+        self._notify_image_path_changed()
         self.current_stem = "_flat_LIGHT"
         self.current_roi_idx = 0
         self.completed = {}
@@ -3265,6 +3266,7 @@ class Step4Frame(SidebarStepFrame):
         self._set_batch_folder_label(self.batch_roi_root)
         self.batch_roi_panel = Step4BatchROISelectionPanel(self, self.plot_container, self.batch_roi_root)
         self.batch_roi_panel.pack(fill="both", expand=True)
+        self._notify_image_path_changed()
         self._refresh_roi_list()
         self._update_confirm_button_state()
         self._update_continue_to_step5_button_state()
@@ -3277,6 +3279,7 @@ class Step4Frame(SidebarStepFrame):
                 panel.destroy()
             except tk.TclError:
                 pass
+        self._notify_image_path_changed()
         if restore_previous:
             self._show_canvas_actions()
             if self.image is not None:
@@ -3504,6 +3507,7 @@ class Step4Frame(SidebarStepFrame):
         self.volume = state.get("volume")
         self.image = state.get("image")
         self.current_path = state.get("current_path") or Path(state["path"])
+        self._notify_image_path_changed()
         self.current_stem = state.get("current_stem") or self.current_path.stem
         self.canvas = canvas
         self.figure = figure
@@ -3660,6 +3664,7 @@ class Step4Frame(SidebarStepFrame):
         self._warm_auto_detection_tools()
         self.volume = volume
         self.current_path = Path(path)
+        self._notify_image_path_changed()
         self.current_stem = self.current_path.stem
         self.input_dir_var.set(str(self.current_path.parent))
         self._input_dir_user_selected = True

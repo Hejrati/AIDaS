@@ -6,7 +6,12 @@ import unittest
 from unittest import mock
 
 import customtkinter as ctk
+from PIL import ImageColor, ImageTk
 
+from aidas.ui.popups import PopupPanel
+from aidas.ui.theme import (
+    COLORS, apply_appearance_mode, get_interface_mode, set_interface_mode,
+)
 from aidas.utils.ui_utils import HoverToolTip
 
 
@@ -256,6 +261,92 @@ class HoverToolTipTests(unittest.TestCase):
             HoverToolTip.dismiss_active()
             if root is not None:
                 root.destroy()
+
+    def test_hover_help_matches_menu_borders_and_keeps_text_inside_at_each_scale(self):
+        original_interface = get_interface_mode()
+        original_appearance = ctk.get_appearance_mode()
+        original_source = ctk.AppearanceModeTracker.appearance_mode_set_by
+        original_scaling = ctk.ScalingTracker.widget_scaling
+        root = None
+
+        class TransparentTipWindow(tk.Toplevel):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.withdraw()
+                self.attributes("-alpha", 0)
+
+        try:
+            try:
+                root = ctk.CTk()
+                root.withdraw()
+                root.attributes("-alpha", 0)
+                root.geometry("640x220+300+200")
+            except tk.TclError as exc:
+                self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
+            button = ctk.CTkButton(root, text="Settings")
+            button.pack(pady=20)
+            tooltip = HoverToolTip(button, "Open settings")
+            root.deiconify()
+            root.update()
+            with (
+                mock.patch("aidas.utils.ui_utils.tk.Toplevel", TransparentTipWindow),
+                mock.patch.object(tooltip, "_pointer_is_over_widget", return_value=True),
+            ):
+                for interface, appearance in (("Modern", "Dark"), ("Modern", "Light"),
+                                              ("Classic", "Light")):
+                    set_interface_mode(interface, redraw=False)
+                    apply_appearance_mode(appearance, root=root, force_ctk_redraw=True)
+                    root.update()
+                    for scale in (1, 1.25, 1.5, 2):
+                        ctk.set_widget_scaling(scale)
+                        root.update_idletasks()
+                        for text, wraplength in (
+                            ("Open settings", 320),
+                            ("Choose a parent folder. Eligible images in its subfolders "
+                             "are added to the work queue automatically.", 240),
+                            ("C:/OCT images/Patient 123/Left eye/Annotated scan.png", 0),
+                        ):
+                            with self.subTest(interface=interface, appearance=appearance,
+                                              scale=scale, wraplength=wraplength):
+                                tooltip._text = text
+                                tooltip._wraplength = wraplength
+                                tooltip._show_now()
+                                root.update()
+                                popup = tooltip.tipwindow
+                                self.assertIsNotNone(popup)
+                                shell = popup.winfo_children()[0]
+                                self.assertIsInstance(shell, PopupPanel)
+                                self.assertEqual(shell.cget("corner_radius"),
+                                                 0 if interface == "Classic" else 4)
+                                rendered = ImageTk.getimage(
+                                    shell._canvas._aidas_surface_photo,
+                                ).convert("RGB")
+                                width, height = rendered.size
+                                stroke = ImageColor.getrgb(COLORS.menu_border)
+                                surface = ImageColor.getrgb(COLORS.menu_surface)
+                                for x, y in ((0, height // 2), (width - 1, height // 2),
+                                             (width // 2, 0), (width // 2, height - 1)):
+                                    self.assertEqual(rendered.getpixel((x, y)), stroke)
+                                for x, y in ((1, height // 2), (width - 2, height // 2),
+                                             (width // 2, 1), (width // 2, height - 2)):
+                                    self.assertEqual(rendered.getpixel((x, y)), surface)
+                                label = shell.winfo_children()[0]
+                                self.assertGreater(label.winfo_x(), 1)
+                                self.assertGreater(label.winfo_y(), 1)
+                                self.assertLess(label.winfo_x() + label.winfo_width(), width - 1)
+                                self.assertLess(label.winfo_y() + label.winfo_height(), height - 1)
+                                self.assertEqual(label._label.cget("foreground"), COLORS.menu_text)
+                                tooltip._hide()
+                                self.assertIsNone(tooltip._pointer_after_id)
+        finally:
+            HoverToolTip.dismiss_active()
+            ctk.set_widget_scaling(original_scaling)
+            if root is not None:
+                root.destroy()
+            set_interface_mode(original_interface, redraw=False)
+            ctk.set_appearance_mode(
+                "System" if original_source == "system" else original_appearance
+            )
 
 
 if __name__ == "__main__":

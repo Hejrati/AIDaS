@@ -48,6 +48,7 @@ from aidas.core.display import (
     work_area_bounds,
 )
 from aidas.ui.components import AppButton, AppRunButton
+from aidas.ui.result_grid import ResultGridCanvas
 from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
@@ -5105,8 +5106,12 @@ class Step3Frame(SidebarStepFrame):
         )
         label.pack(fill="both", expand=True)
         source = image.convert("RGB")
+        redraw_after_id = None
+        rendered_size = None
 
         def redraw(_event=None):
+            nonlocal redraw_after_id, rendered_size
+            redraw_after_id = None
             try:
                 if not label.winfo_exists():
                     return
@@ -5115,6 +5120,8 @@ class Step3Frame(SidebarStepFrame):
             except tk.TclError:
                 return
             if width <= 1 or height <= 1:
+                return
+            if (width, height) == rendered_size:
                 return
             if plot_bounds is not None and plot_margins is not None:
                 left, top, fitted_width, fitted_height = self._result_preview_layout(
@@ -5127,15 +5134,36 @@ class Step3Frame(SidebarStepFrame):
                 top = 0 if align_top else (height - fitted.height) // 2
             canvas = Image.new("RGB", (width, height), background)
             canvas.paste(fitted, (left, top))
-            label.preview_photo = ImageTk.PhotoImage(canvas)
+            photo = ImageTk.PhotoImage(canvas, master=label)
             try:
-                label.configure(image=label.preview_photo)
+                label.configure(image=photo)
             except tk.TclError:
                 return
+            label.preview_photo = photo
+            rendered_size = (width, height)
             if on_image_layout is not None:
                 on_image_layout(label, (left, top, fitted.width, fitted.height))
 
-        label.bind("<Configure>", redraw, add="+")
+        def queue_redraw(_event=None):
+            nonlocal redraw_after_id
+            # Configure also fires when a scrolling window only moves. Those
+            # events must reuse the pixels already uploaded to Tk.
+            if _event is not None and (_event.width, _event.height) == rendered_size:
+                return
+            if redraw_after_id is None:
+                redraw_after_id = label.after_idle(redraw)
+
+        def cleanup(event):
+            nonlocal redraw_after_id, source
+            if event.widget is label:
+                if redraw_after_id is not None:
+                    label.after_cancel(redraw_after_id)
+                    redraw_after_id = None
+                label.preview_photo = None
+                source = None
+
+        label.bind("<Configure>", queue_redraw, add="+")
+        label.bind("<Destroy>", cleanup, add="+")
         if on_click is not None:
             label.configure(cursor="hand2", takefocus=True)
             label.bind("<Button-1>", lambda _event: on_click(), add="+")
@@ -5143,7 +5171,7 @@ class Step3Frame(SidebarStepFrame):
             label.bind("<space>", lambda _event: on_click(), add="+")
         if parent is self.plot_holder:
             self.canvas = label
-        self.after(0, redraw)
+        queue_redraw()
         return label
 
     @classmethod
@@ -5266,20 +5294,23 @@ class Step3Frame(SidebarStepFrame):
             max(1, round(source_height * scale_y)),
         )
 
-    @staticmethod
-    def _set_result_frame_path(frame, folder, prefix=None):
-        """Use a wrapping full-path header without widening the preview grid."""
-        path = str(Path(folder).expanduser().resolve())
-        label = ttk.Label(
-            frame, text=f"{prefix} — {path}" if prefix else path,
-            wraplength=400, justify="left", font=("", 10, "bold"),
-        )
-        frame.configure(labelwidget=label)
-        frame.bind(
-            "<Configure>",
-            lambda event: label.configure(wraplength=max(1, event.width - 24)),
-            add="+",
-        )
+    def _open_result_directory(self, folder):
+        """Open a result link in the platform's file manager."""
+        path = Path(folder).expanduser().resolve()
+        try:
+            if not path.is_dir():
+                raise FileNotFoundError(f"Results directory does not exist: {path}")
+            if os.name == "nt":
+                os.startfile(str(path))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError as exc:
+            messagebox.showerror(
+                "Open Results Folder", f"Could not open the results folder.\n{exc}",
+                parent=self.plot_holder.winfo_toplevel(),
+            )
 
     def _open_result_zoom(self, image, title):
         current = getattr(self, "_result_zoom_dialog", None)
@@ -5309,24 +5340,6 @@ class Step3Frame(SidebarStepFrame):
             )
         return ImageTk.PhotoImage(icon.resize((20, 20), Image.Resampling.LANCZOS))
 
-    @staticmethod
-    def _bind_result_grid_mousewheel(widget, canvas):
-        def scroll(event):
-            if getattr(event, "num", None) == 4:
-                direction = -1
-            elif getattr(event, "num", None) == 5:
-                direction = 1
-            else:
-                direction = -1 if event.delta > 0 else 1
-            canvas.yview_scroll(direction * 3, "units")
-            return "break"
-
-        widget.bind("<MouseWheel>", scroll, add="+")
-        widget.bind("<Button-4>", scroll, add="+")
-        widget.bind("<Button-5>", scroll, add="+")
-        for child in widget.winfo_children():
-            Step3Frame._bind_result_grid_mousewheel(child, canvas)
-
     def _render_result_grid(self, folders):
         folders = [Path(folder) for folder in folders]
         groups = self._group_result_folders(folders)
@@ -5335,183 +5348,59 @@ class Step3Frame(SidebarStepFrame):
 
         self._clear_plot_holder()
         self.batch_result_folders = folders
+        for group in groups:
+            group["root"] = group["root"].expanduser().resolve()
+            group["folders"] = {
+                name: group["folders"][name].expanduser().resolve()
+                for name in (self.RESULT_SIDE_ORDER if group["sided"] else ("result",))
+            }
+
+        def load_page(index):
+            group = groups[index]
+            sides = (
+                [(name.title(), group["folders"][name]) for name in self.RESULT_SIDE_ORDER]
+                if group["sided"] else [(None, group["folders"]["result"])]
+            )
+            pairs = []
+            for side_title, folder in sides:
+                previews = []
+                for result_title, filename in self.RESULT_IMAGE_ROWS:
+                    image = self._load_result_preview(folder, filename)
+                    previews.append((result_title, image, self._result_plot_bounds(image)))
+                margins = [self._result_plot_margins(image, bounds) for _title, image, bounds in previews]
+                first_bounds = previews[0][2]
+                pairs.append({
+                    "title": side_title,
+                    "folder": folder,
+                    "previews": previews,
+                    "margins": tuple(max(values) for values in zip(*margins)),
+                    "aspect": (first_bounds[3] - first_bounds[1]) / max(1, first_bounds[2] - first_bounds[0]),
+                })
+            return pairs
 
         viewport = ttk.Frame(self.plot_holder)
         viewport.pack(fill="both", expand=True)
         viewport.rowconfigure(0, weight=1)
         viewport.columnconfigure(0, weight=1)
-
-        background = resolve_color(COLOR_PAIRS["surface"])
-        expand_icon = self._result_expand_icon()
-        canvas = tk.Canvas(
-            viewport,
-            bg=background,
-            borderwidth=0,
-            highlightthickness=0,
+        palette = {
+            name: resolve_color(COLOR_PAIRS[name])
+            for name in ("surface", "text", "border", "link", "button", "button_hover")
+        }
+        canvas = ResultGridCanvas(
+            viewport, groups=groups, preview_titles=tuple(title for title, _filename in self.RESULT_IMAGE_ROWS),
+            load_page=load_page,
+            preview_layout=self._result_preview_layout,
+            on_zoom=self._open_result_zoom, on_open_folder=self._open_result_directory,
+            palette=palette, expand_icon=self._result_expand_icon(),
+            bg=palette["surface"], borderwidth=0, highlightthickness=0,
         )
         scrollbar = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
         canvas.configure(yscrollcommand=scrollbar.set)
         canvas.grid(row=0, column=0, sticky="nsew")
         scrollbar.grid(row=0, column=1, sticky="ns")
-
-        grid = ttk.Frame(canvas, padding=(12, 8, 12, 12))
-        window_id = canvas.create_window((0, 0), window=grid, anchor="nw")
-        grid.bind(
-            "<Configure>",
-            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
-            add="+",
-        )
-
-        def resize_grid(event):
-            # Keep each subject within a viewport, with the grid's top/bottom
-            # padding counted once so the last subject title stays visible.
-            vertical_padding = 20
-            page_height = max(1, event.height - vertical_padding)
-            canvas.itemconfigure(
-                window_id,
-                width=event.width,
-                height=page_height * len(groups) + vertical_padding,
-            )
-
-        canvas.bind(
-            "<Configure>",
-            resize_grid,
-            add="+",
-        )
-
-        for group_index, group in enumerate(groups):
-            subject = ttk.LabelFrame(grid, padding=(10, 6, 10, 10))
-            self._set_result_frame_path(subject, group["root"])
-            subject.grid(row=group_index, column=0, sticky="nsew", pady=(0, 10))
-            grid.rowconfigure(group_index, weight=1, uniform="result-subject")
-            subject.columnconfigure(0, weight=1)
-
-            if group["sided"]:
-                sides = [
-                    (side_name.title(), group["folders"][side_name])
-                    for side_name in self.RESULT_SIDE_ORDER
-                ]
-            else:
-                sides = [(None, group["folders"]["result"])]
-
-            for side_index, (side_title, folder) in enumerate(sides):
-                if side_title is None:
-                    result_pair = subject
-                else:
-                    result_pair = ttk.LabelFrame(
-                        subject, padding=(5, 4, 5, 5)
-                    )
-                    side_label = ttk.Label(
-                        result_pair, text=side_title, font=("", 10, "bold")
-                    )
-                    result_pair.configure(labelwidget=side_label)
-                    result_pair.grid(
-                        row=side_index, column=0, sticky="nsew", pady=(0, 5)
-                    )
-                    subject.rowconfigure(side_index, weight=1, uniform="result-side-row")
-                result_pair.rowconfigure(1, weight=1)
-
-                previews = []
-                for result_title, filename in self.RESULT_IMAGE_ROWS:
-                    image = self._load_result_preview(folder, filename)
-                    bounds = self._result_plot_bounds(image)
-                    previews.append((result_title, image, bounds))
-                margins = [self._result_plot_margins(image, bounds) for _title, image, bounds in previews]
-                shared_margins = tuple(max(values) for values in zip(*margins))
-                first_bounds = previews[0][2]
-                plot_box_aspect = (first_bounds[3] - first_bounds[1]) / max(1, first_bounds[2] - first_bounds[0])
-
-                for column_index, (result_title, image, plot_bounds) in enumerate(previews):
-                    result_pair.columnconfigure(
-                        column_index, weight=1, uniform="result-image-column"
-                    )
-                    ttk.Label(
-                        result_pair,
-                        text=result_title,
-                        anchor="center",
-                        font=("", 10, "bold"),
-                    ).grid(row=0, column=column_index, sticky="ew", padx=5, pady=(0, 4))
-                    zoom_parts = [group["label"], side_title, result_title]
-                    zoom_title = " — ".join(part for part in zoom_parts if part)
-                    image_host = ttk.Frame(result_pair)
-                    image_host.grid(
-                        row=1,
-                        column=column_index,
-                        sticky="nsew",
-                        padx=5,
-                        pady=5,
-                    )
-                    image_host.pack_propagate(False)
-                    def open_zoom(image=image, title=zoom_title):
-                        self._open_result_zoom(image, title)
-
-                    expand_button = ttk.Button(
-                        image_host,
-                        image=expand_icon,
-                        style="AIDaS.Icon.TButton",
-                        width=0,
-                        compound="image",
-                        command=open_zoom,
-                        cursor="hand2",
-                        takefocus=True,
-                    )
-                    expand_button.expand_icon = expand_icon
-
-                    def refresh_expand_icon(button=expand_button):
-                        button.expand_icon = self._result_expand_icon()
-                        button.configure(image=button.expand_icon)
-
-                    expand_button._apply_aidas_theme = refresh_expand_icon
-
-                    def position_expand_button(
-                        preview,
-                        bounds,
-                        button=expand_button,
-                        panel=plot_bounds,
-                        source_size=image.size,
-                    ):
-                        left, top, width, height = bounds
-                        source_width, source_height = source_size
-                        # Round the transformed panel edges inward so the
-                        # complete button stays inside the visible plot box.
-                        panel_left = left + (panel[0] * width + source_width - 1) // source_width
-                        panel_top = top + (panel[1] * height + source_height - 1) // source_height
-                        panel_right = left + panel[2] * width // source_width
-                        panel_bottom = top + panel[3] * height // source_height
-                        button_width = button.winfo_reqwidth()
-                        button_height = button.winfo_reqheight()
-                        inset = 8
-                        if (
-                            panel_right - panel_left < button_width + 2 * inset
-                            or panel_bottom - panel_top < button_height + 2 * inset
-                        ):
-                            button.place_forget()
-                            return
-                        button.place(
-                            x=preview.winfo_x() + panel_left + inset,
-                            y=preview.winfo_y() + panel_bottom - inset,
-                            anchor="sw",
-                        )
-                        button.lift()
-
-                    preview = self._display_preview_image(
-                        image,
-                        background=background,
-                        parent=image_host,
-                        on_click=open_zoom,
-                        on_image_layout=position_expand_button,
-                        align_top=True,
-                        plot_bounds=plot_bounds,
-                        plot_margins=shared_margins,
-                        plot_box_aspect=plot_box_aspect,
-                    )
-                    HoverToolTip(preview, f"Click to maximize {zoom_title}.")
-                    HoverToolTip(expand_button, f"Maximize {result_title} preview.")
-
-        grid.columnconfigure(0, weight=1)
+        canvas._hover_tooltip = HoverToolTip(canvas, "", anchor_bounds=canvas._tooltip_bounds)
         self.canvas = canvas
-        self.batch_results_grid = grid
-        self._bind_result_grid_mousewheel(grid, canvas)
+        self.batch_results_grid = canvas
 
     def _open_batch_r_result_tabs(self, folders):
         """Display completed batch results in the shared diagnostic grid."""

@@ -45,6 +45,7 @@ from aidas.ui.components import (
 )
 from aidas.ui.menu_bar import ApplicationMenuBar
 from aidas.ui.scrolling import SettingsScrollableFrame
+from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.splash import SplashWindow
 from aidas.ui.theme import (
     APPEARANCE_MODES,
@@ -1825,7 +1826,8 @@ class AIDaSApp(ctk.CTk):
         self._workflow_completion_popup_job = None
         self._build_workflow_header()
         self._build_progress_strip()
-        self._build_status_surface(f"AIDaS v{__version__} — ready")
+        self._build_status_surface("")
+        self.bind("<<AIDaSImagePathChanged>>", self._refresh_image_path_status, add="+")
 
         self.notebook = ttk.Notebook(self, style="AIDaS.TNotebook")
         self.notebook.pack(fill="both", expand=True)
@@ -2351,11 +2353,11 @@ class AIDaSApp(ctk.CTk):
             return status_bar
 
         self.status_bar = None
-        status = ttk.Label(
+        status = ScrollingText(
             self,
             text=str(text),
-            style="AIDaS.Status.TLabel",
-            anchor="w",
+            text_color=COLOR_PAIRS["muted_text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
         )
         self.status = status
         self._pack_shell_surface(status, side="bottom")
@@ -2366,7 +2368,7 @@ class AIDaSApp(ctk.CTk):
         try:
             return str(status.cget("text"))
         except (AttributeError, tk.TclError):
-            return f"AIDaS v{__version__} — ready"
+            return ""
 
     def _destroy_status_surface(self) -> None:
         status_bar = self.__dict__.get("status_bar")
@@ -2578,7 +2580,37 @@ class AIDaSApp(ctk.CTk):
         """Show a transient application-level status without assuming startup is complete."""
         status = getattr(self, "status", None)
         if status is not None:
-            status.configure(text=f"AIDaS v{__version__} — {message}")
+            status.configure(text=str(message))
+            self._refresh_image_path_status()
+
+    def _refresh_image_path_status(self, _event=None) -> None:
+        """Display only the image belonging to the currently visible workflow."""
+        notebook = self.__dict__.get("notebook")
+        status = self.__dict__.get("status")
+        if notebook is None or status is None:
+            return
+        try:
+            index = notebook.index(notebook.select())
+        except (tk.TclError, TypeError, ValueError):
+            return
+        path = None
+        if index == 1:
+            step = self.__dict__.get("step2")
+            if step is not None and not getattr(step, "batch_segmentation_panel", None):
+                state = getattr(step, "_batch_result_states", {}).get(
+                    getattr(step, "_active_batch_result_tab", None), {},
+                )
+                path = state.get("input") or getattr(step, "current_file", None)
+        elif index == 3:
+            step = self.__dict__.get("step4")
+            if step is not None and not getattr(step, "batch_roi_panel", None):
+                state = getattr(step, "batch_roi_tab_states", {}).get(
+                    getattr(step, "_active_batch_roi_tab", None), {},
+                )
+                path = state.get("path") or getattr(step, "current_path", None)
+        address = os.path.abspath(os.fspath(path)) if path and path != "Step 1 output" else ""
+        if status.cget("text") != address:
+            status.configure(text=address)
 
     def _select_workflow_step(self, index: int) -> None:
         """Select a workflow page without exposing its container to the header."""
@@ -2612,6 +2644,7 @@ class AIDaSApp(ctk.CTk):
                 header.select_step(selected_index)
             except (tk.TclError, TypeError, ValueError):
                 pass
+        self._refresh_image_path_status()
                 
         step5 = self.__dict__.get("step5")
         if step5 is not None:
@@ -2925,14 +2958,15 @@ class AIDaSApp(ctk.CTk):
         self._build_menu()
         if self.interface_mode == "Classic":
             status_text = (
-                f"AIDaS v{__version__} — Modern appearance saved as "
+                f"Modern appearance saved as "
                 f"{self.appearance_mode}"
             )
         else:
             status_text = (
-                f"AIDaS v{__version__} — appearance changed to {self.appearance_mode}"
+                f"Appearance changed to {self.appearance_mode}"
             )
         self.status.configure(text=status_text)
+        self._refresh_image_path_status()
         self.after_idle(lambda: refresh_native_widgets(self))
         step3 = getattr(self, "step3", None)
         if step3 is not None:

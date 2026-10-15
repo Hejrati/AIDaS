@@ -383,7 +383,7 @@ class InterfacePreferenceTests(unittest.TestCase):
         apply.assert_called_once_with("Light", root=app, style=app.style)
         self.assertEqual(app.appearance_mode, "Dark")
         self.assertEqual(app.preferences.saved, [("appearance_mode", "Dark")])
-        self.assertIn("Modern appearance saved", app.status.options["text"])
+        self.assertEqual(app.status.options["text"], "")
 
     def test_classic_menu_keeps_all_application_callbacks(self):
         app = self._app_stub()

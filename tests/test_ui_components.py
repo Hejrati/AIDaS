@@ -275,9 +275,9 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("RESULT_SIDE_ORDER", grid_source)
         self.assertIn("RESULT_IMAGE_ROWS", grid_source)
         self.assertIn("_open_result_zoom", grid_source)
-        self.assertIn("height=page_height * len(groups) + vertical_padding", grid_source)
-        self.assertIn('uniform="result-image-column"', grid_source)
-        self.assertIn("image_host.pack_propagate(False)", grid_source)
+        self.assertIn("groups=groups", grid_source)
+        self.assertIn("ResultGridCanvas", grid_source)
+        self.assertIn("on_open_folder=self._open_result_directory", grid_source)
         self.assertIn('label.bind("<Button-1>"', preview_source)
 
     def test_step3_batch_selector_omits_redundant_top_description(self):
@@ -344,7 +344,7 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertNotIn("btn_skip = action_button(", source)
         self.assertNotIn("btn_set = action_button(", source)
         self.assertNotIn("btn_skip", source)
-        self.assertIn('text="Confirm fovea"', source)
+        self.assertIn('text="Set Fovea"', source)
         self.assertIn('text="Temporal"', source)
         self.assertIn('text="Nasal"', source)
 
@@ -361,9 +361,8 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
             button_pack = source.index(f"{button_name}.pack(", button_start)
             self.assertIn("actions_frame,", source[button_start:button_pack])
             self.assertLess(button_pack, prompt_pack)
-        self.assertIn("width=1", source)
-        self.assertIn('anchor="w"', source)
-        self.assertIn("prompt_tooltip.text = msg", source)
+        self.assertIn("prompt_label = ScrollingText(", source)
+        self.assertNotIn("prompt_tooltip", source)
 
     def test_fovea_and_side_prompts_are_required_in_sequence(self):
         source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)

@@ -15,7 +15,8 @@ from typing import Callable, Literal, Sequence
 import customtkinter as ctk
 
 from aidas.core.display import work_area_bounds
-from aidas.ui.theme import COLORS, COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
+from aidas.ui.popups import PopupPanel
+from aidas.ui.theme import COLORS, COLOR_PAIRS, TYPOGRAPHY
 
 
 MenuItemKind = Literal["command", "heading", "separator"]
@@ -32,8 +33,51 @@ class _MenuItem:
     enabled: bool = True
 
 
+class _PopupSeparator(ctk.CTkFrame):
+    """One solid pixel row with symmetric, DPI-scaled insets and spacing."""
+
+    # The row's outer four-pixel margin supplies the other half of the inset.
+    _INSET = 4
+    _GAP = 4
+
+    def __init__(self, master) -> None:
+        self._line_id = None
+        super().__init__(
+            master, height=2 * self._GAP + 1, corner_radius=0,
+            border_width=0, fg_color=COLOR_PAIRS["menu_surface"],
+        )
+        # Axis-aligned rules need integer pixels, not antialiased strokes.
+        self._line_id = tk.Canvas.create_rectangle(self._canvas, 0, 0, 0, 0, outline="")
+        self._resize_rule()
+
+    def _resize_rule(self) -> None:
+        scale = self._get_widget_scaling()
+        self.configure(height=(2 * round(self._GAP * scale) + 1) / scale)
+
+    def _set_scaling(self, *args, **kwargs) -> None:
+        super()._set_scaling(*args, **kwargs)
+        self._resize_rule()
+
+    def _draw(self, no_color_updates=False) -> None:
+        super()._draw(no_color_updates)
+        if self._line_id is None:
+            return
+        scale = self._get_widget_scaling()
+        width = round(self._current_width * scale)
+        height = round(self._current_height * scale)
+        inset = round(self._INSET * scale)
+        y = (height - 1) // 2
+        tk.Canvas.coords(self._canvas, self._line_id, inset, y, width - inset, y + 1)
+        tk.Canvas.itemconfigure(
+            self._canvas, self._line_id,
+            fill=self._apply_appearance_mode(COLOR_PAIRS["menu_separator"]),
+        )
+
+
 class _PopupCommandRow(ctk.CTkFrame):
-    """One full-width popup command with padded content columns."""
+    """Paint a command on the frame's canvas without nested label widgets."""
+
+    _CORNER_RADIUS = 4
 
     def __init__(
         self,
@@ -45,78 +89,84 @@ class _PopupCommandRow(ctk.CTkFrame):
         checked: bool,
         enabled: bool,
         check_column_width: int,
+        font: ctk.CTkFont,
         on_enter: Callable[[], None],
+        on_leave: Callable[[], None],
         on_invoke: Callable[[], None],
     ) -> None:
         self._enabled = bool(enabled)
-        cursor = "hand2" if self._enabled else "arrow"
-        text_color = (
-            COLOR_PAIRS["text"]
-            if self._enabled
-            else COLOR_PAIRS["disabled_text"]
-        )
+        self._checked = bool(checked)
+        self._selected = False
+        self._font = font
+        self._check_column_width = check_column_width
+        self._text_id = None
         super().__init__(
             master,
             width=width,
             height=height,
-            corner_radius=SHAPES.corner_radius_sm,
+            corner_radius=self._CORNER_RADIUS,
             border_width=0,
-            fg_color=COLOR_PAIRS["surface_elevated"],
-            cursor=cursor,
+            fg_color=COLOR_PAIRS["menu_surface"],
+            cursor="arrow",
         )
-        self.grid_propagate(False)
-        self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
         self._on_enter = on_enter
+        self._on_leave = on_leave
         self._on_invoke = on_invoke
         self._pressed = False
+        # Draw a geometric tick through the shared antialiased renderer. A
+        # font glyph is baseline-dependent and gets jagged at small sizes.
+        self._check_id = self._canvas.create_line(
+            0, 0, 0, 0, 0, 0, width=1.5, capstyle=tk.ROUND, joinstyle=tk.ROUND,
+        )
+        self._text_id = self._canvas.create_text(0, 0, text=label, anchor="w")
+        self._draw()
+        self.bind("<Enter>", self._handle_enter, add="+")
+        self.bind("<Leave>", self._handle_leave, add="+")
+        self.bind("<ButtonPress-1>", self._handle_press, add="+")
+        self.bind("<ButtonRelease-1>", self._handle_invoke, add="+")
 
-        self.check_label = ctk.CTkLabel(
-            self,
-            text="\u2713" if checked else "",
-            # Leave the parent's rounded left corners visible while keeping
-            # the complete check/text alignment column at a fixed width.
-            width=max(1, check_column_width - SHAPES.corner_radius_sm),
-            height=height,
-            anchor="center",
-            fg_color=COLOR_PAIRS["surface_elevated"],
-            text_color=text_color,
-            cursor=cursor,
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.body_size,
-                weight=TYPOGRAPHY.semibold_weight,
-            ),
+    def _draw(self, no_color_updates=False) -> None:
+        super()._draw(no_color_updates)
+        if self._text_id is None:
+            return
+        scale = self._get_widget_scaling()
+        center_y = self._current_height * scale / 2
+        center_x = self._check_column_width * scale / 2
+        self._canvas.coords(
+            self._check_id,
+            center_x - 4 * scale, center_y,
+            center_x - scale, center_y + 3 * scale,
+            center_x + 4.5 * scale, center_y - 3 * scale,
         )
-        self.check_label.grid(
-            row=0,
-            column=0,
-            sticky="nsew",
-            padx=(SHAPES.corner_radius_sm, 0),
-        )
-        self.text_label = ctk.CTkLabel(
-            self,
-            text=label,
-            height=height,
-            anchor="w",
-            fg_color=COLOR_PAIRS["surface_elevated"],
-            text_color=text_color,
-            cursor=cursor,
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.body_size,
-            ),
-        )
-        self.text_label.grid(row=0, column=1, sticky="nsew", padx=(0, 12))
+        self._canvas.itemconfigure(self._check_id, width=1.5 * scale)
+        self._canvas.coords(self._text_id, self._check_column_width * scale, center_y)
+        font = self._apply_font_scaling(self._font)
+        self._canvas.itemconfigure(self._text_id, font=font)
+        self._paint_text()
 
-        for widget in (self, self.check_label, self.text_label):
-            widget.bind("<Enter>", self._handle_enter, add="+")
-            widget.bind("<ButtonPress-1>", self._handle_press, add="+")
-            widget.bind("<ButtonRelease-1>", self._handle_invoke, add="+")
+    def _paint_text(self) -> None:
+        token = "menu_hover_text" if self._selected else "menu_text"
+        if not self._enabled:
+            token = "menu_disabled_text"
+        color = self._apply_appearance_mode(COLOR_PAIRS[token])
+        self._canvas.itemconfigure(self._text_id, fill=color)
+        self._canvas.itemconfigure(
+            self._check_id, fill=color, state="normal" if self._checked else "hidden"
+        )
+
+    def set_checked(self, checked: bool) -> None:
+        checked = bool(checked)
+        if checked != self._checked:
+            self._checked = checked
+            self._paint_text()
 
     def _handle_enter(self, _event=None) -> None:
         if getattr(self, "_enabled", True):
             self._on_enter()
+
+    def _handle_leave(self, _event=None) -> None:
+        self._pressed = False
+        self._on_leave()
 
     def _handle_press(self, _event=None) -> str:
         if not getattr(self, "_enabled", True):
@@ -153,16 +203,13 @@ class _PopupCommandRow(ctk.CTkFrame):
             return False
 
     def set_selected(self, selected: bool) -> None:
-        """Apply one background across the complete row and both columns."""
+        """Repaint only when pointer or keyboard selection changes."""
 
-        color = (
-            COLOR_PAIRS["primary_soft"]
-            if selected and getattr(self, "_enabled", True)
-            else COLOR_PAIRS["surface_elevated"]
-        )
-        self.configure(fg_color=color)
-        self.check_label.configure(fg_color=color)
-        self.text_label.configure(fg_color=color)
+        selected = bool(selected) and self._enabled
+        if selected == self._selected:
+            return
+        self._selected = selected
+        self.configure(fg_color=COLOR_PAIRS["menu_hover" if selected else "menu_surface"])
 
     def set_enabled(self, enabled: bool) -> None:
         """Apply disabled semantics without replacing the cached row."""
@@ -172,29 +219,22 @@ class _PopupCommandRow(ctk.CTkFrame):
             return
         self._enabled = enabled
         self._pressed = False
-        cursor = "hand2" if enabled else "arrow"
-        text_color = (
-            COLOR_PAIRS["text"] if enabled else COLOR_PAIRS["disabled_text"]
-        )
-        self.configure(cursor=cursor)
-        self.check_label.configure(cursor=cursor, text_color=text_color)
-        self.text_label.configure(cursor=cursor, text_color=text_color)
         if not enabled:
             self.set_selected(False)
+        self._paint_text()
 
 
 class _PopupMenu(tk.Toplevel):
     """Borderless CTk popup with mouse and keyboard navigation."""
 
-    _MENU_WIDTH = 252
+    _MENU_WIDTH = 220
     _ITEM_MARGIN_X = 4
     _ITEM_GAP_Y = 0
-    _SEPARATOR_MARGIN_X = 8
-    _SEPARATOR_GAP_Y = 2
     _EDGE_PADDING_Y = 4
-    _ITEM_HEIGHT = CONTROLS.height_sm
+    _ITEM_HEIGHT = 24
     _CHECK_COLUMN_WIDTH = 26
     _HEADING_HEIGHT = 22
+    _FONT_SIZE = 13
 
     def __init__(
         self,
@@ -208,7 +248,7 @@ class _PopupMenu(tk.Toplevel):
         self.withdraw()
         self.overrideredirect(True)
         self.transient(master.winfo_toplevel())
-        self.configure(background=COLORS.border_strong)
+        self.configure(background=COLORS.menu_surface)
 
         self._items = tuple(items)
         self._menu_bar = master
@@ -219,33 +259,28 @@ class _PopupMenu(tk.Toplevel):
         self._selected = -1
         self._buttons: dict[int, _PopupCommandRow] = {}
         self._command_indices: list[int] = []
-        self._separators: list[tk.Frame] = []
+        self._separators: list[_PopupSeparator] = []
         self._outside_binding: str | None = None
+        self._focus_after_id: str | None = None
+        self._focus_check_after_id: str | None = None
 
-        panel = ctk.CTkFrame(
-            self,
-            width=self._MENU_WIDTH,
-            corner_radius=SHAPES.corner_radius_sm,
-            border_width=0,
-            fg_color=COLOR_PAIRS["surface_elevated"],
+        # Share fonts and use the longest label to avoid clipping at high DPI.
+        command_font = ctk.CTkFont(family=TYPOGRAPHY.family, size=self._FONT_SIZE)
+        heading_font = ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size)
+        menu_width = max(
+            self._MENU_WIDTH,
+            max((command_font.measure(item.label) for item in self._items), default=0)
+            + self._CHECK_COLUMN_WIDTH + 24,
         )
-        panel.pack(fill="both", expand=True, padx=1, pady=1)
+
+        panel = PopupPanel(self, width=menu_width, corner_radius=4)
+        self._panel = panel
+        panel.pack(fill="both", expand=True)
 
         for index, item in enumerate(self._items):
             if item.kind == "separator":
-                separator = tk.Frame(
-                    panel,
-                    height=1,
-                    borderwidth=0,
-                    highlightthickness=0,
-                    background=COLORS.border_strong,
-                )
-                separator.pack_propagate(False)
-                separator.pack(
-                    fill="x",
-                    padx=self._SEPARATOR_MARGIN_X,
-                    pady=self._SEPARATOR_GAP_Y,
-                )
+                separator = _PopupSeparator(panel)
+                separator.pack(fill="x", padx=self._ITEM_MARGIN_X)
                 self._separators.append(separator)
                 continue
 
@@ -255,12 +290,8 @@ class _PopupMenu(tk.Toplevel):
                     text=item.label.upper(),
                     height=self._HEADING_HEIGHT,
                     anchor="w",
-                    text_color=COLOR_PAIRS["muted_text"],
-                    font=ctk.CTkFont(
-                        family=TYPOGRAPHY.family,
-                        size=TYPOGRAPHY.caption_size,
-                        weight=TYPOGRAPHY.semibold_weight,
-                    ),
+                    text_color=COLOR_PAIRS["menu_muted_text"],
+                    font=heading_font,
                 ).pack(
                     fill="x",
                     padx=(
@@ -273,13 +304,15 @@ class _PopupMenu(tk.Toplevel):
 
             button = _PopupCommandRow(
                 panel,
-                width=self._MENU_WIDTH - (2 * self._ITEM_MARGIN_X),
+                width=menu_width - (2 * self._ITEM_MARGIN_X),
                 height=self._ITEM_HEIGHT,
                 label=item.label,
                 checked=item.checked,
                 enabled=item.enabled,
                 check_column_width=self._CHECK_COLUMN_WIDTH,
+                font=command_font,
                 on_enter=lambda row=index: self._select(row),
+                on_leave=lambda row=index: self._clear_selection(row),
                 on_invoke=lambda row=index: self._invoke(row),
             )
             button.pack(
@@ -296,12 +329,12 @@ class _PopupMenu(tk.Toplevel):
             if item.enabled:
                 self._command_indices.append(index)
 
-        # Let geometry negotiation size the popup to its rows, but retain a
-        # stable width so switching File/View/Help does not make the bar jump.
+        # Negotiate once during construction; cached opens retain this layout.
         panel.update_idletasks()
         requested_width = max(1, panel.winfo_reqwidth())
         requested_height = max(1, panel.winfo_reqheight())
-        self.geometry(f"{requested_width + 2}x{requested_height + 2}")
+        self._layout_scaling = panel._get_widget_scaling()
+        self.geometry(f"{requested_width}x{requested_height}")
 
         self.bind("<Escape>", self._close_from_event, add="+")
         self.bind("<Up>", lambda _event: self._move_selection(-1), add="+")
@@ -328,9 +361,7 @@ class _PopupMenu(tk.Toplevel):
         self._items = updated
         enabled_indices: list[int] = []
         for index, row in self._buttons.items():
-            text = "\u2713" if updated[index].checked else ""
-            if row.check_label.cget("text") != text:
-                row.check_label.configure(text=text)
+            row.set_checked(updated[index].checked)
             row.set_enabled(updated[index].enabled)
             if updated[index].enabled:
                 enabled_indices.append(index)
@@ -363,9 +394,7 @@ class _PopupMenu(tk.Toplevel):
         )
         self.deiconify()
         self.lift()
-        if self._command_indices:
-            self._select(self._command_indices[0])
-        self.after_idle(self._focus_if_visible)
+        self._focus_after_id = self.after_idle(self._focus_if_visible)
 
     def hide(self) -> None:
         """Withdraw the popup for fast reuse on the next menu click."""
@@ -373,16 +402,26 @@ class _PopupMenu(tk.Toplevel):
         if self._closed or not self._visible:
             return
         self._visible = False
+        self._clear_selection()
+        self._cancel_focus_callbacks()
         self._remove_outside_binding()
         self.withdraw()
         self._on_close(self)
 
     def _focus_if_visible(self) -> None:
+        self._focus_after_id = None
         if self._visible and not self._closed:
             try:
                 self.focus_force()
             except tk.TclError:
                 pass
+
+    def _cancel_focus_callbacks(self) -> None:
+        for name in ("_focus_after_id", "_focus_check_after_id"):
+            pending = getattr(self, name, None)
+            if pending is not None:
+                self.after_cancel(pending)
+                setattr(self, name, None)
 
     def _remove_outside_binding(self) -> None:
         binding = self._outside_binding
@@ -395,21 +434,34 @@ class _PopupMenu(tk.Toplevel):
             pass
 
     def _position_below(self, anchor: ctk.CTkButton) -> None:
-        self.update_idletasks()
-        width = max(1, self.winfo_reqwidth())
-        height = max(1, self.winfo_reqheight())
+        scaling = self._panel._get_widget_scaling()
+        if scaling != self._layout_scaling:
+            # Only scaling changes require new geometry negotiation. Ordinary
+            # opens must not flush unrelated idle work across the application.
+            self.update_idletasks()
+            self._layout_scaling = scaling
+        # Tk toplevel geometry is in physical pixels. Re-read the CTk panel's
+        # request so a cached popup follows changes to widget/DPI scaling.
+        width = max(1, self._panel.winfo_reqwidth())
+        height = max(1, self._panel.winfo_reqheight())
         x = anchor.winfo_rootx()
         y = anchor.winfo_rooty() + anchor.winfo_height()
         left, top, right, bottom = work_area_bounds(self, parent=self._owner)
         x = max(left, min(x, right - width))
         if y + height > bottom:
             y = max(top, anchor.winfo_rooty() - height)
-        self.geometry(f"+{x}+{y}")
+        self.geometry(f"{width}x{height}+{x}+{y}")
 
     def _apply_aidas_theme(self) -> None:
-        self.configure(background=COLORS.border_strong)
-        for separator in self._separators:
-            separator.configure(background=COLORS.border_strong)
+        self.configure(background=COLORS.menu_surface)
+
+    def _clear_selection(self, index: int | None = None) -> None:
+        if index is not None and index != self._selected:
+            return
+        previous = self._buttons.get(self._selected)
+        if previous is not None:
+            previous.set_selected(False)
+        self._selected = -1
 
     def _select(self, index: int) -> None:
         if index not in self._command_indices:
@@ -473,10 +525,11 @@ class _PopupMenu(tk.Toplevel):
         self.hide()
 
     def _schedule_focus_check(self, _event=None) -> None:
-        if self._visible and not self._closed:
-            self.after(20, self._close_if_focus_outside)
+        if self._visible and not self._closed and self._focus_check_after_id is None:
+            self._focus_check_after_id = self.after(20, self._close_if_focus_outside)
 
     def _close_if_focus_outside(self) -> None:
+        self._focus_check_after_id = None
         if self._closed or not self._visible:
             return
         focused = self.focus_get()
@@ -493,6 +546,7 @@ class _PopupMenu(tk.Toplevel):
         was_visible = self._visible
         self._closed = True
         self._visible = False
+        self._cancel_focus_callbacks()
         self._remove_outside_binding()
         try:
             super().destroy()
@@ -510,9 +564,9 @@ class ApplicationMenuBar(ctk.CTkFrame):
     """
 
     MENU_NAMES = ("File", "View", "Help")
-    _BAR_HEIGHT = 34
+    _BAR_HEIGHT = 30
     _BUTTON_WIDTH = 50
-    _BUTTON_HEIGHT = 28
+    _BUTTON_HEIGHT = 24
     _ROW_PADDING_X = 6
     _ROW_PADDING_Y = (2, 3)
     _BUTTON_GAP = 2
@@ -575,17 +629,18 @@ class ApplicationMenuBar(ctk.CTkFrame):
                 command=lambda name=menu_name: self._toggle_menu(name),
                 width=self._BUTTON_WIDTH,
                 height=self._BUTTON_HEIGHT,
-                corner_radius=SHAPES.corner_radius_sm,
+                corner_radius=4,
                 border_width=0,
                 fg_color="transparent",
-                hover_color=COLOR_PAIRS["primary_soft"],
-                text_color=COLOR_PAIRS["text"],
+                hover_color=COLOR_PAIRS["menu_hover"],
+                text_color=COLOR_PAIRS["menu_text"],
                 font=ctk.CTkFont(
                     family=TYPOGRAPHY.family,
                     size=TYPOGRAPHY.body_size,
                 ),
             )
             button.pack(side="left", padx=(0, self._BUTTON_GAP))
+            button.bind("<Enter>", lambda _event, name=menu_name: self._hover_menu(name), add="+")
             button.bind("<Down>", lambda _event, name=menu_name: self._open_from_key(name), add="+")
             button.bind("<Return>", lambda _event, name=menu_name: self._open_from_key(name), add="+")
             button.bind("<space>", lambda _event, name=menu_name: self._open_from_key(name), add="+")
@@ -817,7 +872,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         self._reset_button_colors()
         self._active_menu = menu_name
         anchor = self._buttons[menu_name]
-        anchor.configure(fg_color=COLOR_PAIRS["primary_soft"])
+        anchor.configure(fg_color=COLOR_PAIRS["menu_hover"])
         popup = self._popup_cache[menu_name]
         popup.set_items(self._items_for(menu_name))
         self._popup = popup
@@ -825,7 +880,13 @@ class ApplicationMenuBar(ctk.CTkFrame):
 
     def _open_from_key(self, menu_name: str) -> str:
         self._open_menu(menu_name)
+        if self._popup is not None:
+            self._popup._select_edge(first=True)
         return "break"
+
+    def _hover_menu(self, menu_name: str) -> None:
+        if self._popup is not None and self._active_menu != menu_name:
+            self._open_menu(menu_name)
 
     def _popup_closed(self, popup: _PopupMenu) -> None:
         if self._popup is popup:
@@ -844,7 +905,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
             position = self.MENU_NAMES.index(active) if active is not None else 0
         except ValueError:
             position = 0
-        self._open_menu(self.MENU_NAMES[(position + delta) % len(self.MENU_NAMES)])
+        self._open_from_key(self.MENU_NAMES[(position + delta) % len(self.MENU_NAMES)])
 
     def _focus_adjacent(self, menu_name: str, delta: int) -> str:
         position = self.MENU_NAMES.index(menu_name)

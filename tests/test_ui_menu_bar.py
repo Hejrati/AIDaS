@@ -1,23 +1,29 @@
 from __future__ import annotations
 
-import inspect
+from collections import deque
 import tkinter as tk
 import unittest
+
+import customtkinter as ctk
+from PIL import ImageChops, ImageColor, ImageTk
 
 from aidas.ui.menu_bar import (
     ApplicationMenuBar,
     _MenuItem,
     _PopupCommandRow,
     _PopupMenu,
+    _PopupSeparator,
 )
-from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES
+from aidas.ui.theme import (
+    COLOR_PAIRS, COLORS, apply_appearance_mode, get_interface_mode, set_interface_mode,
+)
 
 
 class _SelectionRow:
     def __init__(self):
         self.states = []
         self.enabled_states = []
-        self.check_label = _OptionTarget(text="")
+        self.checked = False
 
     def set_selected(self, selected):
         self.states.append(bool(selected))
@@ -25,18 +31,8 @@ class _SelectionRow:
     def set_enabled(self, enabled):
         self.enabled_states.append(bool(enabled))
 
-
-class _OptionTarget:
-    def __init__(self, **options):
-        self.options = dict(options)
-        self.configure_calls = []
-
-    def cget(self, name):
-        return self.options[name]
-
-    def configure(self, **options):
-        self.options.update(options)
-        self.configure_calls.append(options)
+    def set_checked(self, checked):
+        self.checked = bool(checked)
 
 
 class _ColorTarget:
@@ -140,44 +136,38 @@ class MenuBarTests(unittest.TestCase):
         )
         self.assertGreater(ApplicationMenuBar._BUTTON_GAP, 0)
 
-    def test_popup_rows_use_standard_height_and_fixed_alignment_column(self):
-        self.assertEqual(_PopupMenu._ITEM_HEIGHT, CONTROLS.height_sm)
+    def test_popup_rows_use_compact_height_and_fixed_alignment_column(self):
+        self.assertEqual(_PopupMenu._ITEM_HEIGHT, 24)
         self.assertEqual(_PopupMenu._ITEM_MARGIN_X, 4)
         self.assertEqual(_PopupMenu._ITEM_GAP_Y, 0)
         self.assertGreater(_PopupMenu._CHECK_COLUMN_WIDTH, 0)
         self.assertEqual(
             _PopupMenu._MENU_WIDTH - (2 * _PopupMenu._ITEM_MARGIN_X),
-            244,
+            212,
         )
 
     def test_popup_selection_surface_uses_uniform_rounded_inset(self):
-        source = inspect.getsource(_PopupCommandRow.__init__)
-
-        self.assertIn("corner_radius=SHAPES.corner_radius_sm", source)
+        self.assertEqual(_PopupCommandRow._CORNER_RADIUS, 4)
         self.assertEqual(_PopupMenu._ITEM_MARGIN_X, 4)
         self.assertEqual(_PopupMenu._EDGE_PADDING_Y, 4)
         self.assertEqual(_PopupMenu._ITEM_GAP_Y, 0)
 
     def test_popup_separator_is_compact_and_visible(self):
-        source = inspect.getsource(_PopupMenu.__init__)
+        self.assertEqual(_PopupSeparator._GAP, 4)
+        self.assertEqual(_PopupSeparator._INSET + _PopupMenu._ITEM_MARGIN_X, 8)
 
-        self.assertEqual(_PopupMenu._SEPARATOR_GAP_Y, 2)
-        self.assertIn("separator = tk.Frame(", source)
-        self.assertIn("background=COLORS.border_strong", source)
-
-    def test_popup_row_selection_colors_the_whole_two_column_surface(self):
+    def test_popup_row_selection_skips_repainting_unchanged_state(self):
         row = _PopupCommandRow.__new__(_PopupCommandRow)
-        row.configure = _ColorTarget().configure
-        row.check_label = _ColorTarget()
-        row.text_label = _ColorTarget()
+        target = _ColorTarget()
+        row.configure = target.configure
+        row._enabled = True
+        row._selected = False
 
         row.set_selected(True)
-        self.assertEqual(row.check_label.colors[-1], COLOR_PAIRS["primary_soft"])
-        self.assertEqual(row.text_label.colors[-1], COLOR_PAIRS["primary_soft"])
-
+        row.set_selected(True)
+        self.assertEqual(target.colors, [COLOR_PAIRS["menu_hover"]])
         row.set_selected(False)
-        self.assertEqual(row.check_label.colors[-1], COLOR_PAIRS["surface_elevated"])
-        self.assertEqual(row.text_label.colors[-1], COLOR_PAIRS["surface_elevated"])
+        self.assertEqual(target.colors[-1], COLOR_PAIRS["menu_surface"])
 
     def test_keyboard_selection_still_moves_between_command_rows(self):
         popup = _PopupMenu.__new__(_PopupMenu)
@@ -322,6 +312,8 @@ class MenuBarTests(unittest.TestCase):
         popup = _PopupMenu.__new__(_PopupMenu)
         popup._closed = False
         popup._visible = True
+        popup._selected = -1
+        popup._buttons = {}
         popup._outside_binding = None
         popup._on_close = lambda hidden: closed.append(hidden)
         popup.withdraw = lambda: withdrawn.append(True)
@@ -446,6 +438,208 @@ class MenuBarTests(unittest.TestCase):
 
         self.assertEqual(bar.current_appearance, "Light")
         self.assertEqual(calls, [])
+
+
+class MenuRenderingTests(unittest.TestCase):
+    def setUp(self):
+        self.original_interface = get_interface_mode()
+        self.original_appearance = ctk.get_appearance_mode()
+        self.original_source = ctk.AppearanceModeTracker.appearance_mode_set_by
+        self.original_scaling = ctk.ScalingTracker.widget_scaling
+        set_interface_mode("Modern", redraw=False)
+        ctk.set_appearance_mode("Dark")
+        try:
+            self.root = ctk.CTk()
+        except tk.TclError as exc:
+            set_interface_mode(self.original_interface, redraw=False)
+            ctk.set_appearance_mode(
+                "System" if self.original_source == "system" else self.original_appearance
+            )
+            self.skipTest(f"A Tk display is unavailable: {exc}")
+        self.root.withdraw()
+        self.root.attributes("-alpha", 0)
+        self.root.geometry("640x320+0+0")
+        self.invoked = []
+        self.bar = ApplicationMenuBar(
+            self.root,
+            appearance_modes=("System", "Light", "Dark"),
+            current_appearance="Dark",
+            set_appearance_command=self.invoked.append,
+            interface_modes=("Modern", "Classic"),
+            current_interface="Modern",
+            set_interface_command=self.invoked.append,
+            browse_sdb_command=lambda: self.invoked.append("browse"),
+            check_updates_command=lambda: None,
+            about_command=lambda: None,
+        )
+        self.bar.pack(fill="x")
+        for popup in self.bar._popup_cache.values():
+            popup.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.root.update()
+
+    def tearDown(self):
+        ctk.set_widget_scaling(self.original_scaling)
+        self.root.destroy()
+        set_interface_mode(self.original_interface, redraw=False)
+        ctk.set_appearance_mode(
+            "System" if self.original_source == "system" else self.original_appearance
+        )
+
+    def test_command_rows_use_one_canvas_and_keep_all_labels_inside_at_each_scale(self):
+        for scaling in (1, 1.25, 1.5, 2):
+            with self.subTest(scaling=scaling):
+                ctk.set_widget_scaling(scaling)
+                self.root.update_idletasks()
+                for name, popup in self.bar._popup_cache.items():
+                    self.bar._open_menu(name)
+                    self.root.update()
+                    for row in popup._buttons.values():
+                        children = row.tk.call("winfo", "children", str(row))
+                        self.assertEqual(len(children), 1)
+                        left, top, right, bottom = row._canvas.bbox(row._text_id)
+                        self.assertGreaterEqual(left, 0)
+                        self.assertLess(right, row.winfo_width())
+                        self.assertGreaterEqual(top, 0)
+                        self.assertLessEqual(bottom, row.winfo_height())
+
+    def test_selected_row_and_checkmark_follow_appearance_without_rebuilding(self):
+        popup = self.bar._popup_cache["View"]
+        dark_index = next(i for i, item in enumerate(popup._items) if item.label == "Dark")
+        row = popup._buttons[dark_index]
+        popup._select(dark_index)
+        canvas_items = row._canvas.find_all()
+        for mode in ("Light", "Dark", "Light"):
+            apply_appearance_mode(mode, root=self.root)
+            self.root.update_idletasks()
+            self.assertEqual(row._canvas.itemcget(row._text_id, "fill"), COLORS.menu_hover_text)
+            self.assertEqual(row._canvas.itemcget(row._check_id, "fill"), COLORS.menu_hover_text)
+            self.assertEqual(row._canvas.itemcget(row._check_id, "state"), "normal")
+            self.assertEqual(popup.cget("background"), COLORS.menu_surface)
+            self.assertEqual(popup._panel.cget("border_color"), COLOR_PAIRS["menu_border"])
+            self.assertEqual(row._canvas.find_all(), canvas_items)
+
+    def test_cached_reopen_clears_selection_and_keyboard_can_invoke(self):
+        popup = self.bar._popup_cache["View"]
+        self.bar._open_from_key("View")
+        self.assertEqual(popup._selected, popup._command_indices[0])
+        self.bar.close_menu()
+        self.assertIsNone(popup._focus_after_id)
+        self.assertIsNone(popup._focus_check_after_id)
+        self.bar._open_menu("View")
+        self.assertIs(self.bar._popup, popup)
+        self.assertEqual(popup._selected, -1)
+        popup._move_selection(-1)
+        self.assertEqual(popup._items[popup._selected].label, "Dark")
+        popup._invoke_selected()
+        self.assertEqual(self.invoked, ["Dark"])
+        self.assertFalse(popup._visible)
+
+    def test_hover_switches_only_while_a_menu_is_open(self):
+        self.bar._hover_menu("View")
+        self.assertIsNone(self.bar._popup)
+        self.bar._open_menu("File")
+        file_popup = self.bar._popup
+        self.bar._hover_menu("Help")
+        self.assertFalse(file_popup._visible)
+        self.assertIs(self.bar._popup, self.bar._popup_cache["Help"])
+
+    def test_disabled_rows_ignore_pointer_and_keyboard_and_checks_stay_current(self):
+        popup = self.bar._popup_cache["View"]
+        self.bar.set_interface("Classic")
+        dark_index = next(i for i, item in enumerate(popup._items) if item.label == "Dark")
+        row = popup._buttons[dark_index]
+        row._handle_enter()
+        row._handle_press()
+        row._handle_invoke(_PointerEvent(row.winfo_rootx() + 5, row.winfo_rooty() + 5))
+        self.assertEqual(self.invoked, [])
+        self.assertNotIn(dark_index, popup._command_indices)
+        self.assertEqual(row._canvas.itemcget(row._text_id, "fill"), COLORS.menu_disabled_text)
+        self.bar.set_interface("Modern")
+        self.bar.set_appearance("Light")
+        self.assertIn(dark_index, popup._command_indices)
+        self.assertEqual(row._canvas.itemcget(row._check_id, "state"), "hidden")
+
+    def test_popup_outline_is_closed_and_one_pixel_thick_at_each_scale(self):
+        popup = self.bar._popup_cache["View"]
+        for scale in (1, 1.25, 1.5, 2):
+            with self.subTest(scale=scale):
+                ctk.set_widget_scaling(scale)
+                self.bar._open_menu("View")
+                self.root.update()
+                panel = popup._panel
+                rendered = ImageTk.getimage(panel._canvas._aidas_surface_photo).convert("RGB")
+                width, height = rendered.size
+                surface = ImageColor.getrgb(COLORS.menu_surface)
+                stroke = ImageColor.getrgb(COLORS.menu_border)
+                # All four straight edges occupy precisely one physical pixel.
+                for x in (0, width - 1):
+                    self.assertEqual(rendered.getpixel((x, height // 2)), stroke)
+                for y in (0, height - 1):
+                    self.assertEqual(rendered.getpixel((width // 2, y)), stroke)
+                for x, y in ((1, height // 2), (width - 2, height // 2),
+                             (width // 2, 1), (width // 2, height - 2)):
+                    self.assertEqual(rendered.getpixel((x, y)), surface)
+
+                # A flood from the outside must not leak through a corner join.
+                pixels = rendered.load()
+                outside = {(0, 0)}
+                pending = deque(outside)
+                while pending:
+                    x, y = pending.popleft()
+                    for nx, ny in ((x-1, y), (x+1, y), (x, y-1), (x, y+1)):
+                        if not (0 <= nx < width and 0 <= ny < height) or (nx, ny) in outside:
+                            continue
+                        if max(abs(a-b) for a, b in zip(pixels[nx, ny], surface)) < 4:
+                            outside.add((nx, ny))
+                            pending.append((nx, ny))
+                self.assertNotIn((width // 2, height // 2), outside)
+                # Dividers never cover the outline at their left/right edges.
+                for separator in popup._separators:
+                    self.assertGreater(separator.winfo_x(), 1)
+                    self.assertLess(separator.winfo_x() + separator.winfo_width(), width - 1)
+
+    def test_dividers_have_integer_pixel_geometry_at_each_scale(self):
+        popup = self.bar._popup_cache["View"]
+        for scale in (1, 1.25, 1.5, 2):
+            with self.subTest(scale=scale):
+                ctk.set_widget_scaling(scale)
+                self.bar._open_menu("View")
+                self.root.update()
+                for separator in popup._separators:
+                    x0, y0, x1, y1 = separator._canvas.coords(separator._line_id)
+                    self.assertEqual(y1 - y0, 1)
+                    self.assertEqual(x0, separator.winfo_width() - x1)
+                    self.assertEqual(y0, separator.winfo_height() - y1)
+                    self.assertEqual((x0, y0, x1, y1), tuple(map(round, (x0, y0, x1, y1))))
+                    self.assertEqual(separator._canvas.itemcget(separator._line_id, "fill"),
+                                     COLORS.menu_separator)
+
+    def test_checkmark_is_a_scalable_antialiased_path(self):
+        popup = self.bar._popup_cache["View"]
+        dark_index = next(i for i, item in enumerate(popup._items) if item.label == "Dark")
+        row = popup._buttons[dark_index]
+        for scale in (1, 1.25, 1.5, 2):
+            with self.subTest(scale=scale):
+                ctk.set_widget_scaling(scale)
+                self.bar._open_menu("View")
+                self.root.update()
+                self.assertEqual(row._canvas.type(row._check_id), "line")
+                effective_scale = row._get_widget_scaling()
+                self.assertAlmostEqual(float(row._canvas.itemcget(row._check_id, "width")),
+                                       1.5 * effective_scale)
+                checked = ImageTk.getimage(row._canvas._aidas_surface_photo).convert("RGB")
+                row.set_checked(False)
+                self.root.update_idletasks()
+                unchecked = ImageTk.getimage(row._canvas._aidas_surface_photo).convert("RGB")
+                bounds = ImageChops.difference(checked, unchecked).getbbox()
+                self.assertIsNotNone(bounds)
+                left, top, right, bottom = bounds
+                self.assertGreater(left, 0)
+                self.assertLess(right, row.winfo_width())
+                self.assertGreater(top, 0)
+                self.assertLess(bottom, row.winfo_height())
+                row.set_checked(True)
 
 
 if __name__ == "__main__":
