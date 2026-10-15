@@ -17,10 +17,11 @@ from typing import Mapping, TypeAlias
 import customtkinter as ctk
 
 from aidas.ui.rendering import install_smooth_borders
-from aidas.ui.windowing import synchronize_window_chrome
+from aidas.ui.windowing import synchronize_window_chrome, install_window_callback_cleanup
 
 
 install_smooth_borders()
+install_window_callback_cleanup()
 
 
 class _LiveColorPair(list[str]):

@@ -451,6 +451,8 @@ class AnnotationTutorialTests(unittest.TestCase):
                 root.update()
                 self.assertFalse(visible_tutorial(frame))
                 empty_geometry = canvas_geometry(frame)
+                empty_scrollbars = (frame.image_canvas._vsb.winfo_width(),
+                                    frame.image_canvas._hsb.winfo_height())
                 frame.set_annotation_tutorial_enabled(True)
                 root.update()
                 self.assertFalse(visible_tutorial(frame))
@@ -535,9 +537,16 @@ class AnnotationTutorialTests(unittest.TestCase):
                         self.assertEqual(frame.image_canvas.get_zoom(), zoom)
                         geometry = canvas_geometry(frame)
                         self.assertEqual(geometry[:2], empty_geometry[:2])
-                        # Classic's native scrollbar border changes the
-                        # viewport by two pixels; the banner reserves no row.
-                        for actual, expected in zip(geometry[2:], empty_geometry[2:]):
+                        # Native scrollbar sizes depend on the Windows theme.
+                        # Account for that change while checking that the
+                        # guide itself reserves no canvas space.
+                        scrollbars = (frame.image_canvas._vsb.winfo_width(),
+                                      frame.image_canvas._hsb.winfo_height())
+                        expected_viewport = tuple(
+                            size + old - new for size, old, new in
+                            zip(empty_geometry[2:], empty_scrollbars, scrollbars)
+                        )
+                        for actual, expected in zip(geometry[2:], expected_viewport):
                             self.assertAlmostEqual(actual, expected, delta=2)
                         self.assertEqual(banner.title._label.cget("foreground"),
                                          resolve_color(COLOR_PAIRS["text"], mode))

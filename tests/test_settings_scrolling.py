@@ -244,6 +244,8 @@ class SettingsScrollingTests(unittest.TestCase):
 
                 window.destroy()
                 assert not panel.winfo_exists()
+                from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker
+                assert ScalingTracker.update_loop_running
                 assert pending_redraw not in root.tk.call('after', 'info')
                 for command in binding_commands:
                     assert not root.tk.call('info', 'commands', command), command

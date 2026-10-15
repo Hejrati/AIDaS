@@ -20,6 +20,57 @@ _GA_ROOT = 2
 _DWMWA_COLOR_NONE = 0xFFFFFFFE
 
 
+def install_window_callback_cleanup():
+    """Cancel CTk window timers before Tk deletes their Tcl commands."""
+    import customtkinter as ctk
+    from customtkinter.windows.widgets.scaling.scaling_tracker import ScalingTracker
+    from customtkinter.windows.widgets.appearance_mode.appearance_mode_tracker import AppearanceModeTracker
+
+    def wrap_destroy(original):
+        def destroy(window):
+            window._aidas_destroying = True
+            owned = set(window._tclCommands or ())
+            restart_scaling = restart_appearance = False
+            for timer in window.tk.call("after", "info"):
+                script = window.tk.call("after", "info", timer)[0]
+                command = window.tk.splitlist(script)[0]
+                if command in owned:
+                    restart_scaling |= command.endswith("check_dpi_scaling")
+                    restart_appearance |= command.endswith("update")
+                    window.after_cancel(timer)
+            original(window)
+            for tracked in tuple(ScalingTracker.window_widgets_dict):
+                try:
+                    alive = tracked.winfo_exists()
+                except tk.TclError:
+                    alive = False
+                if not alive:
+                    ScalingTracker.window_widgets_dict.pop(tracked, None)
+                    ScalingTracker.window_dpi_scaling_dict.pop(tracked, None)
+            # CTk's shared polling loop may have been scheduled on this dialog.
+            # Move it to a surviving window so closing settings preserves DPI.
+            if restart_scaling:
+                root = window._root()
+                if root is not window and getattr(root, "_aidas_destroying", False):
+                    ScalingTracker.update_loop_running = False
+                else:
+                    ScalingTracker.update_loop_running = True
+                    ScalingTracker.check_dpi_scaling()
+            if restart_appearance:
+                AppearanceModeTracker.app_list[:] = [
+                    app for app in AppearanceModeTracker.app_list if app is not window
+                ]
+                AppearanceModeTracker.update_loop_running = True
+                AppearanceModeTracker.update()
+
+        return destroy
+
+    for window_class in (ctk.CTk, ctk.CTkToplevel):
+        if not window_class.__dict__.get("_aidas_callback_cleanup", False):
+            window_class.destroy = wrap_destroy(window_class.destroy)
+            window_class._aidas_callback_cleanup = True
+
+
 def _resolved_window_color(window: tk.Misc, color: WindowColor) -> str:
     """Resolve a CTk color pair without importing the theme module here."""
 
