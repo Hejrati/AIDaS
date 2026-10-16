@@ -3081,6 +3081,10 @@ class Step4Frame(SidebarStepFrame):
         self.plot_holder = self.plot_container
 
     def _cancel_batch_roi_open(self) -> None:
+        cancelled = self.__dict__.get("_batch_roi_open_cancel")
+        if cancelled is not None:
+            cancelled.set()
+        self._batch_roi_open_cancel = None
         job = self.__dict__.get("_batch_roi_open_after_id")
         self._batch_roi_open_after_id = None
         if job is not None:
@@ -3441,7 +3445,7 @@ class Step4Frame(SidebarStepFrame):
                 yield idx
 
             first_tab = notebook.tabs()[0] if notebook.tabs() else None
-            if first_tab:
+            if first_tab and not show_progress:
                 notebook.select(first_tab)
 
         tab_loader = create_tabs()
@@ -3451,11 +3455,72 @@ class Step4Frame(SidebarStepFrame):
             return
 
         loading_surface = self._show_batch_roi_loading_canvas(len(paths))
+        cancelled = self._batch_roi_open_cancel = threading.Event()
+        prepared = queue.SimpleQueue()
+        prepared_tab_key = None
 
         def finish_loading():
             self._batch_roi_open_after_id = None
-            if self.batch_roi_notebook is notebook:
+            if not cancelled.is_set() and self.batch_roi_notebook is notebook:
+                self._batch_roi_open_cancel = None
                 self._hide_batch_roi_loading_canvas()
+
+        def prepare_first_file(path):
+            # This worker owns no Tk widgets or Matplotlib figures. Loading the
+            # plotting modules here also keeps first-use imports/font discovery
+            # from stopping the progress animation on the UI thread.
+            try:
+                if cancelled.is_set():
+                    return
+                volume = load_oct_volume(path)
+                if cancelled.is_set():
+                    return
+                from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+                from matplotlib.figure import Figure
+                from matplotlib.patches import Rectangle
+                prepared.put(("loaded", volume))
+            except Exception as exc:
+                prepared.put(("error", exc))
+
+        def show_first_file():
+            self._batch_roi_open_after_id = None
+            if cancelled.is_set() or self.batch_roi_notebook is not notebook:
+                return
+            try:
+                result = prepared.get_nowait()
+            except queue.Empty:
+                self._batch_roi_open_after_id = self.after(16, show_first_file)
+                return
+            first_tab = notebook.tabs()[0] if notebook.tabs() else None
+            if first_tab is not None and str(first_tab) != prepared_tab_key:
+                start_first_file()
+                return
+            if first_tab is not None:
+                state = self.batch_roi_tab_states[str(first_tab)]
+                state["_prepared_load"] = result
+                try:
+                    notebook.select(first_tab)
+                except Exception as exc:
+                    self._clear_batch_roi_session()
+                    self._render_empty_canvas()
+                    messagebox.showerror("Batch ROI", f"Could not prepare files.\n{exc}", parent=self)
+                    return
+            # Tk owns all figure/widget creation. Hide the loading surface
+            # after the first canvas has settled its geometry and drawing.
+            self._batch_roi_open_after_id = self.after_idle(finish_loading)
+
+        def start_first_file():
+            nonlocal prepared_tab_key
+            if cancelled.is_set() or self.batch_roi_notebook is not notebook:
+                return
+            first_tab = notebook.tabs()[0] if notebook.tabs() else None
+            if first_tab is None:
+                self._batch_roi_open_after_id = self.after_idle(finish_loading)
+                return
+            path = self.batch_roi_tab_states[str(first_tab)]["path"]
+            prepared_tab_key = str(first_tab)
+            threading.Thread(target=prepare_first_file, args=(path,), daemon=True).start()
+            self._batch_roi_open_after_id = self.after(16, show_first_file)
 
         def open_next_tab():
             self._batch_roi_open_after_id = None
@@ -3464,9 +3529,7 @@ class Step4Frame(SidebarStepFrame):
             try:
                 completed = next(tab_loader)
             except StopIteration:
-                # Keep the loading canvas visible until the first plot's
-                # queued drawing and geometry updates have finished.
-                self._batch_roi_open_after_id = self.after_idle(finish_loading)
+                start_first_file()
                 return
             except Exception as exc:
                 self._clear_batch_roi_session()
@@ -3772,7 +3835,13 @@ class Step4Frame(SidebarStepFrame):
     def _load_path(self, path: str | os.PathLike, *, restore_state: dict | None = None) -> None:
         self._clear_current_roi_state()
         try:
-            volume = load_oct_volume(path)
+            prepared = restore_state.pop("_prepared_load", None) if restore_state is not None else None
+            if prepared is None:
+                volume = load_oct_volume(path)
+            elif prepared[0] == "error":
+                raise prepared[1]
+            else:
+                volume = prepared[1]
         except Exception as exc:
             if restore_state is not None:
                 self._dispose_roi_plot(restore_state.get("canvas"), restore_state.get("figure"))
@@ -4213,10 +4282,15 @@ class Step4Frame(SidebarStepFrame):
             if idx < len(self.profile_clicks[:2]):
                 boundary.set_xdata([self.profile_clicks[idx]] * 2)
 
-        self.canvas.draw()
         canvas_widget = self.canvas.get_tk_widget()
         if not canvas_widget.winfo_manager():
             canvas_widget.pack(fill="both", expand=True)
+        if self.__dict__.get("_batch_roi_loading_surface") is not None:
+            # Let packing/resize settle before painting the initial figure;
+            # otherwise TkAgg immediately redraws the provisional size again.
+            self.canvas.draw_idle()
+        else:
+            self.canvas.draw()
         self._place_line_positioning_checkbox()
         self._update_profile_status(profile)
         self._update_confirm_button_state()
