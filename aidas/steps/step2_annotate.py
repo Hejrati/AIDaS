@@ -41,6 +41,7 @@ from PIL import Image, ImageDraw, ImageTk
 from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.ui.annotation_guide import AnnotationGuide
+from aidas.ui.batch_selection import BatchSelectionMixin
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.tabs import ClosableTabView
@@ -242,7 +243,7 @@ def _resize_volume_to_shape(volume_3d, target_shape):
     return np.stack(resized_slices[:target_slices], axis=0)
 
 
-class Step2BatchSegmentationTable(ttk.Frame):
+class Step2BatchSegmentationTable(BatchSelectionMixin, ttk.Frame):
     """Fast folder table for Step 2 batch segmentation selection."""
 
     COLUMNS = ("folder", "status", "images")
@@ -385,13 +386,6 @@ class Step2BatchSegmentationTable(ttk.Frame):
                 tags=("locked",),
             )
 
-    def _image_for_row(self, row):
-        if row.get("locked"):
-            return self._checkbox_images["locked"]
-        if row.get("include"):
-            return self._checkbox_images["checked"]
-        return self._checkbox_images["unchecked"]
-
     def _values_for_row(self, row):
         values = row.get("values") or {}
         return (
@@ -449,57 +443,10 @@ class Step2BatchSegmentationTable(ttk.Frame):
             except tk.TclError:
                 pass
 
-    def _refresh_row(self, iid, row):
-        try:
-            self.tree.item(iid, image=self._image_for_row(row), values=self._values_for_row(row))
-        except tk.TclError:
-            pass
-
-    def _refresh_header_checkbox(self):
-        ready_rows = [row for row in self.rows if not row.get("locked")]
-        image = self._checkbox_images["unchecked"]
-        if ready_rows and all(bool(row.get("include")) for row in ready_rows):
-            image = self._checkbox_images["checked"]
-        try:
-            self.tree.heading("#0", image=image)
-        except tk.TclError:
-            pass
-
-    def _on_click(self, event):
-        if self.tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
-            return None
-        if self.tree.identify_column(event.x) != "#0":
-            return None
-        iid = self.tree.identify_row(event.y)
-        row = self._row_by_iid.get(iid)
-        if not row or row.get("locked"):
-            return "break"
-        row["include"] = not bool(row.get("include"))
-        self._refresh_row(iid, row)
-        self._refresh_header_checkbox()
-        self._notify_selection_changed()
-        return "break"
-
-    def _toggle_all_ready(self):
-        ready_rows = [row for row in self.rows if not row.get("locked")]
-        if not ready_rows:
-            return
-        include = not all(bool(row.get("include")) for row in ready_rows)
-        for iid, row in self._row_by_iid.items():
-            if row.get("locked"):
-                continue
-            row["include"] = include
-            self._refresh_row(iid, row)
-        self._refresh_header_checkbox()
-        self._notify_selection_changed()
-
     def _notify_selection_changed(self):
         callback = getattr(self, "_on_selection_changed", None)
         if callback is not None:
             callback(len(self.selected_rows()))
-
-    def selected_rows(self):
-        return [row for row in self.rows if row.get("include") and not row.get("locked")]
 
 
 class Step2BatchSegmentationSelectionPanel(ttk.Frame):

@@ -16,6 +16,7 @@ from aidas.services.step4_compiler import (
     DEFAULT_OUTPUT_FILENAME,
     compile_step4_results,
 )
+from aidas.ui.compiler import CompilerPresentationMixin
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import centered_logical_geometry, synchronize_window_chrome
@@ -25,7 +26,7 @@ from aidas.utils.ui_utils import (
 )
 
 
-class Step4CompilerDialog(ctk.CTkToplevel):
+class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
     """Collect compiler options and keep workbook work off the Tk thread."""
 
     PREFERRED_WIDTH = 720
@@ -33,6 +34,7 @@ class Step4CompilerDialog(ctk.CTkToplevel):
     MINIMUM_WIDTH = 620
     MINIMUM_HEIGHT = 500
     EVENT_POLL_MS = 75
+    COMPILER_PROGRESS_MESSAGE = "Compiling measurements…"
 
     def __init__(
         self,
@@ -320,58 +322,19 @@ class Step4CompilerDialog(ctk.CTkToplevel):
         root_folder, output_path = paths
         include_fovea = bool(self.include_fovea_var.get())
 
-        self._clear_log()
-        self._set_running(True)
-        self._worker = threading.Thread(
-            target=self._compile_worker,
-            args=(root_folder, output_path, include_fovea),
-            name="aidas-step4-compiler",
-            daemon=True,
+        self._start_compiler(
+            root_folder, output_path, include_fovea,
+            thread_name="aidas-step4-compiler",
         )
-        self._worker.start()
 
-    def _compile_worker(
-        self,
-        root_folder: Path,
-        output_path: Path,
-        include_fovea: bool,
-    ) -> None:
-        def emit(message: object) -> None:
-            self._events.put(("log", str(message)))
-
-        def report_progress(completed: int, total: int, message: str) -> None:
-            self._events.put(("progress", (completed, total, message)))
-
-        try:
-            result = compile_step4_results(
-                root_folder,
-                output_path,
-                include_fovea=include_fovea,
-                log_callback=emit,
-                progress_callback=report_progress,
-            )
-        except Exception as exc:
-            self._events.put(("error", exc))
-            return
-        self._events.put(("success", result))
+    def _compiler_function(self):
+        return compile_step4_results
 
     def _poll_events(self) -> None:
         self._poll_after_id = None
         if self._closing:
             return
-        try:
-            while True:
-                kind, payload = self._events.get_nowait()
-                if kind == "log":
-                    self._append_log(str(payload))
-                elif kind == "progress":
-                    self._update_progress(payload)
-                elif kind == "success":
-                    self._compilation_succeeded(payload)
-                elif kind == "error":
-                    self._compilation_failed(payload)
-        except queue.Empty:
-            pass
+        self._drain_compile_events()
         if not self._closing:
             self._poll_after_id = self.after(self.EVENT_POLL_MS, self._poll_events)
 
@@ -392,19 +355,6 @@ class Step4CompilerDialog(ctk.CTkToplevel):
         if running:
             self.status_var.set("Compiling measurements…")
             self.progress.configure(maximum=1, value=0)
-
-    def _update_progress(self, payload: object) -> None:
-        try:
-            completed_value, total_value, message_value = payload
-            total = max(1, int(total_value))
-            completed = min(total, max(0, int(completed_value)))
-        except (TypeError, ValueError):
-            return
-
-        self.progress.configure(maximum=total, value=completed)
-        percentage = round((completed / total) * 100)
-        message = str(message_value).strip() or "Compiling measurements…"
-        self.status_var.set(f"{message} ({percentage}%)")
 
     def _compilation_succeeded(self, result: object) -> None:
         self._set_running(False)
@@ -427,17 +377,6 @@ class Step4CompilerDialog(ctk.CTkToplevel):
             str(error),
             parent=self,
         )
-
-    def _clear_log(self) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
-
-    def _append_log(self, message: str) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"{message}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
 
     def close(self) -> None:
         if self._closing:

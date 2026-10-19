@@ -47,6 +47,7 @@ from aidas.core.display import (
     fit_size_to_bounds,
     work_area_bounds,
 )
+from aidas.ui.batch_selection import BatchSelectionMixin
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.result_grid import ResultGridCanvas
 from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
@@ -129,84 +130,6 @@ class RSetupWizard(ttk.Frame):
         else:
             self.destroy()
 
-    def _build_styles(self):
-        self.style = ttk.Style(self)
-        self.style.configure("WizardTitle.TLabel", font=("Segoe UI", 16, "bold"))
-        self.style.configure("WizardSubtitle.TLabel", foreground=COLORS.muted_text)
-        self.style.configure("WizardStep.TLabel", padding=(10, 7))
-        self.style.configure("WizardStepActive.TLabel", padding=(10, 7), font=("Segoe UI", 9, "bold"))
-        self.style.configure("WizardStepDone.TLabel", padding=(10, 7), foreground=COLORS.success)
-        self.style.configure("WizardAccent.TButton", padding=(10, 5))
-
-    def _build_shell(self):
-        root = ttk.Frame(self, padding=12)
-        root.pack(fill="both", expand=True)
-
-        header = ttk.Frame(root)
-        header.pack(fill="x", pady=(0, 10))
-        ttk.Label(header, text="R environment setup", style="WizardTitle.TLabel").pack(anchor="w")
-        ttk.Label(
-            header,
-            text=f"Set up R {self.step_frame.R_REQUIRED_VERSION} and the two packages required by Step 3.",
-            style="WizardSubtitle.TLabel",
-        ).pack(anchor="w", pady=(2, 0))
-
-        middle = ttk.Frame(root)
-        middle.pack(fill="both", expand=True)
-
-        self.step_rail = ttk.Frame(middle, width=180)
-        self.step_rail.pack(side="left", fill="y", padx=(0, 12))
-        self.step_rail.pack_propagate(False)
-        self.step_labels = []
-        for label in self.STEPS:
-            step_label = ttk.Label(self.step_rail, text=label, style="WizardStep.TLabel", anchor="w")
-            step_label.pack(fill="x", pady=1)
-            self.step_labels.append(step_label)
-
-        right = ttk.Frame(middle)
-        right.pack(side="left", fill="both", expand=True)
-
-        self.content = ttk.Frame(right)
-        self.content.pack(fill="both", expand=True)
-
-        log_frame = ttk.LabelFrame(right, text="Setup log")
-        log_frame.pack(fill="both", expand=False, pady=(10, 0))
-        self.log_text = tk.Text(log_frame, height=8, wrap="word", state="disabled")
-        log_scroll = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=log_scroll.set)
-        self.log_text.pack(side="left", fill="both", expand=True)
-        log_scroll.pack(side="right", fill="y")
-
-        footer = ttk.Frame(root)
-        footer.pack(fill="x", pady=(10, 0))
-        self.next_button = action_button(
-            footer,
-            self,
-            "Next",
-            self._next,
-            "next",
-            style="AIDaS.PrimaryAction.TButton",
-        )
-        self._wizard_finish_icon = load_action_icon(self, "confirm")
-        self.next_button.pack(side="right", padx=(4, 0))
-        self.back_button = action_button(footer, self, "Back", self._back, "previous")
-        self.back_button.pack(side="right", padx=(4, 0))
-
-        self.cancel_button = action_button(footer, self, "Cancel", self._cancel, "cancel")
-        self.cancel_button.pack(side="right")
-
-        self._log("R setup wizard opened.")
-
-    def _set_busy(self, busy, text=None):
-        self.busy = bool(busy)
-        for button in (self.back_button, self.next_button, self.cancel_button):
-            button.configure(state="disabled" if busy else "normal")
-        self._set_content_buttons("disabled" if busy else "normal")
-        if text:
-            self._log(text)
-        if not busy:
-            self._update_nav()
-
     def _set_content_buttons(self, state):
         def visit(parent):
             for child in parent.winfo_children():
@@ -215,42 +138,6 @@ class RSetupWizard(ttk.Frame):
                 visit(child)
 
         visit(self.content)
-
-    def _update_nav(self):
-        for idx, label in enumerate(self.step_labels):
-            prefix = "[x] " if idx < self.current_step else ("[>] " if idx == self.current_step else "[ ] ")
-            label.configure(text=prefix + self.STEPS[idx])
-            if idx < self.current_step:
-                label.configure(style="WizardStepDone.TLabel")
-            elif idx == self.current_step:
-                label.configure(style="WizardStepActive.TLabel")
-            else:
-                label.configure(style="WizardStep.TLabel")
-
-        self.back_button.configure(state="disabled" if self.current_step == 0 else "normal")
-        is_finish = self.current_step == len(self.STEPS) - 1
-        self.next_button.configure(
-            text="Finish" if is_finish else "Next",
-            image=self._wizard_finish_icon if is_finish else self.next_button._aidas_action_icon,
-        )
-        if self.current_step == 0 and self.rscript_path is None:
-            self.next_button.configure(state="disabled")
-        elif self.current_step == 1 and (
-            self.rscript_path is None or not self._all_packages_ready()
-        ):
-            self.next_button.configure(state="disabled")
-        else:
-            self.next_button.configure(state="normal")
-
-    def _render_step(self):
-        self._clear_content()
-        renderers = (
-            self._render_r_program,
-            self._render_packages,
-            self._render_finish,
-        )
-        renderers[self.current_step]()
-        self._update_nav()
 
     def _clear_content(self):
         for child in self.content.winfo_children():
@@ -364,175 +251,6 @@ class RSetupWizard(ttk.Frame):
         self.current_step = max(0, self.current_step - 1)
         self._render_step()
 
-    def _cancel(self):
-        if self.busy:
-            return
-        self.cancelled = True
-        self.result = None
-        self._dismiss(render_previous=True)
-
-    def _finish(self):
-        self.cancelled = False
-        self.result = Path(self.rscript_path) if self.rscript_path is not None else None
-        if self.result is not None:
-            self.step_frame.r_package_library_path = str(self.package_library_path)
-            if self.step_frame.preferences is not None:
-                self.step_frame.preferences.set("rscript_path", str(self.result))
-                self.step_frame.preferences.set("r_package_library_path", str(self.package_library_path))
-        callback = self.on_finish
-        result = self.result
-        self._dismiss(render_previous=callback is None)
-        if callback is not None:
-            self.step_frame.after(0, lambda: callback(result))
-
-    def _detect_rscript(self, schedule_package_check=True):
-        self.rscript_path = self.step_frame._resolve_rscript_executable()
-        self.package_status = {name: "pending" for name in self.setup_package_names}
-        self._log(f"Rscript detection: {self.rscript_path or 'not found'}")
-        self._refresh_status_display()
-        if self.rscript_path is not None and schedule_package_check:
-            self.after(100, self._check_packages)
-
-    def _locate_rscript(self):
-        selected = filedialog.askopenfilename(
-            title=f"Select R {self.step_frame.R_REQUIRED_VERSION} program",
-            initialdir=r"C:\Program Files\R" if os.name == "nt" else (self.step_frame.current_sdb_dir or None),
-            filetypes=[
-                ("R program", "*.exe"),
-                ("Executable files", "*.exe"),
-                ("All files", "*.*"),
-            ],
-        )
-        if not selected:
-            return
-        rscript = self.step_frame._normalize_r_executable(Path(selected))
-        if rscript is None:
-            messagebox.showerror(
-                "Select R program",
-                f"Please select Rscript.exe, R.exe, or Rterm.exe from the R "
-                f"{self.step_frame.R_REQUIRED_VERSION} installation.",
-                parent=self,
-            )
-            return
-        version = self.step_frame._r_version_for_executable(rscript)
-        if version != self.step_frame.R_REQUIRED_VERSION:
-            detected = version or "unknown"
-            messagebox.showerror(
-                "Unsupported R version",
-                f"This Step 3 setup only accepts R {self.step_frame.R_REQUIRED_VERSION}. "
-                f"The selected program reported R {detected}.",
-                parent=self,
-            )
-            self._log(f"Rejected manually selected R program {rscript} (version {detected}).")
-            return
-        self.rscript_path = rscript
-        self.package_status = {name: "pending" for name in self.setup_package_names}
-        if self.step_frame.preferences is not None:
-            self.step_frame.preferences.set("rscript_path", str(rscript))
-        self._log(f"Selected R {self.step_frame.R_REQUIRED_VERSION}: {rscript}")
-        self._refresh_status_display()
-        self.after(100, self._check_packages)
-
-    def _download_and_install_r(self, continue_to_packages=True):
-        if not self.installer_url:
-            self.installer_name = self.step_frame.R_INSTALLER_NAME
-            self.installer_url = self.step_frame.R_DOWNLOAD_PAGE + self.installer_name
-            self.installer_path = self._r_installer_cache_path()
-            self._log(f"R {self.step_frame.R_REQUIRED_VERSION} installer selected: {self.installer_url}")
-        self.installer_path = self.installer_path or self._r_installer_cache_path()
-        if self.installer_path.exists():
-            install_existing = messagebox.askyesno(
-                f"Install R {self.step_frame.R_REQUIRED_VERSION}",
-                "The R installer is already downloaded in the app's local files.\n\nInstall it now?",
-                parent=self,
-            )
-            if install_existing:
-                self._run_downloaded_installer(continue_to_packages=continue_to_packages)
-            return
-
-        def worker():
-            self.installer_path.parent.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(self.installer_url, self.installer_path)
-            return self.installer_path
-
-        def done(value, error):
-            if error:
-                self._log(f"R installer download failed: {error}")
-                messagebox.showerror("R Setup", f"Could not download R.\n{error}", parent=self)
-                return
-            self._log(f"Downloaded R installer: {value}")
-            install_now = messagebox.askyesno(
-                f"Install R {self.step_frame.R_REQUIRED_VERSION}",
-                f"R {self.step_frame.R_REQUIRED_VERSION} was downloaded successfully.\n\n"
-                "Do you want to install it now?",
-                parent=self,
-            )
-            if install_now:
-                self._run_downloaded_installer(continue_to_packages=continue_to_packages)
-            else:
-                messagebox.showinfo(
-                    "R Setup",
-                    "The installer was downloaded. You can install it later from this screen.",
-                    parent=self,
-                )
-
-        self._run_worker("Downloading R installer...", worker, done)
-
-    def _run_downloaded_installer(self, continue_to_packages=True):
-        installer_path = self.installer_path
-        if not installer_path or not installer_path.is_file():
-            messagebox.showwarning("R Setup", "Download the R installer first.", parent=self)
-            return
-
-        def worker():
-            return subprocess.run([str(installer_path)], check=False).returncode
-
-        def done(value, error):
-            if error:
-                self._log(f"R installer could not be started: {error}")
-                messagebox.showerror("R Setup", f"Could not run the R installer.\n{error}", parent=self)
-                return
-            self._log(f"R installer closed with return code {value}.")
-            self._detect_rscript(schedule_package_check=False)
-            if self.rscript_path is not None:
-                messagebox.showinfo(
-                    "R Setup",
-                    f"R {self.step_frame.R_REQUIRED_VERSION} is ready. Missing packages will now be installed.",
-                    parent=self,
-                )
-                if continue_to_packages:
-                    self.after(200, self._install_missing_packages)
-            else:
-                messagebox.showwarning(
-                    "R Setup",
-                    f"AIDaS still cannot find R {self.step_frame.R_REQUIRED_VERSION}. "
-                    "Use Check Again or Search Locally.",
-                    parent=self,
-                )
-
-        self._run_worker("Running R installer. Complete the installer window to continue.", worker, done)
-
-    def _cancel(self):
-        if self.busy:
-            return
-        self.cancelled = True
-        self.result = None
-        self._dismiss(render_previous=True)
-
-    def _finish(self):
-        self.cancelled = False
-        self.result = Path(self.rscript_path) if self.rscript_path is not None else None
-        if self.result is not None:
-            self.step_frame.r_package_library_path = str(self.package_library_path)
-            if self.step_frame.preferences is not None:
-                self.step_frame.preferences.set("rscript_path", str(self.result))
-                self.step_frame.preferences.set("r_package_library_path", str(self.package_library_path))
-        callback = self.on_finish
-        result = self.result
-        self._dismiss(render_previous=callback is None)
-        if callback is not None:
-            self.step_frame.after(0, lambda: callback(result))
-
     def _default_package_library(self):
         configured = getattr(self.step_frame, "r_package_library_path", None)
         if configured:
@@ -598,141 +316,10 @@ class RSetupWizard(ttk.Frame):
         self._set_busy(False)
         done(value, error)
 
-    def _detect_rscript(self):
-        self.rscript_path = self.step_frame._resolve_rscript_executable()
-        if hasattr(self, "r_status_var"):
-            self.r_status_var.set(
-                str(self.rscript_path)
-                if self.rscript_path
-                else f"R {self.step_frame.R_REQUIRED_VERSION} not found"
-            )
-        self._log(f"Rscript detection: {self.rscript_path or 'not found'}")
-        if self.current_step == 0:
-            self._render_step()
-        else:
-            self._update_nav()
-
-    def _locate_rscript(self):
-        selected = filedialog.askopenfilename(
-            title=f"Select R {self.step_frame.R_REQUIRED_VERSION} program",
-            initialdir=r"C:\Program Files\R" if os.name == "nt" else (self.step_frame.current_sdb_dir or None),
-            filetypes=[
-                ("R program", "*.exe"),
-                ("Executable files", "*.exe"),
-                ("All files", "*.*"),
-            ],
-        )
-        if not selected:
-            return
-        rscript = self.step_frame._normalize_r_executable(Path(selected))
-        if rscript is None:
-            messagebox.showerror(
-                "Select R program",
-                f"Please select Rscript.exe, R.exe, or Rterm.exe from the R "
-                f"{self.step_frame.R_REQUIRED_VERSION} installation.",
-                parent=self,
-            )
-            return
-        version = self.step_frame._r_version_for_executable(rscript)
-        if version != self.step_frame.R_REQUIRED_VERSION:
-            detected = version or "unknown"
-            messagebox.showerror(
-                "Unsupported R version",
-                f"This Step 3 setup only accepts R {self.step_frame.R_REQUIRED_VERSION}. "
-                f"The selected program reported R {detected}.",
-                parent=self,
-            )
-            self._log(f"Rejected manually selected R program {rscript} (version {detected}).")
-            return
-        self.rscript_path = rscript
-        if self.step_frame.preferences is not None:
-            self.step_frame.preferences.set("rscript_path", str(rscript))
-        if hasattr(self, "r_status_var"):
-            self.r_status_var.set(str(rscript))
-        self._log(f"Selected R {self.step_frame.R_REQUIRED_VERSION}: {rscript}")
-        self._render_step()
-
     def _r_installer_cache_path(self):
         local_app_data = os.environ.get("LOCALAPPDATA")
         base = (Path(local_app_data) / "AIDaS") if local_app_data else (Path.home() / ".aidas")
         return base / "R" / self.step_frame.R_INSTALLER_NAME
-
-    def _download_and_install_r(self):
-        if not self.installer_url:
-            self.installer_name = self.step_frame.R_INSTALLER_NAME
-            self.installer_url = self.step_frame.R_DOWNLOAD_PAGE + self.installer_name
-            self.installer_path = self._r_installer_cache_path()
-            self._log(f"R {self.step_frame.R_REQUIRED_VERSION} installer selected: {self.installer_url}")
-        self.installer_path = self.installer_path or self._r_installer_cache_path()
-        if self.installer_path.exists():
-            install_existing = messagebox.askyesno(
-                f"Install R {self.step_frame.R_REQUIRED_VERSION}",
-                "The R installer is already downloaded in the app's local files.\n\nInstall it now?",
-                parent=self,
-            )
-            if install_existing:
-                self._run_downloaded_installer()
-            return
-
-        def worker():
-            self.installer_path.parent.mkdir(parents=True, exist_ok=True)
-            urllib.request.urlretrieve(self.installer_url, self.installer_path)
-            return self.installer_path
-
-        def done(value, error):
-            if error:
-                self._log(f"R installer download failed: {error}")
-                messagebox.showerror("R Setup", f"Could not download R.\n{error}", parent=self)
-                return
-            self._log(f"Downloaded R installer: {value}")
-            install_now = messagebox.askyesno(
-                f"Install R {self.step_frame.R_REQUIRED_VERSION}",
-                f"R {self.step_frame.R_REQUIRED_VERSION} was downloaded successfully.\n\n"
-                "Do you want to install it now?",
-                parent=self,
-            )
-            if install_now:
-                self._run_downloaded_installer()
-            else:
-                if hasattr(self, "r_install_button"):
-                    self.r_install_button.configure(
-                        text=f"Install downloaded R {self.step_frame.R_REQUIRED_VERSION}"
-                    )
-                messagebox.showinfo(
-                    "R Setup",
-                    "The installer was downloaded. You can install it later from this screen.",
-                    parent=self,
-                )
-
-        self._run_worker("Downloading R installer...", worker, done)
-
-    def _run_downloaded_installer(self):
-        installer_path = self.installer_path
-        if not installer_path or not installer_path.is_file():
-            messagebox.showwarning("R Setup", "Download the R installer first.", parent=self)
-            return
-
-        def worker():
-            result = subprocess.run([str(installer_path)], check=False)
-            return result.returncode
-
-        def done(value, error):
-            if error:
-                self._log(f"R installer could not be started: {error}")
-                messagebox.showerror("R Setup", f"Could not run the R installer.\n{error}", parent=self)
-                return
-            self._log(f"R installer closed with return code {value}.")
-            self._detect_rscript()
-            if self.rscript_path is not None:
-                messagebox.showinfo("R Setup", "R 3.3.1 was found. Click Next to set up packages.", parent=self)
-            else:
-                messagebox.showwarning(
-                    "R Setup",
-                    "AIDaS still cannot find R 3.3.1. Finish the installer if it is still open, then click Check Again or Search Locally.",
-                    parent=self,
-                )
-
-        self._run_worker("Running R installer. Complete the installer window to continue.", worker, done)
 
     def _package_check_expression(self, package_name):
         lib = self._r_string(self.package_library_path.resolve())
@@ -768,48 +355,6 @@ class RSetupWizard(ttk.Frame):
                 f"type='win.binary', lib={lib})",
             )
         )
-
-    def _check_package_status_worker(self):
-        if self.rscript_path is None:
-            raise RuntimeError("Rscript is not selected.")
-        self.package_library_path.mkdir(parents=True, exist_ok=True)
-        env = os.environ.copy()
-        env["R_LIBS_USER"] = str(self.package_library_path.resolve())
-        statuses = {}
-        for package_name in self.step_frame.R_REQUIRED_PACKAGES:
-            expression = self._package_check_expression(package_name)
-            cmd = self._r_eval_command(expression)
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                env=env,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            self._log_process_result(f"Check package {package_name}", cmd, result)
-            statuses[package_name] = "installed" if result.returncode == 0 else "missing"
-        return statuses
-
-    def _check_packages(self):
-        if self.current_step != 1:
-            return
-
-        def done(value, error):
-            if error:
-                self._log(f"Package check failed: {error}")
-                messagebox.showerror("R Packages", f"Could not check packages.\n{error}", parent=self)
-                return
-            self.package_status.update(value)
-            for name, status in value.items():
-                if hasattr(self, "package_status_vars"):
-                    self.package_status_vars[name].set(status)
-            self._update_nav()
-            self._log("Package check completed.")
-
-        self._run_worker("Checking R packages...", self._check_package_status_worker, done)
 
     def _install_missing_packages_worker(self):
         statuses = self._check_package_status_worker()
@@ -878,36 +423,6 @@ class RSetupWizard(ttk.Frame):
                     "dependent packages may also fail."
                 )
         return statuses
-
-    def _install_missing_packages(self):
-        if self.current_step != 1:
-            return
-
-        def done(value, error):
-            if error:
-                self._log(f"Package installation failed: {error}")
-                messagebox.showerror("R Packages", f"Could not install packages.\n{error}", parent=self)
-                return
-            self.package_status.update(value)
-            for name, status in value.items():
-                if hasattr(self, "package_status_vars"):
-                    self.package_status_vars[name].set(status)
-            self._update_nav()
-            if self._all_packages_ready():
-                self._log("All required R packages are installed.")
-                messagebox.showinfo("R Packages", "All required packages are installed.", parent=self)
-            else:
-                self._log("Some R packages failed to install. See the setup log for details.")
-                messagebox.showerror(
-                    "R Packages",
-                    f"Some packages failed to install.\n\nFull log:\n{self.log_path}",
-                    parent=self,
-                )
-
-        self._run_worker("Installing missing R packages...", self._install_missing_packages_worker, done)
-
-    def _all_packages_ready(self):
-        return all(self.package_status.get(name) == "installed" for name in self.step_frame.R_REQUIRED_PACKAGES)
 
     # Unified setup page. These methods intentionally keep the setup workflow
     # in one frame: detect everything, show every requirement, then install
@@ -1476,7 +991,7 @@ class RSetupWizard(ttk.Frame):
         self._run_worker("Running R installer. Complete the installer window to continue.", worker, done)
 
 
-class RBatchSelectionTable(ttk.Frame):
+class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
     """Fast folder table for Step 3 batch R script selection."""
 
     COLUMNS = ("folder", "status", "inputs")
@@ -1677,13 +1192,6 @@ class RBatchSelectionTable(ttk.Frame):
                 values=(message, "", ""), tags=("locked",),
             )
         self._refresh_header_checkbox()
-
-    def _image_for_row(self, row):
-        if row.get("locked"):
-            return self._checkbox_images["locked"]
-        if row.get("include"):
-            return self._checkbox_images["checked"]
-        return self._checkbox_images["unchecked"]
 
     def _values_for_row(self, row):
         values = row.get("values") or {}
@@ -1911,57 +1419,10 @@ class RBatchSelectionTable(ttk.Frame):
         except tk.TclError:
             pass
 
-    def _refresh_row(self, iid, row):
-        try:
-            self.tree.item(iid, image=self._image_for_row(row), values=self._values_for_row(row))
-        except tk.TclError:
-            pass
-
-    def _refresh_header_checkbox(self):
-        ready_rows = [row for row in self.rows if not row.get("locked")]
-        image = self._checkbox_images["unchecked"]
-        if ready_rows and all(bool(row.get("include")) for row in ready_rows):
-            image = self._checkbox_images["checked"]
-        try:
-            self.tree.heading("#0", image=image)
-        except tk.TclError:
-            pass
-
-    def _on_click(self, event):
-        if self.tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
-            return None
-        if self.tree.identify_column(event.x) != "#0":
-            return None
-        iid = self.tree.identify_row(event.y)
-        row = self._row_by_iid.get(iid)
-        if not row or row.get("locked"):
-            return "break"
-        row["include"] = not bool(row.get("include"))
-        self._refresh_row(iid, row)
-        self._refresh_header_checkbox()
-        self._notify_selection_changed()
-        return "break"
-
-    def _toggle_all_ready(self):
-        ready_rows = [row for row in self.rows if not row.get("locked")]
-        if not ready_rows:
-            return
-        include = not all(bool(row.get("include")) for row in ready_rows)
-        for iid, row in self._row_by_iid.items():
-            if row.get("locked"):
-                continue
-            row["include"] = include
-            self._refresh_row(iid, row)
-        self._refresh_header_checkbox()
-        self._notify_selection_changed()
-
     def _notify_selection_changed(self):
         callback = getattr(self, "_on_selection_changed", None)
         if callback is not None:
             callback(len(self.selected_rows()))
-
-    def selected_rows(self):
-        return [row for row in self.rows if row.get("include") and not row.get("locked")]
 
 
 class RBatchSelectionPanel(ttk.Frame):

@@ -201,7 +201,6 @@ def write_analyze(filepath, data):
     with open(base + ".img", "wb") as fh:
         # Analyze stores x-fastest, then y, then z — same as C-contiguous (row-major)
         for s in range(nslices):
-            slice_arr = np.ascontiguousarray(np.flipud(data[s]))
             if (dt_code, bitpix) == (2, 8):
                 target_dtype = np.dtype("u1")
             elif (dt_code, bitpix) == (4, 16):
@@ -215,7 +214,9 @@ def write_analyze(filepath, data):
                 target_dtype = np.dtype(f"{end}f8")
             else:
                 target_dtype = np.dtype(f"{end}i2")
-            slice_arr = slice_arr.astype(target_dtype, copy=False)
+            # Convert byte order/dtype while making the flipped slice contiguous,
+            # avoiding an intermediate copy without changing stored pixel bytes.
+            slice_arr = np.ascontiguousarray(np.flipud(data[s]), dtype=target_dtype)
             fh.write(slice_arr.tobytes())
 
     return base + ".hdr", base + ".img"

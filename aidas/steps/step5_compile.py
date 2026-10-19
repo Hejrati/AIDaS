@@ -9,6 +9,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from aidas.ui.compiler import CompilerPresentationMixin
 from aidas.ui.components import AppButton
 from aidas.ui.theme import COLORS, COLOR_PAIRS, CONTROLS
 from aidas.utils.ui_layout import LAYOUT
@@ -22,10 +23,11 @@ from aidas.utils.ui_utils import (
 DEFAULT_OUTPUT_FILENAME = "LE_RE_rrMCPAR_ELMRPE_ONL.xlsx"
 
 
-class Step5Frame(SidebarStepFrame):
+class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
     """Dedicated final-step UI for compiling Step 3 and Step 4 results."""
 
     EVENT_POLL_MS = 75
+    COMPILER_PROGRESS_MESSAGE = "Creating the Excel file…"
 
     def __init__(
         self,
@@ -331,57 +333,13 @@ class Step5Frame(SidebarStepFrame):
         paths = self._validated_paths()
         if paths is None:
             return
-        self._clear_log()
-        self._set_running(True)
-        self._worker = threading.Thread(
-            target=self._compile_worker,
-            args=(*paths, bool(self.include_fovea_var.get())),
-            name="aidas-step5-compiler",
-            daemon=True,
+        self._start_compiler(
+            *paths, bool(self.include_fovea_var.get()),
+            thread_name="aidas-step5-compiler",
         )
-        self._worker.start()
-
-    def _compile_worker(
-        self,
-        root_folder: Path,
-        output_path: Path,
-        include_fovea: bool,
-    ) -> None:
-        def emit(message: object) -> None:
-            self._events.put(("log", str(message)))
-
-        def report_progress(completed: int, total: int, message: str) -> None:
-            self._events.put(("progress", (completed, total, message)))
-
-        try:
-            from aidas.services.step4_compiler import compile_step4_results
-
-            result = compile_step4_results(
-                root_folder,
-                output_path,
-                include_fovea=include_fovea,
-                log_callback=emit,
-                progress_callback=report_progress,
-            )
-        except Exception as exc:
-            self._events.put(("error", exc))
-            return
-        self._events.put(("success", result))
 
     def _poll_events(self) -> None:
-        try:
-            while True:
-                kind, payload = self._events.get_nowait()
-                if kind == "log":
-                    self._append_log(str(payload))
-                elif kind == "progress":
-                    self._update_progress(payload)
-                elif kind == "success":
-                    self._compilation_succeeded(payload)
-                elif kind == "error":
-                    self._compilation_failed(payload)
-        except queue.Empty:
-            pass
+        self._drain_compile_events()
         try:
             self.after(self.EVENT_POLL_MS, self._poll_events)
         except tk.TclError:
@@ -427,18 +385,6 @@ class Step5Frame(SidebarStepFrame):
             self.run_button.configure(text="Create Excel File")
             self._update_run_button_state()
 
-    def _update_progress(self, payload: object) -> None:
-        try:
-            completed_value, total_value, message_value = payload
-            total = max(1, int(total_value))
-            completed = min(total, max(0, int(completed_value)))
-        except (TypeError, ValueError):
-            return
-        self.progress.configure(maximum=total, value=completed)
-        percentage = round((completed / total) * 100)
-        message = str(message_value).strip() or "Creating the Excel file…"
-        self.status_var.set(f"{message} ({percentage}%)")
-
     def _compilation_succeeded(self, result: object) -> None:
         self._set_running(False)
         maximum = max(1.0, float(self.progress.cget("maximum")))
@@ -461,17 +407,6 @@ class Step5Frame(SidebarStepFrame):
         self.status_var.set("Could not create the Excel file. See the log for details.")
         self._append_log(f"ERROR: {error}")
         messagebox.showerror("Excel file creation failed", str(error), parent=self)
-
-    def _clear_log(self) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
-
-    def _append_log(self, message: str) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"{message}\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
 
 
 __all__ = ["Step5Frame"]

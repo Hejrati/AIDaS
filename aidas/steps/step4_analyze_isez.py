@@ -56,6 +56,7 @@ from aidas.core.config import (
     validate_step4_auto_detection_preferences,
 )
 from aidas.core.display import centered_position, work_area_bounds
+from aidas.ui.batch_selection import BatchSelectionMixin
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS
@@ -1420,7 +1421,7 @@ def imagej_shape_measurements_from_frame(image: Image.Image) -> dict[str, float]
     }
 
 
-class Step4BatchROITable(ttk.Frame):
+class Step4BatchROITable(BatchSelectionMixin, ttk.Frame):
     """Folder selection table for Step 4 batch ROI review."""
 
     COLUMNS = ("folder", "status", "outputs")
@@ -1549,11 +1550,6 @@ class Step4BatchROITable(ttk.Frame):
                 tags=("locked",),
             )
 
-    def _image_for_row(self, row):
-        if row.get("locked"):
-            return self._checkbox_images["locked"]
-        return self._checkbox_images["checked"] if row.get("include") else self._checkbox_images["unchecked"]
-
     @staticmethod
     def _values_for_row(row):
         values = row.get("values") or {}
@@ -1602,51 +1598,6 @@ class Step4BatchROITable(ttk.Frame):
                 self.tree.column("folder", width=desired)
             except tk.TclError:
                 pass
-
-    def _refresh_row(self, iid, row):
-        try:
-            self.tree.item(iid, image=self._image_for_row(row), values=self._values_for_row(row))
-        except tk.TclError:
-            pass
-
-    def _refresh_header_checkbox(self):
-        ready_rows = [row for row in self.rows if not row.get("locked")]
-        image = self._checkbox_images["checked"] if ready_rows and all(row.get("include") for row in ready_rows) else self._checkbox_images["unchecked"]
-        try:
-            self.tree.heading("#0", image=image)
-        except tk.TclError:
-            pass
-
-    def _on_click(self, event):
-        if self.tree.identify_region(event.x, event.y) not in {"cell", "tree"}:
-            return None
-        if self.tree.identify_column(event.x) != "#0":
-            return None
-        iid = self.tree.identify_row(event.y)
-        row = self._row_by_iid.get(iid)
-        if not row or row.get("locked"):
-            return "break"
-        row["include"] = not bool(row.get("include"))
-        self._refresh_row(iid, row)
-        self._refresh_header_checkbox()
-        self._notify_selection_changed()
-        return "break"
-
-    def _toggle_all_ready(self):
-        ready_rows = [row for row in self.rows if not row.get("locked")]
-        if not ready_rows:
-            return
-        include = not all(row.get("include") for row in ready_rows)
-        for iid, row in self._row_by_iid.items():
-            if row.get("locked"):
-                continue
-            row["include"] = include
-            self._refresh_row(iid, row)
-        self._refresh_header_checkbox()
-        self._notify_selection_changed()
-
-    def selected_rows(self):
-        return [row for row in self.rows if row.get("include") and not row.get("locked")]
 
     def _notify_selection_changed(self):
         callback = getattr(self, "on_selection_changed", None)
