@@ -6,6 +6,99 @@ import unittest
 
 
 class Step4BatchLoadingTests(unittest.TestCase):
+    def test_slow_reads_keep_progress_live_and_cancelled_results_cannot_replace_new_files(self):
+        script = textwrap.dedent(
+            """
+            from pathlib import Path
+            import threading
+            import time
+            from unittest import mock
+            import customtkinter as ctk
+            import numpy as np
+            from aidas.steps import step4_analyze_isez as module
+
+            root = ctk.CTk()
+            root.attributes('-alpha', 0)
+            root.geometry('1000x700+10000+10000')
+            frame = module.Step4Frame(root)
+            frame.pack(fill='both', expand=True)
+            root.update()
+            errors = []
+            root.report_callback_exception = lambda *args: errors.append(args)
+            owner = threading.get_ident()
+            reading = threading.Event()
+            release = threading.Event()
+            old_finished = threading.Event()
+            image = np.ones((1, 450, 3000), dtype=np.int16)
+
+            def load(path):
+                assert threading.get_ident() != owner, 'File reads blocked the Tk thread.'
+                if Path(path).parent.name == 'old':
+                    reading.set()
+                    assert release.wait(10), 'Test did not release old file read.'
+                    old_finished.set()
+                    return image * 9
+                if Path(path).parent.name == 'broken':
+                    raise OSError('Cannot read file')
+                return image * 3
+
+            def wait_until(condition):
+                deadline = time.monotonic() + 20
+                while not condition():
+                    assert time.monotonic() < deadline, 'Loading timed out.'
+                    root.update()
+                    time.sleep(.002)
+                root.update()
+
+            try:
+                with mock.patch.object(module, 'load_oct_volume', side_effect=load), mock.patch.object(
+                        frame, '_warm_auto_detection_tools'), mock.patch.object(
+                        module.messagebox, 'showerror') as show_error:
+                    frame._open_batch_roi_tabs([Path('old/_flat_LIGHT.hdr')], show_progress=True)
+                    wait_until(reading.is_set)
+                    notice = frame._batch_roi_loading_surface
+                    progress = notice._step4_progress
+                    phase = progress._indeterminate_value
+                    beats = []
+                    def heartbeat():
+                        beats.append(time.monotonic())
+                        if len(beats) < 10:
+                            root.after(10, heartbeat)
+                    root.after(10, heartbeat)
+                    wait_until(lambda: len(beats) == 10)
+                    assert progress._indeterminate_value != phase, 'Progress stopped during the read.'
+                    assert notice.winfo_exists()
+
+                    # Replace a run while its worker is still blocked in I/O.
+                    frame._open_batch_roi_tabs([Path('new/_flat_LIGHT.hdr')], show_progress=True)
+                    wait_until(lambda: frame._batch_roi_open_after_id is None)
+                    assert frame.current_path == Path('new/_flat_LIGHT.hdr')
+                    np.testing.assert_array_equal(frame.volume, image * 3)
+                    assert frame._batch_roi_loading_surface is None
+                    assert root.grab_current() is None
+                    release.set()
+                    wait_until(old_finished.is_set)
+                    assert frame.current_path == Path('new/_flat_LIGHT.hdr')
+                    np.testing.assert_array_equal(frame.volume, image * 3)
+                    show_error.assert_not_called()
+
+                    # Read failures must also release progress and its modal grab.
+                    frame._open_batch_roi_tabs([Path('broken/_flat_LIGHT.hdr')], show_progress=True)
+                    wait_until(lambda: frame._batch_roi_open_after_id is None)
+                    show_error.assert_called_once()
+                    assert frame._batch_roi_loading_surface is None
+                    assert frame.volume is None
+                    assert root.grab_current() is None
+                    assert not errors, errors
+            finally:
+                release.set()
+                root.destroy()
+            """
+        )
+        result = subprocess.run([sys.executable, '-c', script],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_real_run_paints_loading_controls_before_reading_the_first_file(self):
         script = textwrap.dedent(
             """
@@ -67,6 +160,10 @@ class Step4BatchLoadingTests(unittest.TestCase):
                             observations = []
 
                             def read_first_file(path):
+                                # Workers must never inspect Tk widgets.
+                                return image[None, ...]
+
+                            def observe_loading():
                                 surface = frame._batch_roi_loading_surface
                                 message = surface._step4_message_label._label
                                 progress = surface._step4_progress._canvas
@@ -76,9 +173,10 @@ class Step4BatchLoadingTests(unittest.TestCase):
                                     'progress_width': progress.winfo_width(),
                                     'progress_height': progress.winfo_height(),
                                 })
-                                return image[None, ...]
 
                             def poll_finished():
+                                if frame._batch_roi_loading_surface is not None and not observations:
+                                    observe_loading()
                                 if frame._batch_roi_open_after_id is not None:
                                     app.after(10, poll_finished)
                                 else:
@@ -155,8 +253,6 @@ class Step4BatchLoadingTests(unittest.TestCase):
                 assert not errors, errors
 
             def load_first_file(path):
-                notice = frame._batch_roi_loading_surface
-                assert notice.winfo_ismapped(), 'Loading notice disappeared before the first file loaded.'
                 return image[None, ...]
 
             try:
