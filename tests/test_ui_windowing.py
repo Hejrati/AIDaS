@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 from aidas.ui.windowing import (
     _hex_to_colorref,
     _is_dark_color,
     _native_border_colorref,
+    _resolved_window_color,
     centered_logical_geometry,
     centered_physical_geometry,
     logical_window_size,
@@ -25,6 +27,11 @@ class _ScaledWindow:
 
 
 class UIWindowingTests(unittest.TestCase):
+    def test_native_caption_color_follows_application_appearance(self):
+        for mode, expected in (("Light", "#FFFFFF"), ("Dark", "#111B25")):
+            with self.subTest(mode=mode), patch("customtkinter.get_appearance_mode", return_value=mode):
+                self.assertEqual(_resolved_window_color(object(), ("#FFFFFF", "#111B25")), expected)
+
     def test_windows_colorref_uses_bgr_integer_layout(self):
         self.assertEqual(_hex_to_colorref("#123456"), 0x563412)
 

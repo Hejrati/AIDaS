@@ -55,6 +55,7 @@ class ConfigPersistenceTests(unittest.TestCase):
                 self.assertEqual(config.get("sdb_raw_height"), 1200)
                 self.assertEqual(config.get("sdb_raw_offset"), 1050)
                 self.assertTrue(config.get("sdb_little_endian"))
+                self.assertFalse(config.get("step1_auto_fix_bright_pixels"))
                 self.assertTrue(config.get("show_step2_annotation_tutorial"))
                 self.assertEqual(config.get("r_main_script_path"), "")
                 self.assertEqual(config.get("r_output_script_path"), "")

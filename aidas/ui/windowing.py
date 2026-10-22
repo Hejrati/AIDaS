@@ -79,7 +79,11 @@ def _resolved_window_color(window: tk.Misc, color: WindowColor) -> str:
     resolver = getattr(window, "_apply_appearance_mode", None)
     if callable(resolver):
         return str(resolver(color))
-    return str(color[0])
+    # Native Tk dialogs do not expose CTk's per-widget resolver, but still
+    # share the application's active appearance mode.
+    import customtkinter as ctk
+
+    return str(color[1] if ctk.get_appearance_mode() == "Dark" else color[0])
 
 
 def _hex_to_colorref(color: str) -> int:
@@ -212,6 +216,10 @@ def synchronize_window_chrome(
     border: WindowColor | None = None,
 ) -> None:
     """Apply caption colors now and once more after CTk's own redraw."""
+
+    from aidas.ui.title_bar import install_dialog_title_bar
+
+    install_dialog_title_bar(window)
 
     def apply() -> None:
         apply_windows_titlebar_colors(

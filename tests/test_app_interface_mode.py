@@ -123,6 +123,7 @@ class InterfacePreferenceTests(unittest.TestCase):
         dialog.annotation_tutorial_var = _StatefulMenu(True)
         dialog._annotation_tutorial_applied_value = True
         dialog._annotation_tutorial_dirty = False
+        dialog.bright_pixel_confirmation_var = _StatefulMenu(True)
         dialog.update_checks_var = SimpleNamespace(get=lambda: True)
         dialog.interface_menu = _StatefulMenu("Modern")
         dialog.appearance_menu = _StatefulMenu(selected_appearance)
@@ -140,6 +141,31 @@ class InterfacePreferenceTests(unittest.TestCase):
             app, AIDaSApp,
         )
         return dialog
+
+    def test_settings_can_enable_automatic_correction_and_restore_confirmation(self):
+        app = self._app_stub()
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+        dialog._set_appearance_command = mock.Mock()
+        dialog.bright_pixel_confirmation_var.set(False)
+        dialog._apply_changes()
+        self.assertTrue(app.preferences.get("step1_auto_fix_bright_pixels"))
+        dialog.bright_pixel_confirmation_var.set(True)
+        dialog._apply_changes()
+        self.assertFalse(app.preferences.get("step1_auto_fix_bright_pixels"))
+
+    def test_settings_preserves_remembered_ignore_and_can_restore_confirmation(self):
+        app = self._app_stub()
+        app.preferences.set("step1_bright_pixel_choice", "ignore")
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+        dialog._set_appearance_command = mock.Mock()
+        dialog.bright_pixel_confirmation_var.set(False)
+        dialog._apply_changes()
+        self.assertEqual(app.preferences.get("step1_bright_pixel_choice"), "ignore")
+        self.assertFalse(app.preferences.get("step1_auto_fix_bright_pixels"))
+        dialog.bright_pixel_confirmation_var.set(True)
+        dialog._apply_changes()
+        self.assertEqual(app.preferences.get("step1_bright_pixel_choice"), "")
+        self.assertFalse(app.preferences.get("step1_auto_fix_bright_pixels"))
 
     def test_settings_restores_guide_once_and_applies_disabling_immediately(self):
         app = self._app_stub()
@@ -486,6 +512,7 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
         dialog._step3 = SimpleNamespace(_busy=False, select_r_script=mock.Mock())
         dialog._step1 = SimpleNamespace(set_sdb_parameter_defaults=mock.Mock())
         dialog._preferences = mock.Mock()
+        dialog.bright_pixel_confirmation_var = _StatefulMenu(True)
         dialog.update_checks_var = SimpleNamespace(get=lambda: True)
         dialog.interface_menu = mock.Mock()
         dialog.interface_menu.get.return_value = "Classic"
@@ -526,6 +553,7 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
         dialog._step3 = SimpleNamespace(_busy=False, select_r_script=mock.Mock())
         dialog._step1 = SimpleNamespace(set_sdb_parameter_defaults=mock.Mock())
         dialog._preferences = mock.Mock()
+        dialog.bright_pixel_confirmation_var = _StatefulMenu(True)
         dialog.update_checks_var = SimpleNamespace(get=lambda: True)
         dialog.interface_menu = mock.Mock()
         dialog.interface_menu.get.return_value = "Modern"
@@ -645,7 +673,10 @@ class AnnotationTutorialControlTests(unittest.TestCase):
             for presentation, initial in (("Modern", False), ("Classic", False), ("Modern", True)):
                 with self.subTest(presentation=presentation, initial=initial):
                     preferences = _Preferences(
-                        {} if initial else {"show_step2_annotation_tutorial": False}
+                        {
+                            "show_step2_annotation_tutorial": initial,
+                            "step1_auto_fix_bright_pixels": not initial,
+                        }
                     )
                     step2 = SimpleNamespace(set_annotation_tutorial_enabled=mock.Mock())
                     with (
@@ -669,6 +700,15 @@ class AnnotationTutorialControlTests(unittest.TestCase):
                         root.after(100, lambda: settled.set(True))
                         root.wait_variable(settled)
                         root.update()
+                        confirmation = dialog.bright_pixel_confirmation_switch
+                        self.assertTrue(confirmation.winfo_viewable())
+                        self.assertEqual(dialog.bright_pixel_confirmation_var.get(), initial)
+                        if presentation == "Modern":
+                            confirmation.toggle()
+                        else:
+                            confirmation.invoke()
+                        self.assertEqual(dialog.bright_pixel_confirmation_var.get(), not initial)
+                        self.assertEqual(preferences.get("step1_auto_fix_bright_pixels"), not initial)
                         control = dialog.annotation_tutorial_switch
                         self.assertTrue(control.winfo_viewable())
                         self.assertEqual(control.cget("text"), "Enable tutorial")

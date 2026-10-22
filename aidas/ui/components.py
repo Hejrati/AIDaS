@@ -75,6 +75,30 @@ class AppButton(ctk.CTkButton):
             )
         super().__init__(master, **options)
 
+    def _remember_workflow_origin(self):
+        """Capture the button before its action can close or replace the view."""
+        try:
+            self._root()._workflow_transition_source = (
+                self.winfo_rootx() + self.winfo_width() / 2,
+                self.winfo_rooty() + self.winfo_height() / 2,
+            )
+        except tk.TclError:
+            pass
+
+    def _clicked(self, event=None):
+        self._remember_workflow_origin()
+        return super()._clicked(event)
+
+    def _on_release(self, event=None):
+        # The installed CTk button invokes mouse actions from _on_release;
+        # invoke() alone only covers programmatic and keyboard activation.
+        self._remember_workflow_origin()
+        return super()._on_release(event)
+
+    def invoke(self):
+        self._remember_workflow_origin()
+        return super().invoke()
+
     @staticmethod
     def _variant_palette(variant: str):
         palettes = {
@@ -898,39 +922,45 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         self.workflow_progress_label.pack(side="left", padx=(10, 0))
 
     def set_completed_steps(self, completed_steps: int) -> None:
-        """Render progress from the number of successfully completed steps."""
-
+        """Compatibility helper for callers with a contiguous completion count."""
         total = max(1, len(self._step_labels))
-        completed = min(total, max(0, int(completed_steps)))
-        active_index = completed if completed < total else None
-        
-        for i, circle in enumerate(self.circles):
-            if i < completed:
-                circle.update_state(
-                    fill_color=COLOR_PAIRS["success"],
-                    text_color=COLOR_PAIRS["on_primary"],
-                    text="✓"
-                )
-            elif i == active_index:
-                circle.update_state(
-                    fill_color=COLOR_PAIRS["primary"],
-                    text_color=COLOR_PAIRS["on_primary"],
-                    text=str(i + 1)
-                )
-            else:
-                circle.update_state(
-                    fill_color=COLOR_PAIRS["surface_subtle"],
-                    text_color=COLOR_PAIRS["muted_text"],
-                    text=str(i + 1)
-                )
+        count = min(total, max(0, int(completed_steps)))
+        self.set_workflow_state(set(range(count)), min(count, total - 1))
 
-        if completed == total:
+    def set_workflow_state(self, completed_steps, active_index=0, cancelled_step=None) -> None:
+        """Render independent step completion, the active page and cancellation."""
+        total = max(1, len(self._step_labels))
+        completed = {index for index in completed_steps if 0 <= index < total}
+        active_index = min(total - 1, max(0, int(active_index)))
+        if cancelled_step is not None:
+            job = self.__dict__.get("_completion_animation_job")
+            if job is not None:
+                self.after_cancel(job)
+                self._completion_animation_job = None
+            overlay = self.__dict__.get("_completion_animation_overlay")
+            if overlay is not None:
+                overlay.destroy()
+                self._completion_animation_overlay = None
+        for index, circle in enumerate(self.circles):
+            if index == cancelled_step:
+                circle.update_state(fill_color=COLOR_PAIRS["danger"],
+                                    text_color=COLOR_PAIRS["on_primary"], text="\u00d7")
+            elif index in completed:
+                circle.update_state(fill_color=COLOR_PAIRS["success"],
+                                    text_color=COLOR_PAIRS["on_primary"], text="\u2713")
+            elif index == active_index:
+                circle.update_state(fill_color=COLOR_PAIRS["primary"],
+                                    text_color=COLOR_PAIRS["on_primary"], text=str(index + 1))
+            else:
+                circle.update_state(fill_color=COLOR_PAIRS["surface_subtle"],
+                                    text_color=COLOR_PAIRS["muted_text"], text=str(index + 1))
+        if len(completed) == total:
             label = f"Workflow complete: {total} of {total} steps"
         else:
-            current = completed + 1
-            step_name = self._step_labels[active_index]
-            step_name = step_name.split("  ", 1)[-1] if "  " in step_name else step_name
-            label = f"Step {current} of {total}: {step_name}"
+            name = self._step_labels[active_index].split("  ", 1)[-1]
+            label = f"Step {active_index + 1} of {total}: {name}"
+            if active_index == cancelled_step:
+                label += " \u2014 Cancelled"
         self.workflow_progress_label.configure(text=label)
 
     def animate_completion(self, completed_index: int) -> None:
@@ -959,21 +989,20 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         circle = self.circles[index]
         x = circle.winfo_rootx() - self.winfo_rootx() + (circle.winfo_width() // 2)
         y = circle.winfo_rooty() - self.winfo_rooty() + (circle.winfo_height() // 2)
+        pulse_font = ctk.CTkFont(
+            family=TYPOGRAPHY.family, size=10, weight=TYPOGRAPHY.bold_weight,
+        )
         overlay = ctk.CTkLabel(
             self,
             text="✓",
             fg_color="transparent",
             text_color=COLOR_PAIRS["success"],
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=10,
-                weight=TYPOGRAPHY.bold_weight,
-            ),
+            font=pulse_font,
         )
         overlay.place(x=x, y=y, anchor="center")
         self._completion_animation_overlay = overlay
 
-        frames = (10, 16, 23, 29, 25, 20, 16)
+        frames = (10, 19, 25, 19, 14)
 
         def render(frame_index: int = 0) -> None:
             if self._completion_animation_overlay is not overlay:
@@ -986,19 +1015,20 @@ class WorkflowProgressStrip(ctk.CTkFrame):
                 self._completion_animation_overlay = None
                 self._completion_animation_job = None
                 return
-            overlay.configure(
-                font=ctk.CTkFont(
-                    family=TYPOGRAPHY.family,
-                    size=frames[frame_index],
-                    weight=TYPOGRAPHY.bold_weight,
-                )
-            )
+            pulse_font.configure(size=frames[frame_index])
             self._completion_animation_job = self.after(
-                65,
+                35,
                 lambda: render(frame_index + 1),
             )
 
         render()
+
+    def destroy(self):
+        if self._completion_animation_job is not None:
+            self.after_cancel(self._completion_animation_job)
+            self._completion_animation_job = None
+        super().destroy()
+        self._completion_animation_overlay = None
 
     def select_step(self, index: int) -> None:
         """Compatibility alias for callers that supply a zero-based step index."""

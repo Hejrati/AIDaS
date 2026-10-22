@@ -24,6 +24,18 @@ from aidas.ui.theme import (
 from aidas.utils.ui_layout import COLORS, LAYOUT, workspace_sidebar_width
 
 
+def notify_workflow_cancelled(widget, step_number):
+    """Report an explicit user cancellation without affecting internal cleanup."""
+    if widget.__dict__.get("tk") is None:
+        return
+    try:
+        callback = getattr(widget._root(), "_on_workflow_cancelled", None)
+        if callable(callback):
+            callback(step_number)
+    except tk.TclError:
+        pass
+
+
 ASSET_DIR_NAME = "assets"
 ACTION_ICON_SIZE = 20
 ACTION_ICON_FILES = {

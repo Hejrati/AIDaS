@@ -67,6 +67,7 @@ from aidas.utils.filesystem import find_candidate_directories, skipped_directori
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
+    notify_workflow_cancelled,
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
@@ -1781,6 +1782,7 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         self.step_frame._start_batch_roi_from_rows(rows)
 
     def _cancel(self):
+        notify_workflow_cancelled(self, 4)
         self.step_frame._close_batch_roi_panel(restore_previous=True)
 
 
@@ -1806,11 +1808,13 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         saved_bounds: tuple[float | int, float | int] | None = None,
         adjust_bounds: bool = True,
         saved_adjust_bounds: bool | None = None,
+        navigation_indices: list[int] | None = None,
+        on_navigate=None,
     ):
         super().__init__(owner)
         self.withdraw()
         apply_app_icon_to(self)
-        self.configure(fg_color=COLOR_PAIRS["surface"])
+        self._apply_aidas_theme()
         self.roi_index = int(roi_index)
         self.profile = np.asarray(profile, dtype=np.float64).reshape(-1)
         if self.profile.size < 2:
@@ -1821,6 +1825,10 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._on_apply_callback = on_apply
         self._on_save_callback = on_save
         self._on_close_callback = on_close
+        self._on_navigate_callback = on_navigate
+        self._navigation_indices = sorted(set(navigation_indices or [self.roi_index]))
+        self._profile_drafts = {}
+        self._roi_suffix = str(roi_suffix)
         self._closing = False
         self._drag_boundary = None
         self._drag_view = None
@@ -1844,7 +1852,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             self._adjust_bounds if saved_adjust_bounds is None else bool(saved_adjust_bounds)
         )
 
-        self.title(f"Revise ROI {roi_suffix} profile")
+        self.title(f"ROI Profile Editor \u2014 ROI {roi_suffix}")
         try:
             self.transient(owner.winfo_toplevel())
         except tk.TclError:
@@ -1856,10 +1864,11 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             name: tk.StringVar(value="--") for name in RESULTS_HEADERS[1:]
         }
 
-        instructions = ttk.Frame(self, padding=(10, 9, 10, 5))
+        instructions = ttk.Frame(self, padding=(10, 9, 10, 5), style="ProfileZoom.TFrame")
         instructions.pack(fill="x")
         ttk.Label(
             instructions,
+            style="ProfileZoom.TLabel",
             text=(
                 "Click the exact profile position you want to move the closest boundary, or "
                 "drag the blue Start or red End line."
@@ -1868,11 +1877,12 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             wraplength=860,
         ).pack(side="left", fill="x", expand=True)
 
-        measurements = ttk.LabelFrame(self, text="Ellipse fitting measurements", padding=(8, 4, 8, 7))
+        measurements = ttk.LabelFrame(self, text="Ellipse fitting measurements", padding=(8, 4, 8, 7),
+                                      style="ProfileZoom.TLabelframe")
         measurements.pack(fill="x", padx=10, pady=(0, 5))
         for column, name in enumerate(RESULTS_HEADERS[1:]):
             measurements.columnconfigure(column, weight=1, uniform="step4_measurement")
-            ttk.Label(measurements, text=name, anchor="center").grid(
+            ttk.Label(measurements, text=name, anchor="center", style="ProfileZoom.TLabel").grid(
                 row=0,
                 column=column,
                 sticky="ew",
@@ -1881,14 +1891,40 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             ttk.Label(
                 measurements,
                 textvariable=self.measurement_vars[name],
+                style="ProfileZoom.TLabel",
                 anchor="center",
             ).grid(row=1, column=column, sticky="ew", padx=3, pady=(2, 0))
-        footer = ttk.Frame(self, padding=(10, 5, 10, 10))
+        footer = ttk.Frame(self, padding=(10, 5, 10, 10), style="ProfileZoom.TFrame")
         footer.pack(side="bottom", fill="x")
-        actions = ttk.Frame(footer)
+        navigation = ttk.Frame(footer, style="ProfileZoom.TFrame")
+        navigation.pack(pady=(0, 10))
+        self.previous_plot_button = AppButton(
+            navigation, text="Previous", width=112, variant="secondary",
+            image=load_ctk_image(self, "flat-color-icons--left.png", size=20),
+            compound="left", anchor="center",
+            bg_color=COLOR_PAIRS["surface_elevated"],
+            command=lambda: self._navigate_profile(-1),
+        )
+        self.previous_plot_button.pack(side="left")
+        self.plot_number_label = ttk.Label(
+            navigation, text=f"ROI {roi_suffix}", anchor="center", width=12,
+            style="ProfileZoom.TLabel",
+        )
+        self.plot_number_label.pack(side="left", padx=12)
+        self.next_plot_button = AppButton(
+            navigation, text="Next", width=112, variant="secondary",
+            image=load_ctk_image(self, "flat-color-icons--right.png", size=20),
+            compound="left", anchor="center",
+            bg_color=COLOR_PAIRS["surface_elevated"],
+            command=lambda: self._navigate_profile(1),
+        )
+        self.next_plot_button.pack(side="left")
+        actions = ttk.Frame(footer, style="ProfileZoom.TFrame")
         actions.pack(side="right")
         self.cancel_button = AppButton(
             actions,
+            anchor="center",
+            bg_color=COLOR_PAIRS["surface_elevated"],
             text="Cancel",
             variant="danger",
             command=self.close,
@@ -1897,6 +1933,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.cancel_button.pack(side="right")
         self.apply_button = AppButton(
             actions,
+            anchor="center",
+            bg_color=COLOR_PAIRS["surface_elevated"],
             text="Apply",
             variant="primary",
             command=self._apply,
@@ -1905,6 +1943,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.apply_button.pack(side="right", padx=(0, 6))
         self.save_button = AppButton(
             actions,
+            anchor="center",
+            bg_color=COLOR_PAIRS["surface_elevated"],
             text="Save and Exit",
             variant="success",
             command=self._save,
@@ -1913,7 +1953,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.save_button.pack(side="right", padx=(0, 6))
         self._update_action_states()
 
-        chart_frame = ttk.Frame(self)
+        chart_frame = ttk.Frame(self, style="ProfileZoom.TFrame")
         chart_frame.pack(fill="both", expand=True, padx=10)
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
         from matplotlib.figure import Figure
@@ -1933,6 +1973,79 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 
         self._size_and_center_on_active_screen()
         self.after_idle(self._focus_window)
+
+    def _update_navigation(self) -> None:
+        indices = self._navigation_indices
+        previous = any(index < self.roi_index for index in indices)
+        following = any(index > self.roi_index for index in indices)
+        enabled = not self._actions_busy and self._on_navigate_callback is not None
+        self.previous_plot_button.state(["!disabled"] if enabled and previous else ["disabled"])
+        self.next_plot_button.state(["!disabled"] if enabled and following else ["disabled"])
+        self.plot_number_label.configure(text=f"ROI {self._roi_suffix}")
+
+    def _navigate_profile(self, direction: int) -> None:
+        if self._actions_busy or self._on_navigate_callback is None:
+            return
+        candidates = [index for index in self._navigation_indices
+                      if (index - self.roi_index) * direction > 0]
+        if not candidates:
+            return
+        target = min(candidates) if direction > 0 else max(candidates)
+        self._actions_busy = True
+        self._update_action_states()
+        try:
+            options = self._on_navigate_callback(target)
+            if options is not None:
+                self._load_profile(**options)
+        finally:
+            self._actions_busy = False
+            self._update_action_states()
+
+    def _load_profile(
+        self, *, roi_index, roi_suffix, profile, start, end,
+        saved_bounds=None, adjust_bounds=True, saved_adjust_bounds=None,
+    ) -> None:
+        """Replace the displayed ROI while retaining unapplied edits for browsing."""
+        self._profile_drafts[self.roi_index] = {
+            "bounds": (self._start, self._end),
+            "applied_bounds": self._applied_bounds,
+            "saved_bounds": self._saved_bounds,
+            "adjust_bounds": self._adjust_bounds,
+            "applied_adjust_bounds": self._applied_adjust_bounds,
+            "saved_adjust_bounds": self._saved_adjust_bounds,
+        }
+        self.roi_index = int(roi_index)
+        self._roi_suffix = str(roi_suffix)
+        self.profile = np.asarray(profile, dtype=np.float64).reshape(-1)
+        self._start, self._end = _updated_profile_bounds(
+            start, end, boundary="end", sample=max(float(start), float(end)),
+            n_points=self.profile.size,
+        )
+        self._applied_bounds = (self._start, self._end)
+        self._saved_bounds = self._applied_bounds if saved_bounds is None else tuple(
+            sorted(_clamp_profile_index(value, self.profile.size) for value in saved_bounds)
+        )
+        self._adjust_bounds = bool(adjust_bounds)
+        self._applied_adjust_bounds = self._adjust_bounds
+        self._saved_adjust_bounds = self._adjust_bounds if saved_adjust_bounds is None else bool(saved_adjust_bounds)
+        draft = self._profile_drafts.get(self.roi_index)
+        if draft is not None:
+            self._start, self._end = draft["bounds"]
+            self._applied_bounds = draft["applied_bounds"]
+            self._saved_bounds = draft["saved_bounds"]
+            self._adjust_bounds = draft["adjust_bounds"]
+            self._applied_adjust_bounds = draft["applied_adjust_bounds"]
+            self._saved_adjust_bounds = draft["saved_adjust_bounds"]
+        self._drag_boundary = self._drag_view = self._context_window = None
+        self.canvas.get_tk_widget().configure(cursor="")
+        title = f"ROI Profile Editor \u2014 ROI {roi_suffix}"
+        self.title(title)
+        title_bar = getattr(self, "_aidas_dialog_title_bar", None)
+        if title_bar is not None:
+            title_bar.set_title(title)
+        self._draw_profile()
+        self._refresh_measurements()
+        self._update_navigation()
 
     def _size_and_center_on_active_screen(self) -> None:
         bounds = work_area_bounds(self)
@@ -1969,6 +2082,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
     def _draw_profile(self) -> None:
         self.ax.clear()
         palette = _theme_matplotlib_figure(self.figure, self.ax)
+        palette["figure"] = COLORS.surface_elevated
+        self.figure.set_facecolor(palette["figure"])
         self._refresh_plot_data()
         (self._boundary_curve,) = self.ax.plot(
             self._plot_data["x"],
@@ -1996,8 +2111,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             solid_joinstyle="round",
             zorder=3,
         )
+        plotted_start, plotted_end = self._displayed_profile_bounds()
         self._start_line = self.ax.axvline(
-            self._start,
+            plotted_start,
             color=palette["primary"],
             linewidth=1.8,
             label="Start",
@@ -2005,7 +2121,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             zorder=4,
         )
         self._end_line = self.ax.axvline(
-            self._end,
+            plotted_end,
             color=palette["danger"],
             linewidth=1.8,
             label="End",
@@ -2061,13 +2177,23 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.canvas.draw()
 
     def _apply_aidas_theme(self) -> None:
-        """Redraw the profile editor when the application mode changes."""
+        """Keep the editor body distinct from the shared window caption."""
 
+        self.configure(fg_color=COLOR_PAIRS["surface_elevated"])
+        style = ttk.Style(self)
+        background = COLORS.surface_elevated
+        style.configure("ProfileZoom.TFrame", background=background)
+        style.configure("ProfileZoom.TLabel", background=background, foreground=COLORS.text)
+        style.configure("ProfileZoom.TLabelframe", background=background)
+        style.configure("ProfileZoom.TLabelframe.Label", background=background, foreground=COLORS.text)
         if getattr(self, "figure", None) is not None:
             self._draw_profile()
 
     def _update_closed_boundary(self) -> None:
         self._refresh_plot_data()
+        plotted_start, plotted_end = self._displayed_profile_bounds()
+        self._start_line.set_xdata([plotted_start, plotted_start])
+        self._end_line.set_xdata([plotted_end, plotted_end])
         self._boundary_curve.set_data(self._plot_data["x"], self._plot_data["y"])
         self._baseline_line.set_data(
             self._plot_data["baseline_x"], self._plot_data["baseline_y"],
@@ -2220,20 +2346,28 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             pass
         self.canvas.draw_idle()
 
+    def _displayed_profile_bounds(self) -> tuple[int, int]:
+        """Return the analyzed endpoints shared by the curve and its handles."""
+        data = getattr(self, "_plot_data", None)
+        if data is None:
+            return self._start, self._end
+        return int(data["adjusted_start"]), int(data["adjusted_end"])
+
     def _boundary_at_event(self, event, *, tolerance_pixels: float = 9.0) -> str | None:
         if event.inaxes is not self.ax or event.xdata is None:
             return None
+        plotted_start, plotted_end = self._displayed_profile_bounds()
         event_x = getattr(event, "x", None)
         if event_x is None:
             distances = {
-                "start": abs(float(event.xdata) - self._start),
-                "end": abs(float(event.xdata) - self._end),
+                "start": abs(float(event.xdata) - plotted_start),
+                "end": abs(float(event.xdata) - plotted_end),
             }
             tolerance = max(1.5, (self._view_right - self._view_left) * 0.02)
         else:
             distances = {
-                "start": abs(float(event_x) - float(self.ax.transData.transform((self._start, 0.0))[0])),
-                "end": abs(float(event_x) - float(self.ax.transData.transform((self._end, 0.0))[0])),
+                "start": abs(float(event_x) - float(self.ax.transData.transform((plotted_start, 0.0))[0])),
+                "end": abs(float(event_x) - float(self.ax.transData.transform((plotted_end, 0.0))[0])),
             }
             tolerance = float(tolerance_pixels)
         boundary = min(distances, key=distances.get)
@@ -2246,20 +2380,24 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         *,
         refresh_measurements: bool,
     ) -> None:
-        previous = (self._start, self._end)
-        self._start, self._end = _updated_profile_bounds(
-            self._start,
-            self._end,
-            boundary=boundary,
-            sample=sample,
-            n_points=self.profile.size,
+        displayed = self._displayed_profile_bounds()
+        updated = _updated_profile_bounds(
+            *displayed, boundary=boundary, sample=sample, n_points=self.profile.size,
         )
-        if (self._start, self._end) != previous:
-            self._adjust_bounds = (
-                self._saved_adjust_bounds if (self._start, self._end) == self._saved_bounds else False
-            )
-        self._start_line.set_xdata([self._start, self._start])
-        self._end_line.set_xdata([self._end, self._end])
+        if updated != displayed:
+            # Once the user edits a handle, both bounds start from the visible
+            # analyzed selection. Keep the opposite endpoint where it was.
+            self._start, self._end = updated
+            self._adjust_bounds = False
+            saved_displayed = self._saved_bounds
+            if getattr(self, "_plot_data", None) is not None:
+                saved = _profile_selection_plot_data(
+                    self.profile, *self._saved_bounds, adjust_bounds=self._saved_adjust_bounds,
+                )
+                saved_displayed = (int(saved["adjusted_start"]), int(saved["adjusted_end"]))
+            if updated == saved_displayed:
+                self._start, self._end = self._saved_bounds
+                self._adjust_bounds = self._saved_adjust_bounds
         self._update_closed_boundary()
         self._update_action_states()
         if refresh_measurements:
@@ -2272,10 +2410,11 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             return
         boundary = self._boundary_at_event(event)
         if boundary is None:
+            plotted_start, plotted_end = self._displayed_profile_bounds()
             boundary = (
                 "start"
-                if abs(float(event.xdata) - self._start)
-                <= abs(float(event.xdata) - self._end)
+                if abs(float(event.xdata) - plotted_start)
+                <= abs(float(event.xdata) - plotted_end)
                 else "end"
             )
             sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
@@ -2296,7 +2435,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             return
         self._drag_boundary = None
         self._drag_view = None
-        current = self._start if boundary == "start" else self._end
+        plotted_start, plotted_end = self._displayed_profile_bounds()
+        current = plotted_start if boundary == "start" else plotted_end
         x_value = event.xdata if event.inaxes is self.ax and event.xdata is not None else current
         sample, _intensity = _nearest_profile_sample(self.profile, x_value)
         self._move_boundary(boundary, sample, refresh_measurements=True)
@@ -2316,6 +2456,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         state = ["!disabled"] if not self._actions_busy and self._has_pending_changes() else ["disabled"]
         for button in (self.save_button, self.apply_button):
             button.state(state)
+        if hasattr(self, "previous_plot_button"):
+            self._update_navigation()
 
     def _apply(self) -> None:
         if self._actions_busy or not self._has_pending_changes():
@@ -3610,7 +3752,8 @@ class Step4Frame(SidebarStepFrame):
             if getattr(self, "_auto_detecting", False) or getattr(self, "_stack_building", False):
                 self._hide_grid_notice()
             self._invalidate_roi_work()
-        self._close_profile_zoom()
+        if tab_key != self._active_batch_roi_tab:
+            self._close_profile_zoom()
         self._hide_roi_grid_hint()
         self._cancel_roi_update_animations(redraw=True)
         self._sync_active_batch_roi_state()
@@ -4537,6 +4680,11 @@ class Step4Frame(SidebarStepFrame):
 
         # Tk can process another click while the dialog is being initialized,
         # before its constructor returns and _profile_zoom_dialog is assigned.
+        # A pending quick-save must not advance the ROI while its editor opens.
+        pending_save = getattr(self, "_auto_save_after_id", None)
+        if pending_save is not None:
+            self.after_cancel(pending_save)
+            self._auto_save_after_id = None
         self._opening_profile_zoom = True
         error = None
         try:
@@ -4550,28 +4698,19 @@ class Step4Frame(SidebarStepFrame):
                     pass
                 self._close_profile_zoom()
 
-            result = self._roi_overview_result(index)
-            if result is None:
+            options = self._profile_zoom_options(index)
+            if options is None:
                 return
-            profile = intensity_profile(self.image, self.rois[index])
-            clicks = list(self.profile_clicks[:2])
-            if len(clicks) < 2:
-                clicks = [float(result.start), float(result.end)]
-            confirmed = self.completed.get(self.rois[index].suffix)
+            available = [candidate for candidate in range(len(self.rois))
+                         if self._roi_overview_result(candidate) is not None]
             self._profile_zoom_dialog = Step4ProfileZoomDialog(
-                self,
-                roi_index=index,
-                roi_suffix=self.rois[index].suffix,
-                profile=profile,
-                start=clicks[0],
-                end=clicks[1],
+                self, **options,
+                navigation_indices=available,
+                on_navigate=self._navigate_profile_zoom,
                 on_preview=self._profile_zoom_measurements,
                 on_apply=self._apply_profile_zoom_clicks,
                 on_save=self._save_profile_zoom_clicks,
                 on_close=self._profile_zoom_closed,
-                saved_bounds=(confirmed.start, confirmed.end) if confirmed is not None else None,
-                adjust_bounds=self._should_adjust_roi_bounds(self.rois[index].suffix),
-                saved_adjust_bounds=(getattr(confirmed, "manual_bounds", False) is not True) if confirmed is not None else None,
             )
         except Exception as exc:
             self._profile_zoom_dialog = None
@@ -4580,6 +4719,43 @@ class Step4Frame(SidebarStepFrame):
             self._opening_profile_zoom = False
         if error is not None:
             messagebox.showerror("Profile Detail", f"Could not open the detailed profile.\n{error}", parent=self)
+
+    def _profile_zoom_options(self, index: int) -> dict | None:
+        if self.image is None or not 0 <= index < len(self.rois):
+            return None
+        result = self._roi_overview_result(index)
+        if result is None:
+            return None
+        roi = self.rois[index]
+        if index == self.current_roi_idx:
+            clicks = list(self.profile_clicks[:2])
+        else:
+            clicks = list(getattr(self, "roi_clicks", {}).get(roi.suffix, [])[:2])
+        if len(clicks) < 2:
+            clicks = [float(result.start), float(result.end)]
+        confirmed = self.completed.get(roi.suffix)
+        return {
+            "roi_index": index, "roi_suffix": roi.suffix,
+            "profile": intensity_profile(self.image, roi),
+            "start": clicks[0], "end": clicks[1],
+            "saved_bounds": (confirmed.start, confirmed.end) if confirmed is not None else None,
+            "adjust_bounds": self._should_adjust_roi_bounds(roi.suffix),
+            "saved_adjust_bounds": (getattr(confirmed, "manual_bounds", False) is not True)
+                                   if confirmed is not None else None,
+        }
+
+    def _navigate_profile_zoom(self, index: int) -> dict | None:
+        """Select an available ROI without closing its editor or saving edits."""
+        options = self._profile_zoom_options(index)
+        if options is None:
+            return None
+        self._remember_current_roi_clicks()
+        self.current_roi_idx = index
+        self._current_profile = options["profile"]
+        self._load_current_roi_clicks()
+        self._select_roi_in_list()
+        self._render_current_roi()
+        return options
 
     def _profile_zoom_measurements(
         self, index: int, start: int, end: int, *, adjust_bounds: bool = True,
@@ -5135,7 +5311,12 @@ class Step4Frame(SidebarStepFrame):
             if generation != getattr(self, "_roi_context_generation", 0):
                 return
             self._auto_save_after_id = None
-            if self.image is image and self.current_roi_idx == roi_index:
+            if (
+                self.image is image
+                and self.current_roi_idx == roi_index
+                and not getattr(self, "_opening_profile_zoom", False)
+                and getattr(self, "_profile_zoom_dialog", None) is None
+            ):
                 self._auto_save_current_roi()
 
         self._auto_save_after_id = self.after_idle(save)

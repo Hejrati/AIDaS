@@ -48,12 +48,14 @@ from aidas.core.display import (
     work_area_bounds,
 )
 from aidas.ui.batch_selection import BatchSelectionMixin
+from aidas.ui.batch_empty_state import NoValidFilesNotice
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.result_grid import ResultGridCanvas
-from aidas.ui.theme import COLOR_PAIRS, COLORS, resolve_color
+from aidas.ui.theme import COLOR_PAIRS, COLORS, TYPOGRAPHY, resolve_color
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
+    notify_workflow_cancelled,
     NativeNumericSpinbox,
     SidebarStepFrame,
     action_button,
@@ -1114,6 +1116,12 @@ class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
         self.tree.bind("<ButtonPress-1>", self._on_tree_button_press, add="+")
         self.tree.bind("<ButtonRelease-1>", self._on_tree_button_release, add="+")
 
+    def destroy(self):
+        if self._xscroll_after_id is not None:
+            self.after_cancel(self._xscroll_after_id)
+            self._xscroll_after_id = None
+        super().destroy()
+
     def _make_checkbox_images(self):
         images = {
             "checked": tk.PhotoImage(width=16, height=16),
@@ -1437,6 +1445,9 @@ class RBatchSelectionPanel(ttk.Frame):
         self.input_folders = None if folders is None else tuple(Path(folder) for folder in folders)
         self.rows = []
         self.table = None
+        self.processed_notice = None
+        self.empty_notice = None
+        self._override_existing_results = False
         self._scan_events: queue.Queue[tuple[str, object]] = queue.Queue()
 
         self._build_ui()
@@ -1477,6 +1488,7 @@ class RBatchSelectionPanel(ttk.Frame):
 
         settings_row = ttk.Frame(run_box)
         settings_row.pack(side="bottom", fill="x", pady=(0, 8))
+        self.worker_settings_footer = settings_row
         ttk.Label(settings_row, text="Batch size:").pack(side="left")
         max_workers = self._max_worker_count()
         self.workers_var = tk.IntVar(value=min(4, max_workers))
@@ -1563,6 +1575,118 @@ class RBatchSelectionPanel(ttk.Frame):
     def _on_hide_processed_changed(self):
         if self.table is not None:
             self.table.set_hide_processed(self.hide_processed_var.get())
+        if self.processed_notice is not None:
+            self.table.pack_forget()
+            self.processed_notice.pack_forget()
+            view = self.processed_notice if self.hide_processed_var.get() else self.table
+            view.pack(fill="both", expand=True)
+
+    def _show_empty_notice(self):
+        self.table.pack_forget()
+        self.next_button.pack_forget()
+        self.worker_settings_footer.pack_forget()
+        self.execution_mode_footer.pack_forget()
+        self.hide_processed_check.state(["disabled"])
+        self.empty_notice = NoValidFilesNotice(
+            self.table_host,
+            description="No complete Step 3 inputs were found in this folder or its subfolders.\n\n"
+                        "Select a folder containing Light and Light_MARKED file pairs (.hdr/.img).",
+            on_select_folder=self._select_another_folder,
+        )
+        self.empty_notice.pack(fill="both", expand=True)
+
+    def _select_another_folder(self):
+        folder = filedialog.askdirectory(
+            parent=self, title="Choose a folder for flattening", initialdir=str(self.root_dir),
+        )
+        if not folder:
+            return
+        self.root_dir = Path(folder)
+        self.input_folders = None
+        self.rows = []
+        self._override_existing_results = False
+        self._show_results_table([])
+        self.table.pack_forget()
+        self.hide_processed_check.state(["disabled"])
+        self.next_button.state(["disabled"])
+        self.workers_spin.configure(state="disabled")
+        self.summary_var.set("Scanning folders...")
+        self.more_label.configure(text="")
+        self.more_tooltip.text = ""
+        self.scan_label = ttk.Label(self.table_host, text="Scanning folders...", anchor="center")
+        self.scan_label.pack(fill="both", expand=True)
+        self._start_scan()
+
+    def _show_processed_notice(self):
+        self.table.pack_forget()
+        self.next_button.pack_forget()
+        self.worker_settings_footer.pack_forget()
+        self.execution_mode_footer.pack_forget()
+        notice = ttk.Frame(self.table_host, padding=24)
+        notice.pack(fill="both", expand=True)
+        notice.columnconfigure(0, weight=1)
+        notice.rowconfigure(0, weight=1)
+        notice.rowconfigure(2, weight=1)
+        content = ttk.Frame(notice)
+        content.grid(row=1, column=0)
+        ttk.Label(
+            content, text="All folders already contain Step 3 results",
+            font=(TYPOGRAPHY.family, TYPOGRAPHY.subtitle_size, "bold"),
+        ).pack(pady=(0, 10))
+        folders = Step3Frame._normalize_step4_result_folders(row["folder"] for row in self.rows)
+        complete = len(folders) == len({os.path.normcase(str(Path(row["folder"]).resolve())) for row in self.rows})
+        message = (
+            "The selected folder already contains processed results. No folders require processing.\n\n"
+            "Continue to Step 4, or choose Override to run processing again."
+            if complete else
+            "Existing R results were found, but some flattened images are missing.\n\n"
+            "Choose Override to regenerate the results before continuing to Step 4."
+        )
+        description = ttk.Label(content, text=message, justify="center", anchor="center", wraplength=500)
+        description.pack(fill="x")
+        notice.bind("<Configure>", lambda event: description.configure(
+            wraplength=max(180, min(500, event.width - 64))), add="+")
+        actions = ttk.Frame(content)
+        actions.pack(pady=(18, 0))
+        self.override_button = AppButton(
+            actions, text="Override", variant="danger", command=self._override_results,
+        )
+        self.override_button.pack(side="left", padx=(0, 10))
+        HoverToolTip(self.override_button, "Select folders to process again. Existing results are replaced when processing runs.")
+        self.go_to_step4_button = AppButton(
+            actions, text="Go to Step 4", variant="success", command=self._continue_with_processed_results,
+        )
+        self.go_to_step4_button.pack(side="left")
+        if not complete or not callable(getattr(self.step_frame, "on_continue_to_step4", None)):
+            self.go_to_step4_button.configure(state="disabled")
+        self.processed_notice = notice
+
+    def _continue_with_processed_results(self):
+        callback = getattr(self.step_frame, "on_continue_to_step4", None)
+        folders = Step3Frame._normalize_step4_result_folders(row["folder"] for row in self.rows)
+        if not callable(callback) or len(folders) != len({os.path.normcase(str(Path(row["folder"]).resolve())) for row in self.rows}):
+            return
+        self.step_frame.step4_result_folders = folders
+        self.step_frame._close_r_batch_panel(render_previous=True)
+        callback([str(folder) for folder in folders])
+
+    def _override_results(self):
+        rows = []
+        for row in self.rows:
+            updated = dict(row)
+            updated.update(include=True, locked=False, status="Ready: override existing results")
+            updated["values"] = dict(row.get("values", {}), status=updated["status"])
+            rows.append(updated)
+        self.rows = rows
+        self._override_existing_results = True
+        self._scan_summary_counts.update(ready=len(rows), processed=0)
+        self._show_results_table(rows)
+        self._on_selection_changed(len(self.table.selected_rows()))
+        maximum = self._max_worker_count(len(rows))
+        self.workers_spin.configure(maximum=maximum, state="normal")
+        self.workers_var.set(min(4, maximum))
+        self.worker_limit_var.set(self._worker_limit_text(maximum))
+        self.step_frame.status_var.set("Override enabled. Select Run to process the selected folders again.")
 
     def _on_selection_changed(self, selected):
         counts = getattr(self, "_scan_summary_counts", None)
@@ -1683,6 +1807,13 @@ class RBatchSelectionPanel(ttk.Frame):
                 child.destroy()
             except tk.TclError:
                 pass
+        self.processed_notice = None
+        self.empty_notice = None
+        self.hide_processed_check.state(["!disabled"])
+        self.next_button.pack(side="right")
+        for footer in (self.worker_settings_footer, self.execution_mode_footer):
+            if not footer.winfo_manager():
+                footer.pack(side="bottom", fill="x", pady=(0, 8), before=self.summary_row)
 
         table = RBatchSelectionTable(
             self.table_host, on_selection_changed=self._on_selection_changed,
@@ -1696,6 +1827,7 @@ class RBatchSelectionPanel(ttk.Frame):
         if not self.winfo_exists():
             return
         self.rows = rows
+        self._override_existing_results = False
         ready = sum(1 for row in rows if not row["locked"])
         processed = sum(1 for row in rows if row["locked"])
         self._scan_summary_counts = {
@@ -1721,6 +1853,13 @@ class RBatchSelectionPanel(ttk.Frame):
                 self.workers_spin.configure(state="disabled")
         except tk.TclError:
             pass
+        if rows and ready == 0 and processed:
+            self._show_processed_notice()
+            self.step_frame.status_var.set("Existing Step 3 results found. Continue to Step 4 or choose Override.")
+        elif not rows:
+            self._show_empty_notice()
+            self.step_frame.status_var.set("No valid Step 3 files found. Select another folder.")
+
     def _run_selected(self):
         if self.table is None:
             return
@@ -1761,15 +1900,19 @@ class RBatchSelectionPanel(ttk.Frame):
         workers = min(workers, max_workers)
         self.workers_var.set(workers)
         output_mode = self.step_frame._normalize_r_output_mode(self.output_mode_var.get())
+        options = {"output_mode": output_mode}
+        if getattr(self, "_override_existing_results", False):
+            options["allow_existing_rdata"] = True
         self.step_frame._start_batch_r_runs(
             folders,
             workers,
             main_script_path,
             output_script_path,
-            output_mode=output_mode,
+            **options,
         )
 
     def _cancel(self):
+        notify_workflow_cancelled(self, 3)
         self.step_frame._close_r_batch_panel(render_previous=True)
 
 class RBatchRunPanel(ttk.Frame):
@@ -2109,6 +2252,9 @@ class Step3ResultZoomDialog(tk.Toplevel):
 
         self.bind("<Escape>", lambda _event: self.destroy(), add="+")
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+        from aidas.ui.title_bar import install_dialog_title_bar
+
+        install_dialog_title_bar(self)
         self.deiconify()
         self._fit_restored_geometry(bounds)
         self.lift()
@@ -3740,6 +3886,7 @@ class Step3Frame(SidebarStepFrame):
         if not self._busy:
             return
         self._r_cancel_event.set()
+        notify_workflow_cancelled(self, 3)
         self.status_var.set("Cancelling Step 3 R processing...")
         if self.r_batch_run_panel is not None:
             self.r_batch_run_panel.log("Cancellation requested by user.")

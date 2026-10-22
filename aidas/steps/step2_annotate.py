@@ -42,6 +42,7 @@ from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.ui.annotation_guide import AnnotationGuide
 from aidas.ui.batch_selection import BatchSelectionMixin
+from aidas.ui.batch_empty_state import NoValidFilesNotice
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.tabs import ClosableTabView
@@ -53,6 +54,7 @@ from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
+    notify_workflow_cancelled,
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
@@ -458,6 +460,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.root_dir = os.path.abspath(root_dir)
         self.rows = []
         self.table = None
+        self.processed_notice = None
+        self.empty_notice = None
 
         self._build_ui()
         if initial_rows is None:
@@ -465,9 +469,10 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         else:
             rows = list(initial_rows)
             self._scan_done(rows, len(rows), 0, [])
-            self.step_frame.status_var.set(
-                "Confirm the Step 1 folders for AI segmentation."
-            )
+            if self.processed_notice is None and self.empty_notice is None:
+                self.step_frame.status_var.set(
+                    "Confirm the Step 1 folders for AI segmentation."
+                )
 
     def _build_ui(self):
         wrapper = ttk.Frame(self, padding=12)
@@ -578,6 +583,10 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
                 child.destroy()
             except tk.TclError:
                 pass
+        self.processed_notice = None
+        self.empty_notice = None
+        self.hide_processed_check.state(["!disabled"])
+        self.next_button.pack(side="right")
 
         table = Step2BatchSegmentationTable(
             self.table_host, on_selection_changed=self._on_selection_changed,
@@ -590,6 +599,108 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     def _on_hide_processed_changed(self):
         if self.table is not None:
             self.table.set_hide_processed(self.hide_processed_var.get())
+        if self.processed_notice is not None:
+            self.table.pack_forget()
+            self.processed_notice.pack_forget()
+            view = self.processed_notice if self.hide_processed_var.get() else self.table
+            view.pack(fill="both", expand=True)
+
+    def _show_empty_notice(self):
+        self.table.pack_forget()
+        self.next_button.pack_forget()
+        self.hide_processed_check.state(["disabled"])
+        self.empty_notice = NoValidFilesNotice(
+            self.table_host,
+            description="No valid Step 2 files were found in this folder or its subfolders.\n\n"
+                        "Select a folder containing Light.hdr and Light.img files.",
+            on_select_folder=self._select_another_folder,
+        )
+        self.empty_notice.pack(fill="both", expand=True)
+
+    def _select_another_folder(self):
+        folder = filedialog.askdirectory(
+            parent=self, title="Choose a folder for segmentation", initialdir=self.root_dir,
+        )
+        if not folder:
+            return
+        self.root_dir = os.path.abspath(folder)
+        self.rows = []
+        self._show_results_table([])
+        self.table.pack_forget()
+        self.hide_processed_check.state(["disabled"])
+        self.next_button.state(["disabled"])
+        self.summary_var.set("Scanning folders...")
+        self.more_label.configure(text="")
+        self.more_tooltip.text = ""
+        self.scan_label = ttk.Label(self.table_host, text="Scanning folders...", anchor="center")
+        self.scan_label.pack(fill="both", expand=True)
+        self._start_scan()
+
+    def _show_processed_notice(self):
+        self.table.pack_forget()
+        self.next_button.pack_forget()
+        notice = ttk.Frame(self.table_host, padding=24)
+        notice.pack(fill="both", expand=True)
+        notice.columnconfigure(0, weight=1)
+        notice.rowconfigure(0, weight=1)
+        notice.rowconfigure(2, weight=1)
+        content = ttk.Frame(notice)
+        content.grid(row=1, column=0)
+        ttk.Label(
+            content, text="All images are already segmented",
+            font=(TYPOGRAPHY.family, TYPOGRAPHY.subtitle_size, "bold"),
+        ).pack(pady=(0, 10))
+        description = ttk.Label(
+            content,
+            text="The selected folder already contains segmented images. "
+                 "No images require segmentation.\n\n"
+                 "Continue to Step 3, or choose Override to segment these images again.",
+            justify="center", anchor="center", wraplength=500,
+        )
+        description.pack(fill="x")
+        notice.bind("<Configure>", lambda event: description.configure(
+            wraplength=max(180, min(500, event.width - 64))), add="+")
+        actions = ttk.Frame(content)
+        actions.pack(pady=(18, 0))
+        self.override_button = AppButton(
+            actions, text="Override", variant="danger", command=self._override_segmentations,
+        )
+        self.override_button.pack(side="left", padx=(0, 10))
+        HoverToolTip(self.override_button, "Select images to segment again. Existing results remain until new results are saved.")
+        self.go_to_step3_button = AppButton(
+            actions, text="Go to Step 3", variant="success",
+            command=self._continue_with_segmented_images,
+        )
+        self.go_to_step3_button.pack(side="left")
+        if not callable(getattr(self.step_frame, "on_continue_to_step3", None)):
+            self.go_to_step3_button.configure(state="disabled")
+        self.processed_notice = notice
+
+    def _continue_with_segmented_images(self):
+        callback = getattr(self.step_frame, "on_continue_to_step3", None)
+        if not callable(callback):
+            return
+        folders = []
+        seen = set()
+        for row in self.rows:
+            for folder in row.get("step3_folders", [row["folder"]]):
+                key = os.path.normcase(os.path.abspath(folder))
+                if key not in seen:
+                    seen.add(key)
+                    folders.append(folder)
+        self.step_frame._close_step2_batch_segmentation_panel(restore_previous=True)
+        callback(folders)
+
+    def _override_segmentations(self):
+        rows = self.step_frame._step2_override_rows(self.rows)
+        if not rows:
+            messagebox.showwarning("Batch Step 2", "No source images are available to segment again.", parent=self)
+            return
+        self.rows = rows
+        self._scan_summary_counts.update(ready=len(rows), processed=0)
+        self._show_results_table(rows)
+        self._on_selection_changed(len(self.table.selected_rows()))
+        self.step_frame.status_var.set("Override enabled. Select Run to segment the selected images again.")
 
     def _on_selection_changed(self, selected):
         counts = getattr(self, "_scan_summary_counts", None)
@@ -630,6 +741,12 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.more_label.configure(text="More" if access_errors else "")
         self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
+        if rows and ready == 0 and already_segmented:
+            self._show_processed_notice()
+            self.step_frame.status_var.set("All images are already segmented. Continue to Step 3 or choose Override.")
+        elif not rows:
+            self._show_empty_notice()
+            self.step_frame.status_var.set("No valid Step 2 files found. Select another folder.")
 
     def _run_selected(self):
         if self.table is None:
@@ -644,6 +761,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         )
 
     def _cancel(self):
+        notify_workflow_cancelled(self, 2)
         self.step_frame._close_step2_batch_segmentation_panel(restore_previous=True)
 
 
@@ -1448,6 +1566,10 @@ class Step2Frame(SidebarStepFrame):
 
         return {
             "folder": folder,
+            "source_image_path": self._preferred_analyze_pair_path(os.path.join(folder, source_name)),
+            "step3_folders": ([folder] if directly_segmented else []) + [
+                side_folders[side] for side in segmented_sides if side in side_folders
+            ],
             "include": not locked,
             "locked": locked,
             "status": status,
@@ -1458,6 +1580,33 @@ class Step2Frame(SidebarStepFrame):
             "completed": ["Light"] if locked else [],
             "segmented_sides": segmented_sides,
         }
+
+    def _step2_override_rows(self, rows):
+        """Requeue original sources without also reprocessing their saved side copies."""
+        side_copies = {
+            os.path.normcase(os.path.abspath(folder))
+            for row in rows
+            for folder in row.get("step3_folders", [])
+            if os.path.normcase(os.path.abspath(folder)) != os.path.normcase(os.path.abspath(row["folder"]))
+        }
+        prepared = []
+        for row in rows:
+            if os.path.normcase(os.path.abspath(row["folder"])) in side_copies:
+                continue
+            path = row.get("source_image_path")
+            if not path or not os.path.isfile(path):
+                continue
+            updated = dict(row)
+            updated.update(
+                include=True, locked=False, status="Ready: override existing segmentation",
+                image_paths=[path], pending=["Light"], completed=[],
+            )
+            updated["values"] = {
+                "folder": row.get("values", {}).get("folder", row["folder"]),
+                "status": updated["status"], "images": "1",
+            }
+            prepared.append(updated)
+        return prepared
 
     def _scan_step2_batch_segmentation_folders(self, root_dir):
         """Return folder rows showing ready and already-segmented Light inputs."""
@@ -1500,6 +1649,7 @@ class Step2Frame(SidebarStepFrame):
         self._show_single_image_canvas()
         manual_fovea_by_path = self._collect_folder_fovea_lines(image_paths)
         if manual_fovea_by_path is None:
+            notify_workflow_cancelled(self, 2)
             self.status_var.set("AI batch segmentation cancelled before running.")
             return
 

@@ -56,59 +56,12 @@ class Step5CompileTests(unittest.TestCase):
 
         frame.on_compilation_complete.assert_called_once_with(Path("compiled.xlsx"))
 
-    def test_app_progress_only_advances_and_marks_final_success_complete(self):
+    def test_final_success_updates_status_without_a_completion_popup(self):
         app = AIDaSApp.__new__(AIDaSApp)
-        app.progress_strip = mock.Mock()
-        app._workflow_completed_steps = 3
-
-        app._advance_workflow_progress(1)
+        app._set_status_message = mock.Mock()
         app._on_step5_compilation_complete(Path("compiled.xlsx"))
-
-        self.assertEqual(app._workflow_completed_steps, 5)
-        self.assertEqual(
-            app.progress_strip.set_completed_steps.call_args_list,
-            [mock.call(3), mock.call(5)],
-        )
-
-    def test_app_progress_animates_only_when_a_milestone_advances(self):
-        app = AIDaSApp.__new__(AIDaSApp)
-        app.progress_strip = mock.Mock()
-        app._workflow_completed_steps = 0
-        app._show_workflow_completion_popup = mock.Mock()
-
-        app._advance_workflow_progress(1)
-        app._advance_workflow_progress(1)
-
-        app.progress_strip.animate_completion.assert_called_once_with(0)
-        app._show_workflow_completion_popup.assert_called_once_with(0)
-
-    def test_workflow_handoff_uses_a_large_workspace_completion_popup(self):
-        source = inspect.getsource(AIDaSApp._show_workflow_completion_popup)
-
-        self.assertIn("width=500", source)
-        self.assertIn("height=285", source)
-        self.assertIn("Step {completed_index + 1} complete", source)
-        self.assertNotIn("Progress bar updated above", source)
-        self.assertNotIn("Next: Step", source)
-        self.assertIn("content.place(relx=0.5, rely=0.5, anchor=\"center\")", source)
-        self.assertIn('"certificate-badge-iconify.png"', source)
-        self.assertIn("badge_size = 112", source)
-        self.assertIn("badge_canvas = tk.Canvas", source)
-        self.assertIn("badge_canvas.create_text", source)
-        self.assertIn("text=str(completed_index + 1)", source)
-        self.assertIn("ProgressCircle.NUMBER_FONT_FAMILY", source)
-        self.assertIn("ProgressCircle.default_number_font_size(badge_size)", source)
-        self.assertIn("ProgressCircle.NUMBER_FONT_WEIGHT", source)
-        self.assertNotIn("ctk.CTkLabel(\n            badge_holder", source)
-        self.assertNotIn("number_disk", source)
-        self.assertNotIn("frames =", source)
-        self.assertIn("self.after(1500, close_popup)", source)
-
-    def test_completion_popup_iconify_badge_asset_is_packaged(self):
-        asset = Path(__file__).parents[1] / "assets" / "certificate-badge-iconify.png"
-
-        self.assertTrue(asset.is_file())
-        self.assertGreater(asset.stat().st_size, 0)
+        app._set_status_message.assert_called_once_with("Excel file created successfully.")
+        self.assertNotIn("_workflow_completion_popup", app.__dict__)
 
     def test_handoff_folder_prefills_input_and_default_workbook(self):
         with tempfile.TemporaryDirectory() as temp_dir:

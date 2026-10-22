@@ -47,7 +47,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         source = inspect.getsource(Step4ProfileZoomDialog.__init__)
 
         self.assertIn("apply_app_icon_to(self)", source)
-        self.assertEqual(source.count("= AppButton("), 3)
+        self.assertEqual(source.count("= AppButton("), 5)
         self.assertIn('text="Save and Exit"', source)
         self.assertIn('text="Apply"', source)
         self.assertIn('text="Cancel"', source)
@@ -66,7 +66,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         footer_source = source.split("footer = ttk.Frame(", 1)[1].split(
             "chart_frame = ttk.Frame(", 1
         )[0]
-        self.assertNotIn("ttk.Label(", footer_source)
+        self.assertIn("self.plot_number_label = ttk.Label(", footer_source)
         dialog_source = inspect.getsource(Step4ProfileZoomDialog)
         self.assertNotIn("cursor_var", dialog_source)
         self.assertNotIn("apply_status_var", dialog_source)
@@ -377,21 +377,22 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         dialog._on_preview_callback = mock.Mock(return_value={name: 1.0 for name in RESULTS_HEADERS[1:]})
         dialog._draw_profile()
         dialog.figure.canvas.draw()
-        press_x = dialog.ax.transData.transform((35, 0))[0]
-        dialog._on_press(SimpleNamespace(inaxes=dialog.ax, xdata=35.0, x=press_x, button=1))
+        plotted_start, plotted_end = map(int, dialog._baseline_line.get_xdata())
+        press_x = dialog.ax.transData.transform((plotted_start, 0))[0]
+        dialog._on_press(SimpleNamespace(inaxes=dialog.ax, xdata=float(plotted_start), x=press_x, button=1))
 
         for start in (20, 25, 30):
             dialog._on_motion(SimpleNamespace(inaxes=dialog.ax, xdata=float(start)))
             self.assertEqual(dialog._start, start)
             self.assertFalse(dialog._adjust_bounds)
-            np.testing.assert_array_equal(dialog._baseline_line.get_xdata(), [start, 110])
+            np.testing.assert_array_equal(dialog._baseline_line.get_xdata(), [start, plotted_end])
             self.assertEqual(dialog._plot_data["adjusted_start"], start)
         dialog._on_preview_callback.assert_not_called()
 
         dialog._on_release(SimpleNamespace(inaxes=dialog.ax, xdata=30.0))
 
-        dialog._on_preview_callback.assert_called_once_with(3, 30, 110, adjust_bounds=False)
-        np.testing.assert_array_equal(dialog._baseline_line.get_xdata(), [30, 110])
+        dialog._on_preview_callback.assert_called_once_with(3, 30, plotted_end, adjust_bounds=False)
+        np.testing.assert_array_equal(dialog._baseline_line.get_xdata(), [30, plotted_end])
         np.testing.assert_array_equal(dialog.profile, profile)
 
     def test_saved_manual_bounds_survive_overview_and_reopening(self):
@@ -488,12 +489,16 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
     def test_zoom_matches_saved_normalized_result_and_preserves_raw_profile(self):
         dialog, image, roi, original = self._normalized_zoom_dialog()
         previous_limits = dialog.ax.get_xlim()
-        for start in (70, 40, 70):
-            if start != dialog._start:
+        initial_start, initial_end = map(int, dialog._baseline_line.get_xdata())
+        for start in (initial_start, 40, initial_start):
+            if start != int(dialog._start_line.get_xdata()[0]):
                 dialog._move_boundary("start", start, refresh_measurements=False)
-            self.assertEqual(dialog._adjust_bounds, start == 70)
+            self.assertEqual(dialog._adjust_bounds, start == initial_start)
             saved = analyze_and_save_roi(
-                image, roi, start_click=start, end_click=95, adjust_bounds=dialog._adjust_bounds,
+                image, roi,
+                start_click=70 if start == initial_start else start,
+                end_click=95 if start == initial_start else initial_end,
+                adjust_bounds=dialog._adjust_bounds,
             )
             np.testing.assert_allclose(dialog._boundary_curve.get_xdata(), saved.normalized_x)
             np.testing.assert_allclose(dialog._boundary_curve.get_ydata(), saved.normalized_y)
@@ -551,7 +556,9 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         pixels_before = dialog.ax.transData.transform(samples)
         view_before = (dialog.ax.get_xlim(), dialog.ax.get_ylim(), dialog.ax.get_box_aspect())
 
-        dialog._on_press(SimpleNamespace(inaxes=dialog.ax, xdata=70.0, x=pixels_before[0, 0], button=1))
+        plotted_start, plotted_end = map(int, dialog._baseline_line.get_xdata())
+        handle_x = dialog.ax.transData.transform((plotted_start, 0))[0]
+        dialog._on_press(SimpleNamespace(inaxes=dialog.ax, xdata=float(plotted_start), x=handle_x, button=1))
 
         self.assertEqual(dialog._drag_boundary, "start")
         for sample in (60.0, 50.0):
@@ -569,7 +576,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertGreaterEqual(dialog.ax.get_xlim()[1], view_before[0][1])
         dialog.figure.canvas.draw()
         self.assertFalse(np.allclose(dialog.ax.transData.transform(samples), pixels_before))
-        saved = analyze_and_save_roi(image, roi, start_click=50, end_click=95, adjust_bounds=False)
+        saved = analyze_and_save_roi(image, roi, start_click=50, end_click=plotted_end, adjust_bounds=False)
         np.testing.assert_allclose(dialog._boundary_curve.get_ydata(), saved.normalized_y)
         np.testing.assert_allclose(dialog._baseline_line.get_ydata(), saved.baseline_y)
         self._assert_readable_plot_frame(dialog)
@@ -974,6 +981,39 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
                     frame._open_profile_zoom.assert_called_once_with(index)
                 else:
                     frame._open_profile_zoom.assert_not_called()
+
+    def test_opening_zoom_cancels_pending_roi_auto_save(self):
+        frame = self._grid_frame()
+        frame._auto_save_after_id = "pending-save"
+        frame.after_cancel = mock.Mock()
+        frame._profile_zoom_measurements = mock.Mock()
+        frame._apply_profile_zoom_clicks = mock.Mock()
+        frame._save_profile_zoom_clicks = mock.Mock()
+        frame._should_adjust_roi_bounds = mock.Mock(return_value=True)
+        frame.completed = {}
+        with (
+            mock.patch("aidas.steps.step4_analyze_isez.intensity_profile", return_value=np.arange(100)),
+            mock.patch("aidas.steps.step4_analyze_isez.Step4ProfileZoomDialog") as constructor,
+        ):
+            Step4Frame._open_profile_zoom(frame, frame.current_roi_idx)
+        frame.after_cancel.assert_called_once_with("pending-save")
+        self.assertIsNone(frame._auto_save_after_id)
+        self.assertIs(frame._profile_zoom_dialog, constructor.return_value)
+
+    def test_pending_auto_save_does_not_interrupt_zoom_editor(self):
+        for opening, dialog in ((True, None), (False, object())):
+            frame = Step4Frame.__new__(Step4Frame)
+            frame.image = object()
+            frame.current_roi_idx = 0
+            frame._roi_context_generation = 1
+            frame._opening_profile_zoom = opening
+            frame._profile_zoom_dialog = dialog
+            frame._auto_save_after_id = None
+            frame.after_idle = mock.Mock(return_value="pending")
+            frame._auto_save_current_roi = mock.Mock()
+            frame._queue_roi_auto_save()
+            frame.after_idle.call_args.args[0]()
+            frame._auto_save_current_roi.assert_not_called()
 
     def test_repeated_grid_double_clicks_share_one_zoom_window_during_creation(self):
         frame = self._grid_frame()

@@ -277,6 +277,15 @@ class _WindowsAPI:
             pass
         return resolved
 
+    def remove_dialog_edge(self, handle: int) -> None:
+        """Remove the raised native edge retained by fixed-size Tk dialogs."""
+        extended_index = -20  # GWL_EXSTYLE
+        style = int(self._get_window_long(handle, extended_index))
+        # WS_EX_DLGMODALFRAME, WS_EX_WINDOWEDGE, WS_EX_CLIENTEDGE, STATICEDGE.
+        border_flags = 0x00000001 | 0x00000100 | 0x00000200 | 0x00020000
+        self._set_window_long(handle, extended_index, style & ~border_flags)
+        self.refresh_frame(handle)
+
     def get_style(self, handle: int) -> int:
         # Window styles are 32-bit bitfields even when LONG_PTR is 64-bit.
         return int(self._get_window_long(handle, _GWL_STYLE)) & 0xFFFFFFFF
@@ -440,8 +449,10 @@ class WindowsCaptionController:
         window: tk.Misc,
         *,
         native_api: _NativeWindowAPI | None = None,
+        dialog: bool = False,
     ) -> None:
         self.window = window
+        self.dialog = dialog
         self._api = native_api
         self.handle: int | None = None
         self.original_style: int | None = None
@@ -470,7 +481,8 @@ class WindowsCaptionController:
         try:
             handle = self._api.root_handle(self.window)
             original_style = self._api.get_style(handle)
-            if original_style & _REQUIRED_NATIVE_STYLES != _REQUIRED_NATIVE_STYLES:
+            required = _WS_SYSMENU if self.dialog else _REQUIRED_NATIVE_STYLES
+            if original_style & required != required:
                 return False
             # On Windows 10, retaining WS_THICKFRAME after removing the
             # caption leaves a system-painted black strip that cannot be
@@ -861,14 +873,16 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
             command=self.controller.minimize,
             font_size=17,
         )
-        self.minimize_button.pack(side="left", fill="y")
+        if not controller.dialog:
+            self.minimize_button.pack(side="left", fill="y")
         self.maximize_button = self._window_button(
             controls,
             text="\u25a1",
             command=self._toggle_maximize,
             font_size=17,
         )
-        self.maximize_button.pack(side="left", fill="y")
+        if not controller.dialog:
+            self.maximize_button.pack(side="left", fill="y")
         self.close_button = self._window_button(
             controls,
             text="\u00d7",
@@ -927,7 +941,9 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
     def _resize_edge_at(self, pointer_x: int, pointer_y: int) -> str | None:
         """Return the client edge under one screen-coordinate pointer."""
 
-        if self.controller.is_maximized():
+        # CTk's resizable() query schedules a native-caption recolor, which
+        # withdraws the window. Pointer motion must only read Tk's WM flags.
+        if not all(tk.Wm.resizable(self.master)) or self.controller.is_maximized():
             return None
         try:
             left = int(self.master.winfo_rootx())
@@ -1070,6 +1086,8 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
         self._cursor_before_resize = previous
 
     def _toggle_maximize(self, _event=None) -> str:
+        if self.controller.dialog:
+            return "break"
         self.controller.toggle_maximize()
         self._queue_window_state_sync()
         return "break"
@@ -1225,3 +1243,59 @@ __all__ = [
     "create_custom_windows_title_bar",
     "reassert_client_size",
 ]
+
+
+def install_dialog_title_bar(window: tk.Misc) -> CustomWindowsTitleBar | None:
+    """Use the main application's caption for decorated application dialogs.
+
+    Native close messages still dispatch each dialog's WM_DELETE_WINDOW handler.
+    Undecorated menus, tooltips, splash screens and animation overlays are excluded.
+    """
+    if not isinstance(window, tk.Toplevel) or window.overrideredirect():
+        return None
+    existing = getattr(window, "_aidas_dialog_title_bar", None)
+    if existing is not None:
+        existing.set_title(window.title())
+        return existing
+    root = window._root()
+    if getattr(root, "interface_mode", "Modern") != "Modern":
+        return None
+    # CTk recolors native captions by withdrawing the window and calling
+    # update(). That reentrant path conflicts with our client-drawn caption.
+    previous_header_manipulation = getattr(
+        window, "_deactivate_windows_window_header_manipulation", False,
+    )
+    window._deactivate_windows_window_header_manipulation = True
+    controller = WindowsCaptionController(window, dialog=True)
+    if not controller.install():
+        window._deactivate_windows_window_header_manipulation = previous_header_manipulation
+        return None
+    try:
+        from aidas.utils.ui_utils import resource_path
+
+        logo = resource_path("assets/aidas.png")
+        bar = CustomWindowsTitleBar(window, controller=controller,
+                                    title=window.title(), logo_path=str(logo))
+        packed = window.pack_slaves()
+        if packed:
+            bar.pack(side="top", fill="x", before=packed[0])
+        elif window.grid_slaves():
+            children = window.grid_slaves()
+            last_row = window.grid_size()[1]
+            for row in range(last_row, -1, -1):
+                weight = window.grid_rowconfigure(row)["weight"]
+                window.grid_rowconfigure(row + 1, weight=weight)
+            window.grid_rowconfigure(0, weight=0)
+            for child in children:
+                child.grid_configure(row=int(child.grid_info()["row"]) + 1)
+            bar.grid(row=0, column=0, columnspan=max(1, window.grid_size()[0]), sticky="ew")
+        else:
+            bar.pack(side="top", fill="x")
+        if isinstance(controller._api, _WindowsAPI):
+            controller._api.remove_dialog_edge(controller.handle)
+        window._aidas_dialog_title_bar = bar
+        return bar
+    except Exception:
+        controller.restore_native_caption()
+        window._deactivate_windows_window_header_manipulation = previous_header_manipulation
+        raise

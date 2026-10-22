@@ -31,6 +31,7 @@ from aidas.ui.theme import COLOR_PAIRS, CONTROLS
 from aidas.utils.ui_layout import COLORS, LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
+    notify_workflow_cancelled,
     NativeNumericSpinbox,
     SidebarStepFrame,
     directory_row,
@@ -2356,7 +2357,7 @@ class Step1Frame(SidebarStepFrame):
                 pass  # Closing the app also cancels a pending canvas notice.
 
     def _dismiss_bright_pixel_notice(self):
-        """Resolve a pending action before removing its in-canvas notice."""
+        """Resolve a pending action before closing its modal popup."""
         decision = self.__dict__.get("_bright_pixel_decision")
         if decision is not None:
             try:
@@ -2373,13 +2374,18 @@ class Step1Frame(SidebarStepFrame):
                 pass
 
     def _ask_bright_pixel_action(self, detection, image, *, context="crop"):
-        """Get consent from an embedded canvas notice without a window or grab.
+        """Require a modal Fix or Cancel choice before continuing.
 
-        Only this Step 1 workspace pauses while the Tk event loop continues.
         The pending image is a temporary preview until the caller commits it.
         """
         if self.__dict__.get("_bright_pixel_notice_pending", False):
             return None
+        preferences = self.__dict__.get("preferences")
+        remembered_choice = "" if preferences is None else preferences.get("step1_bright_pixel_choice", "")
+        if remembered_choice in ("fix", "ignore"):
+            return remembered_choice == "fix"
+        if preferences is not None and preferences.get("step1_auto_fix_bright_pixels", False):
+            return True
         if self.__dict__.get("tk") is None:
             return None
 
@@ -2410,16 +2416,15 @@ class Step1Frame(SidebarStepFrame):
                 pass
 
         try:
-            # Prepend a temporary tag to existing workspace controls. Notice
-            # buttons are created afterwards and remain active; other steps
-            # and the application menu keep their ordinary bindings.
+            # Block existing application controls and keyboard shortcuts.
+            # The popup is created afterwards, so its actions remain active.
             for sequence in (
                 "<ButtonPress>", "<ButtonRelease>", "<KeyPress>",
                 "<KeyRelease>", "<MouseWheel>", "<<ListboxSelect>>",
             ):
                 binding = self.bind_class(guard_tag, sequence, lambda _event: "break")
                 bindings.append((sequence, binding))
-            remaining = list(self.winfo_children())
+            remaining = [binding_owner]
             while remaining:
                 widget = remaining.pop()
                 remaining.extend(widget.winfo_children())
@@ -2435,12 +2440,13 @@ class Step1Frame(SidebarStepFrame):
                 canvas.canvas, count=detection.count, context=context, on_decision=resolve
             )
             self._bright_pixel_notice = notice
-            notice.place(x=0, y=0, anchor="nw", relwidth=1.0)
-            notice.lift()
-            notice.bind("<Unmap>", lambda _event: resolve(None), add="+")
-            notice.focus_default()
-            self.wait_variable(choice)
+            notice.show_modal()
+            if choice.get() == -1:
+                self.wait_variable(choice)
             outcome = {0: False, 1: True, 2: None}.get(choice.get())
+            if outcome is not None and notice.auto_fix_var.get() and preferences is not None:
+                preferences.set("step1_bright_pixel_choice", "fix" if outcome else "ignore")
+                preferences.set("step1_auto_fix_bright_pixels", bool(outcome))
         except tk.TclError:
             # A notice or its parent may be destroyed while awaiting a click.
             outcome = None
@@ -2485,6 +2491,8 @@ class Step1Frame(SidebarStepFrame):
                 pass
             self._syncing_view_roi = old_syncing
             self._bright_pixel_notice_pending = False
+        if outcome is None:
+            notify_workflow_cancelled(self, 1)
         return outcome
 
     def _set_source_bright_pixel_status(self, crop_mask=None):
