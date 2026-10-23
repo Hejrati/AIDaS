@@ -79,7 +79,7 @@ class Step3CompletedFolderPromptTests(unittest.TestCase):
         self.assertFalse(panel.next_button.winfo_viewable())
         self.assertFalse(panel.worker_settings_footer.winfo_viewable())
         panel.go_to_step4_button.invoke()
-        self.step.on_continue_to_step4.assert_called_once_with([str(folder) for folder in folders])
+        self.step.on_continue_to_step4.assert_called_once_with([str(folder.resolve()) for folder in folders])
         self.step._close_r_batch_panel.assert_called_once_with(render_previous=True)
         self.step._start_batch_r_runs.assert_not_called()
 
