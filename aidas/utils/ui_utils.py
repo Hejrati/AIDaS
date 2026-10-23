@@ -11,6 +11,7 @@ import customtkinter as ctk
 from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
 
 from aidas.core.display import work_area_bounds
+from aidas.ui.images import OwnedCTkImage
 from aidas.ui.popups import PopupPanel
 from aidas.ui.scrolling import DeferredScrollbar
 from aidas.ui.theme import (
@@ -97,11 +98,11 @@ def load_ui_icon(owner, filename, *, size=None):
     """Load a PhotoImage from assets, optionally resizing it to exact pixels."""
     path = asset_path(filename)
     try:
-        image = tk.PhotoImage(file=path)
+        image = tk.PhotoImage(master=owner, file=path)
     except tk.TclError:
         with open(path, "rb") as handle:
             data = base64.b64encode(handle.read())
-        image = tk.PhotoImage(data=data)
+        image = tk.PhotoImage(master=owner, data=data)
     if size is not None:
         target_width, target_height = (size, size) if isinstance(size, int) else size
         target_width = max(1, int(target_width))
@@ -181,7 +182,8 @@ def load_color_close_ctk_icon(owner, *, size=ACTION_ICON_SIZE):
     rendered = _color_close_image(size)
     return remember_image(
         owner,
-        ctk.CTkImage(
+        OwnedCTkImage(
+            owner,
             light_image=rendered,
             dark_image=rendered,
             size=(max(8, int(size)), max(8, int(size))),
@@ -236,7 +238,8 @@ def load_compile_ctk_icon(
     icon_size = max(8, int(size))
     return remember_image(
         owner,
-        ctk.CTkImage(
+        OwnedCTkImage(
+            owner,
             light_image=_compile_icon_image(light_color, icon_size),
             dark_image=_compile_icon_image(dark_color, icon_size),
             size=(icon_size, icon_size),
@@ -370,7 +373,7 @@ def load_ctk_image(owner, filename, *, size=CONTROLS.icon_size, tint=None):
         dark_image = _tint_icon(image, dark_color)
     icon = remember_image(
         owner,
-        ctk.CTkImage(light_image=light_image, dark_image=dark_image, size=target_size),
+        OwnedCTkImage(owner, light_image=light_image, dark_image=dark_image, size=target_size),
     )
     icon._aidas_monochrome_action = filename in {
         ACTION_ICON_FILES[action] for action in _MONOCHROME_ACTIONS
@@ -1284,7 +1287,8 @@ class CollapsibleSection(ctk.CTkFrame):
         palette = tuple(COLOR_PAIRS["text"])
         if palette != self._indicator_palette:
             self._indicator_images = {
-                expanded: ctk.CTkImage(
+                expanded: OwnedCTkImage(
+                    self,
                     light_image=self._indicator_image(expanded, palette[0]),
                     dark_image=self._indicator_image(expanded, palette[1]),
                     size=(self.INDICATOR_SIZE, self.INDICATOR_SIZE),

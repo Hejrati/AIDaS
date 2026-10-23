@@ -65,7 +65,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
 
     @staticmethod
     def _expanded_path(value: str | os.PathLike) -> Path:
-        return Path(normalize_path_input(value))
+        """Use one canonical spelling for inputs, defaults, and workbook paths."""
+        return Path(normalize_path_input(value)).resolve()
 
     @classmethod
     def _existing_directory(cls, value: str | os.PathLike | None) -> Path | None:
@@ -290,7 +291,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self.set_input_folder(selected)
 
     def _browse_output(self) -> None:
-        current_text = self.output_var.get().strip()
+        current_text = normalize_path_input(self.output_var.get())
         current_path = self._expanded_path(current_text) if current_text else None
         initial_dir = (
             self._existing_directory(current_path.parent)

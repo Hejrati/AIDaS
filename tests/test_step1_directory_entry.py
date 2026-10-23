@@ -16,6 +16,7 @@ class _QuietRoot(ctk.CTk):
 class Step1DirectoryEntryTests(unittest.TestCase):
     def setUp(self):
         self.root = _QuietRoot()
+        self.addCleanup(self.root.destroy)
         self.root.attributes("-alpha", 0)
         self.root.geometry("1100x800+0+0")
         self.preferences = mock.Mock()
@@ -25,6 +26,7 @@ class Step1DirectoryEntryTests(unittest.TestCase):
         self.frame.pack(fill="both", expand=True)
         self.root.update()
         self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
         self.original = Path(self.temporary.name)
         self.target = self.original / "new folder with spaces"
         self.target.mkdir()
@@ -33,10 +35,6 @@ class Step1DirectoryEntryTests(unittest.TestCase):
         self.entry = self.frame.sdb_dir_entry._entry
         self.entry.focus_force()
         self.root.update()
-
-    def tearDown(self):
-        self.root.destroy()
-        self.temporary.cleanup()
 
     def _type_address(self, address):
         self.entry.delete(0, "end")

@@ -29,20 +29,18 @@ class DirectoryCompletionInteractionTests(unittest.TestCase):
     def setUp(self):
         try:
             self.root = _QuietRoot()
+            self.addCleanup(self.root.destroy)
             self.root.attributes("-alpha", 0)
             self.root.geometry("720x320+0+0")
             self.root.update()
         except tk.TclError as exc:
             self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
         self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
         self.folder = Path(self.temporary.name)
         for name in ("Alpha", "alpine", "Beta folder"):
             (self.folder / name).mkdir()
         (self.folder / "alpha.txt").write_text("not a directory", encoding="utf-8")
-
-    def tearDown(self):
-        self.root.destroy()
-        self.temporary.cleanup()
 
     def _wait_for(self, predicate, message="The completion UI did not settle"):
         deadline = time.monotonic() + 3
@@ -100,6 +98,33 @@ class DirectoryCompletionInteractionTests(unittest.TestCase):
                 self.assertIs(self.root.focus_get(), target)
                 self.assertIsNone(self.root.grab_current())
                 submit.assert_not_called()
+                entry.destroy()
+
+    def test_windows_initialization_and_reverse_tab_do_not_require_the_x11_keysym(self):
+        if self.root.tk.call("tk", "windowingsystem") != "win32":
+            self.skipTest("Windows uses Shift-Tab without the X11 ISO_Left_Tab keysym")
+        for kind in (ttk.Entry, ctk.CTkEntry):
+            with self.subTest(kind=kind.__name__):
+                entry = kind(self.root)
+                entry.pack(fill="x", padx=12, pady=12)
+                target = getattr(entry, "_entry", entry)
+                native_bind = target.bind
+
+                def bind_without_x11(sequence=None, *args, **kwargs):
+                    if sequence == "<ISO_Left_Tab>":
+                        raise tk.TclError('bad event type or keysym "ISO_Left_Tab"')
+                    return native_bind(sequence, *args, **kwargs)
+
+                with mock.patch.object(target, "bind", side_effect=bind_without_x11):
+                    bind_path_entry(entry, mock.Mock())
+                self.root.update()
+                controller = self._complete(entry, target, str(self.folder / "al"), ["Alpha", "alpine"])
+                target.event_generate("<Tab>")
+                target.event_generate("<Tab>")
+                target.event_generate("<Shift-Tab>")
+                self.root.update()
+                self.assertEqual(Path(target.get()), self.folder / "Alpha")
+                self.assertTrue(self._visible(controller))
                 entry.destroy()
 
     def test_tab_completes_first_or_highlighted_directory_without_submitting(self):

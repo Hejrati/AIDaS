@@ -74,10 +74,11 @@ class Step5CompileTests(unittest.TestCase):
             accepted = frame.set_input_folder(temp_dir)
 
             self.assertTrue(accepted)
-            self.assertEqual(Path(frame.input_var.get()), Path(temp_dir))
+            folder = Path(temp_dir).resolve()
+            self.assertEqual(Path(frame.input_var.get()), folder)
             self.assertEqual(
                 Path(frame.output_var.get()),
-                Path(temp_dir) / DEFAULT_OUTPUT_FILENAME,
+                folder / DEFAULT_OUTPUT_FILENAME,
             )
             self.assertIn("Ready to create an Excel file", frame.status_var.get())
 
@@ -89,7 +90,8 @@ class Step5CompileTests(unittest.TestCase):
 
             paths = frame._validated_paths()
 
-            self.assertEqual(paths, (Path(temp_dir), Path(temp_dir) / "combined.xlsx"))
+            folder = Path(temp_dir).resolve()
+            self.assertEqual(paths, (folder, folder / "combined.xlsx"))
             self.assertEqual(Path(frame.output_var.get()).suffix, ".xlsx")
 
     def test_worker_uses_existing_compiler_service(self):

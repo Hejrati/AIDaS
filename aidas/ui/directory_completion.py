@@ -62,7 +62,10 @@ class DirectoryCompletion:
         self._bind(self.target, "<Up>", lambda _event: self._arrow(-1))
         self._bind(self.target, "<Tab>", lambda _event: self._tab(1))
         self._bind(self.target, "<Shift-Tab>", lambda _event: self._tab(-1))
-        self._bind(self.target, "<ISO_Left_Tab>", lambda _event: self._tab(-1))
+        # X11 reports reverse Tab with this keysym; Windows/Aqua use Shift-Tab
+        # and some supported Windows Tk builds cannot parse ISO_Left_Tab.
+        if self.target.tk.call("tk", "windowingsystem") == "x11":
+            self._bind(self.target, "<ISO_Left_Tab>", lambda _event: self._tab(-1))
         self._bind(self.target, "<Escape>", self._escape)
         self._bind(self.target, "<FocusOut>", self._focus_out)
         self._bind(self.target, "<Destroy>", self._target_destroyed)

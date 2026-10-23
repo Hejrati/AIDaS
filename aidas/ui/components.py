@@ -10,6 +10,7 @@ import customtkinter as ctk
 from aidas.ui.scrolling_text import ScrollingText
 from PIL import Image, ImageDraw, ImageTk
 
+from aidas.ui.images import OwnedCTkImage
 from aidas.ui.theme import COLOR_PAIRS, CONTROLS, SHAPES, TYPOGRAPHY
 from aidas.utils.ui_utils import HoverToolTip, _tint_icon
 
@@ -64,6 +65,7 @@ class AppButton(ctk.CTkButton):
             if name in options
         }
         self._aidas_action_icon_source = options.get("image")
+        self._aidas_action_icon_master = master
         self._aidas_tinted_action_icon = None
         self._aidas_action_icon_signature = None
         if options.get("state") == "disabled":
@@ -218,7 +220,9 @@ class AppButton(ctk.CTkButton):
                 "size": size,
             }
             if self._aidas_tinted_action_icon is None:
-                self._aidas_tinted_action_icon = ctk.CTkImage(**options)
+                self._aidas_tinted_action_icon = OwnedCTkImage(
+                    self._aidas_action_icon_master, **options,
+                )
             else:
                 self._aidas_tinted_action_icon.configure(**options)
             self._aidas_action_icon_signature = signature
@@ -257,7 +261,8 @@ class AppRunButton(AppButton):
             )
             return image
 
-        icon = ctk.CTkImage(
+        icon = OwnedCTkImage(
+            master,
             light_image=play_image(COLOR_PAIRS["on_primary"][0]),
             dark_image=play_image(COLOR_PAIRS["on_primary"][1]),
             size=(CONTROLS.icon_size, CONTROLS.icon_size),
