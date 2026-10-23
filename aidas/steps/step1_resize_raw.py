@@ -21,7 +21,8 @@ from aidas.utils.bright_pixels import (
     detect_bright_pixels_in_bands,
     smooth_bright_pixels,
 )
-from aidas.utils.filesystem import find_sdb_directories, skipped_directories_warning
+from aidas.utils.filesystem import existing_directory, find_sdb_directories, skipped_directories_warning
+from aidas.ui.path_entry import bind_path_entry
 from aidas.utils.io_utils import read_analyze, read_raw_oct, scale_image, write_analyze
 from aidas.utils.oct_crop import detect_oct_crop, map_oct_crop_to_raw
 from aidas.utils.sdb_reader import detect_sdb_image, read_sdb_retinal_contours
@@ -208,7 +209,7 @@ class Step1Frame(SidebarStepFrame):
 
         # Build import controls before the queue so its callbacks can use them.
         # Their section is placed after the queue and collapsed below.
-        self.sdb_params_section = self.add_sidebar_section("Advanced import settings", pady=(5, 5))
+        self.sdb_params_section = self.add_sidebar_section("Advanced Import Settings", pady=(5, 5))
         self.sdb_params_frame = self.sdb_params_section.body
         self.sdb_params_frame.grid_columnconfigure(2, weight=1)
 
@@ -247,7 +248,7 @@ class Step1Frame(SidebarStepFrame):
         self._endian_tooltip = HoverToolTip(self.endian_checkbox, "Can affect visualization for some offsets")
 
         # ── SDB Work Queue ──
-        sdb_section = self.add_sidebar_section("SDB Work Queue", pady=(5, 5))
+        sdb_section = self.add_sidebar_section("SDB Files", pady=(5, 5))
         sdb = sdb_section.body
         parent_dir_header = ttk.Frame(sdb)
         parent_dir_header.pack(fill="x", pady=(0, 2))
@@ -265,18 +266,21 @@ class Step1Frame(SidebarStepFrame):
             "Hide SDB folders containing light.hdr and light.img",
         )
         self.sdb_dir_var = tk.StringVar(value=self._initial_sdb_dir())
+        self.sdb_dir_edit_var = tk.StringVar(value=self.sdb_dir_var.get())
         
-        dir_frame, _dir_entry, dir_buttons = directory_row(
+        dir_frame, self.sdb_dir_entry, dir_buttons = directory_row(
             sdb,
             self,
-            self.sdb_dir_var,
+            self.sdb_dir_edit_var,
             self._browse_sdb_dir,
             home_command=self._reset_sdb_dir_to_default,
-            refresh_command=lambda: self.refresh_sdb_list(preview_first=True),
+            refresh_command=self._open_sdb_directory_from_entry,
             browse_tooltip="Choose parent folder to scan",
             home_tooltip="Reset to Desktop",
             refresh_tooltip="Rescan subfolders",
         )
+        bind_path_entry(self.sdb_dir_entry, self._open_sdb_directory_from_entry)
+        HoverToolTip(self.sdb_dir_entry, "Enter a folder path and press Enter to open it.")
         dir_frame.pack(fill="x", pady=(0, 8))
         self.search_btn = dir_buttons["browse"]
         self.home_btn = dir_buttons["home"]
@@ -939,8 +943,28 @@ class Step1Frame(SidebarStepFrame):
         if self.__dict__.get("_bright_pixel_notice_pending", False):
             return False
         self.sdb_dir_var.set(directory)
+        draft = self.__dict__.get("sdb_dir_edit_var")
+        if draft is not None:
+            draft.set(directory)
         if self.preferences is not None:
             self.preferences.set(SDB_PREF_KEY, directory)
+        return True
+
+    def _open_sdb_directory_from_entry(self):
+        """Commit a valid address before replacing the SDB folder browser."""
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return False
+        directory = existing_directory(self.sdb_dir_edit_var.get())
+        if directory is None:
+            messagebox.showerror(
+                "Folder not found", "Enter the path of an existing folder.", parent=self,
+            )
+            self.sdb_dir_entry.focus_set()
+            self.sdb_dir_entry.select_range(0, "end")
+            return False
+        self.set_sdb_directory(str(directory))
+        self.refresh_sdb_list(preview_first=True)
+        return True
 
     @staticmethod
     def _step_numeric_var(var, delta, minimum, maximum):

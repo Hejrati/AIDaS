@@ -143,6 +143,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         dialog._apply_annotation_tutorial_setting = mock.Mock()
         dialog._step1 = SimpleNamespace(set_sdb_parameter_defaults=mock.Mock())
         dialog.update_checks_var = _Var(True)
+        dialog.bright_pixel_confirmation_var = _Var(True)
         dialog.interface_menu = mock.Mock()
         dialog.interface_menu.get.return_value = "Classic"
         dialog.appearance_menu = mock.Mock()
@@ -382,7 +383,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         self.assertEqual(self._checked(dialog, "main"), ["Optimized version"])
 
     def test_settings_has_no_separate_add_script_button_in_either_presentation(self):
-        for build in (SettingsDialog.__init__, SettingsDialog._build_classic_settings):
+        for build in (SettingsDialog.__init__, SettingsDialog._build_step3_page):
             with self.subTest(builder=build.__name__):
                 self.assertNotIn('text="Add R script..."', inspect.getsource(build))
 

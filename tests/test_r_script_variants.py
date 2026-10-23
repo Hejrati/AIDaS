@@ -352,6 +352,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         dialog._preferences = self.frame.preferences
         dialog._step1 = SimpleNamespace(set_sdb_parameter_defaults=mock.Mock())
         dialog.update_checks_var = _Var(True)
+        dialog.bright_pixel_confirmation_var = _Var(True)
         dialog.interface_menu = mock.Mock()
         dialog.interface_menu.get.return_value = "Classic"
         dialog.appearance_menu = mock.Mock()

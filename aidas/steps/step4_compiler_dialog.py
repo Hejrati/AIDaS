@@ -18,8 +18,10 @@ from aidas.services.step4_compiler import (
 )
 from aidas.ui.compiler import CompilerPresentationMixin
 from aidas.ui.components import AppButton, AppRunButton
+from aidas.ui.path_entry import bind_path_entry
 from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import centered_logical_geometry, synchronize_window_chrome
+from aidas.utils.filesystem import existing_directory, normalize_path_input
 from aidas.utils.ui_utils import (
     action_button,
     apply_app_icon_to,
@@ -63,13 +65,13 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         self._output_user_selected = False
 
         input_text = str(initial_input or "")
-        output_folder = self._existing_directory(input_text) or Path.home()
-        self.input_var = tk.StringVar(master=self, value=input_text)
+        input_folder = self._existing_directory(input_text)
+        self._accepted_input_folder = str(input_folder) if input_folder is not None else ""
+        output_folder = input_folder or Path.home()
+        self.input_var = tk.StringVar(master=self, value=self._accepted_input_folder or input_text)
         self.include_fovea_var = tk.BooleanVar(master=self, value=True)
-        self.output_var = tk.StringVar(
-            master=self,
-            value=str(output_folder / DEFAULT_OUTPUT_FILENAME),
-        )
+        self._default_output_path = str(output_folder / DEFAULT_OUTPUT_FILENAME)
+        self.output_var = tk.StringVar(master=self, value=self._default_output_path)
         self.status_var = tk.StringVar(master=self, value="Ready to compile.")
 
         self._build_ui()
@@ -96,19 +98,11 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
 
     @staticmethod
     def _expanded_path(value: str | os.PathLike) -> Path:
-        return Path(os.path.expandvars(os.path.expanduser(str(value).strip())))
+        return Path(normalize_path_input(value))
 
     @classmethod
     def _existing_directory(cls, value: str | os.PathLike | None) -> Path | None:
-        if not value:
-            return None
-        try:
-            path = cls._expanded_path(value)
-            if path.is_dir():
-                return path
-        except (OSError, RuntimeError, ValueError):
-            pass
-        return None
+        return existing_directory(value)
 
     def _build_ui(self) -> None:
         panel = ttk.Frame(self, padding=(16, 14, 16, 14))
@@ -139,6 +133,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         input_group.columnconfigure(0, weight=1)
         self.input_entry = ttk.Entry(input_group, textvariable=self.input_var)
         self.input_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        bind_path_entry(self.input_entry, self._open_input_folder)
         self.input_browse_button = action_button(
             input_group,
             self,
@@ -166,6 +161,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         output_group.columnconfigure(0, weight=1)
         self.output_entry = ttk.Entry(output_group, textvariable=self.output_var)
         self.output_entry.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        bind_path_entry(self.output_entry)
         self.output_browse_button = action_button(
             output_group,
             self,
@@ -233,8 +229,44 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         )
         self.run_button.pack(side="right", padx=(0, 6))
 
+    def set_input_folder(self, folder: str | os.PathLike | None) -> bool:
+        if self._running:
+            return False
+        path = self._existing_directory(folder)
+        if path is None:
+            return False
+        self._accepted_input_folder = str(path)
+        self.input_var.set(str(path))
+        current_output = self.output_var.get().strip()
+        previous_default = getattr(self, "_default_output_path", None)
+        custom_output = bool(
+            current_output and previous_default is not None
+            and self._expanded_path(current_output) != self._expanded_path(previous_default)
+        )
+        if not self._output_user_selected and not custom_output:
+            self._default_output_path = str(path / DEFAULT_OUTPUT_FILENAME)
+            self.output_var.set(self._default_output_path)
+        self.status_var.set(f"Ready to compile measurements in {path}.")
+        return True
+
+    def _open_input_folder(self) -> None:
+        if self._running:
+            return
+        if self.set_input_folder(self.input_var.get()):
+            return
+        self.input_var.set(self._accepted_input_folder)
+        messagebox.showerror(
+            "Invalid folder",
+            "Enter an existing folder path.",
+            parent=self,
+        )
+
     def _browse_input(self) -> None:
-        initial_dir = self._existing_directory(self.input_var.get()) or Path.home()
+        initial_dir = (
+            self._existing_directory(self.input_var.get())
+            or self._existing_directory(self._accepted_input_folder)
+            or Path.home()
+        )
         selected = filedialog.askdirectory(
             title="Select the parent folder containing LE and RE subfolders",
             initialdir=str(initial_dir),
@@ -242,9 +274,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         )
         if not selected:
             return
-        self.input_var.set(selected)
-        if not self._output_user_selected:
-            self.output_var.set(str(Path(selected) / DEFAULT_OUTPUT_FILENAME))
+        self.set_input_folder(selected)
 
     def _browse_output(self) -> None:
         current_text = self.output_var.get().strip()
@@ -273,10 +303,9 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         self.output_var.set(selected)
 
     def _validated_paths(self) -> tuple[Path, Path] | None:
-        root_text = self.input_var.get().strip()
-        output_text = self.output_var.get().strip()
-        root_folder = self._expanded_path(root_text) if root_text else None
-        if root_folder is None or not root_folder.is_dir():
+        output_text = normalize_path_input(self.output_var.get())
+        root_folder = self._existing_directory(self.input_var.get())
+        if root_folder is None:
             messagebox.showerror(
                 "Missing folder",
                 "Choose a valid parent folder containing the LE and RE subfolders.",
@@ -309,6 +338,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
             )
             return None
 
+        self._accepted_input_folder = str(root_folder)
         self.input_var.set(str(root_folder))
         self.output_var.set(str(output_path))
         return root_folder, output_path

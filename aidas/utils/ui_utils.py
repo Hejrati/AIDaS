@@ -20,6 +20,7 @@ from aidas.ui.theme import (
     TYPOGRAPHY,
     configure_ttk_styles,
     get_interface_mode,
+    refresh_interface_widgets,
 )
 from aidas.utils.ui_layout import COLORS, LAYOUT, workspace_sidebar_width
 
@@ -60,10 +61,6 @@ ACTION_ICON_FILES = {
     "undo": "flat-color-icons--undo-action.png",
 }
 _MONOCHROME_ACTIONS = {"next", "previous", "process"}
-_FILLED_ACTION_STYLES = {
-    "AIDaS.PrimaryAction.TButton", "AIDaS.DangerAction.TButton",
-    "Accent.TButton", "AIDaS.Primary.TButton",
-}
 ICON_FOLDER = ACTION_ICON_FILES["folder"]
 ICON_HOME = ACTION_ICON_FILES["home"]
 ICON_REFRESH = ACTION_ICON_FILES["refresh"]
@@ -258,92 +255,53 @@ def action_button(
     icon_size=ACTION_ICON_SIZE,
     **button_options,
 ):
-    """Create an action button, using the shared red style for dismissal.
+    """Create a themed, rounded action with the app's standard icon and state."""
+    # A local import avoids the component module's use of shared icon helpers.
+    from aidas.ui.components import AppButton
 
-    Geometry and interaction states come from the global ``TButton`` style;
-    this helper standardizes semantic icons, their size, and tooltip behavior.
-    """
-
+    options = dict(button_options)
+    legacy_style = str(options.pop("style", ""))
+    variant = {
+        "AIDaS.PrimaryAction.TButton": "primary",
+        "AIDaS.Primary.TButton": "primary",
+        "Accent.TButton": "primary",
+        "AIDaS.DangerAction.TButton": "danger",
+    }.get(legacy_style, "secondary")
     if action in {"cancel", "close"}:
-        # A local import keeps the shared helpers usable by components.py.
-        from aidas.ui.components import AppButton
-
-        options = dict(button_options)
+        variant = "danger"
         options.pop("image", None)
         options.pop("compound", None)
-        options.pop("style", None)
+        text = text or action.capitalize()
         options.setdefault("width", 104)
-        button = AppButton(parent, text=text or action.capitalize(), command=command,
-                           variant="danger", **options)
-        if tooltip:
-            HoverToolTip(button, tooltip)
-        return button
+    else:
+        try:
+            filename = ACTION_ICON_FILES[action]
+        except KeyError as exc:
+            raise ValueError(f"Unknown UI action icon: {action}") from exc
+        options.setdefault("image", load_ctk_image(owner, filename, size=icon_size))
+        options.setdefault("compound", "left")
+        font = options.setdefault("font", ctk.CTkFont(
+            family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size,
+            weight=TYPOGRAPHY.semibold_weight,
+        ))
+        if "width" not in options:
+            text_width = font.measure(text) if text else 0
+            content_width = text_width + icon_size + (CONTROLS.gap if text else 0)
+            options["width"] = max(88, content_width + 2 * CONTROLS.padding_x)
+    options.setdefault("anchor", "center")
+    button = AppButton(parent, text=text, command=command, variant=variant, **options)
+    refresh_interface_widgets(button, recursive=False)
 
-    icon = load_action_icon(owner, action, size=icon_size)
-    options = {
-        "text": text,
-        "command": command,
-        # Reusing the complete source glyph as an explicit disabled-state
-        # image prevents ttk's white stipple without hiding pale icon details.
-        "image": (icon, "disabled", icon),
-        "compound": "left",
-        "style": "AIDaS.Action.TButton",
-    }
-    options.update(button_options)
-    button = ttk.Button(parent, **options)
-    button._aidas_action_icon = icon
-    button._aidas_disabled_action_icon = icon
-    if action in _MONOCHROME_ACTIONS or options["style"] in _FILLED_ACTION_STYLES:
-        source_image = getattr(icon, "_aidas_source_image", None)
-        raw_icon = icon
-        signature = None
-
-        def refresh_icon():
-            nonlocal source_image, raw_icon, signature
-            image_spec = button.cget("image")
-            if isinstance(image_spec, str):
-                image_spec = button.tk.splitlist(image_spec)
-            current_image = str(image_spec[0]) if image_spec else ""
-            own_images = {str(button._aidas_action_icon), str(button._aidas_disabled_action_icon)}
-            if current_image and current_image not in own_images:
-                # Some actions change glyphs in place (Next becomes Finish in
-                # the setup wizard). Retain the new shape during theme refresh.
-                replacement = next((image for image in getattr(owner, "_ui_image_refs", ())
-                                    if str(image) == current_image), None)
-                source_image = getattr(replacement, "_aidas_source_image", None)
-                raw_icon = replacement
-                signature = None
-            if source_image is None:
-                return
-            style_name = str(button.cget("style")) or "TButton"
-            if action not in _MONOCHROME_ACTIONS and style_name not in _FILLED_ACTION_STYLES:
-                button.configure(image=(raw_icon, "disabled", raw_icon))
-                button._aidas_action_icon = raw_icon
-                button._aidas_disabled_action_icon = raw_icon
-                signature = None
-                return
-            style = ttk.Style(button)
-
-            def foreground(states):
-                color = style.lookup(style_name, "foreground", state=states) or COLORS.text
-                red, green, blue = button.winfo_rgb(color)
-                return f"#{red >> 8:02x}{green >> 8:02x}{blue >> 8:02x}"
-
-            enabled_color = foreground(("!disabled",))
-            disabled_color = foreground(("disabled",))
-            next_signature = (id(source_image), enabled_color, disabled_color)
-            if signature == next_signature:
-                return
-            rendered = source_image.resize((icon_size, icon_size), Image.Resampling.LANCZOS)
-            enabled_icon = ImageTk.PhotoImage(_tint_icon(rendered, enabled_color), master=button)
-            disabled_icon = ImageTk.PhotoImage(_tint_icon(rendered, disabled_color), master=button)
-            button._aidas_action_icon = enabled_icon
-            button._aidas_disabled_action_icon = disabled_icon
-            button.configure(image=(enabled_icon, "disabled", disabled_icon))
-            signature = next_signature
-
-        button._apply_aidas_theme = refresh_icon
-        refresh_icon()
+    # Preserve the native controls' keyboard activation when Tab focuses the
+    # frame, or a mouse click focuses one of CTk's internal content labels.
+    focus_command = button.register(lambda _path: button.cget("state") != "disabled")
+    tk.Frame.configure(button, takefocus=focus_command)
+    for child in button.winfo_children():
+        child.configure(takefocus=False)
+    for sequence in ("<Return>", "<space>"):
+        activate = lambda _event: (button.invoke(), "break")[1]
+        tk.Misc.bind(button, sequence, activate, add="+")
+        button.bind(sequence, activate, add="+")
     if tooltip:
         HoverToolTip(button, tooltip)
     return button
@@ -359,14 +317,11 @@ def icon_action_button(
     icon_size=ACTION_ICON_SIZE,
     **button_options,
 ):
-    """Create the standard square icon-only ttk action button."""
+    """Create a rounded square action with a centered icon."""
 
-    button_options.setdefault("style", "AIDaS.Icon.TButton")
-    button_options.setdefault("width", 0)
-    # ``action_button`` normally composes an icon to the left of text.  With
-    # an empty label, that layout can still reserve text spacing and nudge the
-    # glyph off center.  Use Tk's true image-only layout for square controls.
-    button_options.setdefault("compound", "image")
+    button_options.setdefault("width", CONTROLS.height_md)
+    button_options.setdefault("height", CONTROLS.height_md)
+    button_options.setdefault("compound", "left")
     return action_button(
         parent,
         owner,

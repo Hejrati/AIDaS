@@ -133,8 +133,8 @@ REFERENCE.DARK="DARK_MARKED"
 TO.PROCESS.DARK="DARK"
 IMAGE.INDEX.DARK=IMAGE.INDEX.LIGHT
 PIXEL.WIDTH=as.numeric(arg.or.env(9, "AIDAS_PIXEL_WIDTH", "3.89")) #<-- microns per pixel
-PYEXPORTDIR <- file.path(OUTDIR, "step3_r_arrays")
-dir.create(PYEXPORTDIR, showWarnings=FALSE, recursive=TRUE)
+# PYEXPORTDIR <- file.path(OUTDIR, "step3_r_arrays")
+# dir.create(PYEXPORTDIR, showWarnings=FALSE, recursive=TRUE)
 
 write.python.array <- function(name, value) {
   if(is.null(value)) return(invisible(FALSE))
@@ -437,8 +437,8 @@ RPE.info.2=RPE.info[!duplicated(RPE.info[,4]),,drop=FALSE];
 
 #
 # can comment out the next two lines as needed:
-image(y=seq(1,dim(DARK)[2],1),x=seq(1,dim(DARK)[1],1),DARK[,,1])
-matlines(RPE.info.2[,1],RPE.info.2[,2])
+# image(y=seq(1,dim(DARK)[2],1),x=seq(1,dim(DARK)[1],1),DARK[,,1])
+# matlines(RPE.info.2[,1],RPE.info.2[,2])
 RPE.info.2[,3]<-( (-1) / RPE.info.2[,3] )
 colnames(RPE.info.2)<-c("x_pix","y_pix","perpendicular_slope_pix","dist.on.spline.microns")
 dbg("rpe-spline", "Translating the spline/center/RPE.info block through line 305")
@@ -890,12 +890,12 @@ SHIFT.POSITION.DARK[,2:ncol(SHIFT.POSITION.DARK)]=450-SHIFT.POSITION.DARK[,2:nco
 ## now, refine estimates...
 SHIFT.POSITION.DARK.REFINED=SHIFT.POSITION.DARK
 for(y in 2:ncol(SHIFT.POSITION.DARK))
- {plot(SHIFT.POSITION.DARK[,1],SHIFT.POSITION.DARK[,y],ylim=c(430,470));
+ {# plot(SHIFT.POSITION.DARK[,1],SHIFT.POSITION.DARK[,y],ylim=c(430,470));
   SHIFT.POSITION.DARK.sp.maker=cbind(SHIFT.POSITION.DARK[,1],SHIFT.POSITION.DARK[,y]);
   SHIFT.POSITION.DARK.sp.maker=SHIFT.POSITION.DARK.sp.maker[which(!(is.na(SHIFT.POSITION.DARK.sp.maker[,2]))),];
   SHIFT.POSITION.DARK.sp=smooth.spline(SHIFT.POSITION.DARK.sp.maker[,1],SHIFT.POSITION.DARK.sp.maker[,2],df=DFforSECONDfit);
   SHIFT.POSITION.DARK.spline=local({ prediction=predict(SHIFT.POSITION.DARK.sp,seq(-200,3000,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  matlines(SHIFT.POSITION.DARK.spline[,1],SHIFT.POSITION.DARK.spline[,2],col="red");
+  # matlines(SHIFT.POSITION.DARK.spline[,1],SHIFT.POSITION.DARK.spline[,2],col="red");
   SHIFT.POSITION.DARK.REFINED[,y]=SHIFT.POSITION.DARK.spline[,2]}
 
 SHIFT.POSITION.DARK.REFINED[,2:ncol(SHIFT.POSITION.DARK.REFINED)]=round(SHIFT.POSITION.DARK.REFINED[,2:ncol(SHIFT.POSITION.DARK.REFINED)],0)
@@ -947,12 +947,12 @@ REVISE.LIGHT=FLATTENED.LIGHT.RETINA.RAW[,,dim(FLATTENED.LIGHT.RETINA.RAW)[3]]
 ## now, refine estimates...
 SHIFT.POSITION.LIGHT.REFINED=SHIFT.POSITION.LIGHT
 for(y in 2:ncol(SHIFT.POSITION.LIGHT))
- {plot(SHIFT.POSITION.LIGHT[,1],SHIFT.POSITION.LIGHT[,y],ylim=c(430,470));
+ {# plot(SHIFT.POSITION.LIGHT[,1],SHIFT.POSITION.LIGHT[,y],ylim=c(430,470));
   SHIFT.POSITION.LIGHT.sp.maker=cbind(SHIFT.POSITION.LIGHT[,1],SHIFT.POSITION.LIGHT[,y]);
   SHIFT.POSITION.LIGHT.sp.maker=SHIFT.POSITION.LIGHT.sp.maker[which(!(is.na(SHIFT.POSITION.LIGHT.sp.maker[,2]))),];
   SHIFT.POSITION.LIGHT.sp=smooth.spline(SHIFT.POSITION.LIGHT.sp.maker[,1],SHIFT.POSITION.LIGHT.sp.maker[,2],df=DFforSECONDfit);
   SHIFT.POSITION.LIGHT.spline=local({ prediction=predict(SHIFT.POSITION.LIGHT.sp,seq(-200,3000,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  matlines(SHIFT.POSITION.LIGHT.spline[,1],SHIFT.POSITION.LIGHT.spline[,2],col="red");
+  # matlines(SHIFT.POSITION.LIGHT.spline[,1],SHIFT.POSITION.LIGHT.spline[,2],col="red");
   SHIFT.POSITION.LIGHT.REFINED[,y]=SHIFT.POSITION.LIGHT.spline[,2]}
 
 SHIFT.POSITION.LIGHT.REFINED[,2:ncol(SHIFT.POSITION.LIGHT.REFINED)]=round(SHIFT.POSITION.LIGHT.REFINED[,2:ncol(SHIFT.POSITION.LIGHT.REFINED)],0)
@@ -1110,10 +1110,10 @@ for(x in 1:nrow(GRAND.PROFILE)) GRAND.PROFILE[x,2]=mean(na.rm=T,FINAL.GRAND.MEAN
 #abline(v=450)
 #abline(v=434)
 #abline(v=466)
-plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2],type="l")
-abline(v=450)
-abline(v=434)
-abline(v=466)
+# plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2],type="l")
+# abline(v=450)
+# abline(v=434)
+# abline(v=466)
 png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_find_vertex.png",sep="")), width=1200, height=900)
 plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2],type="l")
 abline(v=450)
@@ -1123,14 +1123,14 @@ dev.off()
 ## </new for 2023-SEP-05>
 ### isolate 450 +/- 16 pixels (the drawer should have been within 4 original-pixel-widths of the RPE).
 GRAND.PROFILE=GRAND.PROFILE[434:466,]
-plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2])
+# plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2])
 check.sp=smooth.spline(GRAND.PROFILE[,1],GRAND.PROFILE[,2],df=10);
 check.spline=local({
   prediction=predict(check.sp,seq(434,466,1))
   cbind(as.numeric(prediction$x),as.numeric(prediction$y),
         as.numeric(predict(check.sp,seq(434,466,1),deriv=1)$y))
 });
-matlines(check.spline[,1],check.spline[,2]);
+# matlines(check.spline[,1],check.spline[,2]);
 ##
 ## so, if there's a flip from negative to positive (i.e., the first peak as one comes into the retina from the choroicapilaris)
 ## take the first flip. 
@@ -1139,7 +1139,7 @@ threshold=quantile(check.spline[,2],0.25);
 check.spline[,3]<-ifelse(check.spline[,2]<threshold,NA,check.spline[,3]);
 #check.spline=check.spline[nrow(check.spline):1,]
 vertex=check.spline[which(check.spline[,3]>0)[length(which(check.spline[,3]>0))],1]+1;
-abline(v=vertex)
+# abline(v=vertex)
 ## 
 ## so, we're selecting the farthest-out positive value
 png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
@@ -1166,7 +1166,7 @@ if(length(vertex)==0)
   ## ...but automatically subtracts a wedge (or makes a rotation) that makes half the slopes positive.
   check.spline[,3]=check.spline[,3]-median(na.rm=T,check.spline[,3]);
   vertex=check.spline[which(check.spline[,3]>=0)[length(which(check.spline[,3]>=0))],1]+1;
-  abline(v=vertex,col="red");
+  # abline(v=vertex,col="red");
   png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
   plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2])
   matlines(check.spline[,1],check.spline[,2])
@@ -1195,7 +1195,7 @@ f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat_",TO.PR
 
 #FLATTENED.DARK.RETINA.RRC
 
-export.python.core.arrays()
+# export.python.core.arrays()
 
 ### NOW, CLEAN UP A BIT
 rm(A,BEST.LAT.MOVE.DARK,BEST.LAT.MOVE.LIGHT,bestmove,border)
@@ -1446,18 +1446,18 @@ OLM.POSITION.LIGHT=TRUE.BORDERS.LIGHT[,5,]
 RPE.POSITION.LIGHT=TRUE.BORDERS.LIGHT[,6,]
 
 x=1
-plot(VITREOUS.RETINA.POSITION.DARK[,x],ylim=c(0,450),typ="l")
-matlines(VITREOUS.RETINA.POSITION.LIGHT[,x],lwd=2)
-matlines(RNFL.GCL.POSITION.DARK[,x],col="red")
-matlines(RNFL.GCL.POSITION.LIGHT[,x],col="red",lwd=2)
-matlines(INL.IPL.POSITION.DARK[,x],col="blue")
-matlines(INL.IPL.POSITION.LIGHT[,x],col="blue",lwd=2)
-matlines(ONL.OPL.POSITION.DARK[,x],col="red")
-matlines(ONL.OPL.POSITION.LIGHT[,x],col="red",lwd=2)
-matlines(OLM.POSITION.DARK[,x],col="blue")
-matlines(OLM.POSITION.LIGHT[,x],col="blue",lwd=2)
-matlines(RPE.POSITION.DARK[,x],col="red")
-matlines(RPE.POSITION.LIGHT[,x],col="red",lwd=2)
+# plot(VITREOUS.RETINA.POSITION.DARK[,x],ylim=c(0,450),typ="l")
+# matlines(VITREOUS.RETINA.POSITION.LIGHT[,x],lwd=2)
+# matlines(RNFL.GCL.POSITION.DARK[,x],col="red")
+# matlines(RNFL.GCL.POSITION.LIGHT[,x],col="red",lwd=2)
+# matlines(INL.IPL.POSITION.DARK[,x],col="blue")
+# matlines(INL.IPL.POSITION.LIGHT[,x],col="blue",lwd=2)
+# matlines(ONL.OPL.POSITION.DARK[,x],col="red")
+# matlines(ONL.OPL.POSITION.LIGHT[,x],col="red",lwd=2)
+# matlines(OLM.POSITION.DARK[,x],col="blue")
+# matlines(OLM.POSITION.LIGHT[,x],col="blue",lwd=2)
+# matlines(RPE.POSITION.DARK[,x],col="red")
+# matlines(RPE.POSITION.LIGHT[,x],col="red",lwd=2)
 
 
 
@@ -1514,16 +1514,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -1532,7 +1532,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -1541,7 +1541,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -1550,7 +1550,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -1626,16 +1626,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -1644,7 +1644,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -1653,7 +1653,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -1662,7 +1662,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -1736,16 +1736,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -1754,7 +1754,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -1763,7 +1763,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -1772,7 +1772,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -1848,16 +1848,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -1866,7 +1866,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -1875,7 +1875,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -1884,7 +1884,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -1961,18 +1961,18 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,6];
   LEFT[,2]<-LEFT[,2]-LEFT[,6];
   LEFT[,1]<-LEFT[,1]-LEFT[,6];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,5]);
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,5]);
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   #
   FIVE=cbind(seq(1,split,1), LEFT[,5]);
   FIVE=FIVE[which(!(is.na(FIVE[,2]))),];
   MODEL.5=smooth.spline(FIVE[,1],FIVE[,2],df=5);
   RESULT.5=as.numeric(predict(MODEL.5,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.5,col="red");
+  # matlines(seq(1,split,1),RESULT.5,col="red");
   DEVIATION.5=LEFT[,5]-RESULT.5;
   z.DEVIATION.5=DEVIATION.5;
   z.DEVIATION.5=(z.DEVIATION.5-mean(na.rm=T,DEVIATION.5))/sd(na.rm=T,DEVIATION.5);
@@ -1981,7 +1981,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -1990,7 +1990,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -1999,7 +1999,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -2008,7 +2008,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.DARK)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -2103,16 +2103,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -2121,7 +2121,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -2130,7 +2130,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -2139,7 +2139,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -2215,16 +2215,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -2233,7 +2233,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -2242,7 +2242,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -2251,7 +2251,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -2325,16 +2325,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -2343,7 +2343,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -2352,7 +2352,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -2361,7 +2361,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -2437,16 +2437,16 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,5];
   LEFT[,2]<-LEFT[,2]-LEFT[,5];
   LEFT[,1]<-LEFT[,1]-LEFT[,5];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   FOUR=cbind(seq(1,split,1), LEFT[,4]);
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -2455,7 +2455,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -2464,7 +2464,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -2473,7 +2473,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -2550,18 +2550,18 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   LEFT[,3]<-LEFT[,3]-LEFT[,6];
   LEFT[,2]<-LEFT[,2]-LEFT[,6];
   LEFT[,1]<-LEFT[,1]-LEFT[,6];
-  plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
-  matlines(seq(1,split,1),LEFT[,5]);
-  matlines(seq(1,split,1),LEFT[,4]);
-  matlines(seq(1,split,1),LEFT[,3]);
-  matlines(seq(1,split,1),LEFT[,2]);
-  matlines(seq(1,split,1),LEFT[,1]);
+  # plot(seq(1,split,1),LEFT[,4],ylim=c(min(na.rm=T,LEFT[,1:4]),max(na.rm=T,LEFT[,1:4])));
+  # matlines(seq(1,split,1),LEFT[,5]);
+  # matlines(seq(1,split,1),LEFT[,4]);
+  # matlines(seq(1,split,1),LEFT[,3]);
+  # matlines(seq(1,split,1),LEFT[,2]);
+  # matlines(seq(1,split,1),LEFT[,1]);
   #
   FIVE=cbind(seq(1,split,1), LEFT[,5]);
   FIVE=FIVE[which(!(is.na(FIVE[,2]))),];
   MODEL.5=smooth.spline(FIVE[,1],FIVE[,2],df=5);
   RESULT.5=as.numeric(predict(MODEL.5,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.5,col="red");
+  # matlines(seq(1,split,1),RESULT.5,col="red");
   DEVIATION.5=LEFT[,5]-RESULT.5;
   z.DEVIATION.5=DEVIATION.5;
   z.DEVIATION.5=(z.DEVIATION.5-mean(na.rm=T,DEVIATION.5))/sd(na.rm=T,DEVIATION.5);
@@ -2570,7 +2570,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   FOUR=FOUR[which(!(is.na(FOUR[,2]))),];
   MODEL.4=smooth.spline(FOUR[,1],FOUR[,2],df=5);
   RESULT.4=as.numeric(predict(MODEL.4,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.4,col="red");
+  # matlines(seq(1,split,1),RESULT.4,col="red");
   DEVIATION.4=LEFT[,4]-RESULT.4
   z.DEVIATION.4=DEVIATION.4;
   z.DEVIATION.4=(z.DEVIATION.4-mean(na.rm=T,DEVIATION.4))/sd(na.rm=T,DEVIATION.4);
@@ -2579,7 +2579,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   THREE=THREE[which(!(is.na(THREE[,2]))),];
   MODEL.3=smooth.spline(THREE[,1],THREE[,2],df=5);
   RESULT.3=as.numeric(predict(MODEL.3,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.3,col="red");
+  # matlines(seq(1,split,1),RESULT.3,col="red");
   DEVIATION.3=LEFT[,3]-RESULT.3
   z.DEVIATION.3=DEVIATION.3;
   z.DEVIATION.3=(z.DEVIATION.3-mean(na.rm=T,DEVIATION.3))/sd(na.rm=T,DEVIATION.3);
@@ -2588,7 +2588,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   TWO=TWO[which(!(is.na(TWO[,2]))),];
   MODEL.2=smooth.spline(TWO[,1],TWO[,2],df=5);
   RESULT.2=as.numeric(predict(MODEL.2,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.2,col="red");
+  # matlines(seq(1,split,1),RESULT.2,col="red");
   DEVIATION.2=LEFT[,2]-RESULT.2
   z.DEVIATION.2=DEVIATION.2;
   z.DEVIATION.2=(z.DEVIATION.2-mean(na.rm=T,DEVIATION.2))/sd(na.rm=T,DEVIATION.2);
@@ -2597,7 +2597,7 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
   ONE=ONE[which(!(is.na(ONE[,2]))),];
   MODEL.1=smooth.spline(ONE[,1],ONE[,2],df=5);
   RESULT.1=as.numeric(predict(MODEL.1,seq(1,split,1))$y);
-  matlines(seq(1,split,1),RESULT.1,col="red");
+  # matlines(seq(1,split,1),RESULT.1,col="red");
   DEVIATION.1=LEFT[,1]-RESULT.1
   z.DEVIATION.1=DEVIATION.1;
   z.DEVIATION.1=(z.DEVIATION.1-mean(na.rm=T,DEVIATION.1))/sd(na.rm=T,DEVIATION.1);
@@ -2678,18 +2678,18 @@ for(x in 1:dim(VITREOUS.RETINA.POSITION.LIGHT)[2])
 
 
 x=1
-plot(VITREOUS.RETINA.POSITION.DARK[,x],ylim=c(0,450),typ="l")
-matlines(VITREOUS.RETINA.POSITION.LIGHT[,x],lwd=2)
-matlines(RNFL.GCL.POSITION.DARK[,x],col="red")
-matlines(RNFL.GCL.POSITION.LIGHT[,x],col="red",lwd=2)
-matlines(INL.IPL.POSITION.DARK[,x],col="blue")
-matlines(INL.IPL.POSITION.LIGHT[,x],col="blue",lwd=2)
-matlines(ONL.OPL.POSITION.DARK[,x],col="red")
-matlines(ONL.OPL.POSITION.LIGHT[,x],col="red",lwd=2)
-matlines(OLM.POSITION.DARK[,x],col="blue")
-matlines(OLM.POSITION.LIGHT[,x],col="blue",lwd=2)
-matlines(RPE.POSITION.DARK[,x],col="red")
-matlines(RPE.POSITION.LIGHT[,x],col="red",lwd=2)
+# plot(VITREOUS.RETINA.POSITION.DARK[,x],ylim=c(0,450),typ="l")
+# matlines(VITREOUS.RETINA.POSITION.LIGHT[,x],lwd=2)
+# matlines(RNFL.GCL.POSITION.DARK[,x],col="red")
+# matlines(RNFL.GCL.POSITION.LIGHT[,x],col="red",lwd=2)
+# matlines(INL.IPL.POSITION.DARK[,x],col="blue")
+# matlines(INL.IPL.POSITION.LIGHT[,x],col="blue",lwd=2)
+# matlines(ONL.OPL.POSITION.DARK[,x],col="red")
+# matlines(ONL.OPL.POSITION.LIGHT[,x],col="red",lwd=2)
+# matlines(OLM.POSITION.DARK[,x],col="blue")
+# matlines(OLM.POSITION.LIGHT[,x],col="blue",lwd=2)
+# matlines(RPE.POSITION.DARK[,x],col="red")
+# matlines(RPE.POSITION.LIGHT[,x],col="red",lwd=2)
 
 
 #########################################################
@@ -2728,16 +2728,16 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.DARK))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.VITREOUS.RETINA.POSITION.DARK[,z]=S.spline[,2];
   #
   REVISE=cbind(seq(499,2750,1),R.RNFL.GCL.POSITION.DARK[,z]);
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.RNFL.GCL.POSITION.DARK[,z]=S.spline[,2];
   #
   #
@@ -2745,8 +2745,8 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.DARK))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.INL.IPL.POSITION.DARK[,z]=S.spline[,2];
   #
   #
@@ -2754,8 +2754,8 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.DARK))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.ONL.OPL.POSITION.DARK[,z]=S.spline[,2];
   #
   #
@@ -2763,8 +2763,8 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.DARK))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.OLM.POSITION.DARK[,z]=S.spline[,2];
   #
   #
@@ -2778,16 +2778,16 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.LIGHT))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.VITREOUS.RETINA.POSITION.LIGHT[,z]=S.spline[,2];
   #
   REVISE=cbind(seq(499,2750,1),R.RNFL.GCL.POSITION.LIGHT[,z]);
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.RNFL.GCL.POSITION.LIGHT[,z]=S.spline[,2];
   #
   #
@@ -2795,8 +2795,8 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.LIGHT))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.INL.IPL.POSITION.LIGHT[,z]=S.spline[,2];
   #
   #
@@ -2804,8 +2804,8 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.LIGHT))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.ONL.OPL.POSITION.LIGHT[,z]=S.spline[,2];
   #
   #
@@ -2813,8 +2813,8 @@ for(z in 1:ncol(R.VITREOUS.RETINA.POSITION.LIGHT))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=11);
   S.spline=local({ prediction=predict(S.sp,seq(499,2750,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.OLM.POSITION.LIGHT[,z]=S.spline[,2];
   #
   #
@@ -2997,8 +2997,8 @@ for(z in 1:dim(FLATTENED.DARK.RETINA.RRC.N)[3])
     {FLATTENED.DARK.RETINA.RRC.N.profiles[y,(z+1)]=mean(na.rm=T,FLATTENED.DARK.RETINA.RRC.N[,y,z])}}
 
 z=1
-plot(FLATTENED.DARK.RETINA.RRC.N.profiles[,1],FLATTENED.DARK.RETINA.RRC.N.profiles[,(z+1)],typ="l")
-abline(v=c(0,10,37.5,57.5,77.5,100))
+# plot(FLATTENED.DARK.RETINA.RRC.N.profiles[,1],FLATTENED.DARK.RETINA.RRC.N.profiles[,(z+1)],typ="l")
+# abline(v=c(0,10,37.5,57.5,77.5,100))
 
 
 ### now, repeat for light
@@ -3095,8 +3095,8 @@ for(z in 1:dim(FLATTENED.LIGHT.RETINA.RRC.N)[3])
     {FLATTENED.LIGHT.RETINA.RRC.N.profiles[y,(z+1)]=mean(na.rm=T,FLATTENED.LIGHT.RETINA.RRC.N[,y,z])}}
 
 z=1
-plot(FLATTENED.LIGHT.RETINA.RRC.N.profiles[,1],FLATTENED.LIGHT.RETINA.RRC.N.profiles[,(z+1)],typ="l")
-abline(v=c(0,10,37.5,57.5,77.5,100))
+# plot(FLATTENED.LIGHT.RETINA.RRC.N.profiles[,1],FLATTENED.LIGHT.RETINA.RRC.N.profiles[,(z+1)],typ="l")
+# abline(v=c(0,10,37.5,57.5,77.5,100))
 
 
 
@@ -3137,8 +3137,8 @@ for(z in 1:ncol(R.OLM.POSITION.DARK.FOVEA))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=3);
   S.spline=local({ prediction=predict(S.sp,seq(-80,80,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.OLM.POSITION.DARK.FOVEA[,z]=S.spline[,2]}
 
 ## and prune to just be -50 to 50
@@ -3233,8 +3233,8 @@ for(z in 1:dim(FLATTENED.DARK.RETINA.RRC.N.fovea)[3])
     {FLATTENED.DARK.RETINA.RRC.N.fovea.profiles[y,(z+1)]=mean(na.rm=T,FLATTENED.DARK.RETINA.RRC.N.fovea[51:151,y,z])}}
 
 z=1
-plot(FLATTENED.DARK.RETINA.RRC.N.fovea.profiles[,1],FLATTENED.DARK.RETINA.RRC.N.fovea.profiles[,(z+1)],typ="l")
-abline(v=c(0,10,37.5,57.5,77.5,100))
+# plot(FLATTENED.DARK.RETINA.RRC.N.fovea.profiles[,1],FLATTENED.DARK.RETINA.RRC.N.fovea.profiles[,(z+1)],typ="l")
+# abline(v=c(0,10,37.5,57.5,77.5,100))
 
 ## and crop off that stuff we don't need...
 FLATTENED.DARK.RETINA.RRC.N.fovea.profiles=FLATTENED.DARK.RETINA.RRC.N.fovea.profiles[57:90,]
@@ -3271,8 +3271,8 @@ for(z in 1:ncol(R.OLM.POSITION.LIGHT.FOVEA))
   REVISE=REVISE[which(!(is.na(REVISE[,2]))),];
   S.sp=smooth.spline(REVISE[,1],REVISE[,2],df=3);
   S.spline=local({ prediction=predict(S.sp,seq(-80,80,1)); cbind(as.numeric(prediction$x),as.numeric(prediction$y)) });
-  plot(REVISE[,1],REVISE[,2]);
-  matlines(S.spline[,1],S.spline[,2]);
+  # plot(REVISE[,1],REVISE[,2]);
+  # matlines(S.spline[,1],S.spline[,2]);
   R.OLM.POSITION.LIGHT.FOVEA[,z]=S.spline[,2]}
 
 ## and prune to just be -50 to 50
@@ -3367,8 +3367,8 @@ for(z in 1:dim(FLATTENED.LIGHT.RETINA.RRC.N.fovea)[3])
     {FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles[y,(z+1)]=mean(na.rm=T,FLATTENED.LIGHT.RETINA.RRC.N.fovea[51:151,y,z])}}
 
 z=1
-plot(FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles[,1],FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles[,(z+1)],typ="l")
-abline(v=c(0,10,37.5,57.5,77.5,100))
+# plot(FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles[,1],FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles[,(z+1)],typ="l")
+# abline(v=c(0,10,37.5,57.5,77.5,100))
 
 ## and crop off that stuff we don't need...
 FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles=FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles[57:90,]
@@ -3610,7 +3610,7 @@ write.thickness.table(
   R.VITREOUS.RETINA.POSITION.LIGHT
 )
 
-export.python.final.arrays()
+# export.python.final.arrays()
 
 ## and cleanup before a final Save
 rm(EXPORT.2.buff,EXPORT.2,EXPORT,write.thickness.table)

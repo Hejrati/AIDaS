@@ -11,7 +11,9 @@ from tkinter import filedialog, messagebox, ttk
 
 from aidas.ui.compiler import CompilerPresentationMixin
 from aidas.ui.components import AppButton
+from aidas.ui.path_entry import bind_path_entry
 from aidas.ui.theme import COLORS, COLOR_PAIRS, CONTROLS
+from aidas.utils.filesystem import existing_directory, normalize_path_input
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     SidebarStepFrame,
@@ -46,12 +48,13 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._output_user_selected = False
 
         initial_input = self._source_input_folder()
-        output_folder = self._existing_directory(initial_input) or Path.home()
-        self.input_var = tk.StringVar(value=initial_input)
+        input_folder = self._existing_directory(initial_input)
+        self._accepted_input_folder = str(input_folder) if input_folder is not None else ""
+        output_folder = input_folder or Path.home()
+        self.input_var = tk.StringVar(value=self._accepted_input_folder or initial_input)
         self.include_fovea_var = tk.BooleanVar(value=True)
-        self.output_var = tk.StringVar(
-            value=str(output_folder / DEFAULT_OUTPUT_FILENAME)
-        )
+        self._default_output_path = str(output_folder / DEFAULT_OUTPUT_FILENAME)
+        self.output_var = tk.StringVar(value=self._default_output_path)
         self.status_var = tk.StringVar(value="Ready to create the Excel file.")
 
         self.input_var.trace_add("write", self._update_run_button_state)
@@ -62,19 +65,11 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
 
     @staticmethod
     def _expanded_path(value: str | os.PathLike) -> Path:
-        return Path(os.path.expandvars(os.path.expanduser(str(value).strip())))
+        return Path(normalize_path_input(value))
 
     @classmethod
     def _existing_directory(cls, value: str | os.PathLike | None) -> Path | None:
-        if not value:
-            return None
-        try:
-            path = cls._expanded_path(value)
-            if path.is_dir():
-                return path
-        except (OSError, RuntimeError, ValueError):
-            pass
-        return None
+        return existing_directory(value)
 
     def _source_input_folder(self) -> str:
         source = self.source_step
@@ -112,6 +107,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         input_row.pack(fill="x")
         self.input_entry = ttk.Entry(input_row, textvariable=self.input_var)
         self.input_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        bind_path_entry(self.input_entry, self._open_input_folder)
         self.input_browse_button = action_button(
             input_row,
             self,
@@ -137,6 +133,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         output_row.pack(fill="x")
         self.output_entry = ttk.Entry(output_row, textvariable=self.output_var)
         self.output_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        bind_path_entry(self.output_entry)
         self.output_browse_button = action_button(
             output_row,
             self,
@@ -154,6 +151,9 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             padx=(LAYOUT.space_sm, LAYOUT.space_xs),
             pady=(0, LAYOUT.space_sm),
             before=self.sidebar,
+        )
+        ttk.Separator(footer, orient="horizontal").pack(
+            fill="x", pady=(LAYOUT.space_xs, 6),
         )
         self.run_button_icon = load_compile_ctk_icon(
             self,
@@ -173,7 +173,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             image=self.run_button_disabled_icon,
             compound="left",
         )
-        self.run_button.pack(fill="x")
+        self.run_button.pack(fill="x", padx=2)
 
         ttk.Label(
             self.content,
@@ -240,21 +240,47 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         scrollbar.grid(row=0, column=1, sticky="ns")
 
     def set_input_folder(self, folder: str | os.PathLike | None) -> bool:
+        if getattr(self, "_running", False):
+            return False
         path = self._existing_directory(folder)
         if path is None:
             return False
+        self._accepted_input_folder = str(path)
         self.input_var.set(str(path))
-        if not self._output_user_selected:
-            self.output_var.set(str(path / DEFAULT_OUTPUT_FILENAME))
+        current_output = self.output_var.get().strip()
+        previous_default = getattr(self, "_default_output_path", None)
+        custom_output = bool(
+            current_output and previous_default is not None
+            and self._expanded_path(current_output) != self._expanded_path(previous_default)
+        )
+        if not self._output_user_selected and not custom_output:
+            self._default_output_path = str(path / DEFAULT_OUTPUT_FILENAME)
+            self.output_var.set(self._default_output_path)
         self.status_var.set(f"Ready to create an Excel file from measurements in {path}.")
         return True
+
+    def _open_input_folder(self) -> None:
+        if self._running:
+            return
+        if self.set_input_folder(self.input_var.get()):
+            return
+        self.input_var.set(self._accepted_input_folder)
+        messagebox.showerror(
+            "Invalid folder",
+            "Enter an existing folder path.",
+            parent=self,
+        )
 
     def on_show(self) -> None:
         if not self.input_var.get().strip():
             self.set_input_folder(self._source_input_folder())
 
     def _browse_input(self) -> None:
-        initial_dir = self._existing_directory(self.input_var.get()) or Path.home()
+        initial_dir = (
+            self._existing_directory(self.input_var.get())
+            or self._existing_directory(self._accepted_input_folder)
+            or Path.home()
+        )
         selected = filedialog.askdirectory(
             title="Select the parent folder containing LE and RE subfolders",
             initialdir=str(initial_dir),
@@ -298,7 +324,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
                 parent=self,
             )
             return None
-        output_text = self.output_var.get().strip()
+        output_text = normalize_path_input(self.output_var.get())
         if not output_text:
             messagebox.showerror(
                 "Missing output",
@@ -323,6 +349,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
                 parent=self,
             )
             return None
+        self._accepted_input_folder = str(root_folder)
         self.input_var.set(str(root_folder))
         self.output_var.set(str(output_path))
         return root_folder, output_path

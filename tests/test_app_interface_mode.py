@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
+import tempfile
 import tkinter as tk
+from tkinter import ttk
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -10,6 +12,14 @@ from unittest import mock
 import customtkinter as ctk
 
 from aidas.app import AIDaSApp, SettingsDialog
+from aidas.ui.theme import (
+    COLOR_PAIRS,
+    apply_appearance_mode,
+    get_interface_mode,
+    resolve_color,
+    set_interface_mode,
+)
+from aidas.utils.r_script_library import RScriptChoice
 
 
 class _Preferences:
@@ -118,11 +128,16 @@ class InterfacePreferenceTests(unittest.TestCase):
         dialog._script_status_vars = {role: mock.Mock() for role in choices}
         dialog._step3 = SimpleNamespace(_busy=False, select_r_script=mock.Mock())
         dialog._step1 = SimpleNamespace(set_sdb_parameter_defaults=mock.Mock())
-        dialog._step2 = SimpleNamespace(set_annotation_tutorial_enabled=mock.Mock())
+        dialog._step2 = SimpleNamespace(
+            set_annotation_tutorial_enabled=mock.Mock(),
+            set_manual_segmentation_enabled=mock.Mock(),
+        )
         dialog._preferences = app.preferences
         dialog.annotation_tutorial_var = _StatefulMenu(True)
         dialog._annotation_tutorial_applied_value = True
         dialog._annotation_tutorial_dirty = False
+        dialog.manual_segmentation_var = _StatefulMenu(False)
+        dialog._manual_segmentation_applied_value = False
         dialog.bright_pixel_confirmation_var = _StatefulMenu(True)
         dialog.update_checks_var = SimpleNamespace(get=lambda: True)
         dialog.interface_menu = _StatefulMenu("Modern")
@@ -141,6 +156,39 @@ class InterfacePreferenceTests(unittest.TestCase):
             app, AIDaSApp,
         )
         return dialog
+
+    def test_manual_segmentation_is_applied_live_and_persisted_once_per_change(self):
+        app = self._app_stub()
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+        dialog._set_appearance_command = mock.Mock()
+
+        dialog._apply_changes()
+        dialog._step2.set_manual_segmentation_enabled.assert_not_called()
+        self.assertFalse(app.preferences.get("step2_manual_segmentation_enabled"))
+
+        dialog.manual_segmentation_var.set(True)
+        self.assertFalse(app.preferences.get("step2_manual_segmentation_enabled"))
+        dialog._apply_changes()
+        dialog._apply_changes()
+        dialog._step2.set_manual_segmentation_enabled.assert_called_once_with(True)
+        self.assertTrue(app.preferences.get("step2_manual_segmentation_enabled"))
+
+        dialog.manual_segmentation_var.set(False)
+        dialog._apply_changes()
+        self.assertFalse(app.preferences.get("step2_manual_segmentation_enabled"))
+        self.assertEqual(dialog._step2.set_manual_segmentation_enabled.call_args_list,
+                         [mock.call(True), mock.call(False)])
+
+    def test_manual_segmentation_preference_is_applied_without_an_open_step2(self):
+        app = self._app_stub()
+        dialog = self._settings_stub(app, selected_appearance="Dark")
+        dialog._set_appearance_command = mock.Mock()
+        dialog._step2 = None
+        dialog.manual_segmentation_var.set(True)
+
+        dialog._apply_changes()
+
+        self.assertTrue(app.preferences.get("step2_manual_segmentation_enabled"))
 
     def test_settings_can_enable_automatic_correction_and_restore_confirmation(self):
         app = self._app_stub()
@@ -657,6 +705,333 @@ class SharedWorkflowConstructionTests(unittest.TestCase):
         existing.focus_force.assert_called_once_with()
 
 
+class SettingsCategoryNavigationTests(unittest.TestCase):
+    def setUp(self):
+        try:
+            self.root = ctk.CTk()
+            self.root.withdraw()
+            self.root.attributes("-alpha", 0)
+            self.root.geometry("1024x820+0+0")
+            self.root.deiconify()
+        except tk.TclError as exc:
+            self.skipTest(f"A transparent Tk test window is unavailable: {exc}")
+        self.dialogs = []
+
+    def tearDown(self):
+        for dialog in self.dialogs:
+            if dialog.winfo_exists():
+                dialog._close()
+        self.root.destroy()
+
+    def _open(self, presentation, *, values=None):
+        preferences = _Preferences(values)
+        step3 = SimpleNamespace(
+            _busy=False,
+            R_REQUIRED_VERSION="3.3.1",
+            available_r_scripts=mock.Mock(return_value=[]),
+            _selected_r_script_path=mock.Mock(return_value=None),
+            select_r_script=mock.Mock(),
+        )
+        with mock.patch.object(SettingsDialog, "_schedule_modal_activation"):
+            dialog = SettingsDialog(
+                self.root,
+                preferences=preferences,
+                interface_mode=presentation,
+                set_interface_command=lambda value: value,
+                appearance_mode="Light",
+                set_appearance_command=mock.Mock(),
+                step1=SimpleNamespace(set_sdb_parameter_defaults=mock.Mock()),
+                step2=SimpleNamespace(
+                    set_annotation_tutorial_enabled=mock.Mock(),
+                    set_manual_segmentation_enabled=mock.Mock(),
+                ),
+                step3=step3,
+            )
+        self.dialogs.append(dialog)
+        dialog.attributes("-alpha", 0)
+        self.root.update()
+        return dialog, preferences, step3
+
+    def _navigate(self, dialog, key):
+        navigation = dialog.category_navigation
+        navigation.selection_set(key)
+        navigation.focus(key)
+        navigation.event_generate("<<TreeviewSelect>>")
+        self.root.update()
+        self.assertEqual(navigation.selection(), (key,))
+        self.assertTrue(dialog._category_pages[key].winfo_viewable())
+
+    def test_categories_are_built_on_demand_and_reused_in_both_presentations(self):
+        for presentation in ("Modern", "Classic"):
+            with self.subTest(presentation=presentation):
+                dialog, preferences, step3 = self._open(presentation)
+                self.assertIsInstance(dialog.category_navigation, ttk.Treeview)
+                self.assertEqual(set(dialog._category_pages), {"general"})
+                self.assertEqual(
+                    dialog.category_navigation.get_children(),
+                    tuple(key for key, _label in SettingsDialog.CATEGORIES),
+                )
+                first_page = dialog._category_pages["general"]
+                step3.available_r_scripts.assert_not_called()
+                for key in ("step1", "step2", "step4"):
+                    self._navigate(dialog, key)
+                step3.available_r_scripts.assert_not_called()
+                self._navigate(dialog, "step3")
+                self.assertEqual(step3.available_r_scripts.call_args_list,
+                                 [mock.call("main"), mock.call("output")])
+                script_page = dialog._category_pages["step3"]
+                self._navigate(dialog, "general")
+                self.assertIs(dialog._category_pages["general"], first_page)
+                self._navigate(dialog, "step3")
+                self.assertIs(dialog._category_pages["step3"], script_page)
+                self.assertEqual(step3.available_r_scripts.call_count, 2)
+                self.assertEqual(preferences.saved, [])
+                if presentation == "Classic":
+                    self.assertIsInstance(dialog.interface_menu, ttk.Combobox)
+                    self.assertIsInstance(dialog.annotation_tutorial_switch, ttk.Checkbutton)
+                    self.assertIsInstance(dialog.manual_segmentation_switch, ttk.Checkbutton)
+                    self.assertIsInstance(dialog.bright_pixel_confirmation_switch, ttk.Checkbutton)
+                else:
+                    self.assertIsInstance(dialog.interface_menu, ctk.CTkOptionMenu)
+                    self.assertIsInstance(dialog.annotation_tutorial_switch, ctk.CTkSwitch)
+                    self.assertIsInstance(dialog.manual_segmentation_switch, ctk.CTkSwitch)
+                    self.assertIsInstance(dialog.bright_pixel_confirmation_switch, ctk.CTkSwitch)
+                dialog._close()
+
+    def test_pending_settings_survive_category_navigation(self):
+        for presentation in ("Modern", "Classic"):
+            with self.subTest(presentation=presentation):
+                dialog, preferences, _step3 = self._open(presentation)
+                self._navigate(dialog, "step1")
+                dialog.sdb_default_vars["sdb_raw_width"].set("1001")
+                dialog.bright_pixel_confirmation_var.set(False)
+                self._navigate(dialog, "step2")
+                dialog.annotation_tutorial_var.set(False)
+                dialog.manual_segmentation_var.set(True)
+                self._navigate(dialog, "step4")
+                dialog.auto_detection_vars["step4_auto_start_min"].set("71")
+                self._navigate(dialog, "general")
+                for key in ("step1", "step2", "step4"):
+                    self._navigate(dialog, key)
+                self.assertEqual(dialog.sdb_default_vars["sdb_raw_width"].get(), "1001")
+                self.assertFalse(dialog.bright_pixel_confirmation_var.get())
+                self.assertFalse(dialog.annotation_tutorial_var.get())
+                self.assertTrue(dialog.manual_segmentation_var.get())
+                self.assertEqual(dialog.auto_detection_vars["step4_auto_start_min"].get(), "71")
+                self.assertEqual(preferences.saved, [])
+                dialog._close()
+
+    def test_apply_without_opening_r_scripts_preserves_saved_scripts(self):
+        original = {
+            "r_main_script_path": "C:/saved/main.R",
+            "r_output_script_path": "C:/saved/output.R",
+        }
+        for presentation in ("Modern", "Classic"):
+            with self.subTest(presentation=presentation):
+                dialog, preferences, step3 = self._open(presentation, values=original)
+
+                dialog._apply_changes()
+
+                step3.available_r_scripts.assert_not_called()
+                step3._selected_r_script_path.assert_not_called()
+                step3.select_r_script.assert_not_called()
+                for key, value in original.items():
+                    self.assertEqual(preferences.get(key), value)
+                    self.assertNotIn(key, [key for key, _value in preferences.saved])
+                self.assertEqual(set(dialog._category_pages), {"general"})
+                self.assertEqual(dialog.apply_status_var.get(), "All settings applied")
+                dialog._close()
+
+    def test_invalid_parameters_show_their_category_before_reporting_error(self):
+        for presentation in ("Modern", "Classic"):
+            with self.subTest(presentation=presentation):
+                dialog, _preferences, _step3 = self._open(presentation)
+                dialog.sdb_default_vars["sdb_raw_width"].set("invalid")
+                with mock.patch("aidas.app.messagebox.showerror") as error:
+                    self.assertIsNone(dialog._validated_sdb_defaults())
+                error.assert_called_once()
+                self.assertEqual(dialog.category_navigation.selection(), ("step1",))
+                dialog.sdb_default_vars["sdb_raw_width"].set("768")
+                self._navigate(dialog, "general")
+                dialog.auto_detection_vars["step4_auto_savgol_window"].set("8")
+                with mock.patch("aidas.app.messagebox.showerror") as error:
+                    self.assertIsNone(dialog._validated_auto_detection_settings())
+                error.assert_called_once()
+                self.assertEqual(dialog.category_navigation.selection(), ("step4",))
+                dialog._close()
+
+    def test_ok_keeps_invalid_settings_open_and_applies_valid_settings_before_closing(self):
+        for presentation in ("Modern", "Classic"):
+            with self.subTest(presentation=presentation):
+                dialog, preferences, step3 = self._open(presentation)
+                self.assertEqual(dialog.ok_button.cget("text"), "OK")
+                self.assertEqual(dialog.close_button.cget("text"), "Cancel")
+                self.assertEqual(dialog.apply_button.cget("text"), "Apply")
+                dialog.sdb_default_vars["sdb_raw_width"].set("invalid")
+
+                with mock.patch("aidas.app.messagebox.showerror") as error:
+                    dialog.ok_button.invoke()
+
+                error.assert_called_once()
+                self.assertTrue(dialog.winfo_exists())
+                self.assertEqual(preferences.saved, [])
+                dialog.sdb_default_vars["sdb_raw_width"].set("999")
+                dialog.ok_button.invoke()
+
+                self.assertFalse(dialog.winfo_exists())
+                self.assertEqual(preferences.get("sdb_raw_width"), 999)
+                dialog._step1.set_sdb_parameter_defaults.assert_called_once_with(
+                    width=999, height=1200, offset=1050, little_endian=True,
+                )
+                step3.available_r_scripts.assert_not_called()
+
+    def test_cancel_closes_without_persisting_draft_settings(self):
+        original = {
+            "sdb_raw_width": 768,
+            "step2_manual_segmentation_enabled": False,
+            "show_step2_annotation_tutorial": True,
+        }
+        for presentation in ("Modern", "Classic"):
+            with self.subTest(presentation=presentation):
+                dialog, preferences, _step3 = self._open(presentation, values=original)
+                self._navigate(dialog, "step1")
+                dialog.sdb_default_vars["sdb_raw_width"].set("999")
+                self._navigate(dialog, "step2")
+                if presentation == "Modern":
+                    dialog.manual_segmentation_switch.toggle()
+                    dialog.annotation_tutorial_switch.toggle()
+                else:
+                    dialog.manual_segmentation_switch.invoke()
+                    dialog.annotation_tutorial_switch.invoke()
+                self.assertEqual(dialog.apply_status_var.get(), "Unsaved changes")
+
+                dialog.close_button.invoke()
+
+                self.assertFalse(dialog.winfo_exists())
+                self.assertEqual(preferences.values, original)
+                self.assertEqual(preferences.saved, [])
+                dialog._step1.set_sdb_parameter_defaults.assert_not_called()
+                dialog._step2.set_manual_segmentation_enabled.assert_not_called()
+                dialog._step2.set_annotation_tutorial_enabled.assert_not_called()
+
+    def test_r_script_drafts_survive_navigation_and_apply_only_the_changed_role(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            choices = {}
+            for role in ("main", "output"):
+                choices[role] = []
+                for version in ("original", "optimized"):
+                    path = Path(temp_dir) / f"{role}_{version}.R"
+                    path.write_text("print('test')\n", encoding="utf-8")
+                    choices[role].append(RScriptChoice(
+                        version, path.resolve(), "bundled",
+                        is_default=version == "original", version=version,
+                    ))
+            for presentation in ("Modern", "Classic"):
+                with self.subTest(presentation=presentation):
+                    original = {
+                        f"r_{role}_script_path": str(role_choices[0].path)
+                        for role, role_choices in choices.items()
+                    }
+                    dialog, preferences, step3 = self._open(presentation, values=original)
+                    selected_paths = {role: values[0].path for role, values in choices.items()}
+                    step3.available_r_scripts.side_effect = lambda role: choices[role]
+                    step3._selected_r_script_path.side_effect = lambda role: selected_paths[role]
+
+                    def persist_script(role, path):
+                        selected_paths[role] = path
+                        preferences.set(f"r_{role}_script_path", str(path))
+
+                    step3.select_r_script.side_effect = persist_script
+                    self._navigate(dialog, "step3")
+                    self.assertEqual(step3.available_r_scripts.call_args_list,
+                                     [mock.call("main"), mock.call("output")])
+                    self.assertEqual(dialog._script_vars["main"].get(), "Original script")
+                    dialog._choose_r_script_option("main", "Optimized version")
+                    self.assertEqual(preferences.saved, [])
+                    self._navigate(dialog, "general")
+                    self._navigate(dialog, "step3")
+                    self.assertEqual(dialog._script_vars["main"].get(), "Optimized version")
+                    self.assertEqual(dialog._script_vars["output"].get(), "Original script")
+
+                    dialog.apply_button.invoke()
+
+                    step3.select_r_script.assert_called_once_with("main", choices["main"][1].path)
+                    self.assertEqual(preferences.get("r_main_script_path"), str(choices["main"][1].path))
+                    self.assertEqual(preferences.get("r_output_script_path"), original["r_output_script_path"])
+                    script_saves = [(key, value) for key, value in preferences.saved
+                                    if key in original]
+                    self.assertEqual(script_saves,
+                                     [("r_main_script_path", str(choices["main"][1].path))])
+                    discovery_count = step3.available_r_scripts.call_count
+                    selected_path_count = step3._selected_r_script_path.call_count
+
+                    dialog.apply_button.invoke()
+
+                    self.assertEqual(step3.available_r_scripts.call_count, discovery_count)
+                    self.assertEqual(step3._selected_r_script_path.call_count, selected_path_count)
+                    self.assertEqual(step3.select_r_script.call_count, 1)
+                    self.assertTrue(dialog.winfo_exists())
+                    dialog._close()
+
+    def test_native_settings_surfaces_and_headers_follow_live_appearance_changes(self):
+        original_interface = get_interface_mode()
+        original_appearance = ctk.get_appearance_mode()
+        original_source = ctk.AppearanceModeTracker.appearance_mode_set_by
+        try:
+            set_interface_mode("Modern", redraw=False)
+            dialog, preferences, _step3 = self._open("Modern")
+            for key in ("step1", "step2", "step4"):
+                self._navigate(dialog, key)
+            dialog.sdb_default_vars["sdb_raw_width"].set("999")
+            headings = []
+            for key, page in dialog._category_pages.items():
+                headings.extend(
+                    child for child in page.winfo_children()
+                    if isinstance(child, tk.Label)
+                    and child.cget("text") == dict(SettingsDialog.CATEGORIES)[key]
+                )
+            self.assertEqual(len(headings), len(dialog._category_pages))
+            navigation = dialog.category_navigation.master
+            navigation_heading = next(
+                child for child in navigation.winfo_children()
+                if isinstance(child, tk.Label) and child.cget("text") == "Options"
+            )
+            footer_status = next(
+                child for child in dialog.apply_button.master.winfo_children()
+                if isinstance(child, tk.Label)
+            )
+            for mode in ("Light", "Dark", "Light"):
+                with self.subTest(mode=mode):
+                    style = ttk.Style(dialog)
+                    apply_appearance_mode(mode, root=dialog, style=style)
+                    self.root.update()
+                    surface = resolve_color(COLOR_PAIRS["surface"], mode)
+                    subtle = resolve_color(COLOR_PAIRS["surface_subtle"], mode)
+                    text = resolve_color(COLOR_PAIRS["text"], mode)
+                    for frame in (dialog.settings_panel, dialog.category_content):
+                        self.assertEqual(frame.cget("background"), surface)
+                    for frame in (navigation, dialog.footer, dialog.apply_button.master):
+                        self.assertEqual(frame.cget("background"), subtle)
+                    for heading in headings:
+                        self.assertEqual(heading.cget("background"), surface)
+                        self.assertEqual(heading.cget("foreground"), text)
+                    self.assertEqual(navigation_heading.cget("background"), subtle)
+                    self.assertEqual(navigation_heading.cget("foreground"), text)
+                    self.assertEqual(footer_status.cget("background"), subtle)
+                    self.assertEqual(style.lookup("AIDaS.SettingsNav.Treeview", "background"), subtle)
+                    self.assertEqual(style.lookup("AIDaS.SettingsNav.Treeview", "fieldbackground"), subtle)
+                    for button in (dialog.ok_button, dialog.close_button, dialog.apply_button):
+                        self.assertEqual(button._apply_appearance_mode(button.cget("bg_color")), subtle)
+                    self.assertEqual(dialog.sdb_default_vars["sdb_raw_width"].get(), "999")
+                    self.assertEqual(preferences.saved, [])
+        finally:
+            for dialog in self.dialogs:
+                if dialog.winfo_exists():
+                    dialog._close()
+            set_interface_mode(original_interface, redraw=False)
+            ctk.set_appearance_mode("System" if original_source == "system" else original_appearance)
+
+
 class AnnotationTutorialControlTests(unittest.TestCase):
     def test_both_settings_presentations_restore_saved_guide_choice_and_track_interaction(self):
         root = None
@@ -675,10 +1050,14 @@ class AnnotationTutorialControlTests(unittest.TestCase):
                     preferences = _Preferences(
                         {
                             "show_step2_annotation_tutorial": initial,
+                            "step2_manual_segmentation_enabled": initial,
                             "step1_auto_fix_bright_pixels": not initial,
                         }
                     )
-                    step2 = SimpleNamespace(set_annotation_tutorial_enabled=mock.Mock())
+                    step2 = SimpleNamespace(
+                        set_annotation_tutorial_enabled=mock.Mock(),
+                        set_manual_segmentation_enabled=mock.Mock(),
+                    )
                     with (
                         mock.patch.object(SettingsDialog, "_refresh_r_script_choices"),
                         mock.patch.object(SettingsDialog, "_schedule_modal_activation"),
@@ -700,6 +1079,9 @@ class AnnotationTutorialControlTests(unittest.TestCase):
                         root.after(100, lambda: settled.set(True))
                         root.wait_variable(settled)
                         root.update()
+                        self.assertEqual(set(dialog._category_pages), {"general"})
+                        dialog._select_category("step1")
+                        root.update()
                         confirmation = dialog.bright_pixel_confirmation_switch
                         self.assertTrue(confirmation.winfo_viewable())
                         self.assertEqual(dialog.bright_pixel_confirmation_var.get(), initial)
@@ -709,6 +1091,8 @@ class AnnotationTutorialControlTests(unittest.TestCase):
                             confirmation.invoke()
                         self.assertEqual(dialog.bright_pixel_confirmation_var.get(), not initial)
                         self.assertEqual(preferences.get("step1_auto_fix_bright_pixels"), not initial)
+                        dialog._select_category("step2")
+                        root.update()
                         control = dialog.annotation_tutorial_switch
                         self.assertTrue(control.winfo_viewable())
                         self.assertEqual(control.cget("text"), "Enable tutorial")
@@ -728,6 +1112,20 @@ class AnnotationTutorialControlTests(unittest.TestCase):
                         step2.set_annotation_tutorial_enabled.assert_called_once_with(not initial)
                         self.assertEqual(preferences.saved,
                                          [("show_step2_annotation_tutorial", not initial)])
+                        preferences.saved.clear()
+                        manual = dialog.manual_segmentation_switch
+                        self.assertEqual(manual.cget("text"), "Enable manual segmentation (Step 2)")
+                        self.assertEqual(dialog.manual_segmentation_var.get(), initial)
+                        if presentation == "Modern":
+                            manual.toggle()
+                        else:
+                            manual.invoke()
+                        self.assertEqual(dialog.manual_segmentation_var.get(), not initial)
+                        self.assertEqual(preferences.saved, [])
+                        dialog._apply_manual_segmentation_setting()
+                        step2.set_manual_segmentation_enabled.assert_called_once_with(not initial)
+                        self.assertEqual(preferences.saved,
+                                         [("step2_manual_segmentation_enabled", not initial)])
                     finally:
                         dialog._close()
                         root.update()

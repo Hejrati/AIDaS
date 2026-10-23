@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import importlib.util
 from pathlib import Path
 import unittest
@@ -85,7 +86,16 @@ class PackageStructureTests(unittest.TestCase):
         )
         self.assertIn("def resize_window(", title_source)
         self.assertIn("_WM_NCLBUTTONDOWN", title_source)
-        self.assertNotIn("overrideredirect(", title_source)
+        override_setters = [
+            node.lineno for node in ast.walk(ast.parse(title_source))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in {"overrideredirect", "wm_overrideredirect"}
+            and (node.args or node.keywords)
+        ]
+        self.assertEqual(
+            override_setters, [],
+            "Custom title bars must retain the native frame; querying tooltip override state is allowed.",
+        )
 
     def test_visible_batch_tabs_use_the_shared_customtkinter_component(self):
         step_sources = [

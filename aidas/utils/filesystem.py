@@ -10,6 +10,29 @@ from pathlib import Path
 DirectoryScanError = tuple[Path, str]
 
 
+def normalize_path_input(value: str | os.PathLike) -> str:
+    """Accept paths typed or pasted from a file manager's Copy as path action."""
+    text = os.fspath(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        text = text[1:-1].strip()
+    return os.path.expandvars(os.path.expanduser(text))
+
+
+def existing_directory(value: str | os.PathLike | None) -> Path | None:
+    """Resolve a folder address without accepting an empty path as cwd."""
+    if value is None:
+        return None
+    try:
+        text = normalize_path_input(value)
+        if text:
+            path = Path(text)
+            if path.is_dir():
+                return path.resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        pass
+    return None
+
+
 def find_candidate_directories(
     root: str | os.PathLike,
     required_name_groups: Iterable[Iterable[str]],

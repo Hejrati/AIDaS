@@ -37,13 +37,12 @@ from aidas.services.update_ui import UpdateController
 from aidas.ui.classic import build_classic_application_menu
 from aidas.ui.components import (
     AppButton,
-    AppOptionMenu,
     AppStatusBar,
     WorkflowHeader,
     WorkflowProgressStrip,
 )
 from aidas.ui.menu_bar import ApplicationMenuBar
-from aidas.ui.scrolling import SettingsScrollableFrame
+from aidas.ui.settings_layout import SettingsLayoutMixin
 from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.splash import SplashWindow
 from aidas.ui.step_transition import StepTransition
@@ -76,8 +75,6 @@ from aidas.ui.windowing import (
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.r_script_library import OPTIMIZED_R_SCRIPTS_ENABLED, RScriptChoice
 from aidas.utils.ui_utils import (
-    HoverToolTip,
-    action_button,
     apply_app_icon_to,
     resource_path,
 )
@@ -433,7 +430,7 @@ class AboutDialog(ctk.CTkToplevel):
         self.destroy()
 
 
-class SettingsDialog(ctk.CTkToplevel):
+class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
     """Central application, SDB, and R configuration window."""
 
     SCRIPT_ROLES = (
@@ -510,9 +507,10 @@ class SettingsDialog(ctk.CTkToplevel):
         # Allocate the final viewport before any controls request layout. The
         # centering helper settles idle work, so sizing only at the end first
         # paints a narrow, very tall provisional settings panel.
-        self.geometry("720x720")
+        self.geometry("920x680")
         self.configure(fg_color=COLOR_PAIRS["application"])
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(740, 480)
         self.transient(parent)
         apply_app_icon_to(self)
         self._parent = parent
@@ -529,6 +527,12 @@ class SettingsDialog(ctk.CTkToplevel):
             master=self, value=self._annotation_tutorial_applied_value,
         )
         self._annotation_tutorial_dirty = False
+        self._manual_segmentation_applied_value = bool(
+            preferences.get("step2_manual_segmentation_enabled", False)
+        )
+        self.manual_segmentation_var = tk.BooleanVar(
+            master=self, value=self._manual_segmentation_applied_value,
+        )
         self.bright_pixel_confirmation_var = tk.BooleanVar(
             master=self,
             value=not (
@@ -540,13 +544,11 @@ class SettingsDialog(ctk.CTkToplevel):
         self._classic_settings = self._presentation_mode == "Classic"
         # CTk option menus flush pending paints while being constructed. Let
         # this window settle its full layout before rendering those surfaces.
-        self._aidas_defer_canvas_updates = not self._classic_settings
+        self._aidas_defer_canvas_updates = True
         self._presentation_refresh_after_id = None
         self._presentation_refresh_pending = False
         self._applying_changes = False
         self._modal_activation_after_id = None
-        self._classic_mousewheel_binding_id = None
-        self._r_setup_wizard = None
         self._script_choices = {"main": [], "output": []}
         self._script_by_label = {"main": {}, "output": {}}
         self._script_custom_choices = {"main": None, "output": None}
@@ -567,611 +569,38 @@ class SettingsDialog(ctk.CTkToplevel):
             for key, default in STEP4_AUTO_DETECTION_DEFAULTS.items()
         }
 
-        if self._classic_settings:
-            self._build_classic_settings(
-                preferences=preferences,
-                interface_mode=interface_mode,
-                appearance_mode=appearance_mode,
-                step3=step3,
-            )
-            self.protocol("WM_DELETE_WINDOW", self._close)
-            self.bind("<Escape>", lambda _event: self._close())
-            self.geometry(_center_geometry(self, 720, 720, parent=parent))
-            self.deiconify()
-            self._schedule_modal_activation()
-            return
-
-        self.settings_panel = SettingsScrollableFrame(
-            self,
-            fg_color=COLOR_PAIRS["surface"],
-            corner_radius=SHAPES.corner_radius_lg,
-            border_width=SHAPES.border_width,
-            border_color=COLOR_PAIRS["border"],
-            scrollbar_button_color=COLOR_PAIRS["border_strong"],
-            scrollbar_button_hover_color=COLOR_PAIRS["primary"],
-        )
-        self.settings_panel.pack(fill="both", expand=True, padx=16, pady=(16, 8))
-        self.settings_panel.grid_columnconfigure(0, weight=1)
-
-        ctk.CTkLabel(
-            self.settings_panel,
-            text="Settings",
-            anchor="w",
-            text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.heading_size,
-                weight=TYPOGRAPHY.bold_weight,
-            ),
-        ).grid(row=0, column=0, sticky="ew", padx=18, pady=(16, 10))
-
-        general = self._settings_section("General", row=1)
-        self.interface_menu = AppOptionMenu(
-            general,
-            values=list(INTERFACE_MODES),
-            command=self._interface_choice_changed,
-            width=140,
-            height=34,
-            corner_radius=SHAPES.corner_radius_sm,
-            fg_color=COLOR_PAIRS["button"],
-            button_color=COLOR_PAIRS["primary"],
-            button_hover_color=COLOR_PAIRS["primary_hover"],
-            text_color=COLOR_PAIRS["text"],
-            dropdown_fg_color=COLOR_PAIRS["surface_elevated"],
-            dropdown_hover_color=COLOR_PAIRS["primary_soft"],
-            dropdown_text_color=COLOR_PAIRS["text"],
-        )
-        self._labeled_control(general, 0, "Interface", self.interface_menu)
-        self.interface_menu.set(normalize_interface_mode(interface_mode))
-        self.appearance_menu = AppOptionMenu(
-            general,
-            values=list(APPEARANCE_MODES),
-            command=self._mark_dirty,
-            width=140,
-            height=34,
-            corner_radius=SHAPES.corner_radius_sm,
-            fg_color=COLOR_PAIRS["button"],
-            button_color=COLOR_PAIRS["primary"],
-            button_hover_color=COLOR_PAIRS["primary_hover"],
-            text_color=COLOR_PAIRS["text"],
-            dropdown_fg_color=COLOR_PAIRS["surface_elevated"],
-            dropdown_hover_color=COLOR_PAIRS["primary_soft"],
-            dropdown_text_color=COLOR_PAIRS["text"],
-        )
-        self._labeled_control(general, 1, "Appearance", self.appearance_menu)
-        self.appearance_menu.set(appearance_mode)
-        self._sync_interface_controls(interface_mode, appearance_mode)
+        self._initial_appearance_mode = normalize_appearance_mode(appearance_mode)
+        self._scripts_initialized = False
+        self._pending_script_roles = set()
         self.update_checks_var = tk.BooleanVar(
-            master=self,
-            value=bool(preferences.get("check_for_updates", True)),
+            master=self, value=bool(preferences.get("check_for_updates", True)),
         )
-        self.update_switch = ctk.CTkSwitch(
-            general,
-            text="Check automatically for application updates",
-            variable=self.update_checks_var,
-            command=self._mark_dirty,
-            onvalue=True,
-            offvalue=False,
-            progress_color=COLOR_PAIRS["primary"],
-            text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
-        )
-        self.update_switch.grid(row=2, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 6))
-        self.annotation_tutorial_switch = ctk.CTkSwitch(
-            general,
-            text="Enable tutorial",
-            variable=self.annotation_tutorial_var,
-            command=self._annotation_tutorial_choice_changed,
-            onvalue=True,
-            offvalue=False,
-            progress_color=COLOR_PAIRS["primary"],
-            text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
-        )
-        self.annotation_tutorial_switch.grid(
-            row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(0, 12),
-        )
-
-        self._build_bright_pixel_setting(general, modern=True)
-
-        sdb = self._settings_section("Default SDB image parameters", row=2)
         self.sdb_default_vars = {
-            "sdb_raw_width": tk.StringVar(value=str(preferences.get("sdb_raw_width", 768))),
-            "sdb_raw_height": tk.StringVar(value=str(preferences.get("sdb_raw_height", 1200))),
-            "sdb_raw_offset": tk.StringVar(value=str(preferences.get("sdb_raw_offset", 1050))),
+            key: tk.StringVar(master=self, value=str(preferences.get(key, default)))
+            for key, default in (("sdb_raw_width", 768), ("sdb_raw_height", 1200), ("sdb_raw_offset", 1050))
         }
-        for row, (key, label) in enumerate(
-            (
-                ("sdb_raw_width", "Width (px)"),
-                ("sdb_raw_height", "Height (px)"),
-                ("sdb_raw_offset", "Offset (bytes)"),
-            )
-        ):
-            entry = ctk.CTkEntry(
-                sdb,
-                textvariable=self.sdb_default_vars[key],
-                width=140,
-                height=32,
-                fg_color=COLOR_PAIRS["surface_elevated"],
-                border_color=COLOR_PAIRS["border_strong"],
-                text_color=COLOR_PAIRS["text"],
-            )
-            self._labeled_control(sdb, row, label, entry)
         self.sdb_little_endian_var = tk.BooleanVar(
-            master=self,
-            value=bool(preferences.get("sdb_little_endian", True)),
+            master=self, value=bool(preferences.get("sdb_little_endian", True)),
         )
-        ctk.CTkSwitch(
-            sdb,
-            text="Little-endian byte order",
-            variable=self.sdb_little_endian_var,
-            command=self._mark_dirty,
-            onvalue=True,
-            offvalue=False,
-            progress_color=COLOR_PAIRS["primary"],
-            text_color=COLOR_PAIRS["text"],
-        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=14, pady=(8, 4))
-        sdb_actions = ctk.CTkFrame(sdb, fg_color="transparent", corner_radius=0)
-        sdb_actions.grid(row=4, column=0, columnspan=2, sticky="ew", padx=14, pady=(8, 12))
-        ctk.CTkLabel(
-            sdb_actions,
-            text="Changes are saved with the Apply button below.",
-            text_color=COLOR_PAIRS["muted_text"],
-            anchor="w",
-        ).pack(side="left")
-
-        auto_detection = self._settings_section(
-            "Step 4 auto-detect ROI (Savitzky-Golay)",
-            row=3,
-        )
-        ctk.CTkLabel(
-            auto_detection,
-            text="Configure smoothing, start/end thresholds, and review criteria. Hover ⓘ for help.",
-            anchor="w",
-            text_color=COLOR_PAIRS["muted_text"],
-        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 6))
-        for row, (key, label, help_text) in enumerate(
-            self.AUTO_DETECTION_FIELDS,
-            start=1,
-        ):
-            entry = ctk.CTkEntry(
-                auto_detection,
-                textvariable=self.auto_detection_vars[key],
-                width=140,
-                height=32,
-                justify="right",
-                fg_color=COLOR_PAIRS["surface_elevated"],
-                border_color=COLOR_PAIRS["border_strong"],
-                text_color=COLOR_PAIRS["text"],
-            )
-            self._labeled_control(
-                auto_detection,
-                row,
-                label,
-                entry,
-                help_text=help_text,
-            )
-
-        r_environment = self._settings_section("R environment", row=4)
-        ctk.CTkLabel(
-            r_environment,
-            text=f"Install or verify R {step3.R_REQUIRED_VERSION} and all required packages.",
-            anchor="w",
-            text_color=COLOR_PAIRS["muted_text"],
-        ).grid(row=0, column=0, sticky="ew", padx=14, pady=(6, 8))
-        AppButton(
-            r_environment,
-            text="Install / set up R and packages",
-            variant="primary",
-            command=self._open_r_setup,
-            width=230,
-        ).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 12))
-
-        scripts = self._settings_section("Step 3 R scripts", row=5)
-        ctk.CTkLabel(
-            scripts,
-            text="Choose a script for each processing step, then click Apply.",
-            anchor="w",
-            text_color=COLOR_PAIRS["muted_text"],
-        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(4, 8))
-        self.script_menus = {}
-        self._script_popups = {}
-        for row, (role, label) in enumerate(self.SCRIPT_ROLES):
-            role_frame = ctk.CTkFrame(scripts, fg_color="transparent", corner_radius=0)
-            role_frame.grid(row=row + 1, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 10))
-            role_frame.grid_columnconfigure(0, weight=1)
-            ctk.CTkLabel(
-                role_frame,
-                text=label,
-                anchor="w",
-                text_color=COLOR_PAIRS["text"],
-                font=ctk.CTkFont(
-                    family=TYPOGRAPHY.family,
-                    size=TYPOGRAPHY.body_size,
-                    weight=TYPOGRAPHY.semibold_weight,
-                ),
-            ).grid(row=0, column=0, columnspan=2, sticky="ew")
-            menu = AppOptionMenu(
-                role_frame,
-                variable=self._script_vars[role],
-                values=list(self._r_script_options(role)),
-                command=lambda label, selected_role=role: self._choose_r_script_option(selected_role, label),
-                height=34,
-                fg_color=COLOR_PAIRS["button"],
-                button_color=COLOR_PAIRS["primary"],
-                button_hover_color=COLOR_PAIRS["primary_hover"],
-                text_color=COLOR_PAIRS["text"],
-                dropdown_fg_color=COLOR_PAIRS["surface_elevated"],
-                dropdown_hover_color=COLOR_PAIRS["primary_soft"],
-                dropdown_text_color=COLOR_PAIRS["text"],
-            )
-            menu.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-            self.script_menus[role] = menu
-            self._script_popups[role] = menu._dropdown_menu
-            open_dropdown = menu._open_dropdown_menu
-
-            def open_script_choices(selected_role=role, open_dropdown=open_dropdown):
-                # CTk can rebuild its native menu when fonts/scaling change.
-                # Restore our separator and selected check mark before opening.
-                self._update_r_script_popup(selected_role)
-                open_dropdown()
-
-            menu._open_dropdown_menu = open_script_choices
-            ctk.CTkLabel(
-                role_frame,
-                textvariable=self._script_status_vars[role],
-                anchor="w",
-                text_color=COLOR_PAIRS["muted_text"],
-            ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-            self._refresh_r_script_choices(role)
-
-        self.footer = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        self.footer.pack(fill="x", padx=16, pady=(0, 14))
         self.apply_status_var = tk.StringVar(master=self, value="")
-        for variable in self.sdb_default_vars.values():
+        for variable in (*self.sdb_default_vars.values(), *self.auto_detection_vars.values()):
             variable.trace_add("write", self._mark_dirty)
-        for variable in self.auto_detection_vars.values():
-            variable.trace_add("write", self._mark_dirty)
-        ctk.CTkLabel(
-            self.footer,
-            textvariable=self.apply_status_var,
-            anchor="w",
-            text_color=COLOR_PAIRS["muted_text"],
-        ).pack(side="left")
-        self.close_button = AppButton(
-            self.footer,
-            text="Close",
-            variant="danger",
-            command=self._close,
-            width=104,
-        )
-        self.close_button.pack(side="right")
-        AppButton(
-            self.footer,
-            text="Apply",
-            variant="primary",
-            command=self._apply_changes,
-            width=104,
-        ).pack(side="right", padx=(0, 8))
-
+        style = ttk.Style(self)
+        style.configure("AIDaS.Settings.TLabel", background=COLORS.surface, foreground=COLORS.text)
+        style.configure("AIDaS.Settings.TCheckbutton", background=COLORS.surface)
+        self._build_settings_shell()
         self.protocol("WM_DELETE_WINDOW", self._close)
         self.bind("<Escape>", lambda _event: self._close())
-        self.geometry(_center_geometry(self, 720, 720, parent=parent))
+        self.geometry(_center_geometry(self, 920, 680, parent=parent))
         from .ui.rendering import finish_deferred_rendering
         finish_deferred_rendering(self)
+        self._settings_ready = True
         self.deiconify()
         synchronize_window_chrome(
-            self,
-            background=COLOR_PAIRS["window_chrome"],
-            foreground=COLOR_PAIRS["text"],
-            border=COLOR_PAIRS["window_chrome"],
+            self, background=COLOR_PAIRS["window_chrome"],
+            foreground=COLOR_PAIRS["text"], border=COLOR_PAIRS["window_chrome"],
         )
         self._schedule_modal_activation()
-
-    def _build_classic_settings(
-        self,
-        *,
-        preferences,
-        interface_mode,
-        appearance_mode,
-        step3,
-    ) -> None:
-        """Build a native property-sheet surface for the Classic interface."""
-
-        self.settings_panel = ttk.Frame(self, padding=(10, 10, 10, 0))
-        self.settings_panel.pack(fill="both", expand=True)
-        self.settings_panel.rowconfigure(0, weight=1)
-        self.settings_panel.columnconfigure(0, weight=1)
-
-        canvas = tk.Canvas(
-            self.settings_panel,
-            background=COLORS.application,
-            highlightthickness=1,
-            highlightbackground=COLORS.border,
-            borderwidth=0,
-        )
-        scrollbar = ttk.Scrollbar(
-            self.settings_panel,
-            orient="vertical",
-            command=canvas.yview,
-        )
-        canvas.configure(yscrollcommand=scrollbar.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-        content = ttk.Frame(canvas, padding=14)
-        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
-
-        def update_scroll_region(_event=None):
-            try:
-                canvas.configure(scrollregion=canvas.bbox("all"))
-            except tk.TclError:
-                pass
-
-        def fit_content_width(event):
-            try:
-                canvas.itemconfigure(content_window, width=max(1, event.width))
-            except tk.TclError:
-                pass
-
-        content.bind("<Configure>", update_scroll_region, add="+")
-        canvas.bind("<Configure>", fit_content_width, add="+")
-        def scroll_classic_settings(event):
-            # Descendant widgets receive the toplevel bindtag, whereas a
-            # canvas-only binding stops working as soon as the pointer is over
-            # a label, entry, or combobox.  Ignore the binding while the
-            # embedded R setup wizard has replaced the settings property sheet.
-            try:
-                if self.settings_panel.winfo_manager() != "pack":
-                    return None
-                direction = -1 if event.delta > 0 else 1
-                canvas.yview_scroll(direction, "units")
-            except tk.TclError:
-                return None
-            return "break"
-
-        self._classic_mousewheel_binding_id = self.bind(
-            "<MouseWheel>",
-            scroll_classic_settings,
-            add="+",
-        )
-
-        ttk.Label(
-            content,
-            text="Settings",
-            font=("Segoe UI", 12, "bold"),
-        ).pack(anchor="w", pady=(0, 10))
-
-        general = ttk.LabelFrame(content, text="General", padding=10)
-        general.pack(fill="x", pady=(0, 10))
-        general.columnconfigure(1, weight=1)
-        ttk.Label(general, text="Interface").grid(row=0, column=0, sticky="w", pady=4)
-        self.interface_menu = ttk.Combobox(
-            general,
-            values=list(INTERFACE_MODES),
-            state="readonly",
-            width=18,
-        )
-        self.interface_menu.set(normalize_interface_mode(interface_mode))
-        self.interface_menu.grid(row=0, column=1, sticky="e", pady=4)
-        self.interface_menu.bind(
-            "<<ComboboxSelected>>",
-            lambda _event: self._interface_choice_changed(self.interface_menu.get()),
-            add="+",
-        )
-        ttk.Label(general, text="Appearance").grid(row=1, column=0, sticky="w", pady=4)
-        self.appearance_menu = ttk.Combobox(
-            general,
-            values=list(APPEARANCE_MODES),
-            state="disabled",
-            width=18,
-        )
-        self.appearance_menu.set(normalize_appearance_mode(appearance_mode))
-        self.appearance_menu.grid(row=1, column=1, sticky="e", pady=4)
-        self.appearance_menu.bind(
-            "<<ComboboxSelected>>",
-            self._mark_dirty,
-            add="+",
-        )
-        self.update_checks_var = tk.BooleanVar(
-            master=self,
-            value=bool(preferences.get("check_for_updates", True)),
-        )
-        self.update_switch = ttk.Checkbutton(
-            general,
-            text="Check automatically for application updates",
-            variable=self.update_checks_var,
-            command=self._mark_dirty,
-        )
-        self.update_switch.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 2))
-        self.annotation_tutorial_switch = ttk.Checkbutton(
-            general,
-            text="Enable tutorial",
-            variable=self.annotation_tutorial_var,
-            command=self._annotation_tutorial_choice_changed,
-        )
-        self.annotation_tutorial_switch.grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(4, 2),
-        )
-
-        self._build_bright_pixel_setting(general, modern=False)
-
-        sdb = ttk.LabelFrame(content, text="Default SDB image parameters", padding=10)
-        sdb.pack(fill="x", pady=(0, 10))
-        sdb.columnconfigure(1, weight=1)
-        self.sdb_default_vars = {
-            "sdb_raw_width": tk.StringVar(value=str(preferences.get("sdb_raw_width", 768))),
-            "sdb_raw_height": tk.StringVar(value=str(preferences.get("sdb_raw_height", 1200))),
-            "sdb_raw_offset": tk.StringVar(value=str(preferences.get("sdb_raw_offset", 1050))),
-        }
-        for row, (key, label) in enumerate(
-            (
-                ("sdb_raw_width", "Width (px)"),
-                ("sdb_raw_height", "Height (px)"),
-                ("sdb_raw_offset", "Offset (bytes)"),
-            )
-        ):
-            ttk.Label(sdb, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            ttk.Entry(
-                sdb,
-                textvariable=self.sdb_default_vars[key],
-                width=18,
-                justify="right",
-            ).grid(row=row, column=1, sticky="e", pady=4)
-        self.sdb_little_endian_var = tk.BooleanVar(
-            master=self,
-            value=bool(preferences.get("sdb_little_endian", True)),
-        )
-        ttk.Checkbutton(
-            sdb,
-            text="Little-endian byte order",
-            variable=self.sdb_little_endian_var,
-            command=self._mark_dirty,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 2))
-
-        auto_detection = ttk.LabelFrame(
-            content,
-            text="Step 4 auto-detect ROI (Savitzky-Golay)",
-            padding=10,
-        )
-        auto_detection.pack(fill="x", pady=(0, 10))
-        auto_detection.columnconfigure(1, weight=1)
-        ttk.Label(
-            auto_detection,
-            text="Configure smoothing, start/end thresholds, and review criteria. Hover ⓘ for help.",
-            style="AIDaS.Muted.TLabel",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-        for row, (key, label, help_text) in enumerate(
-            self.AUTO_DETECTION_FIELDS,
-            start=1,
-        ):
-            label_holder = ttk.Frame(auto_detection)
-            label_holder.grid(row=row, column=0, sticky="w", pady=4)
-            ttk.Label(label_holder, text=label).pack(side="left")
-            help_label = ttk.Label(
-                label_holder,
-                text="  ⓘ",
-                cursor="hand2",
-                style="AIDaS.Muted.TLabel",
-            )
-            help_label.pack(side="left")
-            HoverToolTip(help_label, help_text)
-            entry = ttk.Entry(
-                auto_detection,
-                textvariable=self.auto_detection_vars[key],
-                width=18,
-                justify="right",
-            )
-            entry.grid(row=row, column=1, sticky="e", pady=4)
-            HoverToolTip(entry, help_text)
-
-        r_environment = ttk.LabelFrame(content, text="R environment", padding=10)
-        r_environment.pack(fill="x", pady=(0, 10))
-        ttk.Label(
-            r_environment,
-            text=f"Install or verify R {step3.R_REQUIRED_VERSION} and all required packages.",
-        ).pack(anchor="w", pady=(0, 8))
-        action_button(
-            r_environment,
-            self,
-            "Install / set up R and packages",
-            self._open_r_setup,
-            "package",
-            style="AIDaS.PrimaryAction.TButton",
-        ).pack(anchor="w")
-
-        scripts = ttk.LabelFrame(content, text="Step 3 R scripts", padding=10)
-        scripts.pack(fill="x")
-        scripts.columnconfigure(0, weight=1)
-        ttk.Label(
-            scripts,
-            text="Choose a script for each processing step, then click Apply.",
-        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        self.script_menus = {}
-        self._script_popups = {}
-        for row, (role, label) in enumerate(self.SCRIPT_ROLES):
-            base_row = 1 + row * 3
-            ttk.Label(scripts, text=label).grid(
-                row=base_row,
-                column=0,
-                columnspan=2,
-                sticky="w",
-                pady=(5, 2),
-            )
-            menu = ttk.Menubutton(
-                scripts,
-                textvariable=self._script_vars[role],
-                width=62,
-                direction="below",
-            )
-            menu.grid(row=base_row + 1, column=0, columnspan=2, sticky="ew")
-            self.script_menus[role] = menu
-            popup = tk.Menu(menu, tearoff=False)
-            menu.configure(menu=popup)
-            popup.configure(postcommand=lambda selected_role=role: self._update_r_script_popup(selected_role))
-            self._script_popups[role] = popup
-            ttk.Label(
-                scripts,
-                textvariable=self._script_status_vars[role],
-                style="AIDaS.Muted.TLabel",
-            ).grid(row=base_row + 2, column=0, columnspan=2, sticky="w", pady=(2, 4))
-            self._refresh_r_script_choices(role)
-
-        self.footer = ttk.Frame(self, padding=(10, 8, 10, 10))
-        self.footer.pack(fill="x")
-        self.apply_status_var = tk.StringVar(master=self, value="")
-        ttk.Label(
-            self.footer,
-            textvariable=self.apply_status_var,
-            style="AIDaS.Muted.TLabel",
-        ).pack(side="left", fill="x", expand=True)
-        self.close_button = AppButton(
-            self.footer,
-            text="Close",
-            variant="danger",
-            command=self._close,
-            width=104,
-        )
-        self.close_button.pack(side="right")
-        action_button(
-            self.footer,
-            self,
-            "Apply",
-            self._apply_changes,
-            "confirm",
-            style="AIDaS.PrimaryAction.TButton",
-        ).pack(side="right", padx=(0, 8))
-        for variable in self.sdb_default_vars.values():
-            variable.trace_add("write", self._mark_dirty)
-        for variable in self.auto_detection_vars.values():
-            variable.trace_add("write", self._mark_dirty)
-        self._sync_interface_controls(interface_mode, appearance_mode)
-
-    def _settings_section(self, title, *, row):
-        section = ctk.CTkFrame(
-            self.settings_panel,
-            fg_color=COLOR_PAIRS["surface_subtle"],
-            corner_radius=SHAPES.corner_radius_md,
-            border_width=SHAPES.border_width,
-            border_color=COLOR_PAIRS["border"],
-        )
-        section.grid(row=row, column=0, sticky="ew", padx=12, pady=(0, 10))
-        section.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            section,
-            text=title,
-            anchor="w",
-            text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.subtitle_size,
-                weight=TYPOGRAPHY.semibold_weight,
-            ),
-        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(10, 4))
-        body = ctk.CTkFrame(section, fg_color="transparent", corner_radius=0)
-        body.grid(row=1, column=0, columnspan=2, sticky="ew")
-        body.grid_columnconfigure(1, weight=1)
-        return body
 
     @staticmethod
     def _settings_number_text(value):
@@ -1181,33 +610,10 @@ class SettingsDialog(ctk.CTkToplevel):
             return str(int(value))
         return str(value)
 
-    @staticmethod
-    def _labeled_control(parent, row, label, control, *, help_text=None):
-        label_holder = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
-        label_holder.grid(row=row, column=0, sticky="w", padx=(14, 18), pady=6)
-        ctk.CTkLabel(
-            label_holder,
-            text=label,
-            anchor="w",
-            text_color=COLOR_PAIRS["text"],
-        ).pack(side="left")
-        if help_text:
-            help_label = ctk.CTkLabel(
-                label_holder,
-                text="  ⓘ",
-                width=24,
-                cursor="hand2",
-                text_color=COLOR_PAIRS["muted_text"],
-            )
-            help_label.pack(side="left")
-            HoverToolTip(help_label, help_text)
-            HoverToolTip(control, help_text)
-        control.grid(row=row, column=1, sticky="e", padx=(0, 14), pady=6)
-
     def _mark_dirty(self, *_args) -> None:
         self.apply_status_var.set("Unsaved changes")
 
-    def _build_bright_pixel_setting(self, parent, *, modern):
+    def _build_bright_pixel_setting(self, parent, *, modern, row=0):
         options = dict(
             text="Confirm bright-pixel correction (Step 1)",
             variable=self.bright_pixel_confirmation_var,
@@ -1216,11 +622,13 @@ class SettingsDialog(ctk.CTkToplevel):
         if modern:
             self.bright_pixel_confirmation_switch = ctk.CTkSwitch(
                 parent, **options, progress_color=COLOR_PAIRS["primary"],
+                bg_color=COLOR_PAIRS["surface"],
                 text_color=COLOR_PAIRS["text"],
                 font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
             )
             help_label = ctk.CTkLabel(
                 parent, text="When disabled, the saved Fix or Ignore choice is applied automatically.",
+                bg_color=COLOR_PAIRS["surface"],
                 text_color=COLOR_PAIRS["muted_text"], anchor="w", wraplength=580,
             )
         else:
@@ -1230,11 +638,56 @@ class SettingsDialog(ctk.CTkToplevel):
                 style="AIDaS.Muted.TLabel", wraplength=580,
             )
         self.bright_pixel_confirmation_switch.grid(
-            row=4, column=0, columnspan=2, sticky="w", padx=14 if modern else 0, pady=(4, 2),
+            row=row, column=0, columnspan=2, sticky="w", padx=0, pady=(4, 2),
         )
         help_label.grid(
-            row=5, column=0, columnspan=2, sticky="w", padx=14 if modern else 0, pady=(0, 12),
+            row=row + 1, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 12),
         )
+
+    def _build_manual_segmentation_setting(self, parent, *, modern: bool, row=0) -> None:
+        options = dict(
+            text="Enable manual segmentation (Step 2)",
+            variable=self.manual_segmentation_var,
+            command=self._mark_dirty,
+        )
+        help_text = (
+            "Enables ImageJ-style boundary editing. "
+            "Fovea placement remains available."
+        )
+        if modern:
+            self.manual_segmentation_switch = ctk.CTkSwitch(
+                parent, **options, progress_color=COLOR_PAIRS["primary"],
+                bg_color=COLOR_PAIRS["surface"],
+                text_color=COLOR_PAIRS["text"],
+                font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
+            )
+            help_label = ctk.CTkLabel(
+                parent, text=help_text, text_color=COLOR_PAIRS["muted_text"],
+                bg_color=COLOR_PAIRS["surface"],
+                anchor="w", wraplength=580,
+            )
+        else:
+            self.manual_segmentation_switch = ttk.Checkbutton(parent, **options)
+            help_label = ttk.Label(
+                parent, text=help_text, style="AIDaS.Muted.TLabel", wraplength=580,
+            )
+        self.manual_segmentation_switch.grid(
+            row=row, column=0, columnspan=2, sticky="w", padx=0, pady=(4, 2),
+        )
+        help_label.grid(
+            row=row + 1, column=0, columnspan=2, sticky="w", padx=0, pady=(0, 12),
+        )
+
+    def _apply_manual_segmentation_setting(self) -> None:
+        variable = self.__dict__.get("manual_segmentation_var")
+        if variable is None:
+            return
+        enabled = bool(variable.get())
+        changed = enabled != self._manual_segmentation_applied_value
+        self._preferences.set("step2_manual_segmentation_enabled", enabled)
+        if self._step2 is not None and changed:
+            self._step2.set_manual_segmentation_enabled(enabled)
+        self._manual_segmentation_applied_value = enabled
 
     def _annotation_tutorial_choice_changed(self) -> None:
         self._annotation_tutorial_dirty = True
@@ -1343,6 +796,9 @@ class SettingsDialog(ctk.CTkToplevel):
             self.lift()
             self.grab_set()
             self.focus_force()
+            navigation = self.__dict__.get("category_navigation")
+            if navigation is not None:
+                navigation.focus_set()
         except tk.TclError:
             self._modal_activation_after_id = None
 
@@ -1354,6 +810,8 @@ class SettingsDialog(ctk.CTkToplevel):
             if width < 1 or height < 1 or offset < 0:
                 raise ValueError
         except ValueError:
+            if "_category_pages" in self.__dict__:
+                self._select_category("step1")
             messagebox.showerror(
                 "SDB Defaults",
                 "Width and height must be positive integers; offset must be zero or greater.",
@@ -1371,6 +829,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 {key: variable.get() for key, variable in variables.items()}
             )
         except ValueError as exc:
+            if "_category_pages" in self.__dict__:
+                self._select_category("step4")
             messagebox.showerror(
                 "Step 4 Auto-detect Settings",
                 str(exc),
@@ -1447,6 +907,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 f"{state}: {self._script_status_label(selected)}"
             )
             if select_path is not None:
+                if "_pending_script_roles" in self.__dict__:
+                    self._pending_script_roles.add(role)
                 self._mark_dirty()
         else:
             self._script_status_vars[role].set("No runnable script is available")
@@ -1502,6 +964,8 @@ class SettingsDialog(ctk.CTkToplevel):
         choice = self._script_by_label[role].get(self._script_vars[role].get())
         if choice is None:
             return
+        if "_pending_script_roles" in self.__dict__:
+            self._pending_script_roles.add(role)
         self._script_status_vars[role].set(
             f"Pending: {self._script_status_label(choice)} — click Apply"
         )
@@ -1532,15 +996,22 @@ class SettingsDialog(ctk.CTkToplevel):
             return
         self._refresh_r_script_choices(role, select_path=imported)
 
-    def _apply_changes(self) -> None:
+    def _accept_changes(self) -> None:
+        if self._apply_changes():
+            self._close()
+
+    def _apply_changes(self) -> bool:
         sdb_defaults = self._validated_sdb_defaults()
         if sdb_defaults is None:
-            return
+            return False
         auto_detection_settings = self._validated_auto_detection_settings()
         if auto_detection_settings is None:
-            return
+            return False
         selected_scripts = {}
         for role, _label in self.SCRIPT_ROLES:
+            pending_roles = self.__dict__.get("_pending_script_roles")
+            if pending_roles is not None and role not in pending_roles:
+                continue
             choice = self._script_by_label[role].get(self._script_vars[role].get())
             if choice is None:
                 messagebox.showerror(
@@ -1548,9 +1019,9 @@ class SettingsDialog(ctk.CTkToplevel):
                     f"Choose an available {role} R script before applying settings.",
                     parent=self,
                 )
-                return
+                return False
             selected_scripts[role] = choice
-        if self._step3._busy:
+        if selected_scripts and self._step3._busy:
             script_changed = any(
                 self._step3._selected_r_script_path(role) is None
                 or self._step3._selected_r_script_path(role).resolve() != choice.path.resolve()
@@ -1562,7 +1033,7 @@ class SettingsDialog(ctk.CTkToplevel):
                     "R script changes cannot be applied until the current Step 3 batch finishes.",
                     parent=self,
                 )
-                return
+                return False
 
         # Switching or reselecting the interface synchronizes these controls
         # with the app's current values. Preserve the user's choices before
@@ -1570,6 +1041,7 @@ class SettingsDialog(ctk.CTkToplevel):
         selected_interface = normalize_interface_mode(self.interface_menu.get())
         selected_appearance = normalize_appearance_mode(self.appearance_menu.get())
         self._apply_annotation_tutorial_setting()
+        self._apply_manual_segmentation_setting()
         width, height, offset, little_endian = sdb_defaults
         self._preferences.set("check_for_updates", bool(self.update_checks_var.get()))
         remembered_choice = self._preferences.get("step1_bright_pixel_choice", "")
@@ -1597,6 +1069,8 @@ class SettingsDialog(ctk.CTkToplevel):
                 f"Active: {self._script_status_label(choice)}"
             )
             self._update_r_script_popup(role)
+        if "_pending_script_roles" in self.__dict__:
+            self._pending_script_roles.difference_update(selected_scripts)
         self._applying_changes = True
         try:
             applied_interface = self._set_interface_command(selected_interface)
@@ -1626,51 +1100,17 @@ class SettingsDialog(ctk.CTkToplevel):
             if getattr(self, "_presentation_refresh_pending", False):
                 self._presentation_refresh_pending = False
                 self._schedule_presentation_refresh()
-
-    def _open_r_setup(self) -> None:
-        if self._r_setup_wizard is not None:
-            return
-        if self._step3._busy:
-            messagebox.showwarning(
-                "Step 3 is running",
-                "Wait for the current Step 3 batch to finish before changing the R environment.",
-                parent=self,
-            )
-            return
-        from aidas.steps.step3_flatten import RSetupWizard
-
-        self.settings_panel.pack_forget()
-        self.footer.pack_forget()
-        self.resizable(True, True)
-        self._r_setup_wizard = RSetupWizard(
-            self._step3,
-            self,
-            on_finish=lambda _result: self._refresh_r_setup_state(),
-            close_command=self._close_r_setup,
-        )
-        self._r_setup_wizard.pack(fill="both", expand=True)
-        self.geometry(_center_geometry(self, 900, 650, parent=self._parent))
-
-    def _refresh_r_setup_state(self) -> None:
-        self._step3._refresh_input_status()
-
-    def _close_r_setup(self) -> None:
-        wizard = self._r_setup_wizard
-        self._r_setup_wizard = None
-        if wizard is not None:
-            wizard.destroy()
-        if self._classic_settings:
-            self.settings_panel.pack(fill="both", expand=True)
-            self.footer.pack(fill="x")
-        else:
-            self.settings_panel.pack(fill="both", expand=True, padx=16, pady=(16, 8))
-            self.footer.pack(fill="x", padx=16, pady=(0, 14))
-        self.resizable(False, False)
-        self.geometry(_center_geometry(self, 720, 720, parent=self._parent))
+        return applied_interface == selected_interface
 
     def _close(self) -> None:
-        if self._r_setup_wizard is not None and self._r_setup_wizard.busy:
-            return
+        render_id = self.__dict__.get("_category_render_after_id")
+        if render_id is not None:
+            self.after_cancel(render_id)
+            self._category_render_after_id = None
+        pending = getattr(self, "_presentation_refresh_after_id", None)
+        if pending is not None:
+            self.after_cancel(pending)
+            self._presentation_refresh_after_id = None
         activation_id = getattr(self, "_modal_activation_after_id", None)
         self._modal_activation_after_id = None
         if activation_id is not None:
@@ -1678,13 +1118,6 @@ class SettingsDialog(ctk.CTkToplevel):
                 self.after_cancel(activation_id)
             except tk.TclError:
                 pass
-        binding_id = getattr(self, "_classic_mousewheel_binding_id", None)
-        if binding_id is not None:
-            try:
-                self.unbind("<MouseWheel>", binding_id)
-            except tk.TclError:
-                pass
-            self._classic_mousewheel_binding_id = None
         try:
             self.grab_release()
         except tk.TclError:

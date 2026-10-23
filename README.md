@@ -125,8 +125,8 @@ Step 4 can automatically process the first 20 intensity profiles with
 **Auto-detect ROIs 1-20**. **ROI 21 is deliberately excluded** because its
 profile shape differs from the bell-shaped profiles and must always be selected
 manually.
-These values can be changed and saved under **Settings > Step 4 auto-detect
-ROI (Savitzky-Golay)**. Hover the info marker beside any setting for a short
+These values can be changed and saved under **Settings > Step 4: ROI Analysis**.
+Hover the info marker beside any setting for a short
 explanation. The values below are the defaults.
 The detector uses the anatomical ranges supplied for this workflow rather than
 copying one pair of lines to every plot:
@@ -473,7 +473,7 @@ separate conda environment.
 Step 3 still requires the R interpreter and its required R packages. The app's
 **Setup R and Packages** wizard detects or installs those runtime dependencies;
 the workflow `.R` files are bundled with the application automatically.
-**Settings > Step 3 R scripts** selects the main and output processing scripts.
+**Settings > Step 3: R Scripts** selects the main and output processing scripts.
 Both use their bundled **Optimized version** by default. Existing saved bundled
 original defaults upgrade once; later selections of Original or Custom remain
 saved. Custom scripts can be added through each selector and are copied to the

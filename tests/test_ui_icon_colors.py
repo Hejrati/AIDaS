@@ -7,7 +7,8 @@ from PIL import Image
 
 from aidas.ui.components import AppButton
 from aidas.ui.theme import (
-    apply_appearance_mode, get_interface_mode, set_interface_mode,
+    apply_appearance_mode, get_interface_mode, refresh_interface_widgets,
+    set_interface_mode,
 )
 from aidas.utils.ui_utils import (
     ACTION_ICON_FILES, _dark_mode_icon, _tint_icon, action_button, load_ctk_image,
@@ -68,14 +69,18 @@ class UIIconColorTests(unittest.TestCase):
             style = ttk.Style(root)
             set_interface_mode("Modern", redraw=False)
             apply_appearance_mode("Light", root=root, style=style, force_ctk_redraw=True)
-            native_buttons = []
+            helper_buttons = []
             modern_buttons = []
             sources = []
-            for action in ("next", "process"):
-                native = action_button(root, root, action, lambda: None, action,
+            for action in ("previous", "next", "process"):
+                helper = action_button(root, root, action, lambda: None, action,
                                        style="AIDaS.PrimaryAction.TButton")
-                native.pack()
-                native_buttons.append(native)
+                self.assertIsInstance(helper, AppButton)
+                helper.pack()
+                helper_buttons.append(helper)
+                helper_source = helper._aidas_action_icon_source
+                sources.append((helper_source, helper_source.cget("light_image").tobytes(),
+                                helper_source.cget("dark_image").tobytes()))
                 source = load_ctk_image(root, ACTION_ICON_FILES[action], size=20)
                 sources.append((source, source.cget("light_image").tobytes(),
                                 source.cget("dark_image").tobytes()))
@@ -83,9 +88,17 @@ class UIIconColorTests(unittest.TestCase):
                 modern.pack()
                 modern_buttons.append(modern)
 
-            folder_icon = load_ctk_image(root, ACTION_ICON_FILES["folder"], size=20)
-            folder_button = AppButton(root, text="Select folder", image=folder_icon)
+            folder_button = action_button(root, root, "Select folder", lambda: None, "folder")
+            self.assertIsInstance(folder_button, AppButton)
             folder_button.pack()
+            folder_icon = folder_button.cget("image")
+            folder_sources = {
+                mode: folder_icon.cget(mode).copy()
+                for mode in ("light_image", "dark_image")
+            }
+            for image in folder_sources.values():
+                self.assertEqual(image.getchannel("A").getextrema(), (0, 255))
+                self.assertGreater(len({pixel[:3] for pixel in image.getdata() if pixel[3] == 255}), 1)
 
             for interface, appearance in (
                 ("Modern", "Light"), ("Modern", "Dark"),
@@ -95,30 +108,15 @@ class UIIconColorTests(unittest.TestCase):
                 with self.subTest(interface=interface, appearance=appearance):
                     set_interface_mode(interface, redraw=False)
                     apply_appearance_mode(appearance, root=root, style=style, force_ctk_redraw=True)
+                    refresh_interface_widgets(root)
                     root.update()
                     mode_index = 1 if appearance == "Dark" else 0
                     for disabled in (False, True, False):
-                        for button in native_buttons + modern_buttons:
+                        for button in helper_buttons + modern_buttons + [folder_button]:
                             button.state(["disabled" if disabled else "!disabled"])
                         root.update()
 
-                        for button in native_buttons:
-                            state = ("disabled",) if disabled else ("!disabled",)
-                            foreground = style.lookup(button.cget("style"), "foreground", state)
-                            image = (button._aidas_disabled_action_icon if disabled
-                                     else button._aidas_action_icon)
-                            colors = {tuple(root.tk.call(str(image), "get", x, y))
-                                      for x in range(image.width())
-                                      for y in range(image.height())
-                                      if not root.tk.getboolean(root.tk.call(
-                                          str(image), "transparency", "get", x, y))}
-                            self.assertEqual(colors, {_rgb(foreground)})
-                            if interface == "Modern" and not disabled:
-                                for hover_state in (("!disabled",), ("active",), ("pressed",)):
-                                    background = style.lookup(button.cget("style"), "background", hover_state)
-                                    self.assertGreaterEqual(_contrast(foreground, background), 4.5)
-
-                        for button in modern_buttons:
+                        for button in helper_buttons + modern_buttons:
                             color = button.cget("text_color_disabled" if disabled else "text_color")
                             foreground = color[mode_index] if isinstance(color, (list, tuple)) else color
                             image = button.cget("image").cget(
@@ -132,8 +130,16 @@ class UIIconColorTests(unittest.TestCase):
                                                   if isinstance(background, (list, tuple)) else background)
                                     self.assertGreaterEqual(_contrast(foreground, background), 4.5)
 
+                        # Colorful secondary glyphs retain their complete alpha
+                        # edges and saturated details when disabled; no native
+                        # ttk stipple or monochrome action tint is introduced.
+                        self.assertIs(folder_button.cget("image"), folder_icon)
+                        for mode, expected in folder_sources.items():
+                            actual = folder_button.cget("image").cget(mode)
+                            self.assertEqual(actual.tobytes(), expected.tobytes())
+
                     # Moving workflow emphasis must preserve the action glyph's legibility.
-                    for button in modern_buttons:
+                    for button in helper_buttons + modern_buttons:
                         button.set_variant("secondary")
                         image = button.cget("image").cget(
                             "dark_image" if appearance == "Dark" else "light_image")

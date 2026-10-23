@@ -95,6 +95,7 @@ class Config:
         "step1_auto_fix_bright_pixels": False,
         "step1_bright_pixel_choice": "",
         "show_step2_annotation_tutorial": True,
+        "step2_manual_segmentation_enabled": False,
         "rscript_path": "",
         "r_main_script_path": "",
         "r_output_script_path": "",

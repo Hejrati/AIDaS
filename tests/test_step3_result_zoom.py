@@ -13,6 +13,7 @@ class Step3ResultZoomUITests(unittest.TestCase):
         script = textwrap.dedent(
             """
             import sys
+            import time
             import tkinter as tk
             from unittest import mock
 
@@ -21,17 +22,39 @@ class Step3ResultZoomUITests(unittest.TestCase):
 
             from aidas.core.display import work_area_bounds
             from aidas.steps.step3_flatten import Step3ResultZoomDialog
-            from aidas.ui.theme import COLOR_PAIRS, resolve_color
+            from aidas.ui.theme import COLOR_PAIRS, resolve_color, set_interface_mode
 
             scale = float(sys.argv[1])
+            set_interface_mode('Modern', redraw=False)
             ctk.set_widget_scaling(scale)
             ctk.set_window_scaling(scale)
-            root = ctk.CTk()
+
+            class QuietRoot(ctk.CTk):
+                _deactivate_windows_window_header_manipulation = True
+
+            root = QuietRoot()
+            root.interface_mode = 'Modern'
             root.withdraw()
             root.attributes('-alpha', 0.0)
             root.geometry('800x600+10000+10000')
             root.deiconify()
             root.update_idletasks()
+            # CTk queues native icon and DPI min/max initialization. Let the
+            # owner finish startup before creating transient viewers, as the
+            # application does, so those jobs cannot replace their HWNDs.
+            started = time.monotonic()
+            deadline = started + 3
+            while True:
+                root.update_idletasks()
+                root.update()
+                pending = [str(root.tk.call('after', 'info', job)[0])
+                           for job in root.tk.call('after', 'info')]
+                initializing = any('_windows_set_titlebar_icon' in job or '_set_scaled_min_max' in job
+                                   for job in pending)
+                if time.monotonic() - started >= 0.25 and not initializing:
+                    break
+                assert time.monotonic() < deadline, 'Owner startup did not settle.'
+                time.sleep(0.005)
             callback_errors = []
             root.report_callback_exception = lambda *error: callback_errors.append(error)
 
@@ -50,6 +73,10 @@ class Step3ResultZoomUITests(unittest.TestCase):
                     root.update()
 
             def maximize(dialog):
+                bar = getattr(dialog, '_aidas_dialog_title_bar', None)
+                if bar is not None:
+                    bar.controller.toggle_maximize()
+                    return
                 try:
                     dialog.state('zoomed')
                 except tk.TclError:
@@ -57,6 +84,30 @@ class Step3ResultZoomUITests(unittest.TestCase):
                         dialog.attributes('-zoomed', True)
                     except tk.TclError:
                         pass
+
+            def restore(dialog):
+                bar = getattr(dialog, '_aidas_dialog_title_bar', None)
+                if bar is None:
+                    dialog.state('normal')
+                else:
+                    bar.controller.restore()
+                deadline = time.monotonic() + 3
+                while True:
+                    settle()
+                    transitioning = bar is not None and bar.controller._normal_state_transition
+                    if dialog.state() == 'normal' and not transitioning:
+                        return
+                    assert time.monotonic() < deadline, 'Native restore did not settle.'
+                    time.sleep(0.005)
+
+            def resize(dialog, width, height):
+                bar = getattr(dialog, '_aidas_dialog_title_bar', None)
+                if bar is None:
+                    dialog.geometry(f'{width}x{height}+10000+10000')
+                else:
+                    # Client-edge dragging uses physical Windows dimensions;
+                    # Tk wm geometry still assumes its removed native frame.
+                    assert bar.controller.resize_window(10000, 10000, width, height)
 
             def assert_layout(dialog):
                 settle()
@@ -105,14 +156,13 @@ class Step3ResultZoomUITests(unittest.TestCase):
                         # The viewer must fit before the user chooses to
                         # maximize or resize it through the window manager.
                         assert_layout(dialog)
-                        dialog.state('normal')
-                        settle()
+                        restore(dialog)
                         for width, height in ((1000, 700), (720, 480), (640, 480)):
                             minimum = dialog.minsize()
                             maximum = dialog.maxsize()
                             width = max(minimum[0], min(width, maximum[0]))
                             height = max(minimum[1], min(height, maximum[1]))
-                            dialog.geometry(f'{width}x{height}+10000+10000')
+                            resize(dialog, width, height)
                             before = assert_layout(dialog)
                             assert before[0:2] == (width, height), 'Image changed the requested window size.'
                             photo = dialog._photo
@@ -130,8 +180,8 @@ class Step3ResultZoomUITests(unittest.TestCase):
                             assert dialog.winfo_rootx() + dialog.winfo_width() <= right, 'Maximized client area extends beyond the usable screen.'
                             assert dialog.winfo_rooty() + dialog.winfo_height() <= bottom, 'Maximized client area overlaps the taskbar.'
                             assert dialog.close_button.winfo_rooty() + dialog.close_button.winfo_height() <= bottom, 'Maximized Close is behind the taskbar.'
-                        dialog.state('normal')
-                        dialog.geometry('720x480+10000+10000')
+                        restore(dialog)
+                        resize(dialog, 720, 480)
                         assert_layout(dialog)
                         dialog._queue_redraw()
                         assert dialog._redraw_after_id is not None
@@ -171,6 +221,7 @@ class Step3ResultZoomUITests(unittest.TestCase):
         script = textwrap.dedent(
             """
             import sys
+            import time
             import tkinter as tk
             from unittest import mock
 
@@ -178,16 +229,36 @@ class Step3ResultZoomUITests(unittest.TestCase):
             from PIL import Image
 
             from aidas.steps import step3_flatten as module
+            from aidas.ui.theme import set_interface_mode
 
             scale = float(sys.argv[1])
+            set_interface_mode('Modern', redraw=False)
             ctk.set_widget_scaling(scale)
             ctk.set_window_scaling(scale)
-            root = ctk.CTk()
+
+            class QuietRoot(ctk.CTk):
+                _deactivate_windows_window_header_manipulation = True
+
+            root = QuietRoot()
+            root.interface_mode = 'Modern'
             root.withdraw()
             root.attributes('-alpha', 0.0)
             root.geometry('800x600+10000+10000')
             root.deiconify()
             root.update_idletasks()
+            started = time.monotonic()
+            deadline = started + 3
+            while True:
+                root.update_idletasks()
+                root.update()
+                pending = [str(root.tk.call('after', 'info', job)[0])
+                           for job in root.tk.call('after', 'info')]
+                initializing = any('_windows_set_titlebar_icon' in job or '_set_scaled_min_max' in job
+                                   for job in pending)
+                if time.monotonic() - started >= 0.25 and not initializing:
+                    break
+                assert time.monotonic() < deadline, 'Owner startup did not settle.'
+                time.sleep(0.005)
             original_init = tk.Toplevel.__init__
             original_state = tk.Toplevel.state
             original_attributes = tk.Toplevel.attributes

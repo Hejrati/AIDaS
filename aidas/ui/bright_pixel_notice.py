@@ -98,7 +98,7 @@ class BrightPixelNotice(tk.Toplevel):
         self._remember_tooltip = HoverToolTip(
             self.auto_fix_checkbox,
             "Remember Fix or Ignore for future images. "
-            "Restore confirmation in Settings > General.",
+            "Restore confirmation in Settings > Step 1: SDB Parameters.",
         )
         self._actions = tk.Frame(self._footer, borderwidth=0)
         self._actions.grid(row=0, column=1, sticky="e")

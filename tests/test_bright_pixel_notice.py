@@ -113,7 +113,7 @@ class BrightPixelNoticeTests(unittest.TestCase):
         notice = self._notice(Mock())
         self.assertEqual(notice.auto_fix_checkbox.cget("text"), "Remember my choice")
         tooltip = notice._remember_tooltip
-        self.assertIn("Settings > General", tooltip.text)
+        self.assertIn("Settings > Step 1: SDB Parameters", tooltip.text)
         self.assertIn("Fix or Ignore", tooltip.text)
         with patch.object(tooltip, "_pointer_is_over_widget", return_value=True):
             tooltip._show_now()

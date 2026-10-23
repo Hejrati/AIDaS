@@ -31,6 +31,7 @@ class _Var:
 class ManualAnnotationTests(unittest.TestCase):
     def _frame(self):
         frame = Step2Frame.__new__(Step2Frame)
+        frame._manual_segmentation_enabled = True
         frame.image_data = np.arange(80, dtype=np.int16).reshape(8, 10)
         frame.image_canvas = mock.Mock()
         frame.image_canvas.get_active_line.return_value = []
@@ -329,6 +330,12 @@ class ManualAnnotationTests(unittest.TestCase):
 
 
 class AnnotationTutorialTests(unittest.TestCase):
+    @staticmethod
+    def _manual_preferences():
+        preferences = Config()
+        preferences.set("step2_manual_segmentation_enabled", True)
+        return preferences
+
     def test_canvas_banner_waits_for_visible_image_and_remembers_dismissal(self):
         root = None
         original_widget_scaling = ctk.ScalingTracker.widget_scaling
@@ -445,7 +452,7 @@ class AnnotationTutorialTests(unittest.TestCase):
                     self.assertFalse(hasattr(frame, "annotation_tutorial_close_btn"))
                     self.assertIsNone(root.grab_current())
 
-                preferences = Config()
+                preferences = self._manual_preferences()
                 frame = Step2Frame(root, preferences=preferences)
                 frame.pack(fill="both", expand=True)
                 root.update()
@@ -690,7 +697,7 @@ class AnnotationTutorialTests(unittest.TestCase):
                 # a previously hidden Step 2 canvas to become visible, even
                 # with enlarged display scaling and initial text wrapping.
                 ctk.set_widget_scaling(1.5)
-                frame = Step2Frame(root, preferences=Config())
+                frame = Step2Frame(root, preferences=self._manual_preferences())
                 show_segmented_image(frame, "Step 1 output")
                 root.update()
                 self.assertFalse(visible_tutorial(frame))
@@ -715,7 +722,7 @@ class AnnotationTutorialTests(unittest.TestCase):
                 self.assertFalse(Config().get("show_step2_annotation_tutorial"))
                 frame.destroy()
 
-                frame = Step2Frame(root, preferences=Config())
+                frame = Step2Frame(root, preferences=self._manual_preferences())
                 frame.pack(fill="both", expand=True)
                 show_segmented_image(frame, "Step 1 output")
                 root.update()

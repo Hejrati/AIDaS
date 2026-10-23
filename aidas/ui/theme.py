@@ -666,6 +666,11 @@ def refresh_interface_widgets(root: tk.Misc, *, recursive: bool = True) -> int:
     changed = 0
     widgets = (root, *_walk_widgets(root)) if recursive else (root,)
     for widget in widgets:
+        # Native widgets and CTk windows do not expose this option. A
+        # scrollable frame delegates it to its outer CTkFrame, which the walk
+        # already visits; updating both would save the radius twice.
+        if not isinstance(widget, ctk.CTkBaseClass) or "_corner_radius" not in vars(widget):
+            continue
         if getattr(widget, "_aidas_preserve_corner_radius", False):
             continue
         try:
@@ -717,12 +722,6 @@ def refresh_native_widgets(root: tk.Misc) -> None:
     on_selected = COLORS.on_primary
 
     for widget in (root, *_walk_widgets(root)):
-        callback = getattr(widget, "_apply_aidas_theme", None)
-        if callable(callback):
-            try:
-                callback()
-            except tk.TclError:
-                pass
         try:
             if isinstance(widget, tk.Listbox):
                 widget.configure(
@@ -758,6 +757,13 @@ def refresh_native_widgets(root: tk.Misc) -> None:
                 widget.tag_configure("neutral", foreground=muted)
         except tk.TclError:
             pass
+        # Composite widgets may intentionally use a more specific palette.
+        callback = getattr(widget, "_apply_aidas_theme", None)
+        if callable(callback):
+            try:
+                callback()
+            except tk.TclError:
+                pass
 
 
 def apply_appearance_mode(

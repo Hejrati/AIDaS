@@ -128,9 +128,10 @@ class UIThemeTests(unittest.TestCase):
         )
 
     def test_interface_widget_refresh_flattens_and_restores_exact_radii(self):
-        class CornerWidget:
+        class CornerWidget(ctk.CTkFrame):
             def __init__(self, radius, *children):
                 self.radius = radius
+                self._corner_radius = radius
                 self.children = list(children)
 
             def winfo_children(self):

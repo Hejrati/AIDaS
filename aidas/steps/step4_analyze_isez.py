@@ -2746,6 +2746,9 @@ class Step4Frame(SidebarStepFrame):
             "Build output stacks after all ROIs are complete.",
         )
         self.build_stacks_button.pack(fill="x")
+        ttk.Separator(self.sidebar_footer, orient="horizontal").pack(
+            fill="x", pady=(LAYOUT.space_xs, 6),
+        )
         self.continue_to_step5_button_icon = load_ctk_image(
             self,
             "flat-color-icons--right.png",
@@ -2760,7 +2763,7 @@ class Step4Frame(SidebarStepFrame):
             image=self.continue_to_step5_button_icon,
             compound="left",
         )
-        self.continue_to_step5_button.pack(fill="x", pady=(4, 0))
+        self.continue_to_step5_button.pack(fill="x", padx=2)
         # stats_section = self.add_sidebar_section("Stats", padding=3, pady=(0, 5))
         # stats = stats_section.body
         # ttk.Label(stats, textvariable=self.stats_var, wraplength=self.SIDEBAR_TEXT_WRAP, justify="left").pack(fill="x")

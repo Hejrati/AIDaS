@@ -57,6 +57,7 @@ class ConfigPersistenceTests(unittest.TestCase):
                 self.assertTrue(config.get("sdb_little_endian"))
                 self.assertFalse(config.get("step1_auto_fix_bright_pixels"))
                 self.assertTrue(config.get("show_step2_annotation_tutorial"))
+                self.assertFalse(config.get("step2_manual_segmentation_enabled"))
                 self.assertEqual(config.get("r_main_script_path"), "")
                 self.assertEqual(config.get("r_output_script_path"), "")
                 self.assertEqual(config.get("custom_future_setting"), "keep me")
@@ -71,6 +72,20 @@ class ConfigPersistenceTests(unittest.TestCase):
             self.assertEqual(saved["custom_future_setting"], "keep me")
             self.assertEqual(saved["last_successful_update_check"], 123)
             self.assertEqual(list(config_dir.glob("*.tmp")), [])
+
+    def test_manual_segmentation_preference_survives_reloading(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir) / ".aidas"
+            config_file = config_dir / "preferences.json"
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file
+            ):
+                config = Config()
+                self.assertFalse(config.get("step2_manual_segmentation_enabled"))
+                config.set("step2_manual_segmentation_enabled", True)
+                self.assertTrue(Config().get("step2_manual_segmentation_enabled"))
+                config.set("step2_manual_segmentation_enabled", False)
+                self.assertFalse(Config().get("step2_manual_segmentation_enabled"))
 
     def test_step4_auto_detection_preferences_are_parsed_and_validated(self):
         values = {key: str(value) for key, value in STEP4_AUTO_DETECTION_DEFAULTS.items()}

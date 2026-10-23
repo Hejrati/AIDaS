@@ -3,6 +3,8 @@
 This module implements the Step 2 GUI panel for annotating retinal boundary
 lines over OCT images. It supports manual ImageJ-style polyline drawing,
 AI_ForAIDAS batch segmentation import, and saving boundary coordinates.
+Boundary editing is disabled by default and can be enabled in Settings;
+foveal center placement remains available in either mode.
 
 Core Functionality:
   • Manual Annotation: Click-to-place polyline drawing for 6 preset retinal
@@ -43,6 +45,7 @@ from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.ui.annotation_guide import AnnotationGuide
 from aidas.ui.batch_selection import BatchSelectionMixin
 from aidas.ui.batch_empty_state import NoValidFilesNotice
+from aidas.ui.boundary_legend import BoundaryLegend
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.tabs import ClosableTabView
@@ -98,8 +101,9 @@ MARKED_BOUNDARY_WIDTHS = {
 }
 LIGHT_MARKED_BASENAME = "Light_MARKED"
 LIGHT_SOURCE_BASENAME = "Light"
-# The first option preserves the existing Step 2 save behavior: the current
-# image is written to the nasal output and its left/right mirror to temporal.
+# Keep the historical identifiers used by per-image result state. The side
+# prompt labels the LEFT edge; Step 3 analyzes to the RIGHT of the fovea, so
+# the unchanged image belongs to the opposite anatomical output folder.
 SAVE_ORIENTATION_TEMPORAL_TO_NASAL = "temporal_to_nasal"
 SAVE_ORIENTATION_NASAL_TO_TEMPORAL = "nasal_to_temporal"
 DEFAULT_SAVE_ORIENTATION = SAVE_ORIENTATION_TEMPORAL_TO_NASAL
@@ -829,6 +833,9 @@ class Step2Frame(SidebarStepFrame):
         self._pending_external_image = None
         
         # ─ Boundary tracing state ─
+        self._manual_segmentation_enabled = bool(
+            preferences.get("step2_manual_segmentation_enabled", False)
+        ) if preferences is not None else False
         self.active_boundary = None  # Name of boundary currently being traced
         self.boundary_traces = {}  # Dict mapping boundary name -> {points, pixels, color}
         self.boundary_order = []  # List of boundary names in order they were completed
@@ -871,7 +878,7 @@ class Step2Frame(SidebarStepFrame):
         self.ai_for_aidas_default_model = os.path.join(self.ai_for_aidas_root, "model_img.onnx")
 
         self.status_var = tk.StringVar(
-            value="Ready - process an image in Step 1, then trace boundaries or run batch segmentation."
+            value="Ready - select folders to segment and review the predicted boundaries."
         )
         self.ai_device_status_var = tk.StringVar(
             value="AI device: Checking GPU compatibility..."
@@ -1096,7 +1103,8 @@ class Step2Frame(SidebarStepFrame):
         self._annotation_tutorial_after_id = None
         preferences = getattr(self, "preferences", None)
         if (
-            getattr(self, "_annotation_tutorial_dismissed", False)
+            not self.is_manual_segmentation_enabled()
+            or getattr(self, "_annotation_tutorial_dismissed", False)
             or not getattr(self, "_annotation_tutorial_ready", False)
             or getattr(self, "_segmenter_running", False)
             or (preferences is not None and not preferences.get("show_step2_annotation_tutorial", True))
@@ -1190,6 +1198,52 @@ class Step2Frame(SidebarStepFrame):
         self._hide_annotation_tutorial()
         super().destroy()
 
+    def is_manual_segmentation_enabled(self) -> bool:
+        """Return whether Step 2 permits ImageJ-style boundary editing."""
+        return bool(getattr(self, "_manual_segmentation_enabled", False))
+
+    def _apply_manual_segmentation_view(self) -> None:
+        workflow = getattr(self, "_boundary_workflow_frame", None)
+        legend = getattr(self, "_boundary_legend", None)
+        if workflow is None or legend is None:
+            return
+        workflow.pack_forget()
+        legend.pack_forget()
+        visible = workflow if self.is_manual_segmentation_enabled() else legend
+        visible.pack(fill="x", pady=(4, 0))
+
+    def set_manual_segmentation_enabled(self, enabled: bool) -> None:
+        """Apply the preference live without altering saved boundary traces."""
+        self._manual_segmentation_enabled = bool(enabled)
+        self._apply_manual_segmentation_view()
+        if not enabled:
+            self.active_boundary = None
+            canvases = [getattr(self, "image_canvas", None),
+                        getattr(self, "single_image_canvas", None)]
+            canvases.extend(getattr(self, "_batch_result_canvases", []))
+            canvases.extend(getattr(self, "_batch_result_tab_canvases", {}).values())
+            for canvas in {id(canvas): canvas for canvas in canvases if canvas is not None}.values():
+                canvas.enable_line(False)
+                canvas.set_editable_line(None)
+            # Cancel any unfinished drag on retained tabs and restore their
+            # overlays from committed annotations rather than transient points.
+            for key, state in getattr(self, "_batch_result_states", {}).items():
+                canvas = state.get("canvas") or getattr(self, "_batch_result_tab_canvases", {}).get(key)
+                if canvas is not None and canvas is not self.image_canvas:
+                    self._set_canvas_boundary_overlays(canvas, state.get("traces", {}), state.get("order", []))
+            single_state = getattr(self, "_single_editor_state", None)
+            single_canvas = getattr(self, "single_image_canvas", None)
+            if single_state and single_canvas is not None and single_canvas is not self.image_canvas:
+                self._set_canvas_boundary_overlays(single_canvas, single_state.get("traces", {}), single_state.get("order", []))
+            self._rebuild_saved_overlays()
+            self.active_trace_var.set("No active boundary")
+            self._hide_annotation_tutorial()
+        self._refresh_boundary_lists(auto_select=False)
+        self._update_boundary_action_buttons()
+        self._sync_boundary_canvas_state()
+        if enabled:
+            self._queue_annotation_tutorial()
+
     def _build_controls(self):
         """Construct and lay out all left-side control widgets.
 
@@ -1214,7 +1268,12 @@ class Step2Frame(SidebarStepFrame):
         )
         self.batch_ai_button.pack(fill="x")
         workflow = ttk.LabelFrame(segmentation, text="Boundary Progress", padding=3)
-        workflow.pack(fill="x", pady=(4, 0))
+        self._boundary_workflow_frame = workflow
+        self._boundary_legend = BoundaryLegend(
+            segmentation, BOUNDARY_PRESETS,
+            fovea_color=getattr(self.image_canvas, "_vertical_line_color", "#ffd500"),
+        )
+        self._apply_manual_segmentation_view()
 
         workflow_lists = ttk.Frame(workflow)
         workflow_lists.pack(fill="x")
@@ -1288,10 +1347,6 @@ class Step2Frame(SidebarStepFrame):
             pady=(0, LAYOUT.space_sm),
             before=self.sidebar,
         )
-        ttk.Separator(self.step_actions_footer, orient="horizontal").pack(
-            fill="x",
-            pady=(LAYOUT.space_xs, 6),
-        )
         saved_buttons = ttk.Frame(
             self.step_actions_footer,
             style="AIDaS.Sidebar.TFrame",
@@ -1326,6 +1381,10 @@ class Step2Frame(SidebarStepFrame):
             tooltip="Save every completed batch result.",
         )
         self.save_all_button.grid(row=0, column=1, sticky="ew", padx=(2, 0))
+        ttk.Separator(saved_buttons, orient="horizontal").grid(
+            row=1, column=0, columnspan=2, sticky="ew",
+            pady=(LAYOUT.space_xs, 6),
+        )
         self.continue_to_step3_button_icon = load_ctk_image(
             self, "flat-color-icons--right.png", size=20
         )
@@ -1343,11 +1402,10 @@ class Step2Frame(SidebarStepFrame):
             "Save all results and continue to flattening.",
         )
         self.continue_to_step3_button.grid(
-            row=1,
+            row=2,
             column=0,
             columnspan=2,
             sticky="ew",
-            pady=(4, 0),
         )
 
         # help_section = self.add_sidebar_section("How to Trace", padding=3, pady=(2, 6))
@@ -2264,6 +2322,8 @@ class Step2Frame(SidebarStepFrame):
         self._set_segmentation_frame_enabled(True)
         self._update_ai_button_states()
         self.status_var.set(
+            "Image loaded. Drag the foveal center line to adjust its position."
+            if not self.is_manual_segmentation_enabled() else
             "Image loaded. Drag the foveal center line or select an incomplete boundary to trace."
         )
         if notify_output_folder:
@@ -2542,6 +2602,8 @@ class Step2Frame(SidebarStepFrame):
           - canvas to line-drawing mode
           - status bar with instructions
         """
+        if not self.is_manual_segmentation_enabled():
+            return
         if self.image_data is None:
             messagebox.showwarning("No image", "Load an image before tracing boundaries.")
             return
@@ -2581,6 +2643,8 @@ class Step2Frame(SidebarStepFrame):
         self._sync_boundary_canvas_state()
 
     def _set_active_boundary_target(self, name):
+        if not self.is_manual_segmentation_enabled():
+            return
         if name not in BOUNDARY_NAMES or self.image_data is None:
             return
 
@@ -2623,7 +2687,7 @@ class Step2Frame(SidebarStepFrame):
         active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
         is_completed = active_name in self._completed_boundary_names()
         has_clearable_markers = self._has_clearable_boundary_markers()
-        editable = not (
+        editable = self.is_manual_segmentation_enabled() and not (
             getattr(self, "_segmenter_running", False)
             or getattr(self, "_batch_fovea_picker_active", False)
         )
@@ -2694,8 +2758,9 @@ class Step2Frame(SidebarStepFrame):
         active_name = self.active_boundary if self.active_boundary in BOUNDARY_NAMES else None
         # Only allow drawing on incomplete boundaries
         is_incomplete = active_name in self._incomplete_boundary_names()
+        manual_enabled = self.is_manual_segmentation_enabled()
         drawing_enabled = (
-            self.image_data is not None
+            manual_enabled and self.image_data is not None
             and active_name is not None
             and is_incomplete
             and not self._drawing_locked
@@ -2705,7 +2770,7 @@ class Step2Frame(SidebarStepFrame):
             self._ensure_fovea_line()
         self.image_canvas.enable_line(drawing_enabled)
         self.image_canvas.set_editable_line(
-            active_name if active_name in self.boundary_traces
+            active_name if manual_enabled and active_name in self.boundary_traces
             and not self._segmenter_running and not self._drawing_locked else None
         )
         self.image_canvas.enable_vertical_line(
@@ -2718,6 +2783,8 @@ class Step2Frame(SidebarStepFrame):
         Convenience method that resolves the selected incomplete boundary name and
         delegates to _start_boundary_for_name(). Used by the "Start" button.
         """
+        if not self.is_manual_segmentation_enabled():
+            return
         if self.image_data is None:
             return
 
@@ -2730,6 +2797,8 @@ class Step2Frame(SidebarStepFrame):
         Delegates to ImageCanvas.undo_active_line_vertex(). User can call this
         multiple times to step back through all points in the current trace.
         """
+        if not self.is_manual_segmentation_enabled():
+            return
         self.image_canvas.undo_active_line_vertex()
 
     def _clear_active_trace(self):
@@ -2738,6 +2807,8 @@ class Step2Frame(SidebarStepFrame):
         Clears the active line on the canvas and updates status. Does not affect
         any completed boundaries.
         """
+        if not self.is_manual_segmentation_enabled():
+            return
         self.image_canvas.clear_active_line()
         self._update_active_trace_summary()
         self._update_boundary_action_buttons()
@@ -2757,6 +2828,8 @@ class Step2Frame(SidebarStepFrame):
         Auto-saves MARKED images if all 6 boundaries are complete (unless disabled).
         Clears active line and prepares UI for next boundary.
         """
+        if not self.is_manual_segmentation_enabled():
+            return
         if self._segmenter_running:
             return
         if self.image_data is None:
@@ -2810,6 +2883,8 @@ class Step2Frame(SidebarStepFrame):
 
     def _delete_selected_boundary(self):
         """Delete the selected completed line or its unfinished drawing."""
+        if not self.is_manual_segmentation_enabled():
+            return
         if self._segmenter_running:
             return
         name = self._selected_active_boundary_name()
@@ -2837,6 +2912,8 @@ class Step2Frame(SidebarStepFrame):
         Asks for confirmation before clearing to prevent accidental data loss.
         Resets boundary completion status and clears canvas overlays.
         """
+        if not self.is_manual_segmentation_enabled():
+            return
         if self._segmenter_running:
             return
         has_boundary_traces = any(name != FOVEA_BOUNDARY_NAME for name in self.boundary_traces)
@@ -2871,11 +2948,14 @@ class Step2Frame(SidebarStepFrame):
         Maintains order and colors when re-rendering the canvas display.
         The fovea line is drawn only by the interactive vertical marker.
         """
+        self._set_canvas_boundary_overlays(self.image_canvas, self.boundary_traces, self.boundary_order)
+
+    def _set_canvas_boundary_overlays(self, canvas, traces, order):
         overlays = []
-        for name in dict.fromkeys(self.boundary_order):
+        for name in dict.fromkeys(order):
             if name == FOVEA_BOUNDARY_NAME:
                 continue
-            trace = self.boundary_traces.get(name)
+            trace = traces.get(name)
             if trace:
                 overlays.append({
                     "points": trace["points"],
@@ -2883,7 +2963,7 @@ class Step2Frame(SidebarStepFrame):
                     "label": name,
                     "handle_indices": trace.get("handle_indices"),
                 })
-        self.image_canvas.set_line_overlays(overlays)
+        canvas.set_line_overlays(overlays)
 
     def _reset_boundary_completion(self):
         """Reset all boundaries to incomplete status and update UI.
@@ -3016,6 +3096,8 @@ class Step2Frame(SidebarStepFrame):
 
     def _on_boundary_selected(self, _event, list_type):
         """Handle selection from incomplete or completed boundary listbox."""
+        if not self.is_manual_segmentation_enabled():
+            return
         if self._syncing_boundary_selection:
             return
         if list_type == "incomplete":
@@ -3073,6 +3155,8 @@ class Step2Frame(SidebarStepFrame):
         )
         # Recursively disable/enable all children in the segmentation frame
         def set_state(widget):
+            if widget is getattr(self, "_boundary_legend", None):
+                return
             if widget in (
                 getattr(self, "revert_line_btn", None),
                 getattr(self, "revert_all_lines_btn", None),
@@ -3212,6 +3296,8 @@ class Step2Frame(SidebarStepFrame):
     #  Live updates and selection handling
     # ═══════════════════════════════════════════════════════════════════════
     def _on_saved_line_edited(self, name, points):
+        if not self.is_manual_segmentation_enabled():
+            return
         if self._segmenter_running or name not in self.boundary_traces or name not in BOUNDARY_NAMES:
             return
         handles = self.image_canvas.get_line_handle_indices(name)
@@ -3234,6 +3320,8 @@ class Step2Frame(SidebarStepFrame):
         self.status_var.set(f"Updated '{name}'. Drag vertices to adjust; Shift-click adds and Alt-click removes.")
 
     def _on_active_line_changed(self, points):
+        if not self.is_manual_segmentation_enabled():
+            return
         if self.image_data is None:
             return
         if not points:
@@ -3370,7 +3458,7 @@ class Step2Frame(SidebarStepFrame):
 
     @staticmethod
     def _save_orientation_for_image_side(side):
-        """Map the explicit image-side answer to the existing save geometry."""
+        """Encode the left-side answer using the retained per-image identifiers."""
         if side == IMAGE_SIDE_TEMPORAL:
             return SAVE_ORIENTATION_NASAL_TO_TEMPORAL
         if side == IMAGE_SIDE_NASAL:
@@ -3378,6 +3466,7 @@ class Step2Frame(SidebarStepFrame):
         raise ValueError(f"Unknown image side: {side!r}")
 
     def _image_side_for_save_orientation(self, orientation=None):
+        """Decode the anatomical side on the LEFT edge of the displayed image."""
         if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
             return IMAGE_SIDE_TEMPORAL
         return IMAGE_SIDE_NASAL
@@ -3386,21 +3475,22 @@ class Step2Frame(SidebarStepFrame):
         return self._image_side_for_save_orientation(orientation).title()
 
     def _orient_volume_for_single_save(self, volume, orientation=None):
-        """Apply the selected orientation to a single saved Analyze volume."""
-        if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+        """Align single exports with the nasal member of a paired export."""
+        if self._image_side_for_save_orientation(orientation) == IMAGE_SIDE_NASAL:
             return np.ascontiguousarray(np.flip(volume, axis=-1))
         return volume
 
     def _orient_volumes_for_pair_save(self, volume, source_volume, orientation=None):
         """Return ``(nasal, temporal)`` volumes for the selected orientation.
 
-        The default assignment is intentionally the existing behavior. Selecting
-        the opposite direction swaps the unchanged and horizontally mirrored
-        volumes while keeping the output folder names stable.
+        The chosen side describes the image's left edge. Downstream analysis
+        uses increasing x to the right of the fovea, so the unchanged image
+        goes to the opposite-side folder. Mirror source and MARKED volumes
+        together to keep boundary pixels and the foveal marker aligned.
         """
         mirrored_volume = np.ascontiguousarray(np.flip(volume, axis=-1))
         mirrored_source = np.ascontiguousarray(np.flip(source_volume, axis=-1))
-        if self._selected_save_orientation(orientation) == SAVE_ORIENTATION_NASAL_TO_TEMPORAL:
+        if self._image_side_for_save_orientation(orientation) == IMAGE_SIDE_NASAL:
             return mirrored_volume, volume, mirrored_source, source_volume
         return volume, mirrored_volume, source_volume, mirrored_source
 
@@ -3932,7 +4022,7 @@ class Step2Frame(SidebarStepFrame):
                 "Saved All",
                 f"Saved and closed {len(saved)} image(s).\n\n"
                 "Each nasal and temporal folder contains Light and Light_MARKED.\n"
-                "Temporal images were mirrored left to right.",
+                "Output orientation follows the selected left-side anatomy.",
             )
 
     @staticmethod
@@ -4700,6 +4790,8 @@ class Step2Frame(SidebarStepFrame):
         return self._get_listbox_selection(getattr(self, "boundary_incomplete_listbox", None), incomplete)
 
     def _segment_selected_boundary(self):
+        if not self.is_manual_segmentation_enabled():
+            return
         name = self._selected_incomplete_boundary()
         if name is not None:
             self._segment_current_image(boundary_names=[name])
@@ -4744,6 +4836,8 @@ class Step2Frame(SidebarStepFrame):
 
     def _segment_current_image(self, *, boundary_names=None):
         """Run the existing AI worker for this image without replacing other tabs."""
+        if not self.is_manual_segmentation_enabled():
+            return
         if (
             self.image_data is None
             or self._segmenter_running
@@ -4799,6 +4893,8 @@ class Step2Frame(SidebarStepFrame):
             messagebox.showerror("AI segmentation failed", str(exc))
 
     def _restore_unfinished_ai_trace(self, state):
+        if not self.is_manual_segmentation_enabled():
+            return
         if (
             state.get("unfinished_line")
             and state.get("tab_key") == getattr(self, "_active_batch_result_tab", None)
@@ -5147,7 +5243,7 @@ class Step2Frame(SidebarStepFrame):
                         if fovea_x is not None:
                             log_lines.append(f"  Fovea x (manual): {int(fovea_x)}")
                         log_lines.append(
-                            f"  Image side: {self._save_orientation_label(orientation)}"
+                            f"  Left side: {self._save_orientation_label(orientation)}"
                         )
                     except Exception as exc:
                         failures.append({"input": path, "error": str(exc)})

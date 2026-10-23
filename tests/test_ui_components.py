@@ -118,11 +118,11 @@ class ActionButtonConventionTests(unittest.TestCase):
         icon_source = inspect.getsource(icon_action_button)
 
         self.assertEqual(ACTION_ICON_SIZE, 20)
-        self.assertIn('"compound": "left"', text_source)
-        self.assertIn('"image": (icon, "disabled", icon)', text_source)
-        self.assertIn("_aidas_disabled_action_icon", text_source)
-        self.assertIn('"AIDaS.Icon.TButton"', icon_source)
-        self.assertIn('setdefault("compound", "image")', icon_source)
+        self.assertIn('setdefault("compound", "left")', text_source)
+        self.assertIn("load_ctk_image(owner, filename, size=icon_size)", text_source)
+        self.assertIn("button = AppButton(", text_source)
+        self.assertIn('setdefault("width", CONTROLS.height_md)', icon_source)
+        self.assertIn('setdefault("compound", "left")', icon_source)
 
     def test_close_and_cancel_actions_use_the_shared_x_badge(self):
         source = inspect.getsource(load_action_icon)
@@ -176,18 +176,26 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertNotIn("Â", classic_source)
         self.assertIn('f"{APP_SUBTITLE} - Version {__version__}"', classic_source)
 
-    def test_settings_owns_sdb_r_setup_and_script_configuration(self):
-        source = inspect.getsource(SettingsDialog.__init__)
+    def test_settings_owns_sdb_and_script_configuration(self):
+        source = "\n".join(
+            inspect.getsource(builder)
+            for builder in (
+                *(getattr(SettingsDialog, f"_build_{key}_page")
+                  for key, _label in SettingsDialog.CATEGORIES),
+                SettingsDialog._build_bright_pixel_setting,
+                SettingsDialog._build_manual_segmentation_setting,
+            )
+        )
 
-        self.assertIn('"Default SDB image parameters"', source)
-        self.assertIn('"R environment"', source)
-        self.assertIn('"Step 3 R scripts"', source)
-        self.assertIn("self._open_r_setup", source)
-        self.assertIn("self._refresh_r_script_choices(role)", source)
-        self.assertIn('text="Apply"', source)
-        self.assertIn('"Step 4 auto-detect ROI (Savitzky-Golay)"', source)
+        for setting in (
+            "sdb_default_vars", "bright_pixel_confirmation_var",
+            "annotation_tutorial_var", "manual_segmentation_var",
+            "auto_detection_vars", "_script_vars",
+        ):
+            self.assertIn(setting, source)
+        self.assertIn("_refresh_r_script_choices(role)", source)
         self.assertIn("self.AUTO_DETECTION_FIELDS", source)
-        self.assertIn("help_text=help_text", source)
+        self.assertNotIn('"R environment"', source)
         field_keys = {field[0] for field in SettingsDialog.AUTO_DETECTION_FIELDS}
         self.assertNotIn("step4_auto_savgol_polyorder", field_keys)
         self.assertIn("step4_auto_confidence_percent", field_keys)
@@ -208,19 +216,18 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn("self._step3.select_r_script", apply_source)
         self.assertIn("self._set_appearance_command", apply_source)
 
-    def test_classic_settings_uses_native_property_sheet_controls(self):
-        source = inspect.getsource(SettingsDialog._build_classic_settings)
-
-        self.assertIn("ttk.LabelFrame(", source)
-        self.assertIn("ttk.Combobox(", source)
-        self.assertIn("ttk.Checkbutton(", source)
-        self.assertIn("ttk.Entry(", source)
-        self.assertIn("action_button(", source)
-        self.assertIn('text="Step 4 auto-detect ROI (Savitzky-Golay)"', source)
-        self.assertIn("HoverToolTip(help_label, help_text)", source)
-        self.assertNotIn("ctk.CTkOptionMenu(", source)
-        self.assertNotIn("ctk.CTkSwitch(", source)
-        self.assertIn("base_row = 1 + row * 3", source)
+    def test_settings_categories_cover_general_and_each_processing_configuration(self):
+        self.assertEqual(
+            dict(SettingsDialog.CATEGORIES),
+            {
+                "general": "General",
+                "step1": "Step 1: SDB Parameters",
+                "step2": "Step 2: Segmentation",
+                "step3": "Step 3: R Scripts",
+                "step4": "Step 4: ROI Analysis",
+            },
+        )
+        self.assertEqual(len(SettingsDialog.CATEGORIES), 5)
 
     def test_classic_settings_appearance_state_uses_native_readonly_mode(self):
         dialog = SettingsDialog.__new__(SettingsDialog)
@@ -299,7 +306,7 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         header_start = source.index("parent_dir_header = ttk.Frame(sdb)")
         parent_label = source.index('text="Parent dir:"')
         exclude_filter = source.index("self.exclude_saved_outputs_checkbox")
-        directory_controls = source.index("dir_frame, _dir_entry, dir_buttons")
+        directory_controls = source.index("dir_frame, self.sdb_dir_entry, dir_buttons")
         header_source = source[header_start:directory_controls]
         self.assertLess(parent_label, exclude_filter)
         self.assertLess(exclude_filter, directory_controls)
@@ -525,7 +532,7 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertNotIn("image=self.close_icon", source)
         self.assertIn('variant="danger"', source)
         self.assertIn('text="Close"', source)
-        self.assertIn('style="AIDaS.DangerAction.TButton"', source)
+        self.assertIn("self.stop_button = AppButton(", source)
 
     def test_step3_second_script_schedule_defaults_to_parallel(self):
         source = inspect.getsource(RBatchSelectionPanel._build_ui)

@@ -135,7 +135,7 @@ class RSetupWizard(ttk.Frame):
     def _set_content_buttons(self, state):
         def visit(parent):
             for child in parent.winfo_children():
-                if isinstance(child, ttk.Button):
+                if isinstance(child, (ttk.Button, AppButton)):
                     child.configure(state=state)
                 visit(child)
 
@@ -175,8 +175,8 @@ class RSetupWizard(ttk.Frame):
 
         actions = ttk.Frame(self.content)
         actions.pack(fill="x", pady=12)
-        ttk.Button(actions, text="Check Again", command=self._detect_rscript).pack(side="left", padx=(0, 6))
-        ttk.Button(actions, text="Search Locally...", command=self._locate_rscript).pack(side="left", padx=(0, 6))
+        AppButton(actions, text="Check Again", command=self._detect_rscript).pack(side="left", padx=(0, 6))
+        AppButton(actions, text="Search Locally...", command=self._locate_rscript).pack(side="left", padx=(0, 6))
         if self.rscript_path is None:
             self.r_install_button = action_button(
                 actions,
@@ -213,8 +213,8 @@ class RSetupWizard(ttk.Frame):
 
         actions = ttk.Frame(self.content)
         actions.pack(fill="x", pady=12)
-        ttk.Button(actions, text="Check Packages", command=self._check_packages).pack(side="left", padx=(0, 6))
-        ttk.Button(actions, text="Install Missing", command=self._install_missing_packages).pack(side="left")
+        AppButton(actions, text="Check Packages", command=self._check_packages).pack(side="left", padx=(0, 6))
+        AppButton(actions, text="Install Missing", command=self._install_missing_packages).pack(side="left")
 
         ttk.Label(
             self.content,
@@ -1966,12 +1966,12 @@ class RBatchRunPanel(ttk.Frame):
             "refresh",
         )
         self.restart_button.pack(side="left")
-        self.stop_button = ttk.Button(
+        self.stop_button = AppButton(
             action_box,
             text="\u25a0  Stop",
             command=self._cancel_batch,
-            style="AIDaS.DangerAction.TButton",
-            padding=(11, 6),
+            variant="danger",
+            width=104,
         )
         self.stop_button.pack(side="left", padx=(6, 0))
         self.close_button = AppButton(
@@ -3090,14 +3090,14 @@ class Step3Frame(SidebarStepFrame):
     def _ensure_r_ready_with_wizard(self):
         rscript = self._resolve_rscript_executable()
         if rscript is None:
-            self.status_var.set("Rscript was not found. Open Settings > R environment to continue.")
+            self.status_var.set("Rscript was not found. Select 'Set up R and packages' in Step 3 to continue.")
             return None
         if self.preferences is not None:
             self.preferences.set("rscript_path", str(rscript))
         if self._r_packages_ready(rscript):
             self.status_var.set("R and required Step 3 packages are ready.")
             return rscript
-        self.status_var.set("Step 3 R packages are missing. Open Settings > R environment to install them.")
+        self.status_var.set("Step 3 R packages are missing. Select 'Set up R and packages' in Step 3 to install them.")
         return None
 
     @staticmethod
@@ -4037,7 +4037,7 @@ class Step3Frame(SidebarStepFrame):
         if rscript is None:
             messagebox.showerror(
                 "Step 3 R Setup",
-                "R or required packages are not ready. Open Settings > R environment to install or repair them.",
+                "R or required packages are not ready. Select 'Set up R and packages' in Step 3 to install or repair them.",
                 parent=self,
             )
             return

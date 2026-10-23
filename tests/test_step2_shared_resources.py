@@ -135,6 +135,7 @@ class Step2SharedResourceTests(unittest.TestCase):
 
     def test_single_image_worker_receives_the_automatic_fallback_budget(self):
         frame = Step2Frame.__new__(Step2Frame)
+        frame._manual_segmentation_enabled = True
         frame.image_data = [[0]]
         frame._segmenter_running = False
         frame._all_required_boundaries_complete = lambda: False

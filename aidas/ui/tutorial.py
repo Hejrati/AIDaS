@@ -118,7 +118,8 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         title="Step 2 - Segment retinal boundaries",
         purpose=(
             "Step 2 identifies the six retinal layer boundaries and foveal center "
-            "required by flattening. AI supplies a starting trace; every result remains editable."
+            "required by flattening. AI generates the boundary traces for review. "
+            "Boundary editing is disabled by default; the foveal center remains adjustable."
         ),
         input_summary="Step 1 Light Analyze pairs, loaded from selected folders",
         function_summary="Confirm the fovea, identify the image as temporal or nasal, and review six boundaries",
@@ -135,8 +136,8 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "Next identify the image as Temporal or Nasal. Both prompts are required; Exit cancels the batch.",
             ),
             (
-                "Draw like ImageJ's segmented-line tool: click to place points, double-click or click the starting handle to finish. To edit, select a line under Completed and use its square handles. Shift-click a handle and drag the new point to add a vertex; Alt-click or Ctrl-click a handle to remove it. At least three handles must remain.",
-                "The buttons between Incomplete and Completed control the current image: < reverts the selected line to Incomplete; << reverts all lines. > runs AI for the selected incomplete line; >> runs AI for all six lines. The foveal marker is kept.",
+                "Use the boundary legend to match each layer to its color on the image. Boundary lines are locked by default; the foveal marker can still be adjusted.",
+                "For ImageJ-style editing, turn on Enable manual segmentation (Step 2) in Settings > Step 2: Segmentation. Select an incomplete boundary to draw; double-click to finish. Select a completed boundary to edit its handles. The arrow buttons revert or regenerate lines.",
             ),
             (
                 "Save or Save all commits the reviewed results; unsaved AI results and edits exist only in the open review tabs.",
