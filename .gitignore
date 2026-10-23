@@ -3,7 +3,7 @@ cropped_selected_images/
 build/
 aidas.spec
 dist/
-release/
+/release/
 __pycache__/
 *.pyc
 OCT Segmenter\Model\human_OCT.h5

@@ -851,43 +851,6 @@ class Step1Frame(SidebarStepFrame):
             arr = (arr - lo) / (hi - lo) * 255.0
         return np.clip(arr, 0, 255).astype(np.uint8)
 
-    @staticmethod
-    def _control_state(control):
-        """Read a CTk/ttk control state without causing a redraw."""
-        if control is None:
-            return None
-        try:
-            return str(control.cget("state"))
-        except (AttributeError, KeyError, tk.TclError, TypeError, ValueError):
-            pass
-
-        # Lightweight test doubles and a few native ttk wrappers expose state
-        # as an attribute or a state-token method instead of through ``cget``.
-        state_api = getattr(control, "state", None)
-        if isinstance(state_api, str):
-            return state_api
-        if callable(state_api):
-            try:
-                tokens = tuple(state_api())
-            except (tk.TclError, TypeError):
-                return None
-            return "disabled" if "disabled" in tokens else "normal"
-        return None
-
-    @classmethod
-    def _set_control_enabled(cls, control, enabled):
-        """Configure a semantic control only when its state actually changes."""
-        if control is None:
-            return False
-        desired = "normal" if enabled else "disabled"
-        if cls._control_state(control) == desired:
-            return False
-        try:
-            control.configure(state=desired)
-        except (AttributeError, tk.TclError, TypeError, ValueError):
-            return False
-        return True
-
     def _set_sdb_parameters_enabled(self, enabled):
         """Toggle only interactive SDB parameter controls."""
         control_names = (

@@ -457,9 +457,12 @@ PyInstaller and its required Windows compatibility package, `pywin32-ctypes`:
 ```powershell
 python -m venv .venv-release
 .\.venv-release\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv-release\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv-release\Scripts\python.exe -m unittest discover -s tests -t . -v
 .\.venv-release\Scripts\python.exe -m PyInstaller AIDaS.spec --clean --noconfirm
 ```
+
+See [tests/README.md](tests/README.md) for the test layout, focused runs, and
+optional GUI and R integration requirements.
 
 The build is created at `dist/AIDaS/`, with the launch executable at
 `dist/AIDaS/AIDaS.exe`. The spec requires and bundles every Python runtime

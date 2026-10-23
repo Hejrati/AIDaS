@@ -4321,9 +4321,10 @@ class Step2Frame(SidebarStepFrame):
         results = getattr(self, "_ai_device_probe_results", None)
         if results is None:
             return
-        try:
-            result = results.get_nowait()
-        except queue.Empty:
+        # This Tk callback is the only consumer; the worker only puts results.
+        # An empty queue means the probe is still running, not an exception.
+        # No other reader can drain a ready result between empty() and get().
+        if results.empty():
             try:
                 if self.winfo_exists():
                     self.after(50, self._poll_ai_device_probe)
@@ -4331,6 +4332,7 @@ class Step2Frame(SidebarStepFrame):
                 pass
             return
 
+        result = results.get_nowait()
         compatible = result.get("compatible_gpu")
         self._ai_gpu_compatible = None if compatible is None else bool(compatible)
         if self._ai_gpu_compatible is True:

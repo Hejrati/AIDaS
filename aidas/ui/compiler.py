@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import queue
 import threading
 
 
@@ -53,19 +52,18 @@ class CompilerPresentationMixin:
         self._events.put(("success", result))
 
     def _drain_compile_events(self) -> None:
-        try:
-            while True:
-                kind, payload = self._events.get_nowait()
-                if kind == "log":
-                    self._append_log(str(payload))
-                elif kind == "progress":
-                    self._update_progress(payload)
-                elif kind == "success":
-                    self._compilation_succeeded(payload)
-                elif kind == "error":
-                    self._compilation_failed(payload)
-        except queue.Empty:
-            pass
+        # Tk is the sole consumer; workers only publish events. Checking for
+        # pending events is safe here and avoids raising Empty on every poll.
+        while not self._events.empty():
+            kind, payload = self._events.get_nowait()
+            if kind == "log":
+                self._append_log(str(payload))
+            elif kind == "progress":
+                self._update_progress(payload)
+            elif kind == "success":
+                self._compilation_succeeded(payload)
+            elif kind == "error":
+                self._compilation_failed(payload)
 
     def _update_progress(self, payload: object) -> None:
         try:

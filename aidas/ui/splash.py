@@ -26,6 +26,11 @@ def _splash_color(name: str) -> str:
 class SplashWindow(ctk.CTkToplevel):
     """Clear, fixed-light startup window with live progress reporting."""
 
+    # This undecorated window has no native caption to recolor. CTk's Windows
+    # caption update withdraws/remaps the window on every appearance callback,
+    # including the forced theme redraw halfway through startup.
+    _deactivate_windows_window_header_manipulation = True
+
     WIDTH = 480
     HEIGHT = 548
     MAX_SCREEN_FRACTION = 0.9

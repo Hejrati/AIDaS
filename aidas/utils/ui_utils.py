@@ -1,6 +1,7 @@
 """UI helpers shared across AIDaS Tkinter views."""
 
 import base64
+from functools import lru_cache
 import math
 import os
 import sys
@@ -357,23 +358,38 @@ def _tint_icon(image, color):
     return tinted
 
 
+@lru_cache(maxsize=64)
+def _load_ctk_icon_source(path):
+    """Decode a bundled icon once; cached Pillow images stay internal."""
+    with Image.open(path) as source:
+        return source.convert("RGBA")
+
+
+@lru_cache(maxsize=128)
+def _load_ctk_icon_variants(path, tint):
+    """Reuse icon pixels across sizes without sharing Tk image ownership."""
+    image = _load_ctk_icon_source(path)
+    if tint is None:
+        return image, _dark_mode_icon(image)
+    light_color, dark_color = tint
+    return _tint_icon(image, light_color), _tint_icon(image, dark_color)
+
+
 def load_ctk_image(owner, filename, *, size=CONTROLS.icon_size, tint=None):
     """Load one DPI-aware image for modern CustomTkinter controls."""
 
     path = asset_path(filename)
     target_size = (size, size) if isinstance(size, int) else tuple(size)
-    with Image.open(path) as source:
-        image = source.convert("RGBA").copy()
-    if tint is None:
-        light_image = image
-        dark_image = _dark_mode_icon(image)
-    else:
+    if tint is not None:
         light_color, dark_color = tint if isinstance(tint, (tuple, list)) else (tint, tint)
-        light_image = _tint_icon(image, light_color)
-        dark_image = _tint_icon(image, dark_color)
+        tint = (light_color, dark_color)
+    light_image, dark_image = _load_ctk_icon_variants(path, tint)
     icon = remember_image(
         owner,
-        OwnedCTkImage(owner, light_image=light_image, dark_image=dark_image, size=target_size),
+        OwnedCTkImage(
+            owner, light_image=light_image.copy(), dark_image=dark_image.copy(),
+            size=target_size,
+        ),
     )
     icon._aidas_monochrome_action = filename in {
         ACTION_ICON_FILES[action] for action in _MONOCHROME_ACTIONS
@@ -1338,7 +1354,25 @@ class SidebarStepFrame(ctk.CTkFrame):
         """Read a CTk/ttk control state without triggering a redraw."""
         if control is None:
             return None
+        # CTk does not expose a supported-options list. These implementations
+        # are presentation widgets and reject "state". Check the cget method
+        # rather than isinstance so frame-based controls with their own cget
+        # (for example NativeNumericSpinbox) still participate.
+        if getattr(type(control), "cget", None) in (
+            ctk.CTkBaseClass.cget,
+            ctk.CTkFrame.cget,
+            ctk.CTkLabel.cget,
+            ctk.CTkProgressBar.cget,
+            ctk.CTkScrollbar.cget,
+            ctk.CTkScrollableFrame.cget,
+        ):
+            return None
         try:
+            # Native layout widgets also lack a state option. Avoid probing
+            # them with cget, which would raise even when caught below.
+            if isinstance(control, tk.Misc) and not isinstance(control, ctk.CTkBaseClass):
+                if "state" not in control.keys():
+                    return None
             return str(control.cget("state"))
         except (AttributeError, KeyError, tk.TclError, TypeError, ValueError):
             pass
@@ -1360,7 +1394,8 @@ class SidebarStepFrame(ctk.CTkFrame):
         if control is None:
             return False
         desired = "normal" if enabled else "disabled"
-        if cls._control_state(control) == desired:
+        current = cls._control_state(control)
+        if current is None or current == desired:
             return False
         try:
             control.configure(state=desired)

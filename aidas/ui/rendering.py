@@ -172,6 +172,10 @@ class _ScaledCanvas:
 
 
 def _schedule(canvas: CTkCanvas) -> None:
+    # Construction changes can arrive between successive splash updates. Once
+    # registered for the final paint, this canvas needs no more idle callbacks.
+    if getattr(canvas, "_aidas_paint_deferred", False):
+        return
     if getattr(canvas, "_aidas_paint_pending", None) is None and not getattr(canvas, "_aidas_painting", False):
         try:
             canvas._aidas_paint_pending = canvas.after_idle(lambda: _repaint(canvas))
@@ -323,6 +327,7 @@ def _repaint(canvas: CTkCanvas) -> None:
             if pending is None:
                 pending = window._aidas_deferred_surfaces = weakref.WeakSet()
             pending.add(canvas)
+            canvas._aidas_paint_deferred = True
             return
         vectors = getattr(canvas, "_aidas_vectors", {})
         items = [item for item in canvas.find_all() if item in vectors and vectors[item] != "hidden"]
@@ -388,6 +393,7 @@ def finish_deferred_rendering(window):
     pending = getattr(window, "_aidas_deferred_surfaces", ())
     for canvas in tuple(pending):
         if canvas.winfo_exists():
+            canvas._aidas_paint_deferred = False
             _schedule(canvas)
     if pending:
         pending.clear()

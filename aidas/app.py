@@ -1222,8 +1222,10 @@ class AIDaSApp(ctk.CTk):
         splash = getattr(self, "_splash", None)
         if splash is None or not splash.winfo_exists():
             return
+        # set_progress flushes idle drawing, but Windows also needs the full
+        # event loop to map/expose the splash and service CTk's window timers.
+        # Keep that processing at every stage so the splash stays responsive.
         splash.set_progress(value, message)
-        self.update_idletasks()
         self.update()
 
     def _build_application(self) -> None:
