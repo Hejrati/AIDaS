@@ -42,7 +42,7 @@ class RRuntimeEnvironmentTests(unittest.TestCase):
             self._assert_matches_application(home, None, {})
             (home / "Documents").mkdir()
             result = self._assert_matches_application(home, None, {})
-            self.assertEqual(result["R_LIBS_USER"], str(home / "Documents" / "AIDaS" / "R-packages"))
+            self.assertEqual(result["R_LIBS_USER"], str((home / "Documents" / "AIDaS" / "R-packages").resolve()))
             self.assertFalse((home / "Documents" / "AIDaS").exists())
 
     def test_legacy_library_preference_follows_the_application_migration_policy(self):
@@ -52,7 +52,7 @@ class RRuntimeEnvironmentTests(unittest.TestCase):
             app_data = home / "local app data"
             legacy = app_data / "AIDaS" / "R-packages"
             result = self._assert_matches_application(home, str(legacy), {"LOCALAPPDATA": str(app_data)})
-            self.assertEqual(result["R_LIBS_USER"], str(home / "Documents" / "AIDaS" / "R-packages"))
+            self.assertEqual(result["R_LIBS_USER"], str((home / "Documents" / "AIDaS" / "R-packages").resolve()))
 
 
 if __name__ == "__main__":
