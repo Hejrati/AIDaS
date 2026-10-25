@@ -466,17 +466,25 @@ def _quadratic_bell_fit(
     segment = np.asarray(values[start - 1:end], dtype=np.float64)
     if segment.size < 5:
         return 0.0, False
-    x_values = np.arange(start, end + 1, dtype=np.float64)
-    centered_x = x_values - float(np.mean(x_values))
-    coefficients = np.polyfit(centered_x, segment, 2)
-    predicted = np.polyval(coefficients, centered_x)
-    residual_sum = float(np.sum((segment - predicted) ** 2))
-    total_sum = float(np.sum((segment - float(np.mean(segment))) ** 2))
+    # Closed-form orthogonal quadratic fit on centered x in [-(n-1)/2, (n-1)/2]
+    # avoids calling np.polyfit (SVD) for every candidate pair.
+    n = segment.size
+    mean_y = float(np.mean(segment))
+    dy = segment - mean_y
+    total_sum = float(np.dot(dy, dy))
+    half = 0.5 * (n - 1)
+    centered_x = np.arange(n, dtype=np.float64) - half
+    s2 = n * (n * n - 1.0) / 12.0
+    s4 = s2 * (3.0 * n * n - 7.0) / 20.0
+    denom_a = max(np.finfo(float).eps, s4 - (s2 * s2) / n)
+    linear = float(np.dot(centered_x, dy)) / max(np.finfo(float).eps, s2)
+    curvature = float(np.dot(centered_x * centered_x, dy)) / denom_a
+    explained = (linear * linear) * s2 + (curvature * curvature) * denom_a
+    residual_sum = max(0.0, total_sum - explained)
     r_squared = 0.0 if total_sum <= np.finfo(float).eps else 1.0 - residual_sum / total_sum
-    curvature, linear = float(coefficients[0]), float(coefficients[1])
     if curvature >= 0.0 or abs(curvature) <= np.finfo(float).eps:
         return max(0.0, min(1.0, r_squared)), False
-    vertex = float(np.mean(x_values)) - linear / (2.0 * curvature)
+    vertex = start + half - linear / (2.0 * curvature)
     valid_vertex = start + 1 <= vertex <= end - 1
     return max(0.0, min(1.0, r_squared)), valid_vertex
 
@@ -2909,7 +2917,7 @@ class Step4Frame(SidebarStepFrame):
         if busy:
             progress = ctk.CTkProgressBar(
                 notice,
-                mode="indeterminate",
+                mode="determinate",
                 width=300,
                 height=8,
                 indeterminate_speed=0.9,
@@ -2917,6 +2925,7 @@ class Step4Frame(SidebarStepFrame):
                 progress_color=COLOR_PAIRS["primary"],
             )
             progress.pack(padx=24, pady=(0, 20))
+            progress.configure(mode="indeterminate")
             progress.start()
             notice._step4_progress = progress
             # Keep the file/tab state stable while a background worker uses
@@ -3216,7 +3225,7 @@ class Step4Frame(SidebarStepFrame):
         message.place(relx=0.5, rely=0.5, anchor="center")
         progress = ctk.CTkProgressBar(
             surface,
-            mode="indeterminate",
+            mode="determinate",
             width=320,
             height=10,
             indeterminate_speed=0.9,
@@ -3224,6 +3233,8 @@ class Step4Frame(SidebarStepFrame):
             progress_color=COLOR_PAIRS["primary"],
         )
         progress.place(relx=0.5, rely=0.5, y=32, anchor="n")
+        progress.set(0.0)
+        progress.configure(mode="indeterminate")
         progress.start()
         count = ctk.CTkLabel(
             surface,
@@ -3554,6 +3565,14 @@ class Step4Frame(SidebarStepFrame):
         cancelled = self._batch_roi_open_cancel = threading.Event()
         prepared = queue.SimpleQueue()
         prepared_tab_key = None
+        # Automatic ROI detection runs for every file while loading. The worker
+        # fills these; the Tk thread merges them into tab states afterwards.
+        auto_jobs: list[tuple[str, Path]] = []
+        auto_rois: list[ISezROI] = []
+        auto_parameters: dict[str, int | float] = {}
+        auto_results: dict[str, tuple[np.ndarray, AutoDetectionRunResult]] = {}
+        auto_progress = [0]
+        auto_lock = threading.Lock()
 
         def finish_loading():
             self._batch_roi_open_after_id = None
@@ -3561,10 +3580,131 @@ class Step4Frame(SidebarStepFrame):
                 self._batch_roi_open_cancel = None
                 self._hide_batch_roi_loading_canvas()
 
+        def _detect_one_file(item, first_volume):
+            key, job_path = item
+            if cancelled.is_set():
+                return
+            try:
+                if key == prepared_tab_key:
+                    if first_volume is None:
+                        return
+                    volume = first_volume
+                else:
+                    volume = load_oct_volume(job_path)
+                if cancelled.is_set():
+                    return
+                result = self._compute_auto_detection_run(
+                    np.asarray(volume[0]), auto_rois, set(), auto_parameters,
+                )
+                if not cancelled.is_set():
+                    with auto_lock:
+                        auto_results[key] = (volume, result)
+            except Exception:
+                pass
+            finally:
+                volume = None
+                with auto_lock:
+                    auto_progress[0] += 1
+
+        def detect_all_files(first_volume):
+            """Worker-thread only: open each file and run auto ROI on it.
+
+            Pure numpy; never touches Tk. Volumes are retained per tab so
+            switching tabs does not re-read from disk.
+            """
+
+            from concurrent.futures import ThreadPoolExecutor
+
+            max_workers = min(len(auto_jobs) or 1, max(1, min(8, os.cpu_count() or 4)))
+            if max_workers <= 1:
+                for item in auto_jobs:
+                    _detect_one_file(item, first_volume)
+            else:
+                with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                    list(pool.map(lambda item: _detect_one_file(item, first_volume), auto_jobs))
+
+        last_progress_state = [-1]
+
+        def update_auto_progress():
+            with auto_lock:
+                done = auto_progress[0]
+            if done == last_progress_state[0]:
+                return
+            last_progress_state[0] = done
+            total_jobs = max(1, len(auto_jobs))
+            try:
+                if done:
+                    loading_surface._step4_progress.stop()
+                    loading_surface._step4_progress.configure(mode="determinate")
+                loading_surface._step4_progress.set(
+                    min(1.0, 0.25 + 0.75 * (done / total_jobs))
+                )
+            except tk.TclError:
+                pass
+            try:
+                loading_surface._step4_count_label.configure(
+                    text=f"Auto ROI: {auto_progress[0]} of {len(auto_jobs)} files processed"
+                )
+            except tk.TclError:
+                pass
+
+        def merge_auto_results():
+            """Tk thread: apply worker detections to each tab's cached state."""
+
+            flagged = 0
+            for key, (volume, result) in auto_results.items():
+                state = self.batch_roi_tab_states.get(key)
+                if state is None:
+                    continue
+                if "_prepared_load" not in state:
+                    state["_prepared_load"] = ("loaded", volume)
+                completed = dict(state.get("completed") or {})
+                roi_clicks = {
+                    suffix: list(value)
+                    for suffix, value in (state.get("roi_clicks") or {}).items()
+                }
+                # Never overwrite ROIs the user already confirmed or positioned.
+                protected = set(completed) | set(roi_clicks)
+                adjust = dict(state.get("roi_adjust_bounds") or {})
+                for suffix in result.removed_clicks - protected:
+                    roi_clicks.pop(suffix, None)
+                for suffix, clicks in result.roi_clicks.items():
+                    if suffix not in protected:
+                        roi_clicks[suffix] = list(clicks)
+                for suffix, roi_result in result.completed.items():
+                    if suffix not in protected:
+                        completed[suffix] = roi_result
+                touched = set(result.roi_clicks) | result.removed_clicks | set(result.completed)
+                for suffix in touched - protected:
+                    adjust[suffix] = True
+                reviews = dict(state.get("auto_detection_reviews") or {})
+                reviews.update({
+                    suffix: value for suffix, value in result.reviews.items()
+                    if suffix not in protected
+                })
+                reviews = {suffix: value for suffix, value in reviews.items() if suffix not in completed}
+                state["completed"] = completed
+                state["auto_detection_reviews"] = reviews
+                state["roi_clicks"] = roi_clicks
+                state["roi_adjust_bounds"] = adjust
+                if not protected and not state.get("profile_clicks"):
+                    state["current_roi_idx"] = int(result.current_roi_idx)
+                    state["profile_clicks"] = []
+                manual_only_suffix = (
+                    auto_rois[AUTO_MANUAL_ONLY_ROI_INDEX].suffix
+                    if len(auto_rois) > AUTO_MANUAL_ONLY_ROI_INDEX else None
+                )
+                # ROI 21 is always manual, so only count other review flags.
+                if any(suffix != manual_only_suffix for suffix in reviews):
+                    flagged += 1
+            self._refresh_batch_roi_tab_labels()
+            return len(auto_results), flagged
+
         def prepare_first_file(path):
             # This worker owns no Tk widgets or Matplotlib figures. Loading the
             # plotting modules here also keeps first-use imports/font discovery
             # from stopping the progress animation on the UI thread.
+            volume = None
             try:
                 if cancelled.is_set():
                     return
@@ -3574,9 +3714,14 @@ class Step4Frame(SidebarStepFrame):
                 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
                 from matplotlib.figure import Figure
                 from matplotlib.patches import Rectangle
-                prepared.put(("loaded", volume))
+                first_result = ("loaded", volume)
             except Exception as exc:
-                prepared.put(("error", exc))
+                first_result = ("error", exc)
+            if cancelled.is_set():
+                return
+            detect_all_files(volume)
+            if not cancelled.is_set():
+                prepared.put(first_result)
 
         def show_first_file():
             self._batch_roi_open_after_id = None
@@ -3585,6 +3730,7 @@ class Step4Frame(SidebarStepFrame):
             try:
                 result = prepared.get_nowait()
             except queue.Empty:
+                update_auto_progress()
                 self._batch_roi_open_after_id = self.after(16, show_first_file)
                 return
             first_tab = notebook.tabs()[0] if notebook.tabs() else None
@@ -3593,6 +3739,7 @@ class Step4Frame(SidebarStepFrame):
                 return
             if first_tab is not None:
                 state = self.batch_roi_tab_states[str(first_tab)]
+                auto_file_count, auto_flagged_count = merge_auto_results()
                 state["_prepared_load"] = result
                 try:
                     notebook.select(first_tab)
@@ -3601,6 +3748,17 @@ class Step4Frame(SidebarStepFrame):
                     self._render_empty_canvas()
                     messagebox.showerror("Batch ROI", f"Could not prepare files.\n{exc}", parent=self)
                     return
+                if auto_flagged_count:
+                    self.status_var.set(
+                        f"Auto ROI ran on {auto_file_count}/{len(auto_jobs)} file(s). "
+                        f"{auto_flagged_count} file(s) have amber ! ROI(s) that need review; "
+                        "ROI 21 is always manual."
+                    )
+                else:
+                    self.status_var.set(
+                        f"Auto ROI ran on {auto_file_count}/{len(auto_jobs)} file(s). "
+                        "Review each tab, then build the stack."
+                    )
             # Tk owns all figure/widget creation. Hide the loading surface
             # after the first canvas has settled its geometry and drawing.
             self._batch_roi_open_after_id = self.after_idle(finish_loading)
@@ -3615,6 +3773,23 @@ class Step4Frame(SidebarStepFrame):
                 return
             path = self.batch_roi_tab_states[str(first_tab)]["path"]
             prepared_tab_key = str(first_tab)
+            auto_jobs[:] = [
+                (str(tab), self.batch_roi_tab_states[str(tab)]["path"])
+                for tab in notebook.tabs()
+                if str(tab) in self.batch_roi_tab_states
+            ]
+            auto_rois[:] = list(self.rois)
+            auto_parameters.clear()
+            auto_parameters.update(self._auto_detection_parameters())
+            auto_results.clear()
+            auto_progress[0] = 0
+            try:
+                loading_surface._step4_message_label.configure(
+                    text="Please wait, opening files and running auto ROI…"
+                )
+            except tk.TclError:
+                pass
+            update_auto_progress()
             threading.Thread(target=prepare_first_file, args=(path,), daemon=True).start()
             self._batch_roi_open_after_id = self.after(16, show_first_file)
 
@@ -3624,6 +3799,14 @@ class Step4Frame(SidebarStepFrame):
                 return
             try:
                 completed = next(tab_loader)
+                for _ in range(7):
+                    try:
+                        completed = next(tab_loader)
+                    except StopIteration:
+                        break
+                loading_surface._step4_progress.set(
+                    0.25 * (completed / max(1, len(paths)))
+                )
             except StopIteration:
                 start_first_file()
                 return

@@ -352,22 +352,6 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         self.assertIn('text="Temporal"', source)
         self.assertIn('text="Nasal"', source)
 
-    def test_fovea_prompt_reserves_buttons_before_the_long_path(self):
-        source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
-
-        actions_pack = source.index('actions_frame.pack(side="right", fill="y")')
-        prompt_pack = source.index(
-            'prompt_label.pack(side="left", fill="x", expand=True)'
-        )
-        self.assertLess(actions_pack, prompt_pack)
-        for button_name in ("btn_cancel", "btn_set"):
-            button_start = source.index(f"{button_name} = AppButton(")
-            button_pack = source.index(f"{button_name}.pack(", button_start)
-            self.assertIn("actions_frame,", source[button_start:button_pack])
-            self.assertLess(button_pack, prompt_pack)
-        self.assertIn("prompt_label = ScrollingText(", source)
-        self.assertNotIn("prompt_tooltip", source)
-
     def test_fovea_and_side_prompts_are_required_in_sequence(self):
         source = inspect.getsource(Step2Frame._collect_folder_fovea_lines)
 

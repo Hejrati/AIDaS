@@ -392,6 +392,30 @@ class UITabStyleTests(unittest.TestCase):
 
 
 class UITabGeometryTests(unittest.TestCase):
+    def test_direct_resize_consumes_pending_header_sync(self):
+        view = ClosableTabView.__new__(ClosableTabView)
+        view._header_sync_after_id = None
+        view.after_idle = mock.Mock(return_value="header-idle")
+        view.after_cancel = mock.Mock()
+        view._header_canvas = mock.Mock()
+        view._header_canvas.winfo_width.return_value = 600
+        view._tab_row = mock.Mock()
+        view._tab_row.winfo_reqwidth.return_value = 800
+        view._tab_row.winfo_reqheight.return_value = 40
+        view._tab_row_window = 1
+        view._update_header_overflow = mock.Mock()
+        view._draw_content_join = mock.Mock()
+        view._model = SimpleNamespace(selected=None)
+        for _ in range(20):
+            view._queue_sync_header_geometry()
+        view.after_idle.assert_called_once()
+        view._sync_header_geometry(SimpleNamespace())
+        view.after_cancel.assert_called_once_with("header-idle")
+        self.assertIsNone(view._header_sync_after_id)
+        view._header_canvas.configure.assert_called_once_with(
+            height=40, scrollregion=(0, 0, 800, 40),
+        )
+
     def setUp(self):
         self.addCleanup(set_interface_mode, get_interface_mode(), redraw=False)
         self.addCleanup(ctk.set_widget_scaling, ctk.ScalingTracker.widget_scaling)

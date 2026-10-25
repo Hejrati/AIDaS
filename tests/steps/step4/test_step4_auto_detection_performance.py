@@ -16,6 +16,26 @@ def original_profile(image, roi):
 
 
 class AutomaticROIPerformanceTests(unittest.TestCase):
+    def test_closed_form_quadratic_matches_least_squares_reference(self):
+        rng = np.random.default_rng(843)
+        for size in (5, 6, 17, 70, 151):
+            x = np.arange(size, dtype=float) - (size - 1) / 2
+            for values in (np.ones(size), -x*x + 100, x*x, rng.normal(size=size),
+                           1e6 - 0.2*x*x + rng.normal(size=size)):
+                for start in (1, 48):
+                    padded = np.concatenate((np.zeros(start - 1), values))
+                    end = start + size - 1
+                    coefficients = np.polyfit(x, values, 2)
+                    residual = np.sum((values - np.polyval(coefficients, x))**2)
+                    total = np.sum((values - np.mean(values))**2)
+                    expected_r2 = 0 if total <= np.finfo(float).eps else max(0, min(1, 1-residual/total))
+                    vertex = start + (size - 1)/2 - coefficients[1]/(2*coefficients[0])
+                    valid = coefficients[0] < -np.finfo(float).eps and start + 1 <= vertex <= end - 1
+                    actual_r2, actual_valid = step4._quadratic_bell_fit(padded, start, end)
+                    self.assertAlmostEqual(actual_r2, expected_r2, places=9)
+                    # A constant has no meaningful fitted vertex.
+                    self.assertEqual(actual_valid, bool(valid) if total else False)
+
     def test_profiles_are_identical_for_integer_float_and_strided_images(self):
         rng = np.random.default_rng(38)
         roi = step4.ISezROI("test", 7, 29, low=3, high=80)

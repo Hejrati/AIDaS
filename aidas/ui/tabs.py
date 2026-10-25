@@ -164,6 +164,7 @@ class ClosableTabView(ctk.CTkFrame):
             weight=TYPOGRAPHY.semibold_weight,
         )
         self._close_icon = self._create_close_icon()
+        self._header_sync_after_id = None
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
@@ -410,7 +411,7 @@ class ClosableTabView(ctk.CTkFrame):
         else:
             page.grid_remove()
             self._style_tab(page_id, active=False)
-        self.after_idle(self._sync_header_geometry)
+        self._queue_sync_header_geometry()
         return page
 
     def tabs(self) -> tuple[str, ...]:
@@ -461,7 +462,7 @@ class ClosableTabView(ctk.CTkFrame):
             widgets = self._tab_widgets[page_id]
             widgets.title.configure(text=text)
             self._size_tab(page_id)
-            self.after_idle(self._sync_header_geometry)
+            self._queue_sync_header_geometry()
         if "tooltip" in options:
             tooltip = options["tooltip"]
             self._model.tooltips[page_id] = None if tooltip is None else str(tooltip)
@@ -505,7 +506,7 @@ class ClosableTabView(ctk.CTkFrame):
             self._show_selected_page(replacement_id)
         elif replacement_id is not None:
             self._style_tab(replacement_id, active=True)
-        self.after_idle(self._sync_header_geometry)
+        self._queue_sync_header_geometry()
 
     def index(self, tab: object) -> int:
         """Return a page index, including ``end``, ``current``, and ``@x,y``."""
@@ -759,7 +760,20 @@ class ClosableTabView(ctk.CTkFrame):
         except tk.TclError:
             pass
 
+    def _queue_sync_header_geometry(self) -> None:
+        if self._header_sync_after_id is None:
+            try:
+                self._header_sync_after_id = self.after_idle(self._sync_header_geometry)
+            except tk.TclError:
+                self._header_sync_after_id = None
+
     def _sync_header_geometry(self, _event=None) -> None:
+        if self._header_sync_after_id is not None:
+            try:
+                self.after_cancel(self._header_sync_after_id)
+            except tk.TclError:
+                pass
+        self._header_sync_after_id = None
         try:
             canvas_width = max(1, self._header_canvas.winfo_width())
             content_width = max(canvas_width, self._tab_row.winfo_reqwidth())
@@ -872,6 +886,12 @@ class ClosableTabView(ctk.CTkFrame):
         return "break"
 
     def destroy(self) -> None:
+        if self._header_sync_after_id is not None:
+            try:
+                self.after_cancel(self._header_sync_after_id)
+            except tk.TclError:
+                pass
+            self._header_sync_after_id = None
         self._cancel_header_hover()
         for widgets in self._tab_widgets.values():
             self._cancel_tab_hover(widgets)

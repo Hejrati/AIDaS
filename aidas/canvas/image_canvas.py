@@ -15,6 +15,8 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageTk
 
+from aidas.canvas.annotation_labels import LabelSpec, PolylineAnchorIndex, layout_annotation_labels
+
 # Backwards-compatible resampling constant: newer Pillow exposes
 # `Image.Resampling`, older versions use module-level constants like
 # `Image.NEAREST`.
@@ -101,6 +103,8 @@ class ImageCanvas(ttk.Frame):
         self._label_font_size = 4
         self._label_fill = "#ffffff"
         self._label_background = "#111827"
+        self._annotation_label_items = {}
+        self._annotation_label_sources = []
 
         # Vertical line marker state
         self._vertical_line_on = False
@@ -108,6 +112,11 @@ class ImageCanvas(ttk.Frame):
         self._vertical_line_color = "#ffd500"
         self._drag_vertical_line = False
         self._vertical_line_items = []
+        self._fovea_label_offset = 0.0
+        self._fovea_label_drawn_offset = 0.0
+        self._fovea_label_base_bounds = None
+        self._fovea_guidance_target = None
+        self._fovea_guidance_renderer = None
 
         # Drag state
         self._drag = None          # 'tl','tr','bl','br','move' or None
@@ -208,6 +217,7 @@ class ImageCanvas(ttk.Frame):
         self._roi_on = enabled
         if not enabled:
             self._clear_roi()
+            self._update_annotation_labels()
         self._refresh_cursor_for_mode()
 
     # Line tracing
@@ -446,6 +456,35 @@ class ImageCanvas(ttk.Frame):
     def get_vertical_line_x(self):
         return self._vertical_line_x
 
+    def set_fovea_label_offset(self, offset):
+        """Move only the decorative marker label by canvas pixels.
+
+        The requested offset survives marker and zoom redraws.  It never moves
+        the marker itself or emits an image-coordinate change callback.
+        """
+        self._fovea_label_offset = float(offset)
+        self._position_fovea_label()
+
+    def fovea_label_bounds(self):
+        """Return the current label bounds in canvas coordinates, if shown."""
+        if not self._vertical_line_on or self._vertical_line_x is None:
+            return None
+        return self.canvas.bbox("fovea-label")
+
+    def set_fovea_guidance_target(self, x, *, renderer=None):
+        """Point a temporary visual cue toward a viewport-relative x position.
+
+        Passing ``None`` removes the arrow. A renderer can draw beyond the
+        canvas; it receives the marker's exact screen position, or ``None``
+        when hidden. Timing belongs to the owning view.
+        """
+        previous = self._fovea_guidance_renderer
+        if previous is not None and (previous is not renderer or x is None):
+            previous(None)
+        self._fovea_guidance_target = None if x is None else float(x)
+        self._fovea_guidance_renderer = renderer if x is not None else None
+        self._draw_fovea_guidance()
+
     @property
     def vertical_line_x(self):
         return self.get_vertical_line_x()
@@ -669,9 +708,14 @@ class ImageCanvas(ttk.Frame):
     def _redraw(self):
         self._cancel_resize_redraw()
         self.canvas.delete("all")
+        self._annotation_label_items = {}
+        self._annotation_label_sources = []
+        self._fovea_label_base_bounds = None
+        self._fovea_label_drawn_offset = 0.0
         self._roi_items.clear()
         self._img_id = None
         if self._data is None:
+            self._draw_fovea_guidance()
             return
         disp = self._display_data
         if disp is None:
@@ -714,6 +758,8 @@ class ImageCanvas(ttk.Frame):
                 self.canvas.delete(self._img_id)
                 self._img_id = None
             self._photo = None
+            self._draw_fovea_guidance()
+            self._hide_annotation_labels()
             return
 
         # Floor/ceil cover the intersecting source pixels without allocating
@@ -756,6 +802,9 @@ class ImageCanvas(ttk.Frame):
             self.canvas.coords(self._img_id, tile_x, tile_y)
             self.canvas.itemconfigure(self._img_id, image=self._photo)
         self.canvas.tag_lower(self._img_id)
+        if self._vertical_line_on:
+            self._position_fovea_label()
+        self._update_annotation_labels()
 
     def _display_geometry(self, disp=None):
         if disp is None:
@@ -795,25 +844,42 @@ class ImageCanvas(ttk.Frame):
 
     def _redraw_overlays(self):
         if self._data is None or self._img_id is None:
+            self._hide_annotation_labels()
             return
         self.canvas.delete("overlay")
+        self._annotation_label_items = {}
+        self._annotation_label_sources = []
         self._clear_vertical_line_overlay()
         self._roi_items.clear()
         self._draw_roi()
         self._draw_line_overlays()
         self._draw_active_line()
         self._draw_vertical_line()
+        self._annotation_label_sources = [
+            (f"saved-{index}", str(item["label"]), item["color"], PolylineAnchorIndex(item["points"]))
+            for index, item in enumerate(self._line_overlays)
+            if item.get("label") and item.get("points")
+        ]
+        if self._active_line:
+            self._annotation_label_sources.append(
+                ("active", "active", self._line_color, PolylineAnchorIndex(self._active_line))
+            )
+        self._update_annotation_labels()
 
     def _clear_vertical_line_overlay(self):
         for item_id in self._vertical_line_items:
             self.canvas.delete(item_id)
         self._vertical_line_items = []
+        self._fovea_label_drawn_offset = 0.0
+        self._fovea_label_base_bounds = None
+        self.canvas.delete("fovea-guidance")
 
     def _update_vertical_line_overlay(self):
         if self._data is None or self._img_id is None:
             return
         self._clear_vertical_line_overlay()
         self._draw_vertical_line()
+        self._update_annotation_labels()
 
     # ---------------------------------------------------------- ROI drawing
     def _clear_roi(self):
@@ -921,6 +987,7 @@ class ImageCanvas(ttk.Frame):
             sq = self.canvas.create_rectangle(hx - hs, hy - hs, hx + hs, hy + hs,
                                               fill=color, outline="black", tags=("overlay",))
             self._roi_items.append(sq)
+        self._update_annotation_labels()
 
     # ---------------------------------------------------------- line drawing
     def _clean_line_points(self, points):
@@ -958,11 +1025,101 @@ class ImageCanvas(ttk.Frame):
         if self._cb_vertical_line is not None:
             self._cb_vertical_line(self._vertical_line_x)
 
+    def _hide_annotation_labels(self):
+        for item in getattr(self, "_annotation_label_items", {}).values():
+            for name in ("text", "background", "link"):
+                self.canvas.itemconfigure(item[name], state="hidden")
+
+    def _update_annotation_labels(self):
+        """Lay out only the label layer, leaving trace geometry untouched."""
+        sources = getattr(self, "_annotation_label_sources", ())
+        if not sources or self._data is None or self._img_id is None:
+            self._hide_annotation_labels()
+            return
+        left, top = self.canvas.canvasx(0), self.canvas.canvasy(0)
+        right = left + self.canvas.winfo_width()
+        bottom = top + self.canvas.winfo_height()
+        if right - left <= 8 or bottom - top <= 8:
+            self._hide_annotation_labels()
+            return
+        image_view = (*self._c2i(left + 4, top + 4), *self._c2i(right - 4, bottom - 4))
+        specs = []
+        visible = {}
+        for key, label, color, geometry in sources:
+            anchor = geometry.anchor(image_view)
+            item = self._annotation_label_items.get(key)
+            if anchor is None:
+                if item is not None:
+                    for name in ("text", "background", "link"):
+                        self.canvas.itemconfigure(item[name], state="hidden")
+                continue
+            anchor = self._i2c(*anchor)
+            if item is None:
+                identity = f"annotation-label-{key}"
+                link = self.canvas.create_line(
+                    0, 0, 0, 0, fill=color, width=1,
+                    tags=("overlay", "annotation-label-link", identity),
+                )
+                background, text = self._draw_text_label(
+                    0, 0, text=label, accent=color,
+                    tags=("overlay", "annotation-label", identity),
+                    font=self._scaled_annotation_label_font(),
+                )
+                self.canvas.addtag_withtag("annotation-label-text", text)
+                self.canvas.addtag_withtag("annotation-label-background", background)
+                item = self._annotation_label_items[key] = {
+                    "text": text, "background": background, "link": link,
+                    "label": label, "color": color,
+                }
+            for name in ("text", "background", "link"):
+                self.canvas.itemconfigure(item[name], state="normal")
+            bounds = self.canvas.bbox(item["background"])
+            item["anchor"] = anchor
+            item["size"] = (bounds[2] - bounds[0], bounds[3] - bounds[1])
+            specs.append(LabelSpec(key, anchor, *item["size"]))
+            visible[key] = item
+
+        obstacles = []
+        fovea_bounds = self.fovea_label_bounds()
+        if fovea_bounds is not None:
+            # Reserve a small envelope so a brief fovea label cue cannot bump
+            # the packed boundary labels or require relayout on every frame.
+            obstacles.append((fovea_bounds[0] - 8, fovea_bounds[1] - 2,
+                              fovea_bounds[2] + 8, fovea_bounds[3] + 2))
+        for roi_label in self.canvas.find_withtag("roi-label-background"):
+            bounds = self.canvas.bbox(roi_label)
+            if bounds is not None:
+                obstacles.append(bounds)
+        boxes = layout_annotation_labels(specs, (left, top, right, bottom), obstacles=obstacles)
+        for key, item in visible.items():
+            box = boxes.get(key)
+            if box is None:
+                for name in ("text", "background", "link"):
+                    self.canvas.itemconfigure(item[name], state="hidden")
+                continue
+            current = self.canvas.bbox(item["background"])
+            dx, dy = box[0] - current[0], box[1] - current[1]
+            self.canvas.move(item["background"], dx, dy)
+            self.canvas.move(item["text"], dx, dy)
+            x1, y1, x2, y2 = self.canvas.bbox(item["background"])
+            ax, ay = item["anchor"]
+            if ax <= x1:
+                endpoint = (x1, (y1 + y2) / 2)
+            elif ax >= x2:
+                endpoint = (x2, (y1 + y2) / 2)
+            elif ay < y1:
+                endpoint = (ax, y1)
+            else:
+                endpoint = (ax, y2)
+            self.canvas.coords(item["link"], ax, ay, *endpoint)
+        self.canvas.tag_raise("annotation-label-link")
+        self.canvas.tag_raise("annotation-label")
+
     def _draw_line_overlays(self):
         for item in self._line_overlays:
             selected = self._editable_line_label is not None and item.get("label") == self._editable_line_label
             self._draw_polyline(
-                item["points"], item["color"], item.get("label"),
+                item["points"], item["color"],
                 show_vertices=selected, handle_indices=item.get("handle_indices"),
             )
 
@@ -972,13 +1129,13 @@ class ImageCanvas(ttk.Frame):
         self._draw_polyline(
             self._active_line,
             self._line_color,
-            "active",
             preview=self._line_preview,
             show_vertices=True,
         )
 
     def _draw_vertical_line(self):
         if self._data is None or self._vertical_line_x is None or not self._vertical_line_on:
+            self._draw_fovea_guidance()
             return
         ih, _iw = self._data.shape[:2]
         x_top, y_top = self._i2c(self._vertical_line_x, 0)
@@ -992,16 +1149,87 @@ class ImageCanvas(ttk.Frame):
             fill=self._vertical_line_color,
             width=width,
             dash=(5, 3),
-            tags=("vertical_overlay",),
+            tags=("vertical_overlay", "fovea-marker"),
         )
         label_ids = self._draw_text_label(
             x_top + 8,
             y_top + 6,
             text=f"Fovea x={self._vertical_line_x}",
             accent=self._vertical_line_color,
-            tags=("vertical_overlay",),
+            tags=("vertical_overlay", "fovea-label"),
         )
         self._vertical_line_items = [line_id, *label_ids]
+        self._fovea_label_drawn_offset = 0.0
+        self._fovea_label_base_bounds = self.fovea_label_bounds()
+        self._position_fovea_label()
+
+    def _position_fovea_label(self):
+        bounds = getattr(self, "_fovea_label_base_bounds", None)
+        if bounds is None:
+            self._draw_fovea_guidance()
+            return
+        drawn_offset = getattr(self, "_fovea_label_drawn_offset", 0.0)
+        base_left, base_right = bounds[0], bounds[2]
+        view_left = self.canvas.canvasx(0) + 2
+        view_right = self.canvas.canvasx(self.canvas.winfo_width()) - 2
+        offset = getattr(self, "_fovea_label_offset", 0.0)
+        marker_x, _marker_y = self._i2c(self._vertical_line_x, 0)
+        near_viewport = (
+            base_right >= view_left and base_left <= view_right
+        ) or view_left - 8 <= marker_x <= view_right + 8
+        if near_viewport:
+            if base_right - base_left > view_right - view_left:
+                # Keep text readable even if a narrow viewport cannot fit it.
+                offset = view_left - base_left
+            else:
+                offset = max(view_left - base_left, min(offset, view_right - base_right))
+        self.canvas.move("fovea-label", offset - drawn_offset, 0)
+        self._fovea_label_drawn_offset = offset
+        self._draw_fovea_guidance()
+
+    def _draw_fovea_guidance(self):
+        self.canvas.delete("fovea-guidance")
+        target = getattr(self, "_fovea_guidance_target", None)
+        renderer = getattr(self, "_fovea_guidance_renderer", None)
+        if target is None:
+            return
+        if self._data is None or not self._vertical_line_on or self._vertical_line_x is None:
+            if renderer is not None:
+                renderer(None)
+            return
+        # Anchor to the marker itself. Its label sits to the right and can
+        # animate or clamp against the viewport without moving this origin.
+        start_x, start_y = self._i2c(self._vertical_line_x, 0)
+        view_left = self.canvas.canvasx(0)
+        view_top = self.canvas.canvasy(0)
+        view_width = self.canvas.winfo_width()
+        view_bottom = view_top + self.canvas.winfo_height()
+        if (
+            start_x < view_left or start_x > view_left + view_width
+            or start_y < view_top or start_y > view_bottom
+        ):
+            if renderer is not None:
+                renderer(None)
+            return
+        if renderer is not None:
+            renderer((
+                self.canvas.winfo_rootx() + start_x - view_left,
+                self.canvas.winfo_rooty() + start_y - view_top,
+            ))
+            return
+        end_x = view_left + max(12, min(target, view_width - 12))
+        end_y = view_top + 6
+        if start_y <= end_y + 8:
+            # There is no room for an upward cue above the marker.
+            return
+        bend_y = end_y + (start_y - end_y) * 0.35
+        self.canvas.create_line(
+            start_x, start_y, start_x, bend_y, end_x, end_y,
+            smooth=True, splinesteps=16, arrow=tk.LAST,
+            arrowshape=(10, 12, 5), width=2,
+            fill=self._vertical_line_color,
+            tags=("fovea-guidance",),
+        )
 
     def _overlay_zoom_scale(self):
         return max(0.75, min(float(self._zoom), 4.0))
@@ -1017,17 +1245,23 @@ class ImageCanvas(ttk.Frame):
         size = max(8, min(32, int(round(self._label_font_size * self._overlay_zoom_scale()))))
         return (self._label_font_family, size, "bold")
 
+    def _scaled_annotation_label_font(self):
+        # Grow text more gently than image pixels so zoom makes it readable
+        # while leaving room to separate labels on closely spaced boundaries.
+        size = max(8, min(24, round(11 * max(0.01, self._zoom) ** 0.5)))
+        return (self._label_font_family, size, "bold")
+
     def _scaled_label_padding(self):
         return max(0.25, min(1, int(round(10 * self._overlay_zoom_scale()))))
 
-    def _draw_text_label(self, x, y, *, text, accent, tags):
+    def _draw_text_label(self, x, y, *, text, accent, tags, font=None):
         text_id = self.canvas.create_text(
             x,
             y,
             anchor="nw",
             text=str(text),
             fill=self._label_fill,
-            font=self._scaled_label_font(),
+            font=font or self._scaled_label_font(),
             tags=tags,
         )
         bbox = self.canvas.bbox(text_id)
@@ -1047,7 +1281,7 @@ class ImageCanvas(ttk.Frame):
         self.canvas.tag_lower(rect_id, text_id)
         return [rect_id, text_id]
 
-    def _draw_polyline(self, points, color, label=None, preview=None, show_vertices=True, handle_indices=None):
+    def _draw_polyline(self, points, color, preview=None, show_vertices=True, handle_indices=None):
         if not points:
             return
 
@@ -1091,14 +1325,6 @@ class ImageCanvas(ttk.Frame):
                     outline="black",
                     tags=("overlay",),
                 )
-
-        if label:
-            lx, ly = self._i2c(*points[0])
-            gap = max(6, min(18, int(round(8 * self._overlay_zoom_scale()))))
-            label_y = ly - gap
-            if label_y < self._img_offset_y:
-                label_y = ly + gap
-            self._draw_text_label(lx + gap, label_y, text=label, accent=color, tags=("overlay",))
 
         if preview is not None and len(points) >= 1:
             last_x, last_y = self._i2c(*points[-1])

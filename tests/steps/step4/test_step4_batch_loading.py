@@ -8,6 +8,80 @@ from tests.support.paths import PROJECT_ROOT
 
 
 class Step4BatchLoadingTests(unittest.TestCase):
+    def test_batch_detection_caches_each_file_and_preserves_manual_edits(self):
+        script = textwrap.dedent(
+            """
+            from pathlib import Path
+            import threading
+            import time
+            from unittest import mock
+            import customtkinter as ctk
+            import numpy as np
+            from aidas.steps import step4_analyze_isez as module
+
+            root = ctk.CTk()
+            root.attributes('-alpha', 0)
+            frame = module.Step4Frame(root)
+            frame.pack(fill='both', expand=True)
+            root.update()
+            owner = threading.get_ident()
+            entered, release = threading.Event(), threading.Event()
+            reads = []
+            image = np.ones((1, 450, 3000), dtype=np.int16)
+            def load(path):
+                assert threading.get_ident() != owner
+                reads.append(path)
+                return image
+            def detect(*args):
+                assert threading.get_ident() != owner
+                entered.set()
+                assert release.wait(15)
+                return module.AutoDetectionRunResult(
+                    completed={}, reviews={'01': 'new review', '02': 'check'},
+                    roi_clicks={'01': [80, 99], '02': [82, 98]},
+                    removed_clicks=set(), review_count=2, current_roi_idx=0,
+                )
+            def wait_until(condition):
+                deadline = time.monotonic() + 20
+                while not condition():
+                    assert time.monotonic() < deadline
+                    root.update()
+                    time.sleep(.002)
+                root.update()
+            try:
+                with mock.patch.object(module, 'load_oct_volume', side_effect=load), \
+                     mock.patch.object(frame, '_compute_auto_detection_run', side_effect=detect), \
+                     mock.patch.object(frame, '_warm_auto_detection_tools'):
+                    paths = [Path(f'file-{i}/_flat_LIGHT.hdr') for i in range(3)]
+                    frame._open_batch_roi_tabs(paths, show_progress=True)
+                    wait_until(entered.is_set)
+                    keys = list(frame.batch_roi_notebook.tabs())
+                    state = frame.batch_roi_tab_states[keys[1]]
+                    state.update(roi_clicks={'01': [78, 100]},
+                                 auto_detection_reviews={'01': 'manual review'},
+                                 current_roi_idx=4, profile_clicks=[79])
+                    release.set()
+                    wait_until(lambda: frame._batch_roi_open_after_id is None)
+                    assert sorted(reads) == sorted(paths), reads
+                    assert state['roi_clicks']['01'] == [78, 100]
+                    assert state['roi_clicks']['02'] == [82, 98]
+                    assert state['auto_detection_reviews']['01'] == 'manual review'
+                    assert state['current_roi_idx'] == 4
+                    assert state['profile_clicks'] == [79]
+                    assert state['_prepared_load'][0] == 'loaded'
+                    for key in keys:
+                        frame.batch_roi_notebook.select(key)
+                        root.update()
+                    assert sorted(reads) == sorted(paths), 'Tab switching re-read files'
+            finally:
+                release.set()
+                root.destroy()
+            """
+        )
+        result = subprocess.run([sys.executable, '-c', script], cwd=PROJECT_ROOT,
+                                capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_slow_reads_keep_progress_live_and_cancelled_results_cannot_replace_new_files(self):
         script = textwrap.dedent(
             """
@@ -293,7 +367,10 @@ class Step4BatchLoadingTests(unittest.TestCase):
                     assert any(0 < count < 18 for count in heartbeat_counts), heartbeat_counts
                     assert frame.current_path == rows(18)[0]['flat_light']
                     assert frame.image is not None and frame.canvas is not None
-                    assert load.call_count == 1, 'Only the active tab should load its image.'
+                    assert load.call_count == 18, 'Every batch file must be prepared once for automatic ROI detection.'
+                    assert sorted(call.args[0] for call in load.call_args_list) == sorted(
+                        row['flat_light'] for row in rows(18)
+                    )
                     assert not notice.winfo_exists()
                     assert not progress._loop_running
                     assert root.grab_current() is None
@@ -309,7 +386,7 @@ class Step4BatchLoadingTests(unittest.TestCase):
                     assert not old_notebook.winfo_exists()
                     assert not old_notice.winfo_exists() and not old_progress._loop_running
                     assert len(frame.batch_roi_notebook.tabs()) == 2
-                    assert load.call_count == 2
+                    assert load.call_count == 20
 
                     # A failed tab must release the grab and leave the canvas usable.
                     with mock.patch.object(module.ClosableTabView, 'add', side_effect=RuntimeError('Tab failed')):
@@ -329,7 +406,7 @@ class Step4BatchLoadingTests(unittest.TestCase):
                     root.mainloop()
                     assert not pending_notice.winfo_exists() and not pending_progress._loop_running
                     assert root.grab_current() is None
-                    assert load.call_count == 2
+                    assert load.call_count == 20
                     assert not errors, errors
             finally:
                 root.destroy()

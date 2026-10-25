@@ -47,6 +47,8 @@ from aidas.ui.batch_selection import BatchSelectionMixin
 from aidas.ui.batch_empty_state import NoValidFilesNotice
 from aidas.ui.boundary_legend import BoundaryLegend
 from aidas.ui.components import AppButton, AppRunButton
+from aidas.ui.guidance_arrow import GuidanceArrow
+from aidas.ui.prompt_cue import PromptCue
 from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS, SHAPES, TYPOGRAPHY
@@ -77,6 +79,8 @@ BOUNDARY_NAMES = [name for name, _ in BOUNDARY_PRESETS]
 BOUNDARY_COLORS = {name: color for name, color in BOUNDARY_PRESETS}
 TRACE_EXPORT_SUFFIX = "_step2_boundaries.csv"
 FOVEA_BOUNDARY_NAME = "Fovea-Center"
+FOVEA_GUIDE_DELAY_MS = 700
+FOVEA_GUIDE_DURATION_MS = 3000
 MARKED_BACKGROUND_MAX = 230
 COMMON_MARK_VALUES = {
     "RPE": 255,
@@ -1877,24 +1881,44 @@ class Step2Frame(SidebarStepFrame):
             self._set_control_enabled(self.batch_ai_button, False)
 
         # Create a temporary top toolbar to manage interactive fovea selection
-        temp_frame = ttk.Frame(self.canvas_area, relief="solid", borderwidth=1)
-        temp_frame.pack(side="top", fill="x", pady=(0, 4), before=self.image_canvas)
+        temp_frame = ctk.CTkFrame(
+            self.canvas_area,
+            fg_color=COLOR_PAIRS["surface_subtle"],
+            bg_color=COLOR_PAIRS["surface"],
+            corner_radius=SHAPES.corner_radius_sm,
+            border_width=1,
+            border_color=COLOR_PAIRS["border_strong"],
+        )
+        temp_frame.pack(
+            side="top", fill="x", padx=6, pady=(0, 6), before=self.image_canvas,
+        )
+        cue = PromptCue(temp_frame)
+        fovea_label_cue = PromptCue(temp_frame)
+        stage = "fovea"
         
         prompt_label_var = tk.StringVar(value="")
         # Reserve the action cluster before laying out the flexible prompt.
         # Packing the full path first lets its requested width consume the
         # toolbar and can push the required actions outside the viewport.
-        actions_frame = ttk.Frame(temp_frame)
-        actions_frame.pack(side="right", fill="y")
+        actions_frame = ctk.CTkFrame(temp_frame, fg_color="transparent", corner_radius=0)
+        actions_frame.pack(side="right", fill="y", padx=8, pady=6)
+        # A fixed slot reserves room for the brief sideways cue. Neither the
+        # button nor its rectangular background can cover the toolbar border.
+        set_slot = ctk.CTkFrame(
+            actions_frame, width=132, height=42, fg_color="transparent", corner_radius=0,
+        )
         prompt_label = ScrollingText(
             temp_frame,
             textvariable=prompt_label_var,
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=13, weight="bold"),
             padding=4,
             height=36,
+            fg_color=COLOR_PAIRS["surface_subtle"],
         )
         
         def on_confirm_fovea():
+            if stage != "fovea":
+                return
             try:
                 x_val = int(float(self.fovea_x_entry_var.get()))
             except (TypeError, ValueError):
@@ -1913,7 +1937,7 @@ class Step2Frame(SidebarStepFrame):
             next_var.set("fovea")
 
         def on_choose_side(side):
-            if side not in {IMAGE_SIDE_TEMPORAL, IMAGE_SIDE_NASAL}:
+            if stage != "side" or side not in {IMAGE_SIDE_TEMPORAL, IMAGE_SIDE_NASAL}:
                 return
             next_var.set(side)
             
@@ -1924,10 +1948,12 @@ class Step2Frame(SidebarStepFrame):
             actions_frame,
             text="Exit",
             variant="danger",
+            width=72,
             command=on_cancel,
         )
         HoverToolTip(btn_cancel, "Exit batch segmentation.")
-        btn_cancel.pack(side="right", padx=4, pady=4)
+        btn_cancel.pack(side="right", padx=(8, 0))
+        set_slot.pack(side="right")
 
         confirm_icon = load_ctk_image(
             self,
@@ -1936,140 +1962,260 @@ class Step2Frame(SidebarStepFrame):
             tint=COLOR_PAIRS["on_primary"],
         )
         btn_set = AppButton(
-            actions_frame,
+            set_slot,
             text="Set Fovea",
             variant="success",
+            width=120,
             command=on_confirm_fovea,
             image=confirm_icon,
             compound="left",
         )
         HoverToolTip(btn_set, "Set the foveal center for this image.")
-        btn_set.pack(side="right", padx=4, pady=4)
+        btn_set.place(relx=0.5, rely=0.5, anchor="center")
 
-        overlay_frame = tk.Frame(self.image_canvas.canvas, bg="#333333", padx=15, pady=15, highlightthickness=2, highlightbackground="#555555")
-        
-        ttk.Label(
-            overlay_frame, 
-            text="Is the LEFT side of the image Nasal or Temporal?", 
-            foreground="white", 
-            background="#333333", 
-            font=("", 11, "bold")
-        ).pack(side="top", pady=(0, 10))
-        
-        btn_box = tk.Frame(overlay_frame, bg="#333333")
-        btn_box.pack(side="top")
+        canvas = self.image_canvas.canvas
+        guidance_arrow = GuidanceArrow(canvas)
+        overlay_frame = ctk.CTkFrame(
+            canvas,
+            fg_color=COLOR_PAIRS["surface_elevated"],
+            bg_color=canvas.cget("background"),
+            corner_radius=SHAPES.corner_radius_md,
+            border_width=2,
+            border_color=COLOR_PAIRS["border_strong"],
+        )
+        overlay_label = ctk.CTkLabel(
+            overlay_frame,
+            text="3. Is the LEFT side of the image Nasal or Temporal?",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=14, weight="bold"),
+        )
+        overlay_label.pack(side="top", padx=16, pady=(14, 8))
+
+        btn_box = ctk.CTkFrame(overlay_frame, fg_color="transparent", corner_radius=0)
+        btn_box.pack(side="top", padx=16, pady=(0, 14))
         
         btn_nasal_overlay = AppButton(
             btn_box,
             text="Nasal",
             variant="success",
-            bg_color="#333333",
             command=lambda: on_choose_side(IMAGE_SIDE_NASAL),
         )
         HoverToolTip(btn_nasal_overlay, "Identify the left side as nasal.")
-        btn_nasal_overlay.pack(side="left", padx=5)
+        btn_nasal_overlay.pack(side="left", padx=(0, 10))
 
         btn_temporal_overlay = AppButton(
             btn_box,
             text="Temporal",
             variant="success",
-            bg_color="#333333",
             command=lambda: on_choose_side(IMAGE_SIDE_TEMPORAL),
         )
         HoverToolTip(btn_temporal_overlay, "Identify the left side as temporal.")
-        btn_temporal_overlay.pack(side="right", padx=5)
+        btn_temporal_overlay.pack(side="left")
 
-        def _update_overlay_position(event=None):
-            if not getattr(self, "_batch_fovea_picker_active", False) or not overlay_frame.winfo_exists():
+        overlay_position = [0.0, 0.0]
+        overlay_offset = 0
+        arrow_id = None
+        arrow_points = None
+        layout_job = None
+        fovea_guide_job = None
+        fovea_guide_hide_job = None
+        fovea_guide_visible = False
+
+        def _render_fovea_guide(origin):
+            if (
+                origin is None or stage != "fovea" or not fovea_guide_visible
+                or not btn_set.winfo_viewable()
+            ):
+                guidance_arrow.hide()
                 return
-            if btn_set.winfo_ismapped():
+            button_target = (
+                btn_set.winfo_rootx() + btn_set.winfo_width() / 2,
+                btn_set.winfo_rooty() + btn_set.winfo_height() + 4 * btn_set._get_widget_scaling(),
+            )
+            guidance_arrow.show(
+                origin, button_target,
+                color=getattr(self.image_canvas, "_vertical_line_color", "#ffd500"),
+            )
+
+        def _update_fovea_guide(event=None):
+            if (
+                stage == "fovea"
+                and fovea_guide_visible
+                and btn_set.winfo_viewable()
+            ):
+                target_x = btn_set.winfo_rootx() + btn_set.winfo_width() / 2 - canvas.winfo_rootx()
+                self.image_canvas.set_fovea_guidance_target(target_x, renderer=_render_fovea_guide)
+
+        # Position changes arrive after Tk places the animated button. Reading
+        # its bounds here keeps the arrowhead centered below it during the cue.
+        tk.Misc.bind(btn_set, "<Configure>", _update_fovea_guide, add="+")
+
+        def _hide_fovea_guide():
+            nonlocal fovea_guide_hide_job, fovea_guide_visible
+            fovea_guide_hide_job = None
+            fovea_guide_visible = False
+            self.image_canvas.set_fovea_guidance_target(None)
+            guidance_arrow.hide()
+
+        def _stop_fovea_guidance():
+            nonlocal fovea_guide_job, fovea_guide_hide_job
+            fovea_label_cue.stop()
+            for job in (fovea_guide_job, fovea_guide_hide_job):
+                if job is not None:
+                    temp_frame.after_cancel(job)
+            fovea_guide_job = fovea_guide_hide_job = None
+            _hide_fovea_guide()
+
+        def _move_set_button(offset):
+            btn_set.place(relx=0.5, rely=0.5, anchor="center", x=offset)
+
+        def _show_fovea_guide():
+            nonlocal fovea_guide_job, fovea_guide_hide_job, fovea_guide_visible
+            fovea_guide_job = None
+            if stage != "fovea" or not self._batch_fovea_picker_active:
                 return
-            
-            overlay_frame.place_forget()
+            fovea_label_cue.stop()
+            fovea_guide_visible = True
+            _update_fovea_guide()
+            cue.start(_move_set_button)
+            fovea_guide_hide_job = temp_frame.after(FOVEA_GUIDE_DURATION_MS, _hide_fovea_guide)
+
+        def _start_fovea_guidance():
+            nonlocal fovea_guide_job
+            # First show that the yellow label belongs to an adjustable marker.
+            # Only the label moves; the selected image coordinate stays fixed.
+            fovea_label_cue.start(
+                lambda offset: self.image_canvas.set_fovea_label_offset(
+                    offset * temp_frame._get_widget_scaling()
+                ),
+            )
+            fovea_guide_job = temp_frame.after(FOVEA_GUIDE_DELAY_MS, _show_fovea_guide)
+
+        def _move_side_prompt(offset):
+            nonlocal overlay_offset
+            overlay_offset = offset
+            if stage != "side" or not overlay_frame.winfo_exists():
+                return
+            scale = overlay_frame._get_widget_scaling()
+            # place() uses logical pixels; the canvas and winfo use physical
+            # pixels. Keep this panel in the viewport even when it is scrolled.
+            overlay_frame.place(
+                x=overlay_position[0] / scale + offset,
+                y=overlay_position[1] / scale,
+                anchor="nw",
+            )
+            overlay_frame.lift()
+            if arrow_id is not None and arrow_points is not None:
+                x1, y1, x2, y2 = arrow_points
+                canvas.coords(arrow_id, x1, y1, x2 + offset * scale, y2)
+
+        def _update_overlay_position():
+            nonlocal arrow_id, arrow_points
+            if (
+                not getattr(self, "_batch_fovea_picker_active", False)
+                or stage != "side"
+                or not overlay_frame.winfo_exists()
+            ):
+                return
+
+            scale = overlay_frame._get_widget_scaling()
+            canvas_w, canvas_h = canvas.winfo_width(), canvas.winfo_height()
+            margin = 12 * scale  # Includes the four-pixel animation travel.
+            available = max(140, (canvas_w - 2 * margin) / scale)
+            overlay_label.configure(wraplength=max(100, int(available - 32)))
+            button_width = min(140, max(50, int((available - 42) / 2)))
+            btn_nasal_overlay.configure(width=button_width)
+            btn_temporal_overlay.configure(width=button_width)
+            overlay_frame.update_idletasks()
+            popup_w, popup_h = overlay_frame.winfo_reqwidth(), overlay_frame.winfo_reqheight()
+
+            view_x, view_y = canvas.canvasx(0), canvas.canvasy(0)
+            lx, ly = view_x, view_y + canvas_h / 2
+            top_y, bottom_y = view_y, view_y + canvas_h
             if self.image_data is not None:
                 h = self.image_data.shape[0]
                 lx, ly = self.image_canvas._i2c(0, h / 2)
                 top_y = self.image_canvas._i2c(0, 0)[1]
                 bottom_y = self.image_canvas._i2c(0, h)[1]
-                
-                canvas_w = max(400, self.image_canvas.canvas.winfo_width())
-                canvas_h = max(300, self.image_canvas.canvas.winfo_height())
-                
-                self.image_canvas.canvas.delete("side_indicator")
-                
-                radius = 6
-                self.image_canvas.canvas.create_oval(
-                    lx - radius, ly - radius, lx + radius, ly + radius,
-                    fill="#ef4444", outline="white", width=2, tags=("side_indicator",)
-                )
-                
-                popup_height = 100
-                popup_width = 340
-                
-                safe_lx = max(20, min(lx + 20, canvas_w - popup_width - 20))
-                
-                if top_y > popup_height + 20:
-                    # Space ABOVE the image
-                    popup_y = top_y - 10
-                    anchor = "sw"
-                    arrow_start = (lx + 3, ly - 5)
-                    arrow_end = (safe_lx + 40, popup_y)
-                elif canvas_h - bottom_y > popup_height + 20:
-                    # Space BELOW the image
-                    popup_y = bottom_y + 10
-                    anchor = "nw"
-                    arrow_start = (lx + 3, ly + 5)
-                    arrow_end = (safe_lx + 40, popup_y)
-                else:
-                    # No space outside, put it near the top of the canvas
-                    popup_y = 20
-                    anchor = "nw"
-                    arrow_start = (lx + 3, ly - 5)
-                    arrow_end = (safe_lx, popup_y + 40)
-                
-                self.image_canvas.canvas.create_line(
-                    arrow_start[0], arrow_start[1], arrow_end[0], arrow_end[1],
-                    fill="#ef4444", width=3, arrow="last", arrowshape=(10, 12, 4), tags=("side_indicator",)
-                )
-                
-                self.image_canvas.canvas.create_window(
-                    safe_lx, popup_y, window=overlay_frame, anchor=anchor, tags=("side_indicator",)
-                )
+
+            popup_x = max(margin, min(lx - view_x + 20 * scale, canvas_w - popup_w - margin))
+            if top_y - view_y >= popup_h + 2 * margin:
+                popup_y = top_y - view_y - popup_h - margin
+                arrow_end_y = popup_y + popup_h
+            elif view_y + canvas_h - bottom_y >= popup_h + 2 * margin:
+                popup_y = bottom_y - view_y + margin
+                arrow_end_y = popup_y
             else:
-                self.image_canvas.canvas.delete("side_indicator")
-                overlay_frame.place(relx=0.05, rely=0.5, anchor="w")
+                popup_y = margin
+                arrow_end_y = popup_y + popup_h
+            popup_y = max(margin, min(popup_y, canvas_h - popup_h - margin))
+            overlay_position[:] = popup_x, popup_y
+
+            canvas.delete("side_indicator")
+            radius = 6 * scale
+            canvas.create_oval(
+                lx - radius, ly - radius, lx + radius, ly + radius,
+                fill=COLORS.danger, outline="white", width=2,
+                tags=("side_indicator",),
+            )
+            arrow_points = (lx, ly, view_x + popup_x + 24 * scale, view_y + arrow_end_y)
+            arrow_id = canvas.create_line(
+                *arrow_points, fill=COLORS.danger, width=2, arrow="last",
+                arrowshape=(10, 12, 4), tags=("side_indicator",),
+            )
+            _move_side_prompt(overlay_offset)
+
+        def _queue_overlay_position(event=None):
+            nonlocal layout_job
+            if layout_job is not None:
+                temp_frame.after_cancel(layout_job)
+            layout_job = temp_frame.after_idle(_run_overlay_layout)
+
+        def _run_overlay_layout():
+            nonlocal layout_job
+            layout_job = None
+            _update_overlay_position()
+            _update_fovea_guide()
 
         original_zoom_cb = self.image_canvas._cb_zoom
         def _hooked_zoom_cb(zoom):
             if original_zoom_cb:
                 original_zoom_cb(zoom)
-            self.after(10, _update_overlay_position)
+            _queue_overlay_position()
         self.image_canvas._cb_zoom = _hooked_zoom_cb
 
-        bind_id = self.image_canvas.canvas.bind("<Configure>", lambda e: self.after(150, _update_overlay_position), add="+")
+        bind_id = canvas.bind("<Configure>", _queue_overlay_position, add="+")
 
         def show_fovea_stage(index, path):
+            nonlocal stage
+            _stop_fovea_guidance()
+            cue.stop()
+            stage = "fovea"
             overlay_frame.place_forget()
-            self.image_canvas.canvas.delete("side_indicator")
-            btn_set.pack(side="right", padx=4, pady=4)
-            msg = f"Specify fovea ({index}/{total}): {path}"
+            canvas.delete("side_indicator")
+            set_slot.pack(side="right")
+            msg = f"1. Adjust the yellow Fovea line. 2. Click Set Fovea ({index}/{total}): {path}"
             prompt_label_var.set(msg)
             self.status_var.set(msg)
 
         def show_side_stage(index, path):
-            btn_set.pack_forget()
-            
+            nonlocal stage
+            _stop_fovea_guidance()
+            cue.stop()
+            stage = "side"
+            set_slot.pack_forget()
             _update_overlay_position()
+            cue.start(_move_side_prompt)
 
             msg = (
-                f"Specify Temporal or Nasal "
+                f"3. Select Nasal or Temporal "
                 f"({index}/{total}): {path}"
             )
             prompt_label_var.set(msg)
             self.status_var.set(msg)
 
         # Pack the flexible label after every action has claimed its space.
-        prompt_label.pack(side="left", fill="x", expand=True)
+        prompt_label.pack(side="left", fill="x", expand=True, padx=(8, 0), pady=8)
 
         self._batch_fovea_picker_active = True
         self._hide_annotation_tutorial()
@@ -2093,6 +2239,7 @@ class Step2Frame(SidebarStepFrame):
                 # The fovea picker is an intermediate batch view. Step 3 only
                 # needs to hear about folders after Step 2 saves its outputs.
                 self._show_image(image_data, path, notify_output_folder=False)
+                _start_fovea_guidance()
 
                 next_var.set("")
                 self.wait_variable(next_var)
@@ -2128,7 +2275,12 @@ class Step2Frame(SidebarStepFrame):
                 image_side_by_path[path] = side
                 
         finally:
+            _stop_fovea_guidance()
+            cue.stop()
+            if layout_job is not None:
+                temp_frame.after_cancel(layout_job)
             self._batch_fovea_picker_active = False
+            guidance_arrow.destroy()
             temp_frame.destroy()
             if overlay_frame.winfo_exists():
                 overlay_frame.destroy()
