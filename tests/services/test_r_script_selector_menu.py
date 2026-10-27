@@ -66,7 +66,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         self.defaults = {}
         for role in ("main", "output"):
             default = "optimized"
-            versions = ("original", "optimized")
+            versions = ("original", "optimized", "optimized_deep_layers")
             self.paths[role] = {
                 version: self._script(f"bundled/{role}_{version}.R")
                 for version in versions
@@ -160,7 +160,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
             for role in self.choices:
                 with self.subTest(classic=classic, role=role):
                     entries = dialog._script_popups[role].entries
-                    builtin_labels = ["Original script", "Optimized version"]
+                    builtin_labels = ["Original script", "Optimized version", "Optimized deeper layers"]
                     self.assertEqual([entry["kind"] for entry in entries],
                                      ["command"] * len(builtin_labels) + ["separator", "command"])
                     self.assertEqual(self._labels(dialog, role),
@@ -237,8 +237,28 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         self.assertEqual(dialog._script_by_label["main"]["Custom script"].path, external)
         self.assertEqual(dialog._script_by_label["main"]["Custom script"].source, "user")
         self.assertIn(external.name, dialog._script_status_vars["main"].get())
-        self.assertEqual(len(self._labels(dialog, "main")), 3)
+        self.assertEqual(len(self._labels(dialog, "main")), 4)
         self.assertEqual(self.preferences.writes, [])
+
+    def test_deeper_layer_choices_apply_and_reopen_for_both_roles(self):
+        for classic in (False, True):
+            with self.subTest(classic=classic):
+                self.preferences.values.clear()
+                dialog = self._dialog(classic=classic)
+                for role in self.choices:
+                    dialog._script_popups[role].invoke(2)
+                    self.assertEqual(self._checked(dialog, role), ["Optimized deeper layers"])
+                    self.assertEqual(self.frame._selected_r_script_path(role), self.defaults[role])
+                self._prepare_apply(dialog)
+                self.assertTrue(dialog._apply_changes())
+                reopened = self._dialog(classic=classic)
+                for role in self.choices:
+                    self.assertEqual(self.frame._selected_r_script_path(role),
+                                     self.paths[role]["optimized_deep_layers"])
+                    self.assertEqual(self._checked(reopened, role), ["Optimized deeper layers"])
+                    self.assertTrue(reopened._script_status_vars[role].get().startswith(
+                        "Active: Optimized deeper layers"))
+                    self.assertEqual(self.defaults[role], self.paths[role]["optimized"])
 
     def test_canceling_the_custom_picker_preserves_the_previous_pending_choice(self):
         dialog = self._dialog()
@@ -247,7 +267,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         dialog._mark_dirty.reset_mock()
 
         with mock.patch("aidas.app.filedialog.askopenfilename", return_value="") as picker:
-            dialog._script_popups["main"].invoke(3)
+            dialog._script_popups["main"].invoke(4)
 
         picker.assert_called_once()
         self.assertEqual(dialog._script_vars["main"].get(), "Original script")
@@ -307,7 +327,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         self.assertEqual(dialog._script_custom_choices["main"].path, custom)
         self.assertEqual(dialog._script_by_label["main"]["Custom script"].path, custom)
         self.assertEqual(self._labels(dialog, "main"),
-                         ["Original script", "Optimized version", "Select custom script\u2026"])
+                         ["Original script", "Optimized version", "Optimized deeper layers", "Select custom script\u2026"])
         self.assertEqual(self.preferences.writes, [])
 
     def test_output_custom_action_targets_output_without_changing_main(self):
@@ -315,7 +335,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         selected = self._script("outside/output_custom.R")
 
         with mock.patch("aidas.app.filedialog.askopenfilename", return_value=str(selected)) as picker:
-            dialog._script_popups["output"].invoke(3)
+            dialog._script_popups["output"].invoke(4)
 
         self.frame.import_r_script_for_role.assert_called_once_with(selected, "output")
         self.assertEqual(picker.call_args.kwargs["filetypes"][0], ("R scripts", "*.R"))
@@ -343,6 +363,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
             self.assertEqual(self._labels(dialog, role),
                              ["Original script", "Select custom script\u2026"])
             self.assertNotIn("Optimized version", dialog._script_by_label[role])
+            self.assertNotIn("Optimized deeper layers", dialog._script_by_label[role])
             self.assertEqual(self._checked(dialog, role), ["Original script"])
 
     def test_busy_batch_blocks_choices_and_picker_without_moving_the_checkmark(self):
@@ -371,15 +392,16 @@ class RScriptSelectorMenuTests(unittest.TestCase):
 
         self.assertEqual(entries[0]["state"], "normal")
         self.assertEqual(entries[1]["state"], "disabled")
-        self.assertEqual(entries[3]["state"], "normal")
+        self.assertEqual(entries[2]["state"], "normal")
+        self.assertEqual(entries[4]["state"], "normal")
         self.assertEqual(self._checked(dialog, "main"), ["Original script"])
-        self.assertEqual(len(self._labels(dialog, "main")), 3)
+        self.assertEqual(len(self._labels(dialog, "main")), 4)
 
     def test_popup_rebuild_does_not_accumulate_old_history_or_separator_entries(self):
         dialog = self._dialog()
         for _ in range(3):
             dialog._update_r_script_popup("main")
-        self.assertEqual(len(dialog._script_popups["main"].entries), 4)
+        self.assertEqual(len(dialog._script_popups["main"].entries), 5)
         self.assertEqual(self._checked(dialog, "main"), ["Optimized version"])
 
     def test_settings_has_no_separate_add_script_button_in_either_presentation(self):

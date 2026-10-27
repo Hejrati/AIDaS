@@ -111,7 +111,8 @@ class RScriptVariantLibraryTests(unittest.TestCase):
 
     def test_settings_labels_distinguish_both_versions_and_default(self):
         for version, label in (("original", "Original script"),
-                               ("optimized", "Optimized version")):
+                               ("optimized", "Optimized version"),
+                               ("optimized_deep_layers", "Optimized deeper layers")):
             with self.subTest(version=version):
                 choice = RScriptChoice("library label", Path("workflow.R"), "bundled",
                                        is_default=True, version=version)
@@ -142,6 +143,10 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         self.defaults = {
             "main": _write_script(bundled / Step3Frame.R_OPTIMIZED_SCRIPT_NAME),
             "output": _write_script(bundled / Step3Frame.R_OPTIMIZED_OUTPUT_SCRIPT_NAME),
+        }
+        self.deep_layers = {
+            "main": _write_script(bundled / Step3Frame.R_DEEP_LAYERS_SCRIPT_NAME),
+            "output": _write_script(bundled / Step3Frame.R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME),
         }
         self.missing_output_variant = bundled / "more_outputs_afterRAW_OCT_PROCESSING_removed.R"
         self.historical = {
@@ -214,6 +219,8 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
                 self.assertEqual(choices[0].version, "optimized")
                 self.assertTrue(choices[0].is_default)
                 self.assertEqual(by_path[self.originals[role]].version, "original")
+                self.assertEqual(by_path[self.deep_layers[role]].version, "optimized_deep_layers")
+                self.assertIn("Optimized deeper layers", by_path[self.deep_layers[role]].label)
                 self.assertFalse(by_path[self.originals[role]].is_default)
                 self.assertIsNone(by_path[self.historical[role]].version)
                 self.assertNotIn(self.defaults["output" if role == "main" else "main"], by_path)
@@ -224,6 +231,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         for role in ("main", "output"):
             with self.subTest(role=role):
                 self.defaults[role].unlink()
+                self.deep_layers[role].unlink()
                 self.historical[role].unlink()
                 choices = self.frame.available_r_scripts(role)
                 self.assertEqual([choice.path for choice in choices],
@@ -253,7 +261,8 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         dialog._refresh_r_script_choices("main")
 
         self.assertEqual(dialog._script_vars["main"].get(), "Optimized version")
-        self.assertEqual(set(dialog._script_by_label["main"]), {"Original script", "Optimized version"})
+        self.assertEqual(set(dialog._script_by_label["main"]),
+                         {"Original script", "Optimized version", "Optimized deeper layers"})
         self.assertEqual(self.frame.preferences.writes, [])
 
     def test_bundled_optimized_scripts_can_be_selected_directly(self):
@@ -263,6 +272,31 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
                 self.assertEqual(self.frame.select_r_script(role, selected), selected)
                 self.assertEqual(self.frame.preferences.get(f"r_{role}_script_path"), str(selected))
                 self.assertEqual(self.frame._selected_r_script_path(role), selected)
+
+    def test_deeper_layer_choices_are_saved_and_reopened_without_changing_defaults(self):
+        for role in ("main", "output"):
+            with self.subTest(role=role):
+                selected = self.deep_layers[role]
+                self.assertEqual(self.frame.select_r_script(role, selected), selected)
+                dialog = _settings(self.frame)
+                dialog._refresh_r_script_choices(role)
+                self.assertEqual(dialog._script_vars[role].get(), "Optimized deeper layers")
+                self.assertEqual(dialog._script_by_label[role]["Optimized deeper layers"].path, selected)
+                self.assertEqual(self.frame._script_path(role), self.defaults[role])
+                self.assertEqual(self.frame._selected_r_script_path(role), selected)
+
+    def test_disabled_optimization_excludes_both_variants_and_saved_deeper_paths(self):
+        self.frame.R_OPTIMIZED_ENABLED = False
+        self.frame._script_path = lambda role="main": self.originals[role]
+        for role in ("main", "output"):
+            with self.subTest(role=role):
+                self.frame.preferences.values[f"r_{role}_script_path"] = str(self.deep_layers[role])
+                choices = self.frame.available_r_scripts(role)
+                self.assertNotIn(self.defaults[role], [choice.path for choice in choices])
+                self.assertNotIn(self.deep_layers[role], [choice.path for choice in choices])
+                self.assertEqual(self.frame._selected_r_script_path(role), self.originals[role])
+                self.assertEqual(self.frame.preferences.values[f"r_{role}_script_path"],
+                                 str(self.deep_layers[role]))
 
     def test_selecting_original_and_custom_paths_persists_exact_paths_and_preserves_history(self):
         for role in ("main", "output"):
@@ -293,6 +327,19 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
                                  "# independently edited user script\n")
                 self.assertEqual(self.frame._selected_r_script_path(role), self.defaults[role])
 
+    def test_imported_deeper_layer_filenames_keep_custom_metadata(self):
+        for role in ("main", "output"):
+            with self.subTest(role=role):
+                source = _write_script(self.root / "imports" / self.deep_layers[role].name,
+                                       "# independently edited deeper workflow\n")
+                imported = self.frame.import_r_script_for_role(source, role)
+                choice = next(choice for choice in self.frame.available_r_scripts(role)
+                              if choice.path == imported)
+                self.assertEqual(choice.source, "user")
+                self.assertIsNone(choice.version)
+                self.assertEqual(self.frame.select_r_script(role, imported), imported)
+                self.assertEqual(self.frame._selected_r_script_path(role), imported)
+
     def test_settings_refresh_shows_active_versions_without_rewriting_preferences(self):
         dialog = _settings(self.frame)
 
@@ -305,7 +352,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
                     "Active: " + expected_label
                 ))
                 self.assertEqual(set(dialog._script_by_label[role]),
-                                 {"Original script", "Optimized version"})
+                                 {"Original script", "Optimized version", "Optimized deeper layers"})
         self.assertEqual(self.frame.preferences.writes, [])
         dialog._mark_dirty.assert_not_called()
 
@@ -317,7 +364,8 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         dialog._refresh_r_script_choices("output")
 
         self.assertEqual(dialog._script_vars["output"].get(), "Optimized version")
-        self.assertEqual(set(dialog._script_by_label["output"]), {"Original script", "Optimized version"})
+        self.assertEqual(set(dialog._script_by_label["output"]),
+                         {"Original script", "Optimized version", "Optimized deeper layers"})
         self.assertEqual(self.frame.preferences.writes, [])
 
     def test_active_custom_script_uses_fixed_label_and_keeps_filename_in_status(self):
@@ -329,7 +377,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
 
         self.assertEqual(dialog._script_vars["main"].get(), "Custom script")
         self.assertEqual(set(dialog._script_by_label["main"]),
-                         {"Original script", "Optimized version", "Custom script"})
+                         {"Original script", "Optimized version", "Optimized deeper layers", "Custom script"})
         self.assertEqual(dialog._script_by_label["main"]["Custom script"].path, custom)
         self.assertIn(custom.name, dialog._script_status_vars["main"].get())
         self.assertEqual(self.frame.preferences.writes, [])
@@ -385,7 +433,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         }
 
         for role in ("main", "output"):
-            selections = [self.defaults[role], self.originals[role]]
+            selections = [self.defaults[role], self.originals[role], self.deep_layers[role]]
             selections.append(_write_script(self.root / "user" / role / f"custom_{role}.R"))
             for selected in selections:
                 with self.subTest(role=role, selected=selected.name):

@@ -45,6 +45,7 @@ def _restart_frame() -> Step4Frame:
     frame.end_var = _VariableStub("3")
     frame.stats_var = _VariableStub("old measurements")
     frame.status_var = _VariableStub()
+    frame.output_dir_var = _VariableStub("study")
     frame.profile_status_var = _VariableStub()
     frame.image_label_var = _VariableStub("old file")
     frame.figure = None

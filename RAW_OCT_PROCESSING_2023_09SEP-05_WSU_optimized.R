@@ -35,6 +35,9 @@
 ############
 ############
 
+# Implicit diagnostic plots must never create Rplots.pdf; explicit PNGs still render.
+options(device=function(...) grDevices::pdf(file=NULL))
+
 .DEBUG.STEP <- "startup"
 .DIAGNOSTICS.ENABLED <- tolower(Sys.getenv("AIDAS_STEP3_DIAGNOSTICS", unset="")) %in% c("1", "true", "yes", "on")
 
@@ -133,51 +136,6 @@ REFERENCE.DARK="DARK_MARKED"
 TO.PROCESS.DARK="DARK"
 IMAGE.INDEX.DARK=IMAGE.INDEX.LIGHT
 PIXEL.WIDTH=as.numeric(arg.or.env(9, "AIDAS_PIXEL_WIDTH", "3.89")) #<-- microns per pixel
-# PYEXPORTDIR <- file.path(OUTDIR, "step3_r_arrays")
-# dir.create(PYEXPORTDIR, showWarnings=FALSE, recursive=TRUE)
-
-write.python.array <- function(name, value) {
-  if(is.null(value)) return(invisible(FALSE))
-  target <- file.path(PYEXPORTDIR, paste0(name, ".bin"))
-  dims <- dim(value)
-  if(is.null(dims)) dims <- length(value)
-  con <- file(target, "wb")
-  on.exit(close(con), add=TRUE)
-  writeBin(as.numeric(value), con, size=8, endian="little")
-  writeLines(paste(as.integer(dims), collapse=","), file.path(PYEXPORTDIR, paste0(name, ".shape")))
-  invisible(TRUE)
-}
-
-export.python.core.arrays <- function() {
-  dbg("python-export", "Writing core Python-readable R arrays")
-  write.python.array("FLATTENED_DARK_RETINA_RRC", FLATTENED.DARK.RETINA.RRC)
-  write.python.array("FLATTENED_LIGHT_RETINA_RRC", FLATTENED.LIGHT.RETINA.RRC)
-  write.python.array("FLATTENED_MARKERS_RRC", FLATTENED.MARKERS.RRC)
-  write.python.array("FIRST_GRAND_MEAN", FIRST.GRAND.MEAN)
-  write.python.array("SECOND_GRAND_MEAN", SECOND.GRAND.MEAN)
-  write.python.array("FINAL_GRAND_MEAN", FINAL.GRAND.MEAN)
-  write.python.array("GRAND_PROFILE", GRAND.PROFILE)
-  write.python.array("APPARENT_ANGLES_FOR_DARK", APPARENT.ANGLES.FOR.DARK)
-  write.python.array("APPARENT_ANGLES_FOR_LIGHT", APPARENT.ANGLES.FOR.LIGHT)
-  write.python.array("SHIFT_POSITION_DARK", SHIFT.POSITION.DARK)
-  write.python.array("SHIFT_POSITION_LIGHT", SHIFT.POSITION.LIGHT)
-  write.python.array("SHIFT_POSITION_DARK_REFINED", SHIFT.POSITION.DARK.REFINED)
-  write.python.array("SHIFT_POSITION_LIGHT_REFINED", SHIFT.POSITION.LIGHT.REFINED)
-  write.python.array("BEST_LAT_MOVE_DARK", BEST.LAT.MOVE.DARK)
-  write.python.array("BEST_LAT_MOVE_LIGHT", BEST.LAT.MOVE.LIGHT)
-  write.python.array("VERTEX", vertex)
-}
-
-export.python.final.arrays <- function() {
-  dbg("python-export", "Writing final Python-readable R arrays")
-  write.python.array("FLATTENED_DARK_RETINA_RRC_N", FLATTENED.DARK.RETINA.RRC.N)
-  write.python.array("FLATTENED_LIGHT_RETINA_RRC_N", FLATTENED.LIGHT.RETINA.RRC.N)
-  write.python.array("FLATTENED_DARK_RETINA_RRC_N_PROFILES", FLATTENED.DARK.RETINA.RRC.N.profiles)
-  write.python.array("FLATTENED_LIGHT_RETINA_RRC_N_PROFILES", FLATTENED.LIGHT.RETINA.RRC.N.profiles)
-  write.python.array("FLATTENED_DARK_RETINA_RRC_N_FOVEA_PROFILES", FLATTENED.DARK.RETINA.RRC.N.fovea.profiles)
-  write.python.array("FLATTENED_LIGHT_RETINA_RRC_N_FOVEA_PROFILES", FLATTENED.LIGHT.RETINA.RRC.N.fovea.profiles)
-}
-
 save.tissue.border.plot <- function(filename, flattened, rpe, olm, onl.opl, inl.ipl, rnfl.gcl, vitreous.retina) {
   target <- file.path(OUTDIR, filename)
   x.axis <- seq(-100, 2750, 1)
@@ -186,7 +144,11 @@ save.tissue.border.plot <- function(filename, flattened, rpe, olm, onl.opl, inl.
 
   png(filename=target, width=1600, height=520)
   on.exit(dev.off(), add=TRUE)
-  image(
+  plot.image <- image
+  if(identical(Sys.getenv("AIDAS_STEP3_RASTER", unset=""), "1")) {
+    plot.image <- function(...) image(..., useRaster=TRUE)
+  }
+  plot.image(
     as.vector(x.axis),
     as.vector(y.axis),
     as.matrix(flattened[, dim(flattened)[2]:1, 1]),
@@ -1195,7 +1157,6 @@ f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat_",TO.PR
 
 #FLATTENED.DARK.RETINA.RRC
 
-# export.python.core.arrays()
 
 ### NOW, CLEAN UP A BIT
 rm(A,BEST.LAT.MOVE.DARK,BEST.LAT.MOVE.LIGHT,bestmove,border)
@@ -3426,6 +3387,9 @@ colnames(MAIN.DARK.OUTPUTS.fovea)<-c("INDEX","apparent.angle.fovea..degrees","RP
 MAIN.LIGHT.OUTPUTS.fovea=cbind(MAIN.LIGHT.OUTPUTS.fovea[,1],APPARENT.ANGLES.FOR.LIGHT[,2],MAIN.LIGHT.OUTPUTS.fovea[,2])
 colnames(MAIN.LIGHT.OUTPUTS.fovea)<-c("INDEX","apparent.angle.fovea..degrees","RPE.to.OLM.distance")
 
+# The app companion writes these same previews after loading the saved workspace.
+# Standalone execution retains both previews unless deferral is explicitly requested.
+if(!identical(Sys.getenv("AIDAS_STEP3_DEFER_BORDER_PLOTS", unset=""), "1")) {
 dbg("final-export", "Writing tissue-border preview PNGs")
 save.tissue.border.plot(
   paste("_tissueBorders__", TO.PROCESS.DARK, ".png", sep=""),
@@ -3447,6 +3411,7 @@ save.tissue.border.plot(
   R.RNFL.GCL.POSITION.LIGHT,
   R.VITREOUS.RETINA.POSITION.LIGHT
 )
+}
 
 rm(APPARENT.ANGLES.FOR.DARK,APPARENT.ANGLES.FOR.LIGHT)
 rm(VITREOUS.RETINA.POSITION.DARK,VITREOUS.RETINA.POSITION.LIGHT)
@@ -3610,7 +3575,6 @@ write.thickness.table(
   R.VITREOUS.RETINA.POSITION.LIGHT
 )
 
-# export.python.final.arrays()
 
 ## and cleanup before a final Save
 rm(EXPORT.2.buff,EXPORT.2,EXPORT,write.thickness.table)

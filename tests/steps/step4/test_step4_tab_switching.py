@@ -62,6 +62,7 @@ class Step4TabSwitchingTests(unittest.TestCase):
         frame = Step4Frame.__new__(Step4Frame)
         frame.rois = [ISezROI("1", 1, 2)]
         frame.input_dir_var = _VariableStub()
+        frame.output_dir_var = _VariableStub()
         frame._output_dir_user_selected = True
         frame._set_batch_folder_label = lambda _folder: None
         frame._sync_entry_vars_from_clicks = lambda: None
@@ -80,6 +81,7 @@ class Step4TabSwitchingTests(unittest.TestCase):
             "path": Path("study") / "_flat_LIGHT.hdr",
             "current_path": Path("study") / "_flat_LIGHT.hdr",
             "current_stem": "_flat_LIGHT",
+            "output_dir": str(Path("study") / "custom-results"),
             "volume": image[np.newaxis, ...],
             "image": image,
             "canvas": _CanvasStub(),
@@ -95,6 +97,7 @@ class Step4TabSwitchingTests(unittest.TestCase):
         self.assertTrue(frame._restore_batch_roi_tab_from_cache(state))
         self.assertIs(frame.image, image)
         self.assertEqual(frame.current_roi_idx, 0)
+        self.assertEqual(frame.output_dir_var.value, state["output_dir"])
 
     def test_tab_label_refresh_skips_labels_that_are_already_current(self):
         frame = Step4Frame.__new__(Step4Frame)

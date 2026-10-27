@@ -4,6 +4,9 @@
 ## Default graphics preserve legacy rendering. Set AIDAS_STEP3_RASTER=1 only
 ## when faster raster rendering is preferred over byte-identical PNGs.
 
+# Keep unexpected diagnostic graphics in memory; named PNG exports are unchanged.
+options(device=function(...) grDevices::pdf(file=NULL))
+
 ### LIGHT is the app's acquisition channel. Recreate only missing DARK slots.
 if(!exists("TO.PROCESS.DARK")) TO.PROCESS.DARK="DARK"
 if(!exists("FLATTENED.DARK.RETINA.RRC")) FLATTENED.DARK.RETINA.RRC=FLATTENED.LIGHT.RETINA.RRC

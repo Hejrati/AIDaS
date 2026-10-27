@@ -14,6 +14,8 @@ import shutil
 OPTIMIZED_R_SCRIPTS_ENABLED = True
 OPTIMIZED_R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized.R"
 OPTIMIZED_R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited_optimized.R"
+DEEP_LAYERS_R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized_deep_layers.R"
+DEEP_LAYERS_R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited_optimized_deep_layers.R"
 
 
 @dataclass(frozen=True)
@@ -63,7 +65,7 @@ def discover_r_scripts(
     seen: set[str] = set()
     versions = {}
     for path, version in (bundled_versions or {}).items():
-        if version not in {"original", "optimized"}:
+        if version not in {"original", "optimized", "optimized_deep_layers"}:
             raise ValueError(f"Unknown bundled R script version: {version}")
         versions[_path_key(Path(path))] = version
 
@@ -76,7 +78,11 @@ def discover_r_scripts(
         seen.add(key)
         version = versions.get(key) if source == "bundled" else None
         if version is not None:
-            version_label = "Original script" if version == "original" else "Optimized version"
+            version_label = {
+                "original": "Original script",
+                "optimized": "Optimized version",
+                "optimized_deep_layers": "Optimized deeper layers",
+            }[version]
             default_label = " (default)" if is_default else ""
             label = f"{version_label}{default_label} — {path.name}"
         elif is_default:

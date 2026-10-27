@@ -8,6 +8,8 @@ from aidas.utils.r_script_library import (
     OPTIMIZED_R_SCRIPTS_ENABLED,
     OPTIMIZED_R_SCRIPT_NAME,
     OPTIMIZED_R_OUTPUT_SCRIPT_NAME,
+    DEEP_LAYERS_R_SCRIPT_NAME,
+    DEEP_LAYERS_R_OUTPUT_SCRIPT_NAME,
 )
 
 
@@ -38,7 +40,8 @@ def collect_r_scripts():
             path for path in project_root.iterdir()
             if path.is_file() and path.suffix.lower() == ".r"
             and (OPTIMIZED_R_SCRIPTS_ENABLED or path.name.lower() not in
-                 {OPTIMIZED_R_SCRIPT_NAME.lower(), OPTIMIZED_R_OUTPUT_SCRIPT_NAME.lower()})
+                 {OPTIMIZED_R_SCRIPT_NAME.lower(), OPTIMIZED_R_OUTPUT_SCRIPT_NAME.lower(),
+                  DEEP_LAYERS_R_SCRIPT_NAME.lower(), DEEP_LAYERS_R_OUTPUT_SCRIPT_NAME.lower()})
         ),
         key=lambda path: path.name.lower(),
     )

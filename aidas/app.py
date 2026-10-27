@@ -437,7 +437,9 @@ class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
         ("main", "Main processing script"),
         ("output", "Output processing script"),
     )
-    SCRIPT_OPTIONS = ("Original script", "Optimized version", "Custom script")
+    SCRIPT_OPTIONS = (
+        "Original script", "Optimized version", "Optimized deeper layers", "Custom script",
+    )
 
     @classmethod
     def _r_script_options(cls, role):
@@ -862,6 +864,7 @@ class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
         return {
             "original": "Original script",
             "optimized": "Optimized version",
+            "optimized_deep_layers": "Optimized deeper layers",
         }.get(getattr(choice, "version", None))
 
     @classmethod
@@ -874,7 +877,11 @@ class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
         choices = self._step3.available_r_scripts(role)
         self._script_choices[role] = choices
         by_label = {}
-        for version, label in (("original", "Original script"), ("optimized", "Optimized version")):
+        for version, label in (
+            ("original", "Original script"),
+            ("optimized", "Optimized version"),
+            ("optimized_deep_layers", "Optimized deeper layers"),
+        ):
             if label not in self._r_script_options(role):
                 continue
             choice = next((choice for choice in choices if choice.version == version), None)

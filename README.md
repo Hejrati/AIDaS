@@ -482,6 +482,39 @@ original defaults upgrade once; later selections of Original or Custom remain
 saved. Custom scripts can be added through each selector and are copied to the
 user's persistent AIDaS script library for reuse in later sessions.
 
+The optional **Optimized deeper layers** choice uses separate main and output
+scripts named `RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized_deep_layers.R` and
+`more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited_optimized_deep_layers.R`.
+Select that choice for both scripts. Original and Optimized retain their existing
+six-boundary behavior, and Optimized remains the default.
+
+The deeper-layer variant preserves the RPE, OLM, ONL/OPL, and INL/IPL calculation
+paths and foveal analysis. It retains the vitreous/retina boundary internally for
+shared corrections, while skipping GCL/RNFL detection, correction, smoothing,
+and dependent sampling. Outputs keep the existing 90-depth layout, coordinates,
+and eight thickness columns; omitted superficial results and `Summed_layers`
+are marked `NA`. Step 5's ELM-RPE and ONL measurements keep their original columns.
+The numerical workspace records missing depths as missing values. Normalized
+Analyze images can zero-fill those depths for display; those zeros are not
+measured brightness.
+Use the saved numerical workspace as the precision reference. Masking omitted
+table values can change R's text formatting and rounding without changing the
+retained unrounded calculations. Step 5 reads those text tables, so its parsed
+values can reflect that rounding difference.
+
+When the new main script is selected, AIDaS launches it with
+`AIDAS_STEP3_DEEP_ONLY=1` and requires its matching output script. Standalone R
+runs of the new main script default to full processing (`AIDAS_STEP3_DEEP_ONLY=0`);
+set the variable to `1` to enable deeper-layer processing.
+
+Bundled Optimized and Optimized deeper layers pairs render their final border
+previews once, using raster rendering with the original boundary coordinates.
+Standalone scripts retain their default rendering unless
+`AIDAS_STEP3_RASTER=1` is set. These optimized scripts do not export the redundant
+`step3_r_arrays` directory or implicit `Rplots.pdf` files. The batch screen shows
+a live `Elapsed: HH:MM:SS` counter and retains the total elapsed time after
+completion, failure, or cancellation.
+
 Batch Step 3 runs each R process without interactive standard input. The batch
 selection panel provides a second-script schedule. The first script always runs
 across folders in parallel using **Batch Size**. In the default parallel mode,

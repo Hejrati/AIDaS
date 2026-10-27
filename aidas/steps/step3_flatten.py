@@ -40,6 +40,8 @@ from aidas.utils.r_script_library import (
     OPTIMIZED_R_SCRIPTS_ENABLED,
     OPTIMIZED_R_SCRIPT_NAME,
     OPTIMIZED_R_OUTPUT_SCRIPT_NAME,
+    DEEP_LAYERS_R_SCRIPT_NAME,
+    DEEP_LAYERS_R_OUTPUT_SCRIPT_NAME,
     discover_r_scripts,
     import_r_script,
     user_r_script_dir,
@@ -2087,6 +2089,7 @@ class RBatchRunPanel(ttk.Frame):
         summary_row.bind("<Configure>", self._resize_summary_footer, add="+")
 
         ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w")
+        ttk.Label(wrapper, textvariable=self.step_frame.elapsed_time_var).pack(anchor="w", pady=(2, 6))
 
         # Step details have their own scrollbar and a bounded requested height.
         # Pack them above the already-reserved footer and before the table so
@@ -2443,6 +2446,8 @@ class Step3Frame(SidebarStepFrame):
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
     R_OPTIMIZED_SCRIPT_NAME = OPTIMIZED_R_SCRIPT_NAME
     R_OPTIMIZED_OUTPUT_SCRIPT_NAME = OPTIMIZED_R_OUTPUT_SCRIPT_NAME
+    R_DEEP_LAYERS_SCRIPT_NAME = DEEP_LAYERS_R_SCRIPT_NAME
+    R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME = DEEP_LAYERS_R_OUTPUT_SCRIPT_NAME
     R_OPTIMIZED_ENABLED = OPTIMIZED_R_SCRIPTS_ENABLED
     R_SCRIPT_DEFAULTS_VERSION = 1
     R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
@@ -2547,11 +2552,16 @@ class Step3Frame(SidebarStepFrame):
         self._pending_batch_restart = None
         self._pending_input_folder = None
         self._pending_batch_folders = None
+        self._r_run_started_at = None
+        self._r_run_elapsed_seconds = None
+        self._r_elapsed_after_id = None
+        self._r_elapsed_generation = 0
         self.r_package_library_path = None if self.preferences is None else self.preferences.get("r_package_library_path")
 
         self.status_var = tk.StringVar(value="Ready - use batch Step 3 R processing.")
         self.info_var = tk.StringVar(value="")
         self.progress_text_var = tk.StringVar(value="Idle")
+        self.elapsed_time_var = tk.StringVar(value="")
 
         self._build_ui()
         self._refresh_input_status()
@@ -2618,6 +2628,9 @@ class Step3Frame(SidebarStepFrame):
             fill="x",
             pady=(LAYOUT.space_xs, 6),
         )
+        ttk.Label(self.step_actions_footer, textvariable=self.elapsed_time_var).pack(
+            anchor="w", padx=2, pady=(0, 6),
+        )
         self.continue_to_step4_button_icon = load_ctk_image(
             self, "flat-color-icons--right.png", size=20
         )
@@ -2647,6 +2660,67 @@ class Step3Frame(SidebarStepFrame):
         if self.load_r_results_button is not None:
             self.load_r_results_button.configure(state=state)
         self._update_continue_to_step4_button_state()
+
+    @staticmethod
+    def _format_r_elapsed(seconds):
+        seconds = max(0, int(seconds))
+        hours, remainder = divmod(seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+
+    def _cancel_r_elapsed_update(self):
+        after_id = getattr(self, "_r_elapsed_after_id", None)
+        self._r_elapsed_after_id = None
+        if after_id is not None:
+            try:
+                self.after_cancel(after_id)
+            except tk.TclError:
+                pass
+
+    def _start_r_elapsed_timer(self):
+        """Measure the entire batch, including both R scripts and queued jobs."""
+        self._cancel_r_elapsed_update()
+        self._r_elapsed_generation = getattr(self, "_r_elapsed_generation", 0) + 1
+        self._r_run_started_at = time.monotonic()
+        self._r_run_elapsed_seconds = None
+        self._refresh_r_elapsed_timer(self._r_elapsed_generation)
+
+    def _refresh_r_elapsed_timer(self, generation):
+        # A callback already dispatched by Tk must not revive a previous run.
+        if generation != self._r_elapsed_generation or self._r_run_started_at is None:
+            return
+        self._r_elapsed_after_id = None
+        seconds = time.monotonic() - self._r_run_started_at
+        self.elapsed_time_var.set(f"Elapsed: {self._format_r_elapsed(seconds)}")
+        self._r_elapsed_after_id = self.after(
+            1000, lambda: self._refresh_r_elapsed_timer(generation),
+        )
+
+    def _finish_r_elapsed_timer(self):
+        """Freeze the final wall-clock duration for any terminal batch outcome."""
+        started_at = getattr(self, "_r_run_started_at", None)
+        if started_at is None:
+            return getattr(self, "_r_run_elapsed_seconds", None)
+        seconds = max(0.0, time.monotonic() - started_at)
+        self._r_run_started_at = None
+        self._r_run_elapsed_seconds = seconds
+        self._r_elapsed_generation += 1
+        self._cancel_r_elapsed_update()
+        self.elapsed_time_var.set(f"Total elapsed: {self._format_r_elapsed(seconds)}")
+        return seconds
+
+    def _reset_r_elapsed_timer(self):
+        self._cancel_r_elapsed_update()
+        self._r_elapsed_generation = getattr(self, "_r_elapsed_generation", 0) + 1
+        self._r_run_started_at = None
+        self._r_run_elapsed_seconds = None
+        variable = getattr(self, "elapsed_time_var", None)
+        if variable is not None:
+            variable.set("")
+
+    def destroy(self):
+        self._reset_r_elapsed_timer()
+        super().destroy()
 
     @staticmethod
     def _normalize_step4_result_folders(folders):
@@ -2756,10 +2830,12 @@ class Step3Frame(SidebarStepFrame):
             bundled_versions = {default_script.with_name(self.R_SCRIPT_NAME): "original"}
             if self.R_OPTIMIZED_ENABLED:
                 bundled_versions[default_script.with_name(self.R_OPTIMIZED_SCRIPT_NAME)] = "optimized"
+                bundled_versions[default_script.with_name(self.R_DEEP_LAYERS_SCRIPT_NAME)] = "optimized_deep_layers"
         else:
             bundled_versions = {default_script.with_name(self.R_OUTPUT_SCRIPT_NAME): "original"}
             if self.R_OPTIMIZED_ENABLED:
                 bundled_versions[default_script.with_name(self.R_OPTIMIZED_OUTPUT_SCRIPT_NAME)] = "optimized"
+                bundled_versions[default_script.with_name(self.R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME)] = "optimized_deep_layers"
         choices = discover_r_scripts(
             default_script,
             self._user_r_script_dir(role),
@@ -2770,9 +2846,14 @@ class Step3Frame(SidebarStepFrame):
 
     def _r_script_is_enabled(self, role, path):
         if not self.R_OPTIMIZED_ENABLED:
-            optimized_name = self.R_OPTIMIZED_SCRIPT_NAME if role == "main" else self.R_OPTIMIZED_OUTPUT_SCRIPT_NAME
-            optimized = self._script_path(role).with_name(optimized_name)
-            return Path(path).resolve() != optimized.resolve()
+            optimized_names = (
+                (self.R_OPTIMIZED_SCRIPT_NAME, self.R_DEEP_LAYERS_SCRIPT_NAME)
+                if role == "main"
+                else (self.R_OPTIMIZED_OUTPUT_SCRIPT_NAME, self.R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME)
+            )
+            return Path(path).resolve() not in {
+                self._script_path(role).with_name(name).resolve() for name in optimized_names
+            }
         return True
 
     def _import_user_r_script(self, source_path, role="main"):
@@ -3695,6 +3776,7 @@ class Step3Frame(SidebarStepFrame):
         return "\n".join(lines)
 
     def _reset_to_tutorial_state(self):
+        self._reset_r_elapsed_timer()
         self.results = None
         self.original_light_volume = None
         self.progress_text_var.set("Idle")
@@ -4139,6 +4221,10 @@ class Step3Frame(SidebarStepFrame):
         if output_script_path is None or not output_script_path.is_file():
             messagebox.showerror("Batch Step 3", f"Could not find the output R script:\n{output_script_path}")
             return
+        pair_error = self._r_script_pair_error(main_script_path, output_script_path)
+        if pair_error is not None:
+            messagebox.showerror("Batch Step 3", pair_error, parent=self)
+            return
         rscript = self._ensure_r_ready_with_wizard()
         if rscript is None:
             messagebox.showerror(
@@ -4171,6 +4257,7 @@ class Step3Frame(SidebarStepFrame):
         self._active_r_folder_keys = {self._folder_key(folder) for folder in folders}
         self._set_process_buttons("disabled")
         self.progress_text_var.set("Batch running")
+        self._start_r_elapsed_timer()
         output_schedule = (
             "in parallel as each folder finishes its first script"
             if output_mode == self.R_OUTPUT_MODE_PARALLEL
@@ -4196,14 +4283,16 @@ class Step3Frame(SidebarStepFrame):
         try:
             worker_thread.start()
         except Exception as exc:
+            elapsed = self._finish_r_elapsed_timer()
+            elapsed_text = f" Total elapsed: {self._format_r_elapsed(elapsed)}."
             self._busy = False
             self._active_r_core_allocation = 0
             self._active_r_folder_keys = set()
             self._set_process_buttons("normal")
             self.progress_text_var.set("Batch failed to start")
-            self.status_var.set(f"Could not start the Step 3 R batch: {exc}")
+            self.status_var.set(f"Could not start the Step 3 R batch: {exc}.{elapsed_text}")
             if self.r_batch_run_panel is not None:
-                self.r_batch_run_panel.set_summary("Batch failed to start.")
+                self.r_batch_run_panel.set_summary(f"Batch failed to start.{elapsed_text}")
                 self.r_batch_run_panel.log(str(exc))
                 self.r_batch_run_panel.finish()
             messagebox.showerror("Batch Step 3", f"Could not start the R batch worker:\n{exc}")
@@ -4216,6 +4305,24 @@ class Step3Frame(SidebarStepFrame):
             panel.update_folder(folder, status=status, progress=progress)
         if log:
             panel.log(log)
+
+    def _r_pipeline_config(self, r_config, main_script_path, output_script_path):
+        """Render previews once when a bundled companion will provide them."""
+        config = dict(r_config)
+        config.pop("_defer_border_plots", None)
+        bundled_main = self._script_path("main")
+        bundled_output = self._script_path("output")
+        pairs = (
+            (self.R_OPTIMIZED_SCRIPT_NAME, self.R_OPTIMIZED_OUTPUT_SCRIPT_NAME),
+            (self.R_DEEP_LAYERS_SCRIPT_NAME, self.R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME),
+        )
+        selected = (Path(main_script_path).resolve(), Path(output_script_path).resolve())
+        if any(
+            selected == (bundled_main.with_name(main).resolve(), bundled_output.with_name(output).resolve())
+            for main, output in pairs
+        ):
+            config["_defer_border_plots"] = True
+        return config
 
     def _r_run_env_for_config(self, r_config, r_thread_limit):
         env = self._r_env(thread_limit=r_thread_limit)
@@ -4232,6 +4339,9 @@ class Step3Frame(SidebarStepFrame):
                 "AIDAS_PIXEL_WIDTH": r_config["pixel_width"],
             }
         )
+        if r_config.get("_defer_border_plots"):
+            env["AIDAS_STEP3_DEFER_BORDER_PLOTS"] = "1"
+            env["AIDAS_STEP3_RASTER"] = "1"
         return env
 
     @staticmethod
@@ -4245,6 +4355,19 @@ class Step3Frame(SidebarStepFrame):
             "cmd": list(prior_result.get("cmd", [])),
             "outcome": "cancelled",
         }
+
+    def _r_script_pair_error(self, main_script_path, output_script_path):
+        bundled_main = self._script_path("main").with_name(self.R_DEEP_LAYERS_SCRIPT_NAME)
+        if Path(main_script_path).resolve() != bundled_main.resolve():
+            return None
+        bundled_output = self._script_path("output").with_name(self.R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME)
+        if Path(output_script_path).resolve() == bundled_output.resolve():
+            return None
+        return (
+            "The Optimized deeper layers main script requires its matching "
+            "Optimized deeper layers output script. Select that output script "
+            "in Step 3 Settings to preserve omitted measurements."
+        )
 
     def _run_main_r_script_for_config(
         self,
@@ -4273,7 +4396,11 @@ class Step3Frame(SidebarStepFrame):
             r_config["pixel_width"],
         ]
         main_cmd = self._build_r_run_command(rscript_path, main_script_path, script_args)
-        env = self._r_run_env_for_config(r_config, r_thread_limit)
+        env = dict(self._r_run_env_for_config(r_config, r_thread_limit))
+        bundled_deep_main = self._script_path("main").with_name(self.R_DEEP_LAYERS_SCRIPT_NAME)
+        deep_layers_only = Path(main_script_path).resolve() == bundled_deep_main.resolve()
+        if deep_layers_only:
+            env["AIDAS_STEP3_DEEP_ONLY"] = "1"
         output_lines = []
 
         self.after(
@@ -4314,6 +4441,7 @@ class Step3Frame(SidebarStepFrame):
             "stderr": stderr,
             "cmd": [main_cmd],
             "outcome": "completed" if returncode == 0 else outcome,
+            "_deep_layers_only": deep_layers_only,
         }
 
     def _run_output_r_script_for_config(
@@ -4332,6 +4460,19 @@ class Step3Frame(SidebarStepFrame):
                 "Cancelled before the output R script started.",
                 prior_result,
             )
+
+        if prior_result.get("_deep_layers_only"):
+            bundled_deep_main = self._script_path("main").with_name(self.R_DEEP_LAYERS_SCRIPT_NAME)
+            message = self._r_script_pair_error(bundled_deep_main, output_script_path)
+            if message is not None:
+                return {
+                    "folder": folder,
+                    "returncode": 1,
+                    "stdout": prior_result.get("stdout", ""),
+                    "stderr": message,
+                    "cmd": list(prior_result.get("cmd", [])),
+                    "outcome": "failed",
+                }
 
         output_dir = Path(r_config["output_dir"])
         workspace_path = output_dir / self.R_WORKSPACE_FILES[1]
@@ -4446,6 +4587,22 @@ class Step3Frame(SidebarStepFrame):
         batch_folder=None,
         r_thread_limit=None,
     ):
+        r_config = self._r_pipeline_config(r_config, main_script_path, output_script_path)
+        if not self._r_cancel_event.is_set():
+            pair_error = self._r_script_pair_error(main_script_path, output_script_path)
+            if pair_error is not None:
+                return self._finalize_r_script_result(
+                    r_config,
+                    {
+                        "folder": Path(batch_folder or r_config["input_dir"]),
+                        "returncode": 1,
+                        "stdout": "",
+                        "stderr": pair_error,
+                        "cmd": [],
+                        "outcome": "failed",
+                    },
+                    validate_exports=False,
+                )
         main_result = self._run_main_r_script_for_config(
             rscript_path,
             main_script_path,
@@ -4528,12 +4685,16 @@ class Step3Frame(SidebarStepFrame):
                     outcome="cancelled",
                     returncode=130,
                 )
+            pair_error = self._r_script_pair_error(main_script_path, output_script_path)
+            if pair_error is not None:
+                return None, failed_result(folder, pair_error)
             self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
             r_config = None
             try:
                 if not allow_existing_rdata and self._folder_has_r_data(folder):
                     raise RuntimeError("Skipped because this folder contains RData.")
                 r_config = self._r_script_config_for_folder(folder)
+                r_config = self._r_pipeline_config(r_config, main_script_path, output_script_path)
                 result = self._run_main_r_script_for_config(
                     rscript_path,
                     main_script_path,
@@ -4698,6 +4859,7 @@ class Step3Frame(SidebarStepFrame):
             self.after(0, lambda batch_results=finished_results: self._on_batch_r_done(batch_results))
 
     def _on_batch_r_done(self, results):
+        elapsed = self._finish_r_elapsed_timer()
         self._busy = False
         self._active_r_core_allocation = 0
         self._active_r_folder_keys = set()
@@ -4716,6 +4878,8 @@ class Step3Frame(SidebarStepFrame):
             f"Batch complete: {success} succeeded, {failed} failed, "
             f"{cancelled} cancelled."
         )
+        if elapsed is not None:
+            summary += f" Total elapsed: {self._format_r_elapsed(elapsed)}."
         self.status_var.set(summary)
         if panel is not None:
             panel.set_summary(summary)

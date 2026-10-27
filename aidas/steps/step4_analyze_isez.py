@@ -2751,7 +2751,8 @@ class Step4Frame(SidebarStepFrame):
         )
         HoverToolTip(
             self.build_stacks_button,
-            "Build output stacks after all ROIs are complete.",
+            "Build output stacks for every ready tab. Each tab must have all ROIs confirmed; "
+            "the counter shows tabs with completed stack outputs.",
         )
         self.build_stacks_button.pack(fill="x")
         ttk.Separator(self.sidebar_footer, orient="horizontal").pack(
@@ -3085,7 +3086,11 @@ class Step4Frame(SidebarStepFrame):
         """Detach pending work before changing or resetting the active file."""
 
         self._roi_context_generation = getattr(self, "_roi_context_generation", 0) + 1
-        for name in ("_auto_save_after_id", "_auto_detection_after_id", "_stack_build_after_id"):
+        batch_building = getattr(self, "_batch_stack_cancel", None) is not None
+        jobs = ["_auto_save_after_id", "_auto_detection_after_id"]
+        if not batch_building:
+            jobs.append("_stack_build_after_id")
+        for name in jobs:
             job = getattr(self, name, None)
             setattr(self, name, None)
             if job is not None:
@@ -3094,10 +3099,12 @@ class Step4Frame(SidebarStepFrame):
                 except tk.TclError:
                     pass
         self._auto_detection_events = None
-        self._stack_build_events = None
+        if not batch_building:
+            self._stack_build_events = None
         self._auto_detecting = False
         self._auto_saving_roi = False
-        self._stack_building = False
+        if not batch_building:
+            self._stack_building = False
 
     @staticmethod
     def _dispose_roi_plot(canvas, figure) -> None:
@@ -3167,6 +3174,7 @@ class Step4Frame(SidebarStepFrame):
     def _clear_batch_roi_session(self) -> None:
         """Release both active and inactive file caches when replacing a run."""
 
+        self._cancel_batch_stack_build()
         self._cancel_batch_roi_open()
         active_canvas = self.canvas
         self._clear_current_roi_state()
@@ -3265,6 +3273,7 @@ class Step4Frame(SidebarStepFrame):
             pass
 
     def destroy(self) -> None:
+        self._cancel_batch_stack_build()
         self._cancel_batch_roi_open()
         super().destroy()
 
@@ -3920,6 +3929,7 @@ class Step4Frame(SidebarStepFrame):
         state["image"] = self.image
         state["current_path"] = self.current_path
         state["current_stem"] = self.current_stem
+        state["output_dir"] = self.output_dir_var.get()
         state["canvas"] = self.canvas
         state["figure"] = self.figure
         state["ax_profile"] = self.ax_profile
@@ -3998,8 +4008,7 @@ class Step4Frame(SidebarStepFrame):
         self._stack_build_complete = bool(state.get("complete"))
 
         self.input_dir_var.set(str(self.current_path.parent))
-        if not self._output_dir_user_selected:
-            self.output_dir_var.set(str(self.current_path.parent))
+        self.output_dir_var.set(state.get("output_dir") or str(self.current_path.parent))
         self._set_batch_folder_label(state.get("folder"))
         self._sync_entry_vars_from_clicks()
         self._refresh_roi_list()
@@ -4045,6 +4054,8 @@ class Step4Frame(SidebarStepFrame):
         elif was_active:
             notebook.select(notebook.select() or tabs[0])
         self._update_continue_to_step5_button_state()
+
+        self._update_build_stack_button_state()
 
     def _update_active_batch_roi_tab_progress(self) -> None:
         tab_key = self._active_batch_roi_tab
@@ -4145,7 +4156,9 @@ class Step4Frame(SidebarStepFrame):
         self.current_stem = self.current_path.stem
         self.input_dir_var.set(str(self.current_path.parent))
         self._input_dir_user_selected = True
-        if not self._output_dir_user_selected:
+        if restore_state is not None:
+            self.output_dir_var.set(restore_state.get("output_dir") or str(self.current_path.parent))
+        elif not self._output_dir_user_selected:
             self.output_dir_var.set(str(self.current_path.parent))
 
         self.completed.clear()
@@ -5151,10 +5164,18 @@ class Step4Frame(SidebarStepFrame):
     def _update_build_stack_button_state(self) -> None:
         if self.build_stacks_button is None:
             return
+        states = getattr(self, "batch_roi_tab_states", {})
+        if states:
+            completed = sum(bool(state.get("complete")) for state in states.values())
+            total = len(states)
+            ready = any(self._batch_tab_stack_ready(key, state) for key, state in states.items())
+        else:
+            completed, total = int(bool(getattr(self, "_stack_build_complete", False))), 1
+            ready = self._all_rois_completed() and not completed
+        self.build_stacks_button.configure(text=f"Build Stack ({completed}/{total} completed)")
         build_ready = (
-            self._all_rois_completed()
+            ready
             and not getattr(self, "_stack_building", False)
-            and not getattr(self, "_stack_build_complete", False)
         )
         self._update_roi_action_emphasis(build_ready)
         if build_ready:
@@ -5725,6 +5746,9 @@ class Step4Frame(SidebarStepFrame):
         if getattr(self, "_stack_building", False):
             self.status_var.set("Stack creation is already running. Please wait.")
             return
+        if getattr(self, "batch_roi_tab_states", {}):
+            self._build_ready_tab_stacks()
+            return
         if not self.completed:
             messagebox.showwarning("Step 4", "Save at least one ROI before building stack outputs.")
             return
@@ -5767,6 +5791,123 @@ class Step4Frame(SidebarStepFrame):
             )
         except tk.TclError:
             pass
+
+    def _batch_tab_stack_ready(self, key: str, state: dict) -> bool:
+        completed = self.completed if key == getattr(self, "_active_batch_roi_tab", None) else (state.get("completed") or {})
+        return bool(self.rois) and not state.get("complete") and all(
+            roi.suffix in completed for roi in self.rois
+        )
+
+    def _cancel_batch_stack_build(self) -> None:
+        cancelled = getattr(self, "_batch_stack_cancel", None)
+        if cancelled is not None:
+            cancelled.set()
+            self._batch_stack_cancel = None
+            self._stack_build_events = None
+            self._stack_building = False
+            job = getattr(self, "_stack_build_after_id", None)
+            self._stack_build_after_id = None
+            if job is not None:
+                try:
+                    self.after_cancel(job)
+                except tk.TclError:
+                    pass
+
+    def _build_ready_tab_stacks(self) -> None:
+        """Snapshot all ready tabs; only the worker reads or writes files."""
+        self._sync_active_batch_roi_state()
+        jobs = []
+        destinations = set()
+        for key, state in self.batch_roi_tab_states.items():
+            if not self._batch_tab_stack_ready(key, state):
+                continue
+            path = Path(state["path"])
+            output = self.output_dir_var.get() if key == self._active_batch_roi_tab else state.get("output_dir")
+            outdir = Path(output or path.parent).expanduser().resolve()
+            if outdir in destinations:
+                messagebox.showwarning(
+                    "Step 4", "Ready tabs share an output folder. Choose a different output folder "
+                    "for each tab before building stacks.",
+                )
+                return
+            destinations.add(outdir)
+            image = state.get("image")
+            prepared = state.get("_prepared_load")
+            if image is None and prepared is not None and prepared[0] == "loaded":
+                image = np.asarray(prepared[1][0])
+            ordered = [state["completed"][roi.suffix] for roi in self.rois]
+            jobs.append((key, state, path, image, ordered, outdir))
+        if not jobs:
+            messagebox.showwarning("Step 4", "No tabs are ready. Confirm every ROI in a tab before building its stack.")
+            self._update_build_stack_button_state()
+            return
+
+        cancelled = self._batch_stack_cancel = threading.Event()
+        events = self._stack_build_events = queue.Queue()
+        self._stack_building = True
+        self._update_build_stack_button_state()
+        self._update_auto_detect_button_state()
+        self.status_var.set(f"Building stacks for {len(jobs)} ready tab(s). Please wait...")
+        self._show_stack_building_notice(jobs[0][-1])
+        failures = []
+
+        def worker():
+            for key, state, path, image, ordered, outdir in jobs:
+                if cancelled.is_set():
+                    return
+                try:
+                    if image is None:
+                        image = np.asarray(load_oct_volume(path)[0])
+                    self._write_stack_output_files(image, ordered, outdir)
+                except Exception as exc:
+                    events.put(("error", (key, state, ordered, outdir, str(exc))))
+                else:
+                    events.put(("built", (key, state, ordered, outdir, None)))
+            events.put(("done", None))
+
+        def poll():
+            if cancelled.is_set() or events is not getattr(self, "_stack_build_events", None):
+                return
+            self._stack_build_after_id = None
+            while not events.empty():
+                kind, payload = events.get_nowait()
+                if kind == "done":
+                    self._batch_stack_cancel = None
+                    self._stack_build_events = None
+                    self._stack_building = False
+                    self._hide_grid_notice()
+                    self._update_build_stack_button_state()
+                    self._update_auto_detect_button_state()
+                    self._update_continue_to_step5_button_state()
+                    if getattr(self, "_stack_build_complete", False):
+                        self._show_processed_grid_notice(self._last_results_dir)
+                    completed, total = self._completion_progress_counts()
+                    self.status_var.set(f"Stack building finished. {completed}/{total} tabs completed.")
+                    if failures:
+                        messagebox.showerror("Step 4", "Some stacks could not be built:\n" + "\n".join(failures))
+                    return
+                key, state, ordered, outdir, error = payload
+                if self.batch_roi_tab_states.get(key) is not state:
+                    continue
+                if error is not None:
+                    failures.append(f"{state['path']}: {error}")
+                    continue
+                # A reset, edit, or closed tab must not be marked complete by
+                # a worker using an earlier snapshot of its ROI measurements.
+                if not all(state.get("completed", {}).get(result.roi.suffix) is result for result in ordered):
+                    continue
+                state["complete"] = True
+                state["last_results_dir"] = outdir
+                if key == self._active_batch_roi_tab:
+                    self._stack_build_complete = True
+                    self._last_results_dir = outdir
+                self._refresh_batch_roi_tab_labels([key])
+                self._update_build_stack_button_state()
+                self._update_continue_to_step5_button_state()
+            self._stack_build_after_id = self.after(self.BACKGROUND_POLL_MS, poll)
+
+        self._start_background_worker(worker)
+        self._stack_build_after_id = self.after(self.BACKGROUND_POLL_MS, poll)
 
     def _show_processing_complete(
         self,

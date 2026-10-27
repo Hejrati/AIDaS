@@ -188,6 +188,8 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         tips=(
             "The fovea marker value is 243 and the RPE marker value is 255; the technical diagram shown in the idle Step 3 workspace explains minimum marker coverage and depth geometry.",
             "The selected R-script versions are managed in Settings; the Process panel starts setup, scanning, and result loading.",
+            "Original and the default Optimized version retain all six boundaries. For Optimized deeper layers, select the matching main and output scripts in Settings. It preserves RPE, OLM, ONL/OPL, INL/IPL, and foveal calculations; the surface boundary remains an internal reference while GCL/RNFL processing is skipped.",
+            "Deeper-layer outputs retain all 90 depth positions and eight thickness columns. Omitted superficial results are NA; zero-filled regions in normalized Analyze images are display placeholders, not measured brightness. Step 5's ELM-RPE and ONL columns remain available.",
         ),
         step_index=2,
     ),
