@@ -103,7 +103,7 @@ class WorkflowTestRunnerTests(unittest.TestCase):
 
     def test_disabled_collection_setting_is_preserved_after_success(self):
         gc.disable()
-        code, output = self._execute(unittest.TestSuite([unittest.FunctionTestCase(lambda: None)]))
+        code, output = self._execute(unittest.TestSuite([unittest.FunctionTestCase(gc.enable)]))
         self.assertEqual(code, 0, output)
         self.assertFalse(gc.isenabled())
 
