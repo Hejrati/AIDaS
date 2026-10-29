@@ -39,6 +39,9 @@ class _Status:
     def __init__(self, text="ready"):
         self.options = {"text": text}
 
+    def winfo_exists(self):
+        return True
+
     def configure(self, **options):
         self.options.update(options)
 

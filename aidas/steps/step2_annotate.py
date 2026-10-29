@@ -178,6 +178,21 @@ def _polyline_pixels(points):
     return pixel_points or [points[0]]
 
 
+def _polyline_pixel_count(points):
+    """Count Bresenham samples without allocating the rasterized polyline."""
+    vertices = (tuple(map(int, point)) for point in points)
+    previous = next(vertices, None)
+    if previous is None:
+        return 0
+    count = 1
+    for point in vertices:
+        # Each segment includes both endpoints. Its first sample is shared
+        # with the previous segment, including zero-length segments.
+        count += max(abs(point[0] - previous[0]), abs(point[1] - previous[1]))
+        previous = point
+    return count
+
+
 def _resize_to_standard_format(volume_3d):
     """Resize a 3-D volume (slices, height, width) to standard output format.
 
@@ -2556,7 +2571,7 @@ class Step2Frame(SidebarStepFrame):
         points = [(x, 0), (x, max_y)]
         return {
             "points": points,
-            "pixels": _polyline_pixels(points),
+            "pixels": [(x, y) for y in range(max_y + 1)],
             "color": BOUNDARY_COLORS.get(FOVEA_BOUNDARY_NAME, "#ffd500"),
         }
 
@@ -3441,8 +3456,8 @@ class Step2Frame(SidebarStepFrame):
             fovea_x_entry_var.set(str(x))
         self._updating_fovea_entry = False
         self._refresh_live_image_status()
-        if hasattr(self, "revert_line_btn"):
-            self._update_boundary_action_buttons()
+        # Moving the fovea changes no boundary completion or action state.
+        # Avoid rescanning every result tab on each drag event.
 
     # ═══════════════════════════════════════════════════════════════════════
     #  Live updates and selection handling
@@ -3481,11 +3496,11 @@ class Step2Frame(SidebarStepFrame):
             self._update_boundary_action_buttons()
             return
 
-        pixels = _polyline_pixels(points)
+        pixel_count = _polyline_pixel_count(points)
         name = self.active_boundary or self._selected_boundary_name()
         self._boundary_restore_cache().pop(name, None)
         self.active_trace_var.set(
-            f"Active: {name} | {len(points)} vertices | {len(pixels)} pixel(s) on line"
+            f"Active: {name} | {len(points)} vertices | {pixel_count} pixel(s) on line"
         )
         self._update_boundary_action_buttons()
 
@@ -3562,9 +3577,9 @@ class Step2Frame(SidebarStepFrame):
         if not points:
             self.active_trace_var.set(f"Active: {self.active_boundary} | no vertices placed yet")
             return
-        pixels = _polyline_pixels(points)
+        pixel_count = _polyline_pixel_count(points)
         self.active_trace_var.set(
-            f"Active: {self.active_boundary} | {len(points)} vertices | {len(pixels)} pixel(s) on line"
+            f"Active: {self.active_boundary} | {len(points)} vertices | {pixel_count} pixel(s) on line"
         )
 
 
@@ -3760,46 +3775,25 @@ class Step2Frame(SidebarStepFrame):
             scale_x = target_w / orig_w
             scale_y = 1.0
             
-            # Create scaled versions of boundary traces
+            # Scale dense AI traces in one array operation per coordinate list.
             scaled_traces = {}
             for name, trace in self.boundary_traces.items():
-                scaled_points = []
-                for x, y in trace.get("points", []):
-                    scaled_x = int(np.round(x * scale_x))
-                    scaled_y = int(np.round(y * scale_y))
-                    # Clamp to valid range
-                    scaled_x = max(0, min(scaled_x, target_w - 1))
-                    scaled_y = max(0, min(scaled_y, target_h - 1))
-                    scaled_points.append((scaled_x, scaled_y))
-
-                scaled_pixels = []
-                for x, y in trace.get("pixels", []):
-                    scaled_x = int(np.round(x * scale_x))
-                    scaled_y = int(np.round(y * scale_y))
-                    # Clamp to valid range
-                    scaled_x = max(0, min(scaled_x, target_w - 1))
-                    scaled_y = max(0, min(scaled_y, target_h - 1))
-                    scaled_pixels.append((scaled_x, scaled_y))
                 scaled_traces[name] = {
-                    "points": scaled_points,
-                    "pixels": scaled_pixels,
+                    "points": self._scale_trace_coordinates(
+                        trace.get("points", []), scale_x, scale_y, target_w, target_h,
+                    ),
+                    "pixels": self._scale_trace_coordinates(
+                        trace.get("pixels", []), scale_x, scale_y, target_w, target_h,
+                    ),
                     "color": trace.get("color", ""),
                 }
-            
-            # Temporarily use scaled traces for marking
-            original_traces = self.boundary_traces
-            self.boundary_traces = scaled_traces
         else:
-            original_traces = None
+            scaled_traces = self.boundary_traces
 
         # Standard MARKED format: 8-bit with base intensities capped at 230.
         light_slice = np.array(base_marked, copy=True)
-        self._apply_mark_values(light_slice, COMMON_MARK_VALUES)
-        self._apply_mark_values(light_slice, ADDITIONAL_MARK_VALUES)
-
-        # Restore original traces if we modified them
-        if original_traces is not None:
-            self.boundary_traces = original_traces
+        self._apply_mark_values_to_image(light_slice, scaled_traces, COMMON_MARK_VALUES)
+        self._apply_mark_values_to_image(light_slice, scaled_traces, ADDITIONAL_MARK_VALUES)
 
         # Create volume with standard number of slices (always 2 in standard format)
         nslices = max(1, int(target_slices))
@@ -4324,6 +4318,47 @@ class Step2Frame(SidebarStepFrame):
     #  Neural segmentation
     # ═══════════════════════════════════════════════════════════════════════
     @staticmethod
+    def _scale_trace_coordinates(
+        points, scale_x, scale_y, target_width, target_height, *, coerce_float=False,
+    ):
+        """Scale coordinates with the existing rounding and clipping rules.
+
+        Ordinary annotation coordinates fit in float64. Keep a scalar fallback
+        for unusual numeric objects and invalid values so their conversion and
+        error behavior stays the same as the original per-point implementation.
+        """
+        coordinates = np.asarray(points)
+        if coordinates.size == 0:
+            return []
+        if (
+            coordinates.ndim == 2
+            and coordinates.shape[1] == 2
+            and coordinates.dtype.kind in "iuf"
+            and coordinates.dtype.itemsize <= 8
+        ):
+            scaled = coordinates.astype(np.float64, copy=False) * (scale_x, scale_y)
+            np.rint(scaled, out=scaled)
+            if np.isfinite(scaled).all():
+                np.clip(
+                    scaled, 0,
+                    (max(0, target_width - 1), max(0, target_height - 1)),
+                    out=scaled,
+                )
+                return [tuple(point) for point in scaled.astype(np.int64).tolist()]
+
+        scaled_points = []
+        for x, y in points:
+            if coerce_float:
+                x, y = float(x), float(y)
+            sx = int(np.round(x * scale_x))
+            sy = int(np.round(y * scale_y))
+            scaled_points.append((
+                max(0, min(sx, target_width - 1)),
+                max(0, min(sy, target_height - 1)),
+            ))
+        return scaled_points
+
+    @staticmethod
     def _scale_traces_to_shape(traces, source_shape, target_shape):
         source_h, source_w = int(source_shape[0]), int(source_shape[1])
         target_h, target_w = int(target_shape[0]), int(target_shape[1])
@@ -4343,13 +4378,10 @@ class Step2Frame(SidebarStepFrame):
         scale_y = target_h / source_h
         scaled = {}
         for name, trace in traces.items():
-            scaled_points = []
-            for x, y in trace.get("points", []):
-                sx = int(np.round(float(x) * scale_x))
-                sy = int(np.round(float(y) * scale_y))
-                sx = max(0, min(sx, target_w - 1))
-                sy = max(0, min(sy, target_h - 1))
-                scaled_points.append((sx, sy))
+            scaled_points = Step2Frame._scale_trace_coordinates(
+                trace.get("points", []), scale_x, scale_y, target_w, target_h,
+                coerce_float=True,
+            )
             scaled[name] = {
                 "points": scaled_points,
                 "pixels": _polyline_pixels(scaled_points),
@@ -4664,7 +4696,9 @@ class Step2Frame(SidebarStepFrame):
             arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
         source_was_8bit = arr.dtype == np.uint8
         if source_was_8bit:
-            arr = np.rint(arr.astype(np.float64) * (65535.0 / 255.0)).astype(np.uint16)
+            # 65535 / 255 is exactly 257; integer promotion preserves every
+            # possible 8-bit value without allocating float64 intermediates.
+            arr = arr.astype(np.uint16) * np.uint16(257)
         return np.ascontiguousarray(arr), source_was_8bit
 
     def _write_segmenter_log_file(self, content):
@@ -5578,11 +5612,9 @@ class Step2Frame(SidebarStepFrame):
                     traces[FOVEA_BOUNDARY_NAME] = fovea_trace
                     if FOVEA_BOUNDARY_NAME not in order:
                         order.append(FOVEA_BOUNDARY_NAME)
-                    overlays.append({
-                        "points": fovea_trace["points"],
-                        "color": fovea_trace.get("color"),
-                        "label": FOVEA_BOUNDARY_NAME,
-                    })
+                # The interactive vertical marker draws the fovea. Including
+                # it here forces the first activation to rebuild every dense
+                # boundary overlay just to remove this duplicate line.
                 canvas.set_line_overlays(overlays)
                 self._batch_result_states[str(frame)] = {
                     "input": input_path,
@@ -5653,12 +5685,15 @@ class Step2Frame(SidebarStepFrame):
     def _activate_batch_result_tab(self, tab):
         if tab is None:
             return
-        self._sync_active_batch_result_state()
         tab_key = str(tab)
         state = self._batch_result_states.get(tab_key)
         if not state:
             return
         canvas = state.get("canvas") or self._batch_result_tab_canvases.get(tab_key)
+        if (tab_key == self._active_batch_result_tab
+                and canvas is self.image_canvas):
+            return
+        self._sync_active_batch_result_state()
         self._active_batch_result_tab = tab_key
         self._load_editor_state(
             state,

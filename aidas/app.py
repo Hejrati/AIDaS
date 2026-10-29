@@ -1354,7 +1354,9 @@ class AIDaSApp(ctk.CTk):
             get_step2_core_usage=self._step2_core_usage,
             on_continue_to_step4=self._on_step3_continue_to_step4,
         )
-        self.step3.elapsed_time_var.trace_add("write", self._refresh_image_path_status)
+        self._step3_elapsed_trace_id = self.step3.elapsed_time_var.trace_add(
+            "write", self._refresh_image_path_status,
+        )
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
 
         self._set_splash_progress(91, "Preparing Step 4 - rrMCP/AR...")
@@ -1388,6 +1390,22 @@ class AIDaSApp(ctk.CTk):
         self._queue_interface_widget_refresh(include_splash=True)
         self._last_effective_appearance = ctk.get_appearance_mode()
         self._appearance_watch_after_id = self.after(1500, self._watch_system_appearance)
+
+    def destroy(self) -> None:
+        """Detach status observers before Tk destroys the shell and step pages."""
+        if self.__dict__.get("_aidas_destroying", False):
+            return
+        self._aidas_destroying = True
+        trace_id = self.__dict__.pop("_step3_elapsed_trace_id", None)
+        step3 = self.__dict__.get("step3")
+        variable = getattr(step3, "elapsed_time_var", None)
+        if trace_id is not None and variable is not None:
+            try:
+                variable.trace_remove("write", trace_id)
+            except tk.TclError:
+                # The step or interpreter may already have been torn down.
+                pass
+        super().destroy()
 
     def _finish_startup(self) -> None:
         """Close the splash and reveal the fully initialized main window."""
@@ -1961,16 +1979,22 @@ class AIDaSApp(ctk.CTk):
 
     def _set_status_message(self, message: str) -> None:
         """Show a transient application-level status without assuming startup is complete."""
-        status = getattr(self, "status", None)
-        if status is not None:
+        if self.__dict__.get("_aidas_destroying", False):
+            return
+        status = self.__dict__.get("status")
+        if status is not None and status.winfo_exists():
             status.configure(text=str(message))
             self._refresh_image_path_status()
 
     def _refresh_image_path_status(self, *_args) -> None:
         """Show the active step's image path or Step 3 elapsed duration."""
+        if self.__dict__.get("_aidas_destroying", False):
+            return
         notebook = self.__dict__.get("notebook")
         status = self.__dict__.get("status")
         if notebook is None or status is None:
+            return
+        if not status.winfo_exists():
             return
         try:
             index = notebook.index(notebook.select())

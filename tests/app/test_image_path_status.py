@@ -157,6 +157,16 @@ class ImagePathStatusTests(unittest.TestCase):
                         roi._close_batch_roi_tab(roi.batch_roi_notebook, tabs[1])
                         app.update()
                         self.assertEqual(app.status.cget("text"), "")
+                    app.notebook.select(app.step3)
+                    app.update()
+                    app.step3._start_r_elapsed_timer()
+                    elapsed = app.step3.elapsed_time_var
+                    trace_id = app._step3_elapsed_trace_id
+                    app.report_callback_exception = mock.Mock()
+                    app.destroy()
+                    app.report_callback_exception.assert_not_called()
+                    self.assertNotIn(trace_id, [name for _modes, name in elapsed.trace_info()])
+                    self.assertEqual(elapsed.get(), "")
                 finally:
                     if app is not None:
                         app.destroy()

@@ -2808,9 +2808,9 @@ class Step3Frame(SidebarStepFrame):
     def _script_path(role="main"):
         """Return a Step 3 script from source or PyInstaller's bundle."""
         if role == "main":
-            script_name = Step3Frame.R_OPTIMIZED_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_SCRIPT_NAME
+            script_name = Step3Frame.R_DEEP_LAYERS_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_SCRIPT_NAME
         else:
-            script_name = Step3Frame.R_OPTIMIZED_OUTPUT_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_OUTPUT_SCRIPT_NAME
+            script_name = Step3Frame.R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME if Step3Frame.R_OPTIMIZED_ENABLED else Step3Frame.R_OUTPUT_SCRIPT_NAME
         # Resolve short Windows temp paths (RUNNER~1) in the same way as the
         # discovery library so default and selected paths share one identity.
         return Path(resource_path(script_name)).resolve()

@@ -159,11 +159,26 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         self.frame._script_path = lambda role="main": self.defaults[role]
         self.frame._user_r_script_dir = lambda role="main": self.root / "user" / role
 
-    def test_actual_bundled_script_paths_use_optimized_defaults(self):
+    def test_actual_bundled_defaults_select_the_matching_deeper_pair_in_settings(self):
+        del self.frame._script_path
         with mock.patch("aidas.steps.step3_flatten.resource_path",
                         side_effect=lambda name: str(self.root / "bundled" / name)):
-            self.assertEqual(Step3Frame._script_path("main"), self.defaults["main"])
-            self.assertEqual(Step3Frame._script_path("output"), self.defaults["output"])
+            dialog = _settings(self.frame)
+            for role in ("main", "output"):
+                self.assertEqual(Step3Frame._script_path(role), self.deep_layers[role])
+                choices = self.frame.available_r_scripts(role)
+                self.assertEqual(choices[0].path, self.deep_layers[role])
+                self.assertTrue(choices[0].is_default)
+                self.assertEqual(choices[0].version, "optimized_deep_layers")
+                self.assertEqual(self.frame._selected_r_script_path(role), self.deep_layers[role])
+                dialog._refresh_r_script_choices(role)
+                self.assertEqual(dialog._script_vars[role].get(), "Optimized deeper layers")
+                self.assertIn(self.defaults[role], [choice.path for choice in choices])
+                self.assertIn(self.originals[role], [choice.path for choice in choices])
+            self.assertIsNone(self.frame._r_script_pair_error(
+                self.frame._selected_r_script_path("main"),
+                self.frame._selected_r_script_path("output"),
+            ))
 
         self.assertTrue(Step3Frame.R_OPTIMIZED_ENABLED)
         self.assertEqual(self.originals["main"].name, "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R")
@@ -173,7 +188,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         bundled = self.root / "bundled" / ".." / "bundled"
         with mock.patch("aidas.steps.step3_flatten.resource_path",
                         side_effect=lambda name: str(bundled / name)):
-            self.assertEqual(Step3Frame._script_path(), self.defaults["main"])
+            self.assertEqual(Step3Frame._script_path(), self.deep_layers["main"])
         self.frame.preferences.values["r_main_script_path"] = str(bundled / self.defaults["main"].name)
         self.assertEqual(self.frame._selected_r_script_path(), self.defaults["main"])
 
