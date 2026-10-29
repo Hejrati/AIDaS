@@ -2,22 +2,21 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
-import time
+import math
 import tkinter as tk
 from typing import Callable
 
 import customtkinter as ctk
-from PIL import Image, ImageDraw
 
 from aidas.core.display import work_area_bounds
 from aidas.ui.components import AppButton
+from aidas.ui.rendering import finish_deferred_rendering
 from aidas.ui.theme import (
     COLOR_PAIRS,
-    CONTROLS,
     SHAPES,
     TYPOGRAPHY,
-    resolve_color,
 )
 from aidas.ui.windowing import (
     centered_logical_geometry,
@@ -25,7 +24,7 @@ from aidas.ui.windowing import (
     physical_window_size,
     synchronize_window_chrome,
 )
-from aidas.utils.ui_utils import HoverToolTip, apply_app_icon_to
+from aidas.utils.ui_utils import apply_app_icon_to
 
 
 StagePointGroups = tuple[
@@ -67,7 +66,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         output_summary="Analyze images, diagnostics, ROI stacks, and one compiled Excel workbook",
         completion_check=(
             "The workflow is complete when Step 5 has combined the selected Step 3 "
-            "and Step 4 measurements into LE_RE_rrMCPAR_ELMRPE_ONL.xlsx."
+            "and Step 4 measurements into rrMCPAR_ELMRPE_ONL.xlsx."
         ),
         tips=(
             "Use the green progress rows, completed lists, tab counters, and status bars to see what is ready at each stage.",
@@ -223,7 +222,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             (
                 "When all 21 ROIs are complete, Build stack becomes available and marks the folder tab Done after a successful build.",
                 "The build shows a wait message while writing ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder. A completed plot tab provides Open results folder, Restart this file, and Go to Step 5 actions.",
-                "Go to Step 5 opens Create Excel File and carries forward the current measurement root.",
+                "Go to Step 5 opens Create Excel File, carries forward the measurement root for all tabs, and starts compilation automatically.",
             ),
         ),
         tips=(
@@ -242,32 +241,32 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             "Step 5 combines measurements produced throughout the workflow into "
             "one Excel file for downstream review and analysis."
         ),
-        input_summary="An LE/RE parent tree containing Step 3 text exports and Step 4 workbooks",
+        input_summary="A group / subject / nasal or temporal folder tree containing Step 3 text exports and Step 4 workbooks",
         function_summary="Combine rrMCP/AR, ELM-RPE, and ONL measurements into an Excel file",
-        output_summary="LE_RE_rrMCPAR_ELMRPE_ONL.xlsx",
+        output_summary="rrMCPAR_ELMRPE_ONL.xlsx",
         completion_check=(
-            "Progress reaches 100%, the log reports a saved Excel file, and the "
-            "selected output path contains LE_RE_rrMCPAR_ELMRPE_ONL.xlsx."
+            "A completion message confirms the Excel file was saved, and the "
+            "selected output path contains the compiled workbook (rrMCPAR_ELMRPE_ONL.xlsx by default)."
         ),
         stage_points=(
             (
-                "Use the Step 4 handoff or browse to the parent folder containing LE and RE subject folders.",
+                "Choose Go to Step 5 in Step 4 to transfer its measurement folders and start compilation automatically. Switching workspace tabs only opens the workspace. For manual compilation, browse to a folder containing group and subject folders at any depth.",
                 "Review the Excel file path and choose a different .xlsx destination if needed.",
                 "Choose whether to include the fovea RPEtoOLM row in the ELM-RPE sheet.",
-                "Select Create Excel File to start the final workflow step.",
+                "Select Create Excel File to run a manual compilation or compile again after changing options.",
             ),
             (
-                "AIDaS discovers current rr_MCPAR.xlsx and compatible legacy workbooks, then reads the Step 3 ELM-RPE and ONL exports.",
-                "Follow the progress bar and Excel file log; inputs stay locked while the file is being created.",
+                "AIDaS discovers current rr_MCPAR.xlsx and compatible legacy workbooks, then reads the Step 3 ELM-RPE and ONL exports. The nasal/temporal parent folder supplies the full subject ID. Its parent folder supplies the group name, including custom names or LE and RE. Folders without Excel results are ignored.",
+                "Explore the Folder contents canvas to see recorded Excel results. Hide other files is checked by default; uncheck it to also see thickness tables, fovea measurements, and image stacks. Expand or collapse folders and use Refresh to read changes. Files outside nasal/temporal folders are visible with an explanation. Inputs stay locked while the Excel file is being created.",
             ),
             (
                 "AIDaS creates the rrMCP-AR, ELM-RPE, and ONL worksheets.",
                 "The Excel file is saved at the selected output path.",
-                "A 100% progress value and completion message confirm that the five-step workflow is finished.",
+                "A completion message confirms that the five-step workflow is finished. The saved workbook appears in the folder tree when it is inside the selected directory.",
             ),
         ),
         tips=(
-            "Select the common parent above the LE and RE trees rather than an individual subject folder.",
+            "Select a common parent to include every group. Each group gets ID, Nasal, and Temporal columns on each measurement sheet.",
             "AIDaS accepts both current rr_MCPAR.xlsx outputs and recognized legacy result names.",
         ),
         step_index=4,
@@ -288,69 +287,41 @@ def tutorial_page_index_for_step(step_index: int) -> int:
     return 0
 
 
-@dataclass(frozen=True)
-class _PipelineAnimationState:
-    active_stage: int
-    connector_progress: tuple[float, float]
-    stage_progress: float = 0.0
+class _TextMeasurements:
+    """Cache Tk's complete text layout without measuring individual words."""
 
+    MAX_HEIGHTS = 64
 
-INPUT_HOLD_MS = 5200.0
-CONNECTOR_TRAVEL_MS = 900.0
-PROCESS_HOLD_MS = 3200.0
-OUTPUT_HOLD_MS = 4300.0
-PIPELINE_CYCLE_MS = (
-    INPUT_HOLD_MS
-    + CONNECTOR_TRAVEL_MS
-    + PROCESS_HOLD_MS
-    + CONNECTOR_TRAVEL_MS
-    + OUTPUT_HOLD_MS
-)
-
-
-def _smoothstep(value: float) -> float:
-    value = max(0.0, min(1.0, float(value)))
-    return value * value * (3.0 - (2.0 * value))
-
-
-def _pipeline_orientation(logical_width: int) -> str:
-    """Choose a readable card layout for the available logical width."""
-
-    return "horizontal" if int(logical_width) >= 650 else "vertical"
-
-
-def _pipeline_animation_state(elapsed_ms: float) -> _PipelineAnimationState:
-    """Return the deterministic stage and connector state for one animation tick."""
-
-    elapsed = max(0.0, float(elapsed_ms)) % PIPELINE_CYCLE_MS
-
-    if elapsed < INPUT_HOLD_MS:
-        return _PipelineAnimationState(
-            0,
-            (0.0, 0.0),
-            elapsed / INPUT_HOLD_MS,
+    def __init__(self, font: ctk.CTkFont, master: tk.Misc, *, scaling: float = 1.0) -> None:
+        # An unmanaged native label computes requested geometry immediately.
+        # It never paints or participates in the visible layout, and its parent
+        # destroys it with the tutorial. Match CTk's actual scaled font so pixel
+        # rounding cannot change line breaks on high-DPI displays.
+        self._scaling = scaling
+        self._label = tk.Label(
+            master, font=font.create_scaled_tuple(scaling),
+            borderwidth=0, highlightthickness=0, padx=0, pady=0,
         )
-    elapsed -= INPUT_HOLD_MS
-    if elapsed < CONNECTOR_TRAVEL_MS:
-        progress = _smoothstep(elapsed / CONNECTOR_TRAVEL_MS)
-        return _PipelineAnimationState(0, (progress, 0.0), 1.0)
-    elapsed -= CONNECTOR_TRAVEL_MS
-    if elapsed < PROCESS_HOLD_MS:
-        return _PipelineAnimationState(
-            1,
-            (1.0, 0.0),
-            elapsed / PROCESS_HOLD_MS,
+        self._heights: OrderedDict[tuple[tuple[str, ...], int], int] = OrderedDict()
+
+    def copy_height(self, font: ctk.CTkFont, copies: tuple[str, ...], width: int) -> int:
+        key = (copies, width)
+        if key in self._heights:
+            self._heights.move_to_end(key)
+            return self._heights[key]
+        self._label.configure(
+            font=font.create_scaled_tuple(self._scaling),
+            wraplength=width * self._scaling,
         )
-    elapsed -= PROCESS_HOLD_MS
-    if elapsed < CONNECTOR_TRAVEL_MS:
-        progress = _smoothstep(elapsed / CONNECTOR_TRAVEL_MS)
-        return _PipelineAnimationState(1, (1.0, progress), 1.0)
-    elapsed -= CONNECTOR_TRAVEL_MS
-    return _PipelineAnimationState(
-        2,
-        (1.0, 1.0),
-        min(1.0, elapsed / OUTPUT_HOLD_MS),
-    )
+        height = 0
+        for copy in copies:
+            self._label.configure(text=copy)
+            height = max(height, self._label.winfo_reqheight())
+        height = math.ceil(height / self._scaling) + 8
+        self._heights[key] = height
+        if len(self._heights) > self.MAX_HEIGHTS:
+            self._heights.popitem(last=False)
+        return height
 
 
 class _WorkflowOverviewMap(ctk.CTkFrame):
@@ -528,1307 +499,197 @@ class _WorkflowOverviewMap(ctk.CTkFrame):
 
     @staticmethod
     def stop() -> None:
-        """Match the animated visualizer lifecycle contract; no timer exists."""
+        """Match the guide lifecycle contract; no timer exists."""
 
 
 class _WorkflowPipeline(ctk.CTkFrame):
-    """Responsive Input/Process/Output story with stage-specific tutorial points."""
+    """Immediate, reader-controlled instructions with a fixed set of reusable rows."""
 
-    ANIMATION_INTERVAL_MS = 50
-    HIDDEN_RETRY_MS = 250
-    RESIZE_DEBOUNCE_MS = 60
-    MIN_CONNECTOR_SIZE = 48
-    MAX_CONNECTOR_SIZE = 80
-    HORIZONTAL_DIAGRAM_HEIGHT = 106
-    HORIZONTAL_DETAIL_ROW_HEIGHT = 294
-    STAGE_LABELS = ("INPUT", "PROCESS", "OUTPUT")
-    STAGE_ROLES = ("SOURCE", "TRANSFORM", "RESULT")
-    STAGE_STRONG_COLORS = ("primary", "warning", "success")
-    STAGE_SOFT_COLORS = ("primary_soft", "warning_soft", "success_soft")
+    SECTIONS = ("1  Prepare", "2  Run & review", "3  Save & continue", "Details")
 
     def __init__(
-        self,
-        master,
-        summaries: tuple[str, str, str],
-        stage_points: StagePointGroups,
-        completion_check: str,
-        tips: tuple[str, ...] = (),
-        *,
-        available_width: int = 650,
+        self, master, summaries: tuple[str, str, str],
+        stage_points: StagePointGroups, completion_check: str,
+        tips: tuple[str, ...] = (), *, available_width: int = 650,
     ) -> None:
-        if len(summaries) != 3:
-            raise ValueError("The workflow pipeline requires exactly three summaries")
-        if len(stage_points) != 3 or any(not group for group in stage_points):
-            raise ValueError(
-                "The workflow pipeline requires non-empty Input, Process, and Output points"
-            )
-        if not completion_check.strip():
-            raise ValueError("The workflow pipeline requires a completion check")
-        super().__init__(
-            master,
-            fg_color=COLOR_PAIRS["surface_subtle"],
-            corner_radius=SHAPES.corner_radius_lg,
-            border_width=SHAPES.border_width,
-            border_color=COLOR_PAIRS["border"],
-        )
+        super().__init__(master, fg_color="transparent", corner_radius=0)
+        self._available_width = None
+        self._section = 0
         self._summaries = summaries
-        self._stage_points: StagePointGroups = (
-            tuple(stage_points[0]),
-            tuple(stage_points[1]),
-            tuple(stage_points[2]),
-        )
+        self._stage_points = stage_points
         self._completion_check = completion_check
-        self._tips = tuple(tips)
-        self._orientation: str | None = None
-        self._summary_wraplength: int | None = None
-        self._connector_size: int | None = None
-        initial_width = max(220, int(available_width))
-        self._pending_logical_width = initial_width
-        self._viewport_logical_width = initial_width
-        self._applied_layout_width: int | None = None
-        self._stage_points_orientation: str | None = None
-        self._stage_point_wraplength: int | None = None
-        self._context_wraplength: int | None = None
-        self._animation_after_id = None
-        self._resize_after_id = None
-        self._destroying = False
-        self._stopped = False
-        self._paused = False
-        self._hidden_since: float | None = None
-        self._animation_started_at = time.monotonic()
-        self._paused_elapsed_ms = 0.0
-        self._animation_state = _pipeline_animation_state(0.0)
-        self._rendered_active_stage: int | None = None
-        self._rendered_paused: bool | None = None
-        self._rendered_reveal: tuple[int, int] | None = None
-        self._theme_binding_widget = None
-        self._theme_binding_id = None
-        self._cards: list[ctk.CTkFrame] = []
-        self._title_labels: list[ctk.CTkLabel] = []
-        self._summary_labels: list[ctk.CTkLabel] = []
-        self._icon_tiles: list[ctk.CTkFrame] = []
-        self._icon_canvases: list[tk.Canvas] = []
-        self._stage_group_frames: list[ctk.CTkFrame] = []
-        self._stage_point_hosts: list[ctk.CTkFrame] = []
-        self._stage_point_widgets: list[
-            list[tuple[ctk.CTkFrame, ctk.CTkLabel, ctk.CTkLabel]]
-        ] = []
-        self._context_labels: list[ctk.CTkLabel] = []
-        self._connector_canvases: list[tk.Canvas] = []
-        self._connector_items: list[dict[str, object]] = [{}, {}]
-        self._connector_geometry: list[tuple[float, float, float, float] | None] = [
-            None,
-            None,
-        ]
-
-        self._build_ui()
-        self._apply_responsive_layout(initial_width)
-        self._redraw_stage_icons()
-        self._apply_animation_state(self._animation_state)
-        self.bind("<Destroy>", self._on_destroy_event, add="+")
-        try:
-            root = self._root()
-            self._theme_binding_widget = root
-            self._theme_binding_id = root.bind(
-                "<<AIDaSThemeChanged>>",
-                self._on_theme_changed,
-                add="+",
-            )
-        except (AttributeError, tk.TclError):
-            self._theme_binding_widget = None
-            self._theme_binding_id = None
-        self.start()
-
-    def _build_ui(self) -> None:
-        self.grid_columnconfigure(0, weight=1)
-        header = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        header.grid(row=0, column=0, sticky="ew", padx=10, pady=(4, 0))
-        header.grid_columnconfigure(0, weight=1)
-        self.motion_status = ctk.CTkLabel(
-            header,
-            text="●  INPUT ACTIVE",
-            anchor="w",
-            text_color=COLOR_PAIRS["primary"],
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.caption_size,
-                weight=TYPOGRAPHY.semibold_weight,
-            ),
-        )
-        self.motion_status.grid(row=0, column=0, sticky="w")
-        self._refresh_animation_icons()
-        self.animation_button = AppButton(
-            header,
-            text="",
-            image=self._pause_animation_icon,
-            variant="ghost",
-            width=CONTROLS.height_md,
-            height=CONTROLS.height_md,
-            corner_radius=SHAPES.corner_radius_sm,
-            border_spacing=0,
-            command=self._toggle_animation,
-        )
-        self.animation_button.grid(row=0, column=1, sticky="e")
-        self.animation_button.image = self._pause_animation_icon
-        self._animation_tooltip = HoverToolTip(
-            self.animation_button,
-            "Pause animation",
-        )
-        self.animation_button._canvas.configure(takefocus=1)
-        self.animation_button.bind(
-            "<Return>",
-            self._toggle_animation_from_keyboard,
-            add="+",
-        )
-        self.animation_button.bind(
-            "<space>",
-            self._toggle_animation_from_keyboard,
-            add="+",
-        )
-        self.animation_button.bind("<FocusIn>", self._show_animation_focus, add="+")
-        self.animation_button.bind("<FocusOut>", self._hide_animation_focus, add="+")
-
-        self.diagram = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        self.diagram.grid(row=1, column=0, sticky="ew", padx=10, pady=(0, 4))
-
-        for index, summary in enumerate(self._summaries):
-            card = ctk.CTkFrame(
-                self.diagram,
-                width=1,
-                fg_color=COLOR_PAIRS["surface"],
-                corner_radius=SHAPES.corner_radius_md,
-                border_width=2,
-                border_color=COLOR_PAIRS["border"],
-            )
-            card.grid_columnconfigure(1, weight=1)
-            card.grid_rowconfigure(1, weight=1)
-            icon_tile = ctk.CTkFrame(
-                card,
-                width=38,
-                height=38,
-                fg_color=COLOR_PAIRS[self.STAGE_SOFT_COLORS[index]],
-                corner_radius=SHAPES.corner_radius_sm,
-                border_width=SHAPES.border_width,
-                border_color=COLOR_PAIRS[self.STAGE_STRONG_COLORS[index]],
-            )
-            icon_tile.grid_propagate(False)
-            icon_tile.pack_propagate(False)
-            icon_canvas = tk.Canvas(
-                icon_tile,
-                width=1,
-                height=1,
-                highlightthickness=0,
-                bd=0,
-                takefocus=0,
-            )
-            icon_canvas.pack(fill="both", expand=True, padx=4, pady=4)
-            icon_canvas.bind(
-                "<Configure>",
-                lambda event, stage_index=index: self._redraw_stage_icon(
-                    stage_index,
-                    event,
-                ),
-                add="+",
-            )
-            icon_tile.grid(
-                row=0,
-                column=0,
-                sticky="n",
-                padx=(8, 6),
-                pady=(8, 4),
-            )
-            title_label = ctk.CTkLabel(
-                card,
-                text=f"0{index + 1}  {self.STAGE_LABELS[index]}",
-                anchor="w",
-                text_color=COLOR_PAIRS[self.STAGE_STRONG_COLORS[index]],
-                font=ctk.CTkFont(
-                    family=TYPOGRAPHY.family,
-                    size=TYPOGRAPHY.caption_size,
-                    weight=TYPOGRAPHY.bold_weight,
-                ),
-            )
-            title_label.grid(
-                row=0,
-                column=1,
-                sticky="ew",
-                padx=(0, 8),
-                pady=(8, 4),
-            )
-            summary_label = ctk.CTkLabel(
-                card,
-                text=summary,
-                anchor="nw",
-                justify="left",
-                wraplength=150,
-                text_color=COLOR_PAIRS["text"],
-                font=ctk.CTkFont(
-                    family=TYPOGRAPHY.family,
-                    size=TYPOGRAPHY.body_size,
-                ),
-            )
-            summary_label.grid(
-                row=1,
-                column=0,
-                columnspan=2,
-                sticky="nsew",
-                padx=8,
-                pady=(0, 7),
-            )
-            self._cards.append(card)
-            self._title_labels.append(title_label)
-            self._summary_labels.append(summary_label)
-            self._icon_tiles.append(icon_tile)
-            self._icon_canvases.append(icon_canvas)
-
-        for index in range(2):
-            canvas = tk.Canvas(
-                self.diagram,
-                width=self.MIN_CONNECTOR_SIZE,
-                height=120,
-                highlightthickness=0,
-                bd=0,
-                takefocus=0,
-            )
-            canvas.bind(
-                "<Configure>",
-                lambda event, connector_index=index: self._redraw_connector(
-                    connector_index,
-                    event,
-                ),
-                add="+",
-            )
-            self._connector_canvases.append(canvas)
-
-        self.stage_detail_shell = ctk.CTkFrame(
-            self,
-            fg_color=COLOR_PAIRS["surface_elevated"],
-            corner_radius=SHAPES.corner_radius_md,
-            border_width=2,
-            border_color=COLOR_PAIRS["primary"],
-        )
-        self.stage_detail_shell.grid(
-            row=2,
-            column=0,
-            sticky="ew",
-            padx=10,
-            pady=(2, 8),
-        )
-        self.stage_detail_shell.grid_columnconfigure(0, weight=1)
-        self.stage_detail_shell.grid_rowconfigure(0, weight=1)
-
-        for stage_index, points in enumerate(self._stage_points):
-            strong_color = COLOR_PAIRS[self.STAGE_STRONG_COLORS[stage_index]]
-            soft_color = COLOR_PAIRS[self.STAGE_SOFT_COLORS[stage_index]]
-            group_frame = ctk.CTkFrame(
-                self.stage_detail_shell,
-                fg_color=COLOR_PAIRS["surface_elevated"],
-                corner_radius=0,
-            )
-            group_frame.grid(row=0, column=0, sticky="nsew")
-            group_frame.grid_columnconfigure(0, weight=1)
-            group_frame.grid_rowconfigure(1, weight=1)
-            ctk.CTkLabel(
-                group_frame,
-                text=f"{self.STAGE_LABELS[stage_index]} · {len(points)} POINTS",
-                anchor="w",
-                text_color=strong_color,
-                font=ctk.CTkFont(
-                    family=TYPOGRAPHY.family,
-                    size=TYPOGRAPHY.caption_size,
-                    weight=TYPOGRAPHY.bold_weight,
-                ),
-            ).grid(row=0, column=0, sticky="ew", padx=7, pady=(5, 2))
-            point_host = ctk.CTkFrame(
-                group_frame,
-                fg_color="transparent",
-                corner_radius=0,
-            )
-            point_host.grid(row=1, column=0, sticky="nsew", padx=4, pady=(0, 4))
-            widgets: list[tuple[ctk.CTkFrame, ctk.CTkLabel, ctk.CTkLabel]] = []
-            for point_number, point in enumerate(points, start=1):
-                point_card = ctk.CTkFrame(
-                    point_host,
-                    fg_color=COLOR_PAIRS["surface"],
-                    corner_radius=SHAPES.corner_radius_sm,
-                    border_width=2,
-                    border_color=COLOR_PAIRS["border"],
-                )
-                point_card.grid_columnconfigure(1, weight=1)
-                point_card.grid_rowconfigure(0, weight=1)
-                badge = ctk.CTkLabel(
-                    point_card,
-                    text=str(point_number),
-                    width=22,
-                    height=22,
-                    corner_radius=11,
-                    fg_color=soft_color,
-                    text_color=strong_color,
-                    font=ctk.CTkFont(
-                        family=TYPOGRAPHY.family,
-                        size=TYPOGRAPHY.caption_size,
-                        weight=TYPOGRAPHY.bold_weight,
-                    ),
-                )
-                badge.grid(row=0, column=0, sticky="nw", padx=(5, 4), pady=4)
-                label = ctk.CTkLabel(
-                    point_card,
-                    text=point,
-                    anchor="nw",
-                    justify="left",
-                    wraplength=250,
-                    text_color=COLOR_PAIRS["muted_text"],
-                    font=ctk.CTkFont(
-                        family=TYPOGRAPHY.family,
-                        size=TYPOGRAPHY.caption_size,
-                    ),
-                )
-                label.grid(
-                    row=0,
-                    column=1,
-                    sticky="nsew",
-                    padx=(0, 5),
-                    pady=4,
-                )
-                widgets.append((point_card, badge, label))
-            self._stage_group_frames.append(group_frame)
-            self._stage_point_hosts.append(point_host)
-            self._stage_point_widgets.append(widgets)
-
-        self.context_card = ctk.CTkFrame(
-            self.stage_detail_shell,
+        self._tips = tips
+        self._body_labels = []
+        self._text_measurements = {}
+        self._section_values = self.SECTIONS
+        self.sections = ctk.CTkSegmentedButton(
+            self, values=self.SECTIONS, command=self._section_selected,
+            height=38, font=ctk.CTkFont(family=TYPOGRAPHY.family, size=13),
+            selected_color=COLOR_PAIRS["primary_soft"],
+            selected_hover_color=COLOR_PAIRS["primary_soft"],
+            unselected_color=COLOR_PAIRS["surface"],
+            unselected_hover_color=COLOR_PAIRS["primary_soft"],
             fg_color=COLOR_PAIRS["surface"],
-            corner_radius=SHAPES.corner_radius_sm,
-            border_width=SHAPES.border_width,
-            border_color=COLOR_PAIRS["border"],
-        )
-        self.context_card.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            self.context_card,
-            text="READY WHEN",
-            anchor="w",
-            text_color=COLOR_PAIRS["success"],
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.caption_size,
-                weight=TYPOGRAPHY.bold_weight,
-            ),
-        ).grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 1))
-        self._completion_label = ctk.CTkLabel(
-            self.context_card,
-            text=self._completion_check,
-            anchor="nw",
-            justify="left",
-            wraplength=220,
             text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.caption_size,
-            ),
         )
-        self._completion_label.grid(
-            row=1,
-            column=0,
-            sticky="ew",
-            padx=8,
-            pady=(0, 5),
+        self.sections.pack(fill="x", pady=(0, 16))
+        self.summary = ctk.CTkLabel(
+            self, text="", anchor="w", justify="left",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=15, weight="bold"),
         )
-        self._context_labels.append(self._completion_label)
-
-        self._tips_label: ctk.CTkLabel | None = None
-        if self._tips:
-            ctk.CTkLabel(
-                self.context_card,
-                text="KEY NOTES",
-                anchor="w",
-                text_color=COLOR_PAIRS["primary"],
-                font=ctk.CTkFont(
-                    family=TYPOGRAPHY.family,
-                    size=TYPOGRAPHY.caption_size,
-                    weight=TYPOGRAPHY.bold_weight,
-                ),
-            ).grid(row=2, column=0, sticky="ew", padx=8, pady=(1, 1))
-            self._tips_label = ctk.CTkLabel(
-                self.context_card,
-                text="\n".join(f"\u2022  {tip}" for tip in self._tips),
-                anchor="nw",
-                justify="left",
-                wraplength=220,
-                text_color=COLOR_PAIRS["muted_text"],
-                font=ctk.CTkFont(
-                    family=TYPOGRAPHY.family,
-                    size=TYPOGRAPHY.caption_size,
-                ),
+        self.summary.pack(fill="x", pady=(0, 10))
+        self._body_labels.append((self.summary, 8))
+        self.rows = []
+        self._badges = []
+        # Reuse these rows across sections and pages; avoid repeated widget creation.
+        for index in range(max(4, len(tips), *(len(group) for group in stage_points))):
+            row = ctk.CTkFrame(self, fg_color=COLOR_PAIRS["surface"], corner_radius=8)
+            row.grid_columnconfigure(1, weight=1)
+            row.grid_propagate(False)
+            row.pack(fill="x", pady=3)
+            badge = ctk.CTkLabel(
+                row, text=str(index + 1), width=26, height=26, corner_radius=13,
+                fg_color=COLOR_PAIRS["primary_soft"], text_color=COLOR_PAIRS["primary"],
+                font=ctk.CTkFont(family=TYPOGRAPHY.family, size=13, weight="bold"),
             )
-            self._tips_label.grid(
-                row=3,
-                column=0,
-                sticky="ew",
-                padx=8,
-                pady=(0, 6),
+            badge.grid(row=0, column=0, sticky="nw", padx=(12, 10), pady=12)
+            label = ctk.CTkLabel(
+                row, text="", anchor="nw", justify="left",
+                text_color=COLOR_PAIRS["text"],
+                font=ctk.CTkFont(family=TYPOGRAPHY.family, size=14),
             )
-            self._context_labels.append(self._tips_label)
-
-        self._stage_group_frames[0].tkraise()
-
-    @staticmethod
-    def _render_animation_icon(kind: str, color: str) -> Image.Image:
-        """Render one anti-aliased play/pause glyph at four times display size."""
-
-        source_size = CONTROLS.icon_size * 4
-        icon = Image.new("RGBA", (source_size, source_size), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(icon)
-        if kind == "pause":
-            draw.rounded_rectangle((21, 15, 31, 57), radius=4, fill=color)
-            draw.rounded_rectangle((41, 15, 51, 57), radius=4, fill=color)
-        elif kind == "play":
-            draw.polygon(((24, 13), (24, 59), (58, 36)), fill=color)
-        else:
-            raise ValueError(f"Unknown animation icon: {kind}")
-        return icon
-
-    @classmethod
-    def _build_animation_icon(cls, kind: str) -> ctk.CTkImage:
-        color_pair = COLOR_PAIRS["primary"]
-        if isinstance(color_pair, str):
-            light_color = dark_color = color_pair
-        else:
-            light_color, dark_color = color_pair
-        return ctk.CTkImage(
-            light_image=cls._render_animation_icon(kind, light_color),
-            dark_image=cls._render_animation_icon(kind, dark_color),
-            size=(CONTROLS.icon_size, CONTROLS.icon_size),
+            label.grid(row=0, column=1, sticky="ew", padx=(0, 14), pady=12)
+            self._body_labels.append((label, 80))
+            self.rows.append((row, label))
+            self._badges.append(badge)
+        self.ready = ctk.CTkFrame(
+            self, fg_color=COLOR_PAIRS["success_soft"], corner_radius=8,
         )
-
-    def _refresh_animation_icons(self) -> None:
-        self._pause_animation_icon = self._build_animation_icon("pause")
-        self._play_animation_icon = self._build_animation_icon("play")
-        if hasattr(self, "animation_button"):
-            self._sync_animation_control()
-
-    def _sync_animation_control(self) -> None:
-        icon = (
-            self._play_animation_icon
-            if self._paused
-            else self._pause_animation_icon
+        self.ready.pack(fill="x", pady=(14, 2))
+        ctk.CTkLabel(
+            self.ready, text="READY TO CONTINUE WHEN", anchor="w",
+            text_color=COLOR_PAIRS["success"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=12, weight="bold"),
+        ).pack(fill="x", padx=14, pady=(10, 2))
+        self.completion = ctk.CTkLabel(
+            self.ready, text=completion_check, anchor="w", justify="left",
+            text_color=COLOR_PAIRS["text"],
+            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=13),
         )
-        tooltip = "Play animation" if self._paused else "Pause animation"
-        self.animation_button.image = icon
-        self.animation_button.configure(image=icon)
-        if hasattr(self, "_animation_tooltip"):
-            self._animation_tooltip.text = tooltip
+        self.completion.pack(fill="x", padx=14, pady=(0, 12))
+        self._body_labels.append((self.completion, 40))
+        self.set_available_width(available_width)
+        self.sections.set(self.sections.cget("values")[0])
+        self._select_section(self.SECTIONS[0])
 
-    def replace_content(
-        self,
-        summaries: tuple[str, str, str],
-        stage_points: StagePointGroups,
-        completion_check: str,
-        tips: tuple[str, ...],
-    ) -> bool:
-        """Reuse the fixed 4/2/3 pipeline when another tutorial step opens."""
+    def _select_section(self, value: str) -> None:
+        self._section = self.SECTIONS.index(value)
+        details = self._section == 3
+        points = self._tips if details else self._stage_points[self._section]
+        summary = "Tips & technical details" if details else self._summaries[self._section]
+        if self.summary.cget("text") != summary:
+            self.summary.configure(text=summary)
+        for index, (row, label) in enumerate(self.rows):
+            text = points[index] if index < len(points) else ""
+            if label.cget("text") != text:
+                label.configure(text=text)
+            if index >= len(points):
+                if row.winfo_manager():
+                    row.pack_forget()
+            elif not row.winfo_manager():
+                row.pack(fill="x", pady=3, before=self.ready)
+        self.winfo_toplevel().event_generate("<<TutorialSectionChanged>>")
 
-        if (
-            len(summaries) != len(self._summary_labels)
-            or tuple(map(len, stage_points))
-            != tuple(map(len, self._stage_point_widgets))
-            or not completion_check.strip()
-            or bool(tips) != (self._tips_label is not None)
-        ):
+    def _section_selected(self, value: str) -> None:
+        index = self._section_values.index(value)
+        if index != self._section:
+            self._select_section(self.SECTIONS[index])
+
+    def replace_content(self, summaries, stage_points, completion_check, tips) -> bool:
+        required = max(len(tips), *(len(group) for group in stage_points))
+        if required > len(self.rows):
             return False
-
-        self._summaries = tuple(summaries)
-        self._stage_points = tuple(tuple(group) for group in stage_points)
+        self._summaries = summaries
+        self._stage_points = stage_points
+        self._tips = tips
         self._completion_check = completion_check
-        self._tips = tuple(tips)
-        for label, summary in zip(self._summary_labels, self._summaries):
-            label.configure(text=summary)
-        for widgets, points in zip(self._stage_point_widgets, self._stage_points):
-            for (_point_card, _badge, label), point in zip(widgets, points):
-                label.configure(text=point)
-        self._completion_label.configure(text=self._completion_check)
-        if self._tips_label is not None:
-            self._tips_label.configure(
-                text="\n".join(f"\u2022  {tip}" for tip in self._tips)
-            )
-
-        self._cancel_after_job("_animation_after_id")
-        self._paused = False
-        self._hidden_since = None
-        self._animation_started_at = time.monotonic()
-        self._paused_elapsed_ms = 0.0
-        self._animation_state = _pipeline_animation_state(0.0)
-        self._rendered_active_stage = None
-        self._rendered_paused = None
-        self._rendered_reveal = None
-        self._sync_animation_control()
-        self._apply_animation_state(self._animation_state)
-        self.start()
+        self.completion.configure(text=completion_check)
+        self.sections.set(self.sections.cget("values")[0])
+        self._select_section(self.SECTIONS[0])
         return True
 
-    def _layout_stage_points(self, orientation: str, logical_width: int) -> None:
-        horizontal = orientation == "horizontal"
-        if horizontal:
-            context_width = max(230, min(285, int(logical_width * 0.35)))
-            points_width = max(340, int(logical_width) - context_width - 38)
-            columns = 2
-            self.stage_detail_shell.grid_columnconfigure(0, weight=3, minsize=0)
-            self.stage_detail_shell.grid_columnconfigure(
-                1,
-                weight=2,
-                minsize=context_width,
-            )
-            self.stage_detail_shell.grid_rowconfigure(
-                0,
-                weight=1,
-                minsize=self.HORIZONTAL_DETAIL_ROW_HEIGHT,
-            )
-            self.stage_detail_shell.grid_rowconfigure(1, weight=0, minsize=0)
-            context_wrap = max(175, context_width - 22)
-        else:
-            points_width = max(180, int(logical_width) - 28)
-            columns = 1
-            self.stage_detail_shell.grid_columnconfigure(0, weight=1, minsize=0)
-            self.stage_detail_shell.grid_columnconfigure(1, weight=0, minsize=0)
-            self.stage_detail_shell.grid_rowconfigure(0, weight=1, minsize=0)
-            self.stage_detail_shell.grid_rowconfigure(1, weight=0, minsize=0)
-            context_wrap = max(180, int(logical_width) - 48)
-
-        if context_wrap != self._context_wraplength:
-            self._context_wraplength = context_wrap
-            for label in self._context_labels:
-                label.configure(wraplength=context_wrap)
-
-        card_width = max(150, points_width // columns)
-        wraplength = max(120, card_width - 48)
-        if wraplength != self._stage_point_wraplength:
-            self._stage_point_wraplength = wraplength
-            for widgets in self._stage_point_widgets:
-                for _point_card, _badge, label in widgets:
-                    label.configure(wraplength=wraplength)
-
-        if orientation == self._stage_points_orientation:
-            return
-        self._stage_points_orientation = orientation
-        if horizontal:
-            self.context_card.grid(
-                row=0,
-                column=1,
-                sticky="nsew",
-                padx=(3, 5),
-                pady=5,
-            )
-        else:
-            self.context_card.grid(
-                row=1,
-                column=0,
-                sticky="ew",
-                padx=5,
-                pady=(1, 5),
-            )
-
-        for point_host, widgets in zip(
-            self._stage_point_hosts,
-            self._stage_point_widgets,
-        ):
-            for column in range(2):
-                point_host.grid_columnconfigure(
-                    column,
-                    weight=0,
-                    minsize=0,
-                    uniform="",
-                )
-            for row in range(4):
-                point_host.grid_rowconfigure(
-                    row,
-                    weight=0,
-                    minsize=0,
-                    uniform="",
-                )
-            for index, (point_card, _badge, label) in enumerate(widgets):
-                point_card.grid_forget()
-                row, column = divmod(index, columns)
-                point_card.grid(
-                    row=row,
-                    column=column,
-                    sticky="nsew",
-                    padx=2,
-                    pady=2,
-                )
-            for column in range(columns):
-                point_host.grid_columnconfigure(
-                    column,
-                    weight=1,
-                    uniform="stage_point",
-                )
-            row_count = (len(widgets) + columns - 1) // columns
-            for row in range(row_count):
-                point_host.grid_rowconfigure(
-                    row,
-                    weight=1,
-                    uniform="stage_point_row",
-                )
-
-    def _apply_stage_reveal(self, stage_index: int, progress: float) -> None:
-        progress = max(0.0, min(1.0, float(progress)))
-        widgets = self._stage_point_widgets[stage_index]
-        revealed_count = min(len(widgets), int(progress * len(widgets)) + 1)
-        render_key = (stage_index, revealed_count)
-        if render_key == self._rendered_reveal:
-            return
-        strong_color = COLOR_PAIRS[self.STAGE_STRONG_COLORS[stage_index]]
-        soft_color = COLOR_PAIRS[self.STAGE_SOFT_COLORS[stage_index]]
-        self._stage_group_frames[stage_index].tkraise()
-        for index, (point_card, badge, label) in enumerate(widgets):
-            revealed = index < revealed_count
-            current = index == revealed_count - 1
-            point_card.configure(
-                fg_color=soft_color if revealed else COLOR_PAIRS["surface"],
-                border_color=(
-                    strong_color if current else COLOR_PAIRS["border"]
-                ),
-            )
-            badge.configure(
-                fg_color=strong_color if revealed else COLOR_PAIRS["surface_subtle"],
-                text_color=(
-                    COLOR_PAIRS["on_primary"]
-                    if revealed
-                    else COLOR_PAIRS["muted_text"]
-                ),
-            )
-            label.configure(
-                text_color=(
-                    COLOR_PAIRS["text"]
-                    if revealed
-                    else COLOR_PAIRS["muted_text"]
-                ),
-            )
-        self._rendered_reveal = render_key
-
     def set_available_width(self, logical_width: int) -> None:
-        """Receive the scroll viewport width, which is authoritative for overflow."""
-
-        available_width = max(220, int(logical_width))
-        if available_width == self._viewport_logical_width:
+        width = max(180, int(logical_width))
+        if width == self._available_width:
             return
-        self._viewport_logical_width = available_width
-        self._queue_responsive_layout(available_width)
+        self._available_width = width
+        for label, inset in self._body_labels:
+            label.configure(wraplength=max(100, width - inset))
+        self._size_template(width)
+        # Keep all section controls reachable on narrow/high-DPI displays.
+        values = self.SECTIONS if width >= 540 else ("Prepare", "Run", "Save", "Details")
+        if values != self._section_values:
+            self._section_values = values
+            self.sections.configure(values=values)
+            self.sections.set(values[self._section])
 
-    def _queue_responsive_layout(self, logical_width: int) -> None:
-        if self._destroying or self._stopped:
-            return
-        logical_width = max(220, int(logical_width))
-        if logical_width == self._applied_layout_width:
-            self._cancel_after_job("_resize_after_id")
-            self._pending_logical_width = logical_width
-            return
-        if (
-            logical_width == self._pending_logical_width
-            and self._resize_after_id is not None
-        ):
-            return
-        self._pending_logical_width = logical_width
-        self._cancel_after_job("_resize_after_id")
-        try:
-            self._resize_after_id = self.after(
-                self.RESIZE_DEBOUNCE_MS,
-                self._apply_pending_layout,
-            )
-        except tk.TclError:
-            self._resize_after_id = None
+    @staticmethod
+    def _copy_height(label, copies, width: int, *, measurements=None) -> int:
+        """Reserve space for all pages without repeating native word measurements."""
 
-    def _apply_pending_layout(self) -> None:
-        self._resize_after_id = None
-        if self._destroying or self._stopped:
-            return
-        self._apply_responsive_layout(self._pending_logical_width)
+        font = label.cget("font")
+        if measurements is None:
+            measurements = label.__dict__.setdefault("_tutorial_text_measurements", {})
+        # Equal font descriptions can share metrics, including the four body rows.
+        # Re-read the description so font changes invalidate cached measurements.
+        scaling = label._get_widget_scaling()
+        signature = (font.cget("size"), tuple(sorted(font.actual().items())), scaling)
+        if signature not in measurements:
+            measurements[signature] = _TextMeasurements(font, label, scaling=scaling)
+        return measurements[signature].copy_height(font, tuple(copies), width)
 
-    def _apply_responsive_layout(self, logical_width: int) -> None:
-        logical_width = max(220, int(logical_width))
-        if logical_width == self._applied_layout_width:
-            return
-        orientation = _pipeline_orientation(logical_width)
-        orientation_changed = orientation != self._orientation
-        if orientation_changed:
-            for widget in (*self._cards, *self._connector_canvases):
-                widget.grid_forget()
-            for column in range(5):
-                self.diagram.grid_columnconfigure(
-                    column,
-                    weight=0,
-                    minsize=0,
-                    uniform="",
-                )
-            for row in range(5):
-                self.diagram.grid_rowconfigure(row, weight=0, minsize=0)
-            self._configure_card_content_layout(orientation)
-
-        if orientation == "horizontal":
-            connector_size = max(
-                self.MIN_CONNECTOR_SIZE,
-                min(self.MAX_CONNECTOR_SIZE, (int(logical_width) - 540) // 2),
-            )
-            if orientation_changed:
-                for index, card in enumerate(self._cards):
-                    column = index * 2
-                    card.grid(row=0, column=column, sticky="nsew", pady=2)
-                    self.diagram.grid_columnconfigure(
-                        column,
-                        weight=1,
-                        uniform="pipeline_stage",
-                    )
-                for index, canvas in enumerate(self._connector_canvases):
-                    column = (index * 2) + 1
-                    canvas.grid(row=0, column=column, sticky="nsew", padx=3, pady=2)
-                self.diagram.grid_rowconfigure(
-                    0,
-                    weight=1,
-                    minsize=self.HORIZONTAL_DIAGRAM_HEIGHT,
-                )
-            if orientation_changed or connector_size != self._connector_size:
-                for index, canvas in enumerate(self._connector_canvases):
-                    column = (index * 2) + 1
-                    canvas.configure(height=100, width=connector_size)
-                    self.diagram.grid_columnconfigure(
-                        column,
-                        weight=0,
-                        minsize=connector_size,
-                    )
-                self._connector_size = connector_size
-            card_width = max(
-                120,
-                (int(logical_width) - (connector_size * 2) - 38) // 3,
-            )
-            wraplength = max(110, card_width - 24)
-        else:
-            if orientation_changed:
-                self.diagram.grid_columnconfigure(0, weight=1)
-                for index, card in enumerate(self._cards):
-                    card.grid(
-                        row=index * 2,
-                        column=0,
-                        sticky="ew",
-                        padx=2,
-                        pady=2,
-                    )
-                for index, canvas in enumerate(self._connector_canvases):
-                    canvas.configure(height=20, width=1)
-                    canvas.grid(
-                        row=(index * 2) + 1,
-                        column=0,
-                        sticky="ew",
-                        padx=2,
-                    )
-                self._connector_size = None
-            wraplength = max(180, int(logical_width) - 100)
-
-        self._orientation = orientation
-        if wraplength != self._summary_wraplength:
-            self._summary_wraplength = wraplength
-            for label in self._summary_labels:
-                label.configure(wraplength=wraplength)
-        self._layout_stage_points(orientation, logical_width)
-        self._applied_layout_width = logical_width
-
-    def _configure_card_content_layout(self, orientation: str) -> None:
-        """Use compact side-by-side copy only in the narrow vertical timeline."""
-
-        for icon_tile, title_label, summary_label in zip(
-            self._icon_tiles,
-            self._title_labels,
-            self._summary_labels,
-        ):
-            icon_tile.grid_forget()
-            title_label.grid_forget()
-            summary_label.grid_forget()
-            if orientation == "horizontal":
-                icon_tile.configure(width=38, height=38)
-                title_label.configure(height=22)
-                icon_tile.grid(
-                    row=0,
-                    column=0,
-                    sticky="n",
-                    padx=(8, 6),
-                    pady=(8, 4),
-                )
-                title_label.grid(
-                    row=0,
-                    column=1,
-                    sticky="ew",
-                    padx=(0, 8),
-                    pady=(8, 4),
-                )
-                summary_label.grid(
-                    row=1,
-                    column=0,
-                    columnspan=2,
-                    sticky="nsew",
-                    padx=8,
-                    pady=(0, 7),
-                )
-                continue
-            icon_tile.configure(width=36, height=36)
-            title_label.configure(height=18)
-            icon_tile.grid(
-                row=0,
-                column=0,
-                rowspan=2,
-                sticky="n",
-                padx=(7, 7),
-                pady=5,
-            )
-            title_label.grid(
-                row=0,
-                column=1,
-                sticky="ew",
-                padx=(0, 7),
-                pady=(5, 0),
-            )
-            summary_label.grid(
-                row=1,
-                column=1,
-                sticky="nsew",
-                padx=(0, 7),
-                pady=(0, 5),
-            )
-
-    def _redraw_stage_icons(self) -> None:
-        for index in range(len(self._icon_canvases)):
-            self._redraw_stage_icon(index)
-
-    def _redraw_stage_icon(self, index: int, event=None) -> None:
-        if self._destroying or index >= len(self._icon_canvases):
-            return
-        canvas = self._icon_canvases[index]
-        strong_pair = COLOR_PAIRS[self.STAGE_STRONG_COLORS[index]]
-        soft_pair = COLOR_PAIRS[self.STAGE_SOFT_COLORS[index]]
-        strong = resolve_color(strong_pair)
-        soft = resolve_color(soft_pair)
-        try:
-            width = max(1, int(getattr(event, "width", canvas.winfo_width())))
-            height = max(1, int(getattr(event, "height", canvas.winfo_height())))
-            self._icon_tiles[index].configure(
-                fg_color=soft_pair,
-                border_color=strong_pair,
-            )
-            canvas.configure(background=soft)
-            canvas.delete("all")
-            scale = max(0.1, min(width, height) / 36.0)
-            offset_x = (width - (36.0 * scale)) / 2.0
-            offset_y = (height - (36.0 * scale)) / 2.0
-            def x(value: float) -> float:
-                return offset_x + (float(value) * scale)
-
-            def y(value: float) -> float:
-                return offset_y + (float(value) * scale)
-
-            stroke = max(1, round(2.0 * scale))
-            if index == 0:
-                canvas.create_polygon(
-                    x(4),
-                    y(11),
-                    x(14),
-                    y(11),
-                    x(18),
-                    y(15),
-                    x(32),
-                    y(15),
-                    x(32),
-                    y(29),
-                    x(4),
-                    y(29),
-                    fill="",
-                    outline=strong,
-                    width=stroke,
-                    joinstyle=tk.ROUND,
-                )
-                canvas.create_line(
-                    x(4),
-                    y(15),
-                    x(32),
-                    y(15),
-                    fill=strong,
-                    width=stroke,
-                )
-            elif index == 1:
-                for line_y, knob_x in ((9, 14), (18, 25), (27, 11)):
-                    canvas.create_line(
-                        x(5),
-                        y(line_y),
-                        x(31),
-                        y(line_y),
-                        fill=strong,
-                        width=stroke,
-                        capstyle=tk.ROUND,
-                    )
-                    canvas.create_oval(
-                        x(knob_x - 3),
-                        y(line_y - 3),
-                        x(knob_x + 3),
-                        y(line_y + 3),
-                        fill=soft,
-                        outline=strong,
-                        width=stroke,
-                    )
-            else:
-                canvas.create_polygon(
-                    x(7),
-                    y(4),
-                    x(24),
-                    y(4),
-                    x(31),
-                    y(11),
-                    x(31),
-                    y(32),
-                    x(7),
-                    y(32),
-                    fill="",
-                    outline=strong,
-                    width=stroke,
-                    joinstyle=tk.ROUND,
-                )
-                canvas.create_line(
-                    x(24),
-                    y(4),
-                    x(24),
-                    y(11),
-                    x(31),
-                    y(11),
-                    fill=strong,
-                    width=stroke,
-                )
-                canvas.create_line(
-                    x(12),
-                    y(21),
-                    x(17),
-                    y(26),
-                    x(26),
-                    y(16),
-                    fill=strong,
-                    width=stroke,
-                    capstyle=tk.ROUND,
-                    joinstyle=tk.ROUND,
-                )
-        except tk.TclError:
-            return
-
-    def _redraw_connector(self, index: int, event=None) -> None:
-        if self._destroying or index >= len(self._connector_canvases):
-            return
-        canvas = self._connector_canvases[index]
-        try:
-            width = max(2, int(getattr(event, "width", canvas.winfo_width())))
-            height = max(2, int(getattr(event, "height", canvas.winfo_height())))
-            background = resolve_color(COLOR_PAIRS["surface_subtle"])
-            canvas.configure(background=background)
-            canvas.delete("all")
-            if self._orientation == "horizontal":
-                geometry = (5.0, height / 2.0, width - 5.0, height / 2.0)
-            else:
-                geometry = (width / 2.0, 4.0, width / 2.0, height - 4.0)
-            x1, y1, x2, y2 = geometry
-            track_color = resolve_color(COLOR_PAIRS["border_strong"])
-            progress_color = resolve_color(
-                COLOR_PAIRS[("primary", "success")[index]]
-            )
-            soft_color = resolve_color(
-                COLOR_PAIRS[("primary_soft", "success_soft")[index]]
-            )
-            track = canvas.create_line(
-                x1,
-                y1,
-                x2,
-                y2,
-                fill=track_color,
-                width=4,
-                capstyle=tk.ROUND,
-            )
-            progress = canvas.create_line(
-                x1,
-                y1,
-                x1,
-                y1,
-                fill=progress_color,
-                width=5,
-                capstyle=tk.ROUND,
-                state="hidden",
-            )
-            for x, y in ((x1, y1), (x2, y2)):
-                canvas.create_oval(
-                    x - 4,
-                    y - 4,
-                    x + 4,
-                    y + 4,
-                    fill=background,
-                    outline=track_color,
-                    width=2,
-                )
-            trails = [
-                canvas.create_oval(0, 0, 0, 0, fill=progress_color, outline="", state="hidden")
-                for _trail in range(2)
+    def _size_template(self, width: int) -> None:
+        pages = TUTORIAL_PAGES[1:]
+        summary_height = self._copy_height(
+            self.summary,
+            [copy for page in pages for copy in (
+                page.input_summary, page.function_summary, page.output_summary,
+            )] + ["Tips & technical details"],
+            max(100, width - 8),
+            measurements=self._text_measurements,
+        )
+        if self.summary.cget("height") != summary_height:
+            self.summary.configure(height=summary_height)
+        for index, (row, label) in enumerate(self.rows):
+            copies = [
+                group[index]
+                for page in pages
+                for group in (*page.stage_points, page.tips)
+                if index < len(group)
             ]
-            halo = canvas.create_oval(
-                0,
-                0,
-                0,
-                0,
-                fill=soft_color,
-                outline="",
-                state="hidden",
+            text_height = self._copy_height(
+                label, copies, max(100, width - 80),
+                measurements=self._text_measurements,
             )
-            packet = canvas.create_oval(
-                0,
-                0,
-                0,
-                0,
-                fill=progress_color,
-                outline=background,
-                width=1,
-                state="hidden",
-            )
-            self._connector_geometry[index] = geometry
-            self._connector_items[index] = {
-                "track": track,
-                "progress": progress,
-                "trails": trails,
-                "halo": halo,
-                "packet": packet,
-            }
-            self._update_connector(index, self._animation_state.connector_progress[index])
-        except tk.TclError:
-            self._connector_geometry[index] = None
-            self._connector_items[index] = {}
-
-    def _update_connector(self, index: int, progress: float) -> None:
-        geometry = self._connector_geometry[index]
-        items = self._connector_items[index]
-        if geometry is None or not items:
-            return
-        canvas = self._connector_canvases[index]
-        x1, y1, x2, y2 = geometry
-        progress = max(0.0, min(1.0, float(progress)))
-        packet_x = x1 + ((x2 - x1) * progress)
-        packet_y = y1 + ((y2 - y1) * progress)
-        moving = 0.0 < progress < 1.0
-        try:
-            progress_item = items["progress"]
-            canvas.coords(progress_item, x1, y1, packet_x, packet_y)
-            canvas.itemconfigure(
-                progress_item,
-                state="normal" if progress > 0.0 else "hidden",
-            )
-            for trail_index, trail_item in enumerate(items["trails"]):
-                trail_progress = max(0.0, progress - ((trail_index + 1) * 0.1))
-                trail_x = x1 + ((x2 - x1) * trail_progress)
-                trail_y = y1 + ((y2 - y1) * trail_progress)
-                radius = 2.5 - (trail_index * 0.5)
-                canvas.coords(
-                    trail_item,
-                    trail_x - radius,
-                    trail_y - radius,
-                    trail_x + radius,
-                    trail_y + radius,
-                )
-                canvas.itemconfigure(
-                    trail_item,
-                    state=("normal" if moving and trail_progress > 0.0 else "hidden"),
-                )
-            canvas.coords(
-                items["halo"],
-                packet_x - 12,
-                packet_y - 12,
-                packet_x + 12,
-                packet_y + 12,
-            )
-            canvas.coords(
-                items["packet"],
-                packet_x - 8,
-                packet_y - 8,
-                packet_x + 8,
-                packet_y + 8,
-            )
-            canvas.itemconfigure(items["halo"], state="normal" if moving else "hidden")
-            canvas.itemconfigure(items["packet"], state="normal" if moving else "hidden")
-        except (KeyError, tk.TclError):
-            return
-
-    def _apply_animation_state(self, state: _PipelineAnimationState) -> None:
-        self._animation_state = state
-        stage_style_changed = (
-            state.active_stage != self._rendered_active_stage
-            or self._paused != self._rendered_paused
+            # Keep the text widget's allocation stable as well as the card's.
+            # Otherwise every section swaps in new canvas sizes and paints them.
+            if label.cget("height") != text_height:
+                label.configure(height=text_height)
+            row_height = max(54, text_height + 24)
+            if row.cget("height") != row_height:
+                row.configure(height=row_height)
+        completion_height = self._copy_height(
+            self.completion, [page.completion_check for page in pages],
+            max(100, width - 40),
+            measurements=self._text_measurements,
         )
-        if stage_style_changed:
-            for index, card in enumerate(self._cards):
-                active = index == state.active_stage
-                card.configure(
-                    fg_color=(
-                        COLOR_PAIRS[self.STAGE_SOFT_COLORS[index]]
-                        if active
-                        else COLOR_PAIRS["surface"]
-                    ),
-                    border_color=(
-                        COLOR_PAIRS[self.STAGE_STRONG_COLORS[index]]
-                        if active
-                        else COLOR_PAIRS["border"]
-                    ),
-                )
-            active_stage = state.active_stage
-            strong_color = COLOR_PAIRS[self.STAGE_STRONG_COLORS[active_stage]]
-            self.stage_detail_shell.configure(border_color=strong_color)
-            if self._paused:
-                self.motion_status.configure(
-                    text=f"Ⅱ  {self.STAGE_LABELS[active_stage]} PAUSED",
-                    text_color=COLOR_PAIRS["muted_text"],
-                )
-            else:
-                self.motion_status.configure(
-                    text=f"●  {self.STAGE_LABELS[active_stage]} ACTIVE",
-                    text_color=strong_color,
-                )
-            self._rendered_active_stage = state.active_stage
-            self._rendered_paused = self._paused
-        self._apply_stage_reveal(state.active_stage, state.stage_progress)
-        for index, progress in enumerate(state.connector_progress):
-            self._update_connector(index, progress)
+        if self.completion.cget("height") != completion_height:
+            self.completion.configure(height=completion_height)
 
-    def _elapsed_ms(self, now: float | None = None) -> float:
-        if self._paused:
-            return self._paused_elapsed_ms
-        now = time.monotonic() if now is None else now
-        return max(0.0, (now - self._animation_started_at) * 1000.0)
-
-    def _schedule_tick(self, delay_ms: int) -> None:
-        if (
-            self._destroying
-            or self._stopped
-            or self._paused
-            or self._animation_after_id is not None
-        ):
-            return
-        try:
-            self._animation_after_id = self.after(
-                max(1, int(delay_ms)),
-                self._animation_tick,
-            )
-        except (tk.TclError, TypeError, ValueError):
-            self._animation_after_id = None
-
-    def start(self) -> None:
-        """Start the decorative animation without creating duplicate timer jobs."""
-
-        self._stopped = False
-        self._schedule_tick(self.ANIMATION_INTERVAL_MS)
-
-    def _animation_tick(self) -> None:
-        self._animation_after_id = None
-        if self._destroying or self._stopped or self._paused:
-            return
-        now = time.monotonic()
-        try:
-            visible = bool(self.winfo_exists() and self.winfo_viewable())
-        except tk.TclError:
-            return
-        if not visible:
-            if self._hidden_since is None:
-                self._hidden_since = now
-            self._schedule_tick(self.HIDDEN_RETRY_MS)
-            return
-        if self._hidden_since is not None:
-            self._animation_started_at += now - self._hidden_since
-            self._hidden_since = None
-        self._apply_animation_state(
-            _pipeline_animation_state(self._elapsed_ms(now))
-        )
-        self._schedule_tick(self.ANIMATION_INTERVAL_MS)
-
-    def _toggle_animation(self) -> None:
-        if self._destroying or self._stopped:
-            return
-        if self._paused:
-            self._paused = False
-            self._animation_started_at = (
-                time.monotonic() - (self._paused_elapsed_ms / 1000.0)
-            )
-            self._sync_animation_control()
-            self._apply_animation_state(self._animation_state)
-            self._schedule_tick(self.ANIMATION_INTERVAL_MS)
-            return
-        self._paused_elapsed_ms = self._elapsed_ms()
-        self._paused = True
-        self._cancel_after_job("_animation_after_id")
-        self._sync_animation_control()
-        self._apply_animation_state(self._animation_state)
-
-    def _toggle_animation_from_keyboard(self, _event=None) -> str:
-        self._toggle_animation()
-        return "break"
-
-    def _show_animation_focus(self, _event=None) -> None:
-        self.animation_button.configure(
-            border_color=COLOR_PAIRS["primary"],
-            border_width=2,
-        )
-
-    def _hide_animation_focus(self, _event=None) -> None:
-        self.animation_button.configure(
-            border_color=COLOR_PAIRS["border"],
-            border_width=SHAPES.border_width,
-        )
-
-    def _on_theme_changed(self, _event=None) -> None:
-        if self._destroying:
-            return
-        self._refresh_animation_icons()
-        self._redraw_stage_icons()
-        for index in range(len(self._connector_canvases)):
-            self._redraw_connector(index)
-        self._rendered_active_stage = None
-        self._rendered_paused = None
-        self._rendered_reveal = None
-        self._apply_animation_state(self._animation_state)
-
-    def _cancel_after_job(self, attribute: str) -> None:
-        after_id = getattr(self, attribute, None)
-        setattr(self, attribute, None)
-        if after_id is None:
-            return
-        try:
-            self.after_cancel(after_id)
-        except tk.TclError:
-            pass
-
-    def stop(self) -> None:
-        """Stop all pending animation/layout work before this page is replaced."""
-
-        self._stopped = True
-        self._cancel_after_job("_animation_after_id")
-        self._cancel_after_job("_resize_after_id")
-
-    def _unbind_theme_event(self) -> None:
-        widget = self._theme_binding_widget
-        binding_id = self._theme_binding_id
-        self._theme_binding_widget = None
-        self._theme_binding_id = None
-        if widget is None or binding_id is None:
-            return
-        try:
-            widget.unbind("<<AIDaSThemeChanged>>", binding_id)
-        except (AttributeError, tk.TclError):
-            pass
-
-    def _on_destroy_event(self, event) -> None:
-        if event.widget not in (self, getattr(self, "_canvas", None)):
-            return
-        self._destroying = True
-        self.stop()
-        self._unbind_theme_event()
-
-    def destroy(self) -> None:
-        if not self._destroying:
-            self._destroying = True
-            self.stop()
-            self._unbind_theme_event()
-        super().destroy()
+    @staticmethod
+    def stop() -> None:
+        """No animation timers or theme-event handlers to tear down."""
 
 
 class TutorialDialog(ctk.CTkToplevel):
@@ -1850,6 +711,9 @@ class TutorialDialog(ctk.CTkToplevel):
         on_close: Callable[["TutorialDialog"], None] | None = None,
     ) -> None:
         super().__init__(owner)
+        # Scrollbars flush Tk's idle queue during their own draws. Keep those
+        # flushes from painting the tutorial at intermediate construction sizes.
+        self._aidas_defer_canvas_updates = True
         self.withdraw()
         self.title("AIDaS Workflow Tutorial")
         self.configure(fg_color=COLOR_PAIRS["application"])
@@ -1895,12 +759,24 @@ class TutorialDialog(ctk.CTkToplevel):
         self._closing = False
         self._modal_activation_after_id = None
         self._scrollbar_sync_after_id = None
+        self._content_resize_after_id = None
+        self._pending_content_width = None
+        self._text_measurements = {}
         self._navigation_buttons: list[AppButton] = []
         self._wrapped_labels: list[tuple[ctk.CTkLabel, int]] = []
         self._overview_context_labels: list[ctk.CTkLabel] = []
         self._flow_visualizer: _WorkflowOverviewMap | _WorkflowPipeline | None = None
 
+        # Install the native frame and caption while the window is still empty.
+        # Installing it after mapping would lay out and paint the full guide twice.
+        synchronize_window_chrome(
+            self,
+            background=COLOR_PAIRS["window_chrome"],
+            foreground=COLOR_PAIRS["text"],
+            border=COLOR_PAIRS["window_chrome"],
+        )
         self._build_ui()
+        self.bind("<<TutorialSectionChanged>>", self._on_section_changed)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.bind("<Escape>", lambda _event: self.close())
         self.bind("<Alt-Left>", lambda _event: self._previous_page())
@@ -1915,12 +791,7 @@ class TutorialDialog(ctk.CTkToplevel):
         )
         self.show_page(initial_page)
         self.deiconify()
-        synchronize_window_chrome(
-            self,
-            background=COLOR_PAIRS["window_chrome"],
-            foreground=COLOR_PAIRS["text"],
-            border=COLOR_PAIRS["window_chrome"],
-        )
+        finish_deferred_rendering(self)
         self._schedule_modal_activation()
 
     @property
@@ -1944,7 +815,7 @@ class TutorialDialog(ctk.CTkToplevel):
         header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             header,
-            text="AIDaS workflow tutorial",
+            text="AIDaS quick guide",
             anchor="w",
             text_color=COLOR_PAIRS["text"],
             font=ctk.CTkFont(
@@ -1969,7 +840,7 @@ class TutorialDialog(ctk.CTkToplevel):
         self.page_indicator.grid(row=0, column=1, sticky="e", padx=(12, 0))
         ctk.CTkLabel(
             header,
-            text="Select a topic, follow the process, or open the matching workspace step.",
+            text="Choose a step. Read at your pace. Open the workspace when ready.",
             anchor="w",
             text_color=COLOR_PAIRS["muted_text"],
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
@@ -2009,15 +880,6 @@ class TutorialDialog(ctk.CTkToplevel):
             button.pack(fill="x", padx=8, pady=2)
             self._navigation_buttons.append(button)
 
-        ctk.CTkLabel(
-            navigation,
-            text="Alt + Left / Right changes pages\nEsc closes the tutorial",
-            anchor="w",
-            justify="left",
-            text_color=COLOR_PAIRS["muted_text"],
-            font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.caption_size),
-        ).pack(side="bottom", fill="x", padx=12, pady=14)
-
         self.content_scroll = ctk.CTkScrollableFrame(
             shell,
             fg_color=COLOR_PAIRS["surface_subtle"],
@@ -2029,8 +891,21 @@ class TutorialDialog(ctk.CTkToplevel):
         )
         self.content_scroll.grid(row=1, column=1, sticky="nsew", padx=(0, 18), pady=(0, 8))
         self.content_scroll.grid_columnconfigure(0, weight=1)
-        # Detailed pages fit at the normal dialog size, so start without a
-        # scrollbar gutter. Overflow detection restores it for small windows.
+        self.content_scroll._parent_canvas.configure(
+            yscrollcommand=self._update_content_scrollbar,
+        )
+        # Reserve the scrollbar's width even while it is hidden. Switching
+        # sections must not change wrapping and trigger another full layout.
+        self._scrollbar_gutter = ctk.CTkFrame(
+            self.content_scroll._parent_frame,
+            width=self.content_scroll._scrollbar.cget("width"),
+            height=1, fg_color="transparent", corner_radius=0,
+        )
+        self._scrollbar_gutter.grid(
+            row=1, column=1, sticky="ns",
+            padx=(0, self.content_scroll._border_width + 1),
+        )
+        self._scrollbar_gutter.lower(self.content_scroll._scrollbar)
         self.content_scroll._scrollbar.grid_remove()
         # CTkScrollableFrame's outer widget is wider than its real canvas
         # viewport.  Track the viewport itself so wrapped copy and the
@@ -2052,6 +927,7 @@ class TutorialDialog(ctk.CTkToplevel):
         )
         self.page_host.grid(row=0, column=0, sticky="ew", padx=12, pady=6)
         self.page_host.grid_columnconfigure(0, weight=1)
+        self.page_host.bind("<Configure>", self._schedule_scrollbar_sync, add="+")
 
         footer = ctk.CTkFrame(shell, fg_color="transparent", corner_radius=0)
         footer.grid(row=2, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 12))
@@ -2087,7 +963,7 @@ class TutorialDialog(ctk.CTkToplevel):
         self.close_button = AppButton(
             footer,
             text="Close",
-            variant="danger",
+            variant="ghost",
             width=104,
             command=self.close,
         )
@@ -2119,15 +995,37 @@ class TutorialDialog(ctk.CTkToplevel):
         return label
 
     def _on_content_resize(self, event) -> None:
-        """Keep tutorial copy inside the content pane after window resizing."""
+        """Coalesce resize events so dragging a window cannot flood the UI thread."""
 
+        if getattr(self, "_closing", False):
+            return
         try:
             logical_width, _ = logical_window_size(self, int(event.width), 1)
             if logical_width < 100:
                 return
-            content_wrap = max(220, min(650, logical_width - 50))
         except (AttributeError, TypeError, ValueError):
             return
+        if (
+            logical_width == self._content_viewport_width
+            and getattr(self, "_pending_content_width", None) is None
+        ):
+            return
+        self._pending_content_width = logical_width
+        if getattr(self, "_content_resize_after_id", None) is None:
+            try:
+                self._content_resize_after_id = self.after(40, self._apply_content_resize)
+            except tk.TclError:
+                self._pending_content_width = None
+
+    def _apply_content_resize(self) -> None:
+        """Apply only the most recent logical viewport size."""
+
+        self._content_resize_after_id = None
+        logical_width = self._pending_content_width
+        self._pending_content_width = None
+        if logical_width is None or getattr(self, "_closing", False):
+            return
+        content_wrap = max(220, min(650, logical_width - 50))
         viewport_changed = logical_width != getattr(
             self,
             "_content_viewport_width",
@@ -2147,6 +1045,7 @@ class TutorialDialog(ctk.CTkToplevel):
                 )
             except tk.TclError:
                 pass
+        self._size_page_headings()
         overview_wrap = max(150, (self._content_wrap - 34) // 2)
         for label in tuple(getattr(self, "_overview_context_labels", ())):
             try:
@@ -2167,6 +1066,43 @@ class TutorialDialog(ctk.CTkToplevel):
             )
         except (AttributeError, tk.TclError):
             self._scrollbar_sync_after_id = None
+
+    def _update_content_scrollbar(self, start, end) -> None:
+        """Update the thumb without flushing partially updated section layouts."""
+
+        scrollbar = self.content_scroll._scrollbar
+        fractions = float(start), float(end)
+        if scrollbar.get() == fractions:
+            return
+        already_deferred = self._aidas_defer_canvas_updates
+        self._aidas_defer_canvas_updates = True
+        try:
+            scrollbar.set(*fractions)
+        finally:
+            if not already_deferred:
+                finish_deferred_rendering(self)
+
+    def _size_page_headings(self) -> None:
+        for name, copies in (
+            ("_page_title_label", [page.title for page in TUTORIAL_PAGES]),
+            ("_page_purpose_label", [page.purpose for page in TUTORIAL_PAGES]),
+        ):
+            label = self.__dict__.get(name)
+            if label is not None:
+                height = _WorkflowPipeline._copy_height(
+                    label, copies, self._content_wrap,
+                    measurements=self._text_measurements,
+                )
+                if label.cget("height") != height:
+                    label.configure(height=height)
+
+    def _on_section_changed(self, _event=None) -> None:
+        """Start each selected section at its first instruction."""
+
+        canvas = self.content_scroll._parent_canvas
+        if canvas.yview()[0] > 0:
+            canvas.yview_moveto(0)
+        self._schedule_scrollbar_sync()
 
     def _sync_content_scrollbar(self) -> None:
         """Hide the scrollbar when the whole tutorial page already fits."""
@@ -2323,45 +1259,49 @@ class TutorialDialog(ctk.CTkToplevel):
                 self._page_purpose_label.configure(text=page.purpose)
                 return
 
-        self._stop_flow_visualizer()
-        for child in self.page_host.winfo_children():
-            child.destroy()
-        self._wrapped_labels.clear()
-        self._overview_context_labels.clear()
+        # Keep both layouts alive. Going through the overview must not destroy
+        # and reconstruct the shared template for the five workflow steps.
+        panels = self.__dict__.setdefault("_page_panels", {})
+        kind = "overview" if page.key == "overview" else "step"
+        for panel, _visualizer in panels.values():
+            panel.pack_forget()
 
-        self._page_title_label = self._wrapped_label(
-            self.page_host,
-            text=page.title,
-            anchor="w",
-            justify="left",
-            text_color=COLOR_PAIRS["text"],
-            font=ctk.CTkFont(
-                family=TYPOGRAPHY.family,
-                size=TYPOGRAPHY.heading_size,
-                weight=TYPOGRAPHY.bold_weight,
-            ),
-        )
-        self._page_title_label.pack(fill="x", pady=(0, 3))
-        self._page_purpose_label = self._wrapped_label(
-            self.page_host,
-            text=page.purpose,
-            anchor="nw",
-            justify="left",
-            text_color=COLOR_PAIRS["muted_text"],
-            font=self._body_font(),
-        )
-        self._page_purpose_label.pack(fill="x")
-
-        if page.key == "overview":
-            self._section_title(
-                self.page_host,
-                "Five-step workflow",
-                pady=(12, 5),
+        if "_page_title_label" not in self.__dict__:
+            self._page_title_label = self._wrapped_label(
+                self.page_host, text="", anchor="w", justify="left",
+                text_color=COLOR_PAIRS["text"],
+                font=ctk.CTkFont(family=TYPOGRAPHY.family,
+                                size=TYPOGRAPHY.heading_size, weight="bold"),
             )
-            self._render_flow(self.page_host, page)
-            self._render_overview_context(self.page_host, page)
+            self._page_title_label.pack(fill="x", pady=(0, 3))
+            self._page_purpose_label = self._wrapped_label(
+                self.page_host, text="", anchor="nw", justify="left",
+                text_color=COLOR_PAIRS["muted_text"], font=self._body_font(),
+            )
+            self._page_purpose_label.pack(fill="x")
+            self._size_page_headings()
+        self._page_title_label.configure(text=page.title)
+        self._page_purpose_label.configure(text=page.purpose)
+
+        if kind not in panels:
+            panel = ctk.CTkFrame(self.page_host, fg_color="transparent")
+            if kind == "overview":
+                self._section_title(panel, "Five-step workflow", pady=(12, 5))
+                self._render_flow(panel, page)
+                self._render_overview_context(panel, page)
+            else:
+                self._render_flow(panel, page)
+            panels[kind] = (panel, self._flow_visualizer)
         else:
-            self._render_flow(self.page_host, page)
+            panel, visualizer = panels[kind]
+            self._flow_visualizer = visualizer
+            visualizer.set_available_width(max(220, self._content_viewport_width - 24))
+            if kind == "step":
+                visualizer.replace_content(
+                    (page.input_summary, page.function_summary, page.output_summary),
+                    page.stage_points, page.completion_check, page.tips,
+                )
+        panels[kind][0].pack(fill="x")
 
     def show_page(self, page_index: int) -> None:
         """Display one valid page and synchronize all navigation controls."""
@@ -2494,6 +1434,9 @@ class TutorialDialog(ctk.CTkToplevel):
         self._modal_activation_after_id = None
         scrollbar_sync_id = getattr(self, "_scrollbar_sync_after_id", None)
         self._scrollbar_sync_after_id = None
+        resize_id = getattr(self, "_content_resize_after_id", None)
+        self._content_resize_after_id = None
+        self._pending_content_width = None
         if activation_id is not None:
             try:
                 self.after_cancel(activation_id)
@@ -2502,6 +1445,11 @@ class TutorialDialog(ctk.CTkToplevel):
         if scrollbar_sync_id is not None:
             try:
                 self.after_cancel(scrollbar_sync_id)
+            except tk.TclError:
+                pass
+        if resize_id is not None:
+            try:
+                self.after_cancel(resize_id)
             except tk.TclError:
                 pass
         try:

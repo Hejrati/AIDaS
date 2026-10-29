@@ -365,7 +365,7 @@ class Step1AutoCropTests(unittest.TestCase):
 
 
 class Step1AutoCropCanvasTests(unittest.TestCase):
-    def test_real_canvas_keeps_full_view_and_editable_proposal_with_visible_summary(self):
+    def test_real_canvas_keeps_full_view_and_editable_proposal_without_summary_messages(self):
         # CTk retains process-wide DPI timers, so isolate this application's
         # real window from other suites that also construct and close roots.
         code = textwrap.dedent("""
@@ -401,7 +401,8 @@ class Step1AutoCropCanvasTests(unittest.TestCase):
                     root.update()
                     assert frame.image_canvas.get_roi() == (0, 605, 768, 150)
                     np.testing.assert_array_equal(frame.image_canvas.get_image(), full)
-                    assert frame.crop_region_summary_label.winfo_ismapped()
+                    assert not frame.sdb_params_summary_label.winfo_ismapped()
+                    assert not frame.crop_region_summary_label.winfo_ismapped()
                     assert not frame.sdb_params_section.body.winfo_ismapped()
                     assert frame.crop_options_menu.entrycget(0, 'label') == 'Auto OCT Region'
                     assert frame.crop_options_menu.index('end') == 1

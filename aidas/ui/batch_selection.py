@@ -52,8 +52,10 @@ class BatchSelectionMixin:
         for iid, row in self._row_by_iid.items():
             if row.get("locked"):
                 continue
+            changed = bool(row.get("include")) != include
             row["include"] = include
-            self._refresh_row(iid, row)
+            if changed:
+                self._refresh_row(iid, row)
         self._refresh_header_checkbox()
         self._notify_selection_changed()
 

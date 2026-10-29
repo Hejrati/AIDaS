@@ -48,6 +48,8 @@ class DirectoryCompletion:
         self._hover_id = None
         self._hovered = False
         self._scrollable = False
+        self._scrollbar_visible = False
+        self._theme_signature = None
         self._outside_id = None
         self._bindings = []
         self._variable = str(self.target.cget("textvariable"))
@@ -120,6 +122,12 @@ class DirectoryCompletion:
 
     def refresh_now(self):
         """Request suggestions without waiting for the typing debounce."""
+        if (self._pending is not None and self._editable() and self._has_focus()
+                and self._query_text == self.target.get()):
+            # Repeated navigation while a slow folder lookup is pending should
+            # keep that lookup and its keyboard action alive.
+            self._cancel("_delay_id")
+            return
         self.hide()
         if not self._editable() or not self._has_focus():
             return
@@ -203,11 +211,20 @@ class DirectoryCompletion:
         # toplevel before app-wide wheel handlers also move the sidebar below.
         for event in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
             popup.bind(event, lambda _event: "break")
-        self.listbox._apply_aidas_theme = self._apply_theme
+        # Native theme refresh first applies the generic listbox palette. Its
+        # composite hook must restore our menu palette even in the same mode.
+        self.listbox._apply_aidas_theme = lambda: self._apply_theme(force=True)
         self._apply_theme()
 
-    def _apply_theme(self):
+    def _apply_theme(self, *, force=False):
         if self.popup is None or self._disposed:
+            return
+        signature = (
+            COLORS.menu_surface, COLORS.menu_border, COLORS.menu_text,
+            COLORS.menu_hover, COLORS.menu_hover_text, COLORS.border_strong,
+            COLORS.muted_text, self.scrollbar.winfo_reqwidth(),
+        )
+        if not force and signature == self._theme_signature:
             return
         self.popup.configure(
             background=COLORS.menu_surface, highlightthickness=1,
@@ -222,6 +239,7 @@ class DirectoryCompletion:
             button_hover_color=COLORS.muted_text,
         )
         self.popup.grid_columnconfigure(1, minsize=self.scrollbar.winfo_reqwidth() + 2)
+        self._theme_signature = signature
 
     def _set_scrollbar(self, first, last):
         self.scrollbar.set(first, last)
@@ -229,7 +247,11 @@ class DirectoryCompletion:
         self._update_scrollbar_visibility()
 
     def _update_scrollbar_visibility(self):
-        if self._hovered and self._scrollable and self._visible():
+        visible = self._hovered and self._scrollable and self._visible()
+        if visible == self._scrollbar_visible:
+            return
+        self._scrollbar_visible = visible
+        if visible:
             self.scrollbar.grid()
         else:
             self.scrollbar.grid_remove()
@@ -401,7 +423,7 @@ class DirectoryCompletion:
         self._hovered = False
         if self.popup is not None:
             self.popup.withdraw()
-            self.scrollbar.grid_remove()
+            self._update_scrollbar_visibility()
         self.suggestions = []
         if self._outside_id is not None:
             self.owner.unbind("<ButtonPress-1>", self._outside_id)

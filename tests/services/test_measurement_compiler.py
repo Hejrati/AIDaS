@@ -63,7 +63,7 @@ class Step4CompilerTests(unittest.TestCase):
         self.assertIn("workbook.move_sheet", source)
         self.assertNotIn("workbook._sheets", source)
 
-    def test_subject_ids_over_999_are_discovered_and_sorted_numerically(self):
+    def test_full_numeric_subject_names_are_preserved_and_sorted_naturally(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             for subject_id in ("1000", "999"):
@@ -74,8 +74,8 @@ class Step4CompilerTests(unittest.TestCase):
             folders = find_subject_folders(root)
             result = compile_step4_results(root, root / "compiled.xlsx")
 
-            self.assertEqual(set(folders["LE"]), {"999", "1000"})
-            self.assertEqual(result.le_ids, ("999", "1000"))
+            self.assertEqual(set(folders["LE"]), {"999_0_0", "1000_0_0"})
+            self.assertEqual(result.group_ids, {"LE": ("999_0_0", "1000_0_0")})
 
     def test_light_cleanup_falls_back_to_original_on_any_os_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -109,7 +109,7 @@ class Step4CompilerTests(unittest.TestCase):
             )
 
             self.assertEqual(result.output_path, output)
-            self.assertEqual(result.le_ids, ("007",))
+            self.assertEqual(result.le_ids, ("7_0_0",))
             self.assertEqual(result.re_ids, ())
             self.assertEqual(
                 result.measures,
@@ -119,7 +119,7 @@ class Step4CompilerTests(unittest.TestCase):
                     MeasureCompilation("ONL", 1, 0),
                 ),
             )
-            self.assertTrue(any("LE subject(s) found: 007" in line for line in log_messages))
+            self.assertTrue(any("LE subject(s) found: 7_0_0" in line for line in log_messages))
             self.assertTrue(log_messages[-1].endswith(str(output)))
             self.assertEqual(progress_events[0], (0, 1, "Scanning input folders..."))
             self.assertEqual(progress_events[1][:2], (1, 5))
@@ -144,12 +144,12 @@ class Step4CompilerTests(unittest.TestCase):
                 rr_sheet = workbook["rrMCP-AR"]
                 self.assertEqual(rr_sheet.max_row, 22)
                 self.assertEqual(rr_sheet["A1"].value, "LE")
-                self.assertEqual(rr_sheet["E1"].value, "RE")
+                self.assertIsNone(rr_sheet["E1"].value)
                 self.assertEqual(
                     [rr_sheet.cell(2, column).value for column in range(1, 8)],
-                    ["ID", "Nasal", "Temporal", None, "ID", "Nasal", "Temporal"],
+                    ["ID", "Nasal", "Temporal", None, None, None, None],
                 )
-                self.assertEqual(rr_sheet["A3"].value, "007")
+                self.assertEqual(rr_sheet["A3"].value, "7_0_0")
                 self.assertEqual(rr_sheet["B3"].value, 1)
                 self.assertEqual(rr_sheet["B22"].value, 20)
                 self.assertEqual(rr_sheet["C3"].value, 101)
@@ -158,12 +158,12 @@ class Step4CompilerTests(unittest.TestCase):
                 self.assertEqual(rr_sheet["A3"].alignment.horizontal, "center")
                 self.assertEqual(rr_sheet["A3"].alignment.vertical, "center")
                 self.assertEqual(rr_sheet["B3"].number_format, "0.000")
-                for column in ("A", "B", "C", "E", "F", "G"):
+                for column in ("A", "B", "C"):
                     self.assertEqual(rr_sheet.column_dimensions[column].width, 12.0)
 
                 elm_sheet = workbook["ELM-RPE"]
                 self.assertEqual(elm_sheet.max_row, 26)
-                self.assertEqual(elm_sheet["A3"].value, "007")
+                self.assertEqual(elm_sheet["A3"].value, "7_0_0")
                 self.assertAlmostEqual(elm_sheet["B3"].value, 55.77)
                 self.assertAlmostEqual(elm_sheet["C3"].value, 66.88)
                 self.assertEqual(elm_sheet["B4"].value, 10.0)
@@ -172,7 +172,7 @@ class Step4CompilerTests(unittest.TestCase):
 
                 onl_sheet = workbook["ONL"]
                 self.assertEqual(onl_sheet.max_row, 25)
-                self.assertEqual(onl_sheet["A3"].value, "007")
+                self.assertEqual(onl_sheet["A3"].value, "7_0_0")
                 self.assertEqual(onl_sheet["B3"].value, 20.0)
                 self.assertEqual(onl_sheet["B25"].value, 20.0)
                 self.assertEqual(onl_sheet["C3"].value, 40.0)
@@ -182,7 +182,7 @@ class Step4CompilerTests(unittest.TestCase):
                 self.assertEqual(log_sheet.max_column, 9)
                 self.assertEqual(log_sheet["A2"].value, "rrMCP-AR")
                 self.assertEqual(log_sheet["B2"].value, "LE")
-                self.assertEqual(log_sheet["C2"].value, "007")
+                self.assertEqual(log_sheet["C2"].value, "7_0_0")
                 self.assertEqual(log_sheet["I2"].value, "OK")
                 self.assertTrue(str(log_sheet["E2"].value).endswith("rr_MCPAR.xlsx"))
                 self.assertEqual(log_sheet["G2"].value, 20)
@@ -293,10 +293,144 @@ class Step4CompilerTests(unittest.TestCase):
             _write_results(root / "Results.xlsx", 1)
             output = root / "empty.xlsx"
 
-            with self.assertRaisesRegex(ValueError, "No LE or RE subject folders"):
+            with self.assertRaisesRegex(ValueError, "No subject folders"):
                 compile_step4_results(root, output)
 
             self.assertFalse(output.exists())
+
+    def test_recursive_groups_nested_workbooks_and_extra_subject_folders(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = {
+                "Control": ("Subject_2", "Subject_10"),
+                "Treatment": ("Subject_2",),
+                "Validation": ("001_extra",),
+            }
+            sources = {}
+            for group, ids in expected.items():
+                for subject_id in ids:
+                    subject = root / "Experiment" / "Visit 1" / group / subject_id
+                    for side, value in (("Nasal", 1), ("TEMPORAL", 101)):
+                        result_dir = subject / side / "exports" / "final"
+                        result_dir.mkdir(parents=True)
+                        source = result_dir / "measurements.xlsx"
+                        _write_results(source, value)
+                        sources[group, subject_id, side] = str(source)
+                    images = subject / "Images" / "Previews"
+                    images.mkdir(parents=True)
+                    (images / "scan.png").write_bytes(b"preview")
+                    notes = subject / "Notes"
+                    notes.mkdir()
+                    (notes / "notes.txt").write_text("notes", encoding="utf-8")
+
+            # These branches must never create subjects or group blocks.
+            thickness_only = root / "Other" / "TextOnly" / "nasal"
+            thickness_only.mkdir(parents=True)
+            _write_thickness(thickness_only / "_thickness_vs_distance_from_fovea_LIGHT.txt", 8, 9)
+            unrelated = root / "Other" / "Unrelated" / "Documents"
+            unrelated.mkdir(parents=True)
+            _write_results(unrelated / "notes.xlsx", 900)
+            locked = root / "Other" / "LockOnly" / "temporal"
+            locked.mkdir(parents=True)
+            (locked / "~$rr_MCPAR.xlsx").write_bytes(b"lock")
+            output = root / DEFAULT_OUTPUT_FILENAME
+            result = compile_step4_results(root, output)
+
+            self.assertEqual(result.group_ids, expected)
+            self.assertEqual(result.measures[0], MeasureCompilation("rrMCP-AR", 4, 0))
+            with_workbook = load_workbook(output, data_only=True)
+            try:
+                sheet = with_workbook["rrMCP-AR"]
+                for column, (group, ids) in zip((1, 5, 9), expected.items()):
+                    self.assertEqual(sheet.cell(1, column).value, group)
+                    self.assertEqual(sheet.cell(2, column).value, "ID")
+                    for index, subject_id in enumerate(ids):
+                        row = 3 + index * 20
+                        self.assertEqual(sheet.cell(row, column).value, subject_id)
+                        self.assertEqual(sheet.cell(row, column + 1).value, 1)
+                        self.assertEqual(sheet.cell(row, column + 2).value, 101)
+                log = with_workbook["Extraction_log"]
+                self.assertEqual(log["B1"].value, "Group")
+                rr_rows = [row for row in log.iter_rows(min_row=2, values_only=True) if row[0] == "rrMCP-AR"]
+                self.assertEqual(len(rr_rows), 4)
+                for row in rr_rows:
+                    self.assertEqual(row[4], sources[row[1], row[2], "Nasal"])
+                    self.assertEqual(row[5], sources[row[1], row[2], "TEMPORAL"])
+            finally:
+                with_workbook.close()
+
+            # Re-running must not discover the combined output as an input.
+            self.assertEqual(compile_step4_results(root, output).group_ids, expected)
+
+    def test_duplicate_group_and_subject_names_are_reported_without_losing_data(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            for batch in ("Batch1", "Batch2"):
+                folder = root / batch / "Control" / "Subject_A" / "nasal"
+                folder.mkdir(parents=True)
+                _write_results(folder / "rr_MCPAR.xlsx", 1)
+            output = root / "combined.xlsx"
+            with self.assertRaisesRegex(ValueError, "Duplicate subject 'Subject_A' in group 'Control'"):
+                compile_step4_results(root, output)
+            self.assertFalse(output.exists())
+
+    def test_temporal_only_subject_keeps_nasal_measurements_blank(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            side = root / "Temporal group" / "Subject_A" / "temporal"
+            side.mkdir(parents=True)
+            _write_results(side / "rr_MCPAR.xlsx", 101)
+            _write_thickness(side / "_thickness_vs_distance_from_fovea_LIGHT.txt", 30, 40)
+            output = root / "compiled.xlsx"
+            result = compile_step4_results(root, output, include_fovea=False)
+            self.assertEqual(result.group_ids, {"Temporal group": ("Subject_A",)})
+            workbook = load_workbook(output, data_only=True)
+            try:
+                for measure, value in (("rrMCP-AR", 101), ("ELM-RPE", 30), ("ONL", 40)):
+                    self.assertIsNone(workbook[measure]["B3"].value)
+                    self.assertEqual(workbook[measure]["C3"].value, value)
+            finally:
+                workbook.close()
+
+    def test_full_names_that_start_with_equals_are_written_as_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            side = root / "=Control" / "=Subject_A" / "nasal"
+            side.mkdir(parents=True)
+            _write_results(side / "rr_MCPAR.xlsx", 1)
+            output = root / "compiled.xlsx"
+            compile_step4_results(root, output)
+            workbook = load_workbook(output, data_only=False)
+            try:
+                for cell, value in (
+                    (workbook["rrMCP-AR"]["A1"], "=Control"),
+                    (workbook["rrMCP-AR"]["A3"], "=Subject_A"),
+                    (workbook["Extraction_log"]["B2"], "=Control"),
+                    (workbook["Extraction_log"]["C2"], "=Subject_A"),
+                ):
+                    self.assertEqual(cell.value, value)
+                    self.assertEqual(cell.data_type, "s")
+            finally:
+                workbook.close()
+
+    def test_nested_current_workbook_is_preferred_to_direct_legacy_workbook(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            folder = Path(temp_dir)
+            _write_results(folder / "Results.xlsx", 100)
+            nested = folder / "exports"
+            nested.mkdir()
+            current = nested / "rr_MCPAR.xlsx"
+            _write_results(current, 1)
+            self.assertEqual(Path(find_results_file(folder)), current)
+
+    def test_output_cannot_replace_an_input_workbook(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source = _build_subject(root) / "nasal" / "rr_MCPAR.xlsx"
+            original = source.read_bytes()
+            with self.assertRaisesRegex(ValueError, "different from the input"):
+                compile_step4_results(root, source)
+            self.assertEqual(source.read_bytes(), original)
 
 
 if __name__ == "__main__":

@@ -681,20 +681,23 @@ class WorkflowNavigationTests(unittest.TestCase):
             text="Workflow complete: 5 of 5 steps"
         )
 
-    def test_header_keeps_only_settings_and_help_shortcuts_at_top_right(self):
+    def test_header_keeps_settings_help_and_feedback_shortcuts_at_top_right(self):
         source = inspect.getsource(WorkflowHeader.__init__)
 
         settings_index = source.index("self.settings_button = ctk.CTkButton")
         help_index = source.index("self.help_button = ctk.CTkButton")
+        feedback_index = source.index("self.feedback_button = ctk.CTkButton")
         navigation_index = source.index("self.navigation = WorkflowNavigation")
         self.assertLess(settings_index, help_index)
-        self.assertLess(help_index, navigation_index)
+        self.assertLess(help_index, feedback_index)
+        self.assertLess(feedback_index, navigation_index)
         self.assertNotIn("self.appearance_menu", source)
         self.assertNotIn('text="Appearance"', source)
         self.assertIn("image=self.settings_image", source)
         self.assertIn("image=self.help_image", source)
+        self.assertIn("image=self.feedback_image", source)
         settings_source = source[settings_index:help_index]
-        help_source = source[help_index:navigation_index]
+        help_source = source[help_index:feedback_index]
         self.assertEqual(settings_source.count('anchor="center"'), 1)
         self.assertEqual(help_source.count('anchor="center"'), 1)
         self.assertIn("size=(24, 24)", source)

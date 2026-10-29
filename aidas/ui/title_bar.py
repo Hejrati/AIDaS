@@ -827,6 +827,8 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
         self._resize_drag: dict[str, object] | None = None
         self._cursor_widget = None
         self._cursor_before_resize = ""
+        self._resize_cursor = ""
+        self._last_maximized = None
 
         drag_surface = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
         drag_surface.pack(side="left", fill="both", expand=True)
@@ -1063,8 +1065,11 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
     def _set_resize_cursor(self, widget, edge: str | None) -> None:
         desired = self._RESIZE_CURSORS.get(edge or "", "")
         if widget is self._cursor_widget and desired:
+            if desired == self._resize_cursor:
+                return
             try:
                 widget.configure(cursor=desired)
+                self._resize_cursor = desired
             except (AttributeError, tk.TclError, ValueError):
                 pass
             return
@@ -1075,6 +1080,7 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
                 pass
         self._cursor_widget = None
         self._cursor_before_resize = ""
+        self._resize_cursor = ""
         if widget is None or not desired:
             return
         try:
@@ -1084,6 +1090,7 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
             return
         self._cursor_widget = widget
         self._cursor_before_resize = previous
+        self._resize_cursor = desired
 
     def _toggle_maximize(self, _event=None) -> str:
         if self.controller.dialog:
@@ -1096,9 +1103,10 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
         self._state_sync_after_id = None
         try:
             self.controller.correct_maximized_bounds()
-            self.maximize_button.configure(
-                text="\u2750" if self.controller.is_maximized() else "\u25a1"
-            )
+            maximized = self.controller.is_maximized()
+            if maximized != self._last_maximized:
+                self.maximize_button.configure(text="\u2750" if maximized else "\u25a1")
+                self._last_maximized = maximized
         except tk.TclError:
             pass
 

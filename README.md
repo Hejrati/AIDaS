@@ -176,6 +176,72 @@ future placements and corrections; it does not move existing lines. The choice
 is shared across open file tabs for the session. The explicit **Auto-detect
 ROIs 1-20** action remains available.
 
+## Step 5 Excel Compilation
+
+Step 5 searches the selected input folder recursively for Excel results inside
+`nasal` and `temporal` folders, including nested export folders. It uses the
+side folders' parent name as the complete subject ID and the subject's parent
+name as the group. Group names can be `Control`, `Treatment`, `LE`, `RE`, or any
+other folder name; subject names do not need to be numeric.
+
+```text
+Input folder
+├── Control                         → Group
+│   └── Subject_A                   → Subject ID
+│       ├── nasal
+│       │   └── rr_MCPAR.xlsx        → Nasal results
+│       ├── temporal
+│       │   └── exports
+│       │       └── rr_MCPAR.xlsx    → Temporal results
+│       ├── Images                  → Ignored: no Excel results
+│       └── Notes                   → Ignored: no Excel results
+└── Treatment                       → Group
+    └── Subject_B                   → Subject ID
+        ├── nasal
+        │   └── rr_MCPAR.xlsx
+        └── temporal
+            └── rr_MCPAR.xlsx
+```
+
+Each measurement sheet has an `ID`, `Nasal`, and `Temporal` column block per
+discovered group. IDs retain their full spelling, including leading zeros and
+suffixes. Subjects with only one side are included with the other side blank.
+Folders without nasal/temporal Excel results are ignored. Step 3 thickness and
+optional fovea extraction continue for the discovered subjects.
+
+The scanner prefers `rr_MCPAR.xlsx`, then legacy `Results*.xlsx`, then other
+`.xlsx` files; it ignores Excel lock files (`~$*`). Other workbook names must use
+the same Step 4 layout (measurements in column G). Duplicate subject names within
+the same group label in separate branches cause a clear error rather than
+silently dropping data.
+
+Clicking **Go to Step 5** in Step 4 transfers the measurement root for all Step 4
+tabs and starts compilation automatically. Switching workspace tabs does not
+transfer folders or start compilation. A side or subject root is promoted to include its group. The default output
+is `rrMCPAR_ELMRPE_ONL.xlsx` in that root; an explicitly chosen output path and
+fovea option are preserved. **Create Excel File** remains available for manual
+runs. The workbook contains `rrMCP-AR`, `ELM-RPE`, `ONL`, and `Extraction_log`;
+the log records each source path and extraction status.
+
+The Step 5 workspace shows an expandable folder-tree canvas for the currently
+selected input directory. Excel workbooks, thickness tables, fovea measurements,
+flattened images, and Step 4 image stacks have distinct icons and descriptions.
+Other files are summarized when shown, and folders without recorded Excel results appear as
+compact rows. Use **Refresh**, **Expand all**, and **Collapse all** to explore the
+tree. Scanning runs in the background and only visible rows are drawn.
+
+**Hide other files** is checked by default, so the tree shows Excel files and
+their folders. Uncheck it to also see thickness tables, fovea files, images, and
+the summaries of other files. Folders without Excel workbooks are labeled
+**No recorded Excel results**. Toggling this option updates the existing view
+without scanning the directory again.
+
+Flat result folders are also visualized: workbooks outside `nasal` or `temporal`
+folders are marked as lacking a side assignment. This preview does not change
+the compiler's folder requirements. The workspace uses a short status message
+instead of progress bars or on-screen logs; detailed extraction information
+remains in the saved workbook's `Extraction_log` sheet.
+
 ## 6. Run the App (From Source)
 From the project root:
 
@@ -188,6 +254,31 @@ python run_aidas.py
 ```bash
 python run_aidas.py
 ```
+
+## Send feedback and diagnostic reports
+
+Use the blue speech-bubble button beside **?**, or **Help > Send feedback...**
+(available in both interface modes). Describe the problem, review the generated
+diagnostics, and optionally select screenshots, sample data, or R workspaces.
+The report contains app/OS/Python/package versions, selected R script hashes,
+processing settings, workflow status, recent errors, and optional recent logs.
+Input file contents are included only when explicitly selected.
+
+After reviewing the contents, check the approval box and choose **Save report
+ZIP...**, then **Open email draft**. The draft is addressed to
+`b.hejrati+AIDaSFeedBack@wayne.edu` with subject prefix `[AIDaS Feedback]` and a
+report ID. **Attach the saved ZIP manually and send it from your email app.**
+The app does not send email or attach files automatically; it stores no mailbox
+credentials. If no default email app is configured, the address and ZIP location
+remain available for manual submission.
+
+Generated text is scrubbed on a best-effort basis; review it before sharing.
+Selected files retain their original contents and may contain patient details.
+Archive filenames are anonymized while matching Analyze `.hdr`/`.img` pairs keep
+matching stems. Selected files are limited to 10 MB total and the final ZIP to
+15 MB; larger datasets require a separate transfer. Existing data are unchanged.
+Uncaught errors and error dialogs are recorded locally in bounded logs under
+`~/.aidas/diagnostics` for inclusion in future reports.
 
 ## OCT Retinal Layer Segmenter
 
@@ -512,7 +603,8 @@ previews once, using raster rendering with the original boundary coordinates.
 Standalone scripts retain their default rendering unless
 `AIDAS_STEP3_RASTER=1` is set. These optimized scripts do not export the redundant
 `step3_r_arrays` directory or implicit `Rplots.pdf` files. The batch screen shows
-a live `Elapsed: HH:MM:SS` counter and retains the total elapsed time after
+a live `Elapsed: HH:MM:SS` counter in the bottom status panel beside the green
+indicator while Step 3 is selected, and retains the total elapsed time after
 completion, failure, or cancellation.
 
 Batch Step 3 runs each R process without interactive standard input. The batch

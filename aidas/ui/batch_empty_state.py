@@ -20,8 +20,16 @@ class NoValidFilesNotice(ttk.Frame):
         ).pack(pady=(0, 10))
         message = ttk.Label(content, text=description, justify="center", anchor="center", wraplength=500)
         message.pack(fill="x")
-        self.bind("<Configure>", lambda event: message.configure(
-            wraplength=max(180, min(500, event.width - 64))), add="+")
+        wraplength = 500
+
+        def resize_message(event):
+            nonlocal wraplength
+            width = max(180, min(500, event.width - 64))
+            if width != wraplength:
+                message.configure(wraplength=width)
+                wraplength = width
+
+        self.bind("<Configure>", resize_message, add="+")
         self.select_folder_button = AppButton(
             content, text="Select another folder", variant="primary", width=180,
             command=on_select_folder,

@@ -25,6 +25,7 @@ class BrightPixelNotice(tk.Toplevel):
     ) -> None:
         self._on_decision = on_decision
         self._resolved = False
+        self._text_widths = None
         self.context = context
         super().__init__(
             master,
@@ -159,11 +160,14 @@ class BrightPixelNotice(tk.Toplevel):
 
     def _set_text_width(self, width) -> None:
         # Leave room for the warning glyph, inset, and warning border.
-        wraplength = max(100, width - 108)
-        self._body.configure(wraplength=wraplength)
+        widths = (max(100, width - 108), max(70, width - 280))
+        if widths == self._text_widths:
+            return
+        self._body.configure(wraplength=widths[0])
         self.auto_fix_checkbox._text_label.configure(
-            wraplength=max(70, width - 280), justify="left", anchor="w",
+            wraplength=widths[1], justify="left", anchor="w",
         )
+        self._text_widths = widths
 
     def _apply_aidas_theme(self) -> None:
         background = resolve_color(COLOR_PAIRS["surface_elevated"])

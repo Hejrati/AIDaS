@@ -1907,7 +1907,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         navigation = ttk.Frame(footer, style="ProfileZoom.TFrame")
         navigation.pack(pady=(0, 10))
         self.previous_plot_button = AppButton(
-            navigation, text="Previous", width=112, variant="secondary",
+            navigation, text="Previous", width=112, variant="primary",
+            raised=True,
             image=load_ctk_image(self, "flat-color-icons--left.png", size=20),
             compound="left", anchor="center",
             bg_color=COLOR_PAIRS["surface_elevated"],
@@ -1920,7 +1921,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         )
         self.plot_number_label.pack(side="left", padx=12)
         self.next_plot_button = AppButton(
-            navigation, text="Next", width=112, variant="secondary",
+            navigation, text="Next", width=112, variant="primary",
+            raised=True,
             image=load_ctk_image(self, "flat-color-icons--right.png", size=20),
             compound="left", anchor="center",
             bg_color=COLOR_PAIRS["surface_elevated"],
@@ -2747,12 +2749,13 @@ class Step4Frame(SidebarStepFrame):
             command=self._build_stack_outputs,
             state="disabled",
             image=self.build_stacks_button_icon,
+            preserve_icon_colors=True,
             compound="left",
         )
         HoverToolTip(
             self.build_stacks_button,
             "Build output stacks for every ready tab. Each tab must have all ROIs confirmed; "
-            "the counter shows tabs with completed stack outputs.",
+            "the counter shows tabs ready to build, excluding completed stacks.",
         )
         self.build_stacks_button.pack(fill="x")
         ttk.Separator(self.sidebar_footer, orient="horizontal").pack(
@@ -2802,8 +2805,19 @@ class Step4Frame(SidebarStepFrame):
         if callback is None:
             messagebox.showerror("Step 5 unavailable", "Step 5 — Create Excel File is unavailable.")
             return
+        paths = self.__dict__.get("batch_roi_paths", [])
+        shared_root = None
+        if paths and not self.batch_roi_root:
+            try:
+                shared_root = os.path.commonpath([str(Path(path).parent) for path in paths])
+            except ValueError:
+                # Step 5 can report that a manual input is needed when the
+                # selected folders span drives and have no common root.
+                callback(None)
+                return
         folder = (
             self.batch_roi_root
+            or shared_root
             or self.output_dir_var.get()
             or self.input_dir_var.get()
             or self._default_input_folder()
@@ -3439,6 +3453,11 @@ class Step4Frame(SidebarStepFrame):
             )
             return False
 
+        # Replace any older browse root when Step 3 transfers a new batch.
+        try:
+            self.batch_roi_root = Path(os.path.commonpath([str(path.parent) for path in paths]))
+        except ValueError:
+            self.batch_roi_root = None
         self._start_batch_roi_from_rows(
             [{"folder": path.parent, "flat_light": path} for path in paths]
         )
@@ -5166,15 +5185,19 @@ class Step4Frame(SidebarStepFrame):
             return
         states = getattr(self, "batch_roi_tab_states", {})
         if states:
-            completed = sum(bool(state.get("complete")) for state in states.values())
             total = len(states)
-            ready = any(self._batch_tab_stack_ready(key, state) for key, state in states.items())
+            ready_count = sum(self._batch_tab_stack_ready(key, state) for key, state in states.items())
+        elif self._has_current_roi_input():
+            total = 1
+            ready_count = int(self._all_rois_completed() and not getattr(self, "_stack_build_complete", False))
         else:
-            completed, total = int(bool(getattr(self, "_stack_build_complete", False))), 1
-            ready = self._all_rois_completed() and not completed
-        self.build_stacks_button.configure(text=f"Build Stack ({completed}/{total} completed)")
+            self.build_stacks_button.configure(text="Build Stack — no image loaded")
+            self._update_roi_action_emphasis(False)
+            self.build_stacks_button.state(["disabled"])
+            return
+        self.build_stacks_button.configure(text=f"Build Stack ({ready_count}/{total} ready to build)")
         build_ready = (
-            ready
+            ready_count > 0
             and not getattr(self, "_stack_building", False)
         )
         self._update_roi_action_emphasis(build_ready)

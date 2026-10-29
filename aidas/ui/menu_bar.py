@@ -586,6 +586,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         current_interface: str = "Modern",
         set_interface_command: Callable[[str], None] | None = None,
         tutorial_command: Callable[[], None] | None = None,
+        feedback_command: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(
             master,
@@ -607,6 +608,7 @@ class ApplicationMenuBar(ctk.CTkFrame):
         self._check_updates_command = check_updates_command
         self._about_command = about_command
         self._tutorial_command = tutorial_command
+        self._feedback_command = feedback_command
         self._exit_command = exit_command or master.winfo_toplevel().destroy
         self._popup: _PopupMenu | None = None
         self._popup_cache: dict[str, _PopupMenu] = {}
@@ -820,6 +822,8 @@ class ApplicationMenuBar(ctk.CTkFrame):
         )
         return (
             *tutorial_items,
+            *((_MenuItem("command", "Send feedback...", self._feedback_command),)
+              if getattr(self, "_feedback_command", None) is not None else ()),
             _MenuItem("command", "Check for Updates...", self._check_updates_command),
             _MenuItem("separator"),
             _MenuItem("command", "About", self._about_command),

@@ -1,4 +1,4 @@
-"""Compile Step 4 measurements from an LE/RE folder tree into one workbook.
+"""Compile measurements from recursively discovered group/subject folders.
 
 This module is the non-UI implementation of the legacy
 ``rrMCPAR_ELMRPE_ONL_Compiler`` utility.  It preserves the workbook layout,
@@ -29,7 +29,7 @@ ELMRPE_COL = 3
 ONL_COL = 4
 FOVEA_LABEL = "RPEtoOLM"
 SHEET_NAMES = ("rrMCP-AR", "ELM-RPE", "ONL")
-DEFAULT_OUTPUT_FILENAME = "LE_RE_rrMCPAR_ELMRPE_ONL.xlsx"
+DEFAULT_OUTPUT_FILENAME = "rrMCPAR_ELMRPE_ONL.xlsx"
 
 PathLike = str | os.PathLike[str]
 LogCallback = Callable[[str], None]
@@ -51,9 +51,29 @@ class CompilationResult:
     """Summary returned after a compiler workbook is saved."""
 
     output_path: Path
-    le_ids: tuple[str, ...]
-    re_ids: tuple[str, ...]
+    group_ids: dict[str, tuple[str, ...]]
     measures: tuple[MeasureCompilation, ...]
+
+    @property
+    def le_ids(self) -> tuple[str, ...]:
+        """Retain access for callers using an actual LE group."""
+        return self.group_ids.get("LE", ())
+
+    @property
+    def re_ids(self) -> tuple[str, ...]:
+        return self.group_ids.get("RE", ())
+
+
+def _natural_key(value: str):
+    """Sort names naturally without changing their spelling in the workbook."""
+    return tuple(
+        (1, int(part)) if part.isdigit() else (0, part.casefold())
+        for part in re.split(r"(\d+)", value)
+    ), value
+
+
+def _raise_walk_error(error: OSError) -> None:
+    raise error
 
 
 def classify_eye_from_path(path: PathLike) -> str:
@@ -91,7 +111,7 @@ def existing_file(*parts: PathLike) -> str | None:
 
 
 def find_results_file(folder_path: PathLike | None) -> str | None:
-    """Find the current Step 4 workbook, then fall back to legacy names."""
+    """Search a side recursively, preferring current and legacy result names."""
 
     if not folder_path:
         return None
@@ -99,20 +119,18 @@ def find_results_file(folder_path: PathLike | None) -> str | None:
     if not os.path.isdir(folder):
         return None
 
-    filenames = sorted(os.listdir(folder), key=str.lower)
-    for filename in filenames:
-        if filename.lower() == "rr_mcpar.xlsx" and not filename.startswith("~$"):
-            path = os.path.join(folder, filename)
-            if os.path.isfile(path):
-                return path
-
-    for filename in filenames:
-        lower = filename.lower()
-        if lower.startswith("results") and lower.endswith(".xlsx") and not filename.startswith("~$"):
-            path = os.path.join(folder, filename)
-            if os.path.isfile(path):
-                return path
-    return None
+    candidates = []
+    for directory, subdirectories, filenames in os.walk(folder, onerror=_raise_walk_error):
+        subdirectories.sort(key=_natural_key)
+        for filename in filenames:
+            lower = filename.lower()
+            if not lower.endswith(".xlsx") or filename.startswith("~$"):
+                continue
+            path = Path(directory) / filename
+            relative = path.relative_to(folder)
+            rank = 0 if lower == "rr_mcpar.xlsx" else 1 if lower.startswith("results") else 2
+            candidates.append((rank, len(relative.parts), _natural_key(str(relative)), str(path)))
+    return min(candidates)[-1] if candidates else None
 
 
 def find_nasal_temporal_results(subject_path: PathLike) -> tuple[str | None, str | None]:
@@ -253,11 +271,11 @@ def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
                     all_text_files.append(os.path.join(root, filename))
         all_text_files.sort(key=lambda path: ("light2" not in path.lower(), path.lower()))
         for filepath in all_text_files:
-            lower_path = filepath.lower()
-            if not temporal_file and (
-                "temporal" in lower_path or "\\temp" in lower_path or "/temp" in lower_path
-            ):
-                temporal_file = filepath
+            relative_parts = Path(os.path.relpath(filepath, subject)).parts[:-1]
+            is_temporal = any(part.lower() in ("temporal", "temp") for part in relative_parts)
+            if is_temporal:
+                if not temporal_file:
+                    temporal_file = filepath
             elif not nasal_file:
                 nasal_file = filepath
 
@@ -413,31 +431,44 @@ def extract_elmrpe_onl_from_subject(
 
 
 def find_subject_folders(root_folder: PathLike) -> dict[str, dict[str, str]]:
-    """Return discovered subject folders grouped by eye and zero-padded ID."""
+    """Find side workbooks, then use their subject and group folder names.
 
-    subject_folders: dict[str, dict[str, str]] = {"LE": {}, "RE": {}, "UNKNOWN": {}}
-    for directory, _subdirectories, _filenames in os.walk(os.fspath(root_folder)):
-        match = re.match(r"^(\d+)(?:_|\b)", os.path.basename(directory))
-        if not match:
+    Other subject subfolders never become subjects themselves. A subject with
+    only thickness text files is ignored; one side's workbook is sufficient.
+    """
+    subject_folders: dict[str, dict[str, str]] = {}
+    for directory, subdirectories, _filenames in os.walk(
+        os.fspath(root_folder), onerror=_raise_walk_error,
+    ):
+        subdirectories.sort(key=_natural_key)
+        side = Path(directory)
+        if side.name.strip().lower() not in ("nasal", "temporal"):
             continue
-        subject_id = match.group(1).zfill(3)
-        nasal_results, temporal_results = find_nasal_temporal_results(directory)
-        nasal_light, temporal_light = find_light_files(directory)
-        if not any((nasal_results, temporal_results, nasal_light, temporal_light)):
+        # find_results_file handles everything below this side, so the outer
+        # walk must not reinterpret a nested directory as another subject.
+        subdirectories.clear()
+        if not find_results_file(side):
             continue
-        eye = classify_eye_from_path(directory)
-        if subject_id not in subject_folders.setdefault(eye, {}):
-            subject_folders[eye][subject_id] = directory
+        subject = side.parent
+        group_name = subject.parent.name
+        subjects = subject_folders.setdefault(group_name, {})
+        previous = subjects.get(subject.name)
+        if previous is not None and previous != str(subject):
+            raise ValueError(
+                f"Duplicate subject {subject.name!r} in group {group_name!r}: "
+                f"{previous} and {subject}. Choose a narrower input folder or rename the folders."
+            )
+        subjects[subject.name] = str(subject)
     return subject_folders
 
 
-def write_eye_block(
+def write_group_block(
     worksheet,
     log_worksheet,
     measure_name: str,
-    eye: str,
+    group_name: str,
     start_column: int,
-    subject_folders_for_eye: dict[str, str],
+    subject_folders_for_group: dict[str, str],
     include_fovea: bool,
     subject_processed_callback: SubjectProcessedCallback | None = None,
 ) -> tuple[int, int]:
@@ -445,7 +476,8 @@ def write_eye_block(
     nasal_column = start_column + 1
     temporal_column = start_column + 2
 
-    worksheet.cell(1, id_column).value = eye
+    worksheet.cell(1, id_column).value = group_name
+    worksheet.cell(1, id_column).data_type = "s"
     worksheet.cell(1, id_column).font = Font(bold=True)
     worksheet.cell(2, id_column).value = "ID"
     worksheet.cell(2, nasal_column).value = "Nasal"
@@ -458,8 +490,8 @@ def write_eye_block(
     row = ID_ROW_START
     included = 0
     skipped = 0
-    for subject_id in sorted(subject_folders_for_eye, key=int):
-        subject_path = subject_folders_for_eye[subject_id]
+    for subject_id in sorted(subject_folders_for_group, key=_natural_key):
+        subject_path = subject_folders_for_group[subject_id]
         try:
             if measure_name == "rrMCP-AR":
                 nasal_values, temporal_values, nasal_file, temporal_file = extract_rrmcpar_from_subject(
@@ -478,10 +510,10 @@ def write_eye_block(
         except Exception as exc:
             skipped += 1
             log_worksheet.append(
-                [measure_name, eye, subject_id, subject_path, "", "", 0, 0, f"Error: {exc}"]
+                [measure_name, group_name, subject_id, subject_path, "", "", 0, 0, f"Error: {exc}"]
             )
             if subject_processed_callback is not None:
-                subject_processed_callback(measure_name, eye, subject_id)
+                subject_processed_callback(measure_name, group_name, subject_id)
             continue
 
         if not any(value is not None for value in nasal_values) and not any(
@@ -491,7 +523,7 @@ def write_eye_block(
             log_worksheet.append(
                 [
                     measure_name,
-                    eye,
+                    group_name,
                     subject_id,
                     subject_path,
                     nasal_file or "",
@@ -502,11 +534,12 @@ def write_eye_block(
                 ]
             )
             if subject_processed_callback is not None:
-                subject_processed_callback(measure_name, eye, subject_id)
+                subject_processed_callback(measure_name, group_name, subject_id)
             continue
 
         id_cell = worksheet.cell(row, id_column)
         id_cell.value = subject_id
+        id_cell.data_type = "s"
         id_cell.font = Font(bold=True)
         id_cell.alignment = Alignment(horizontal="center", vertical="center")
         for index in range(row_count):
@@ -523,7 +556,7 @@ def write_eye_block(
         log_worksheet.append(
             [
                 measure_name,
-                eye,
+                group_name,
                 subject_id,
                 subject_path,
                 nasal_file or "",
@@ -536,7 +569,7 @@ def write_eye_block(
         included += 1
         row += row_count
         if subject_processed_callback is not None:
-            subject_processed_callback(measure_name, eye, subject_id)
+            subject_processed_callback(measure_name, group_name, subject_id)
 
     for column in (id_column, nasal_column, temporal_column):
         worksheet.column_dimensions[get_column_letter(column)].width = 12
@@ -551,27 +584,21 @@ def write_measure_sheet(
     include_fovea: bool,
     subject_processed_callback: SubjectProcessedCallback | None = None,
 ) -> tuple[int, int]:
-    le_included, le_skipped = write_eye_block(
-        worksheet,
-        log_worksheet,
-        measure_name,
-        "LE",
-        1,
-        subject_folders.get("LE", {}),
-        include_fovea,
-        subject_processed_callback,
-    )
-    re_included, re_skipped = write_eye_block(
-        worksheet,
-        log_worksheet,
-        measure_name,
-        "RE",
-        5,
-        subject_folders.get("RE", {}),
-        include_fovea,
-        subject_processed_callback,
-    )
-    return le_included + re_included, le_skipped + re_skipped
+    included = skipped = 0
+    for index, group_name in enumerate(sorted(subject_folders, key=_natural_key)):
+        group_included, group_skipped = write_group_block(
+            worksheet,
+            log_worksheet,
+            measure_name,
+            group_name,
+            1 + index * 4,
+            subject_folders[group_name],
+            include_fovea,
+            subject_processed_callback,
+        )
+        included += group_included
+        skipped += group_skipped
+    return included, skipped
 
 
 def compile_step4_results(
@@ -587,7 +614,7 @@ def compile_step4_results(
     root = Path(root_folder).expanduser()
     output = Path(output_path).expanduser()
     if not root.is_dir():
-        raise ValueError("Choose a valid parent folder containing LE and RE subject folders.")
+        raise ValueError("Choose a valid input folder containing group and subject folders.")
     if output.suffix.lower() != ".xlsx":
         raise ValueError("The compiled output filename must end with .xlsx.")
     if not output.parent.is_dir():
@@ -603,21 +630,30 @@ def compile_step4_results(
 
     emit(f"Root folder: {root}")
     emit(f"Include fovea in ELM-RPE: {bool(include_fovea)}\n")
-    emit("Scanning for LE and RE subject folders...")
+    emit("Searching recursively for nasal and temporal Excel results...")
     report_progress(0, 1, "Scanning input folders...")
     subject_folders = find_subject_folders(root)
-    le_ids = tuple(sorted(subject_folders.get("LE", {}), key=int))
-    re_ids = tuple(sorted(subject_folders.get("RE", {}), key=int))
-    emit(f"LE subject(s) found: {', '.join(le_ids) or '(none)'}")
-    emit(f"RE subject(s) found: {', '.join(re_ids) or '(none)'}\n")
-    if not le_ids and not re_ids:
+    group_ids = {
+        group: tuple(sorted(subject_folders[group], key=_natural_key))
+        for group in sorted(subject_folders, key=_natural_key)
+    }
+    for group_name, ids in group_ids.items():
+        emit(f"{group_name} subject(s) found: {', '.join(ids)}")
+    if not group_ids:
         raise ValueError(
-            "No LE or RE subject folders with Step 4 data were found. Select the parent "
-            "folder that contains the LE and RE folders, subject ID folders, and nasal or "
-            "temporal data folders."
+            "No subject folders with nasal or temporal Excel results were found. "
+            "Expected: group / subject / nasal or temporal / Excel workbook (.xlsx). "
+            "Folders without Excel results are ignored."
         )
 
-    total_subjects = len(le_ids) + len(re_ids)
+    # A custom destination must never replace one of the source workbooks.
+    for subjects in subject_folders.values():
+        for subject in subjects.values():
+            for source_file in find_nasal_temporal_results(subject):
+                if source_file and Path(source_file).resolve() == output.resolve():
+                    raise ValueError("Choose an output path different from the input Excel result files.")
+
+    total_subjects = sum(len(ids) for ids in group_ids.values())
     total_steps = 2 + (len(SHEET_NAMES) * total_subjects)
     completed_steps = 1
     report_progress(
@@ -626,13 +662,13 @@ def compile_step4_results(
         f"Found {total_subjects} subject folder{'s' if total_subjects != 1 else ''}.",
     )
 
-    def subject_processed(measure_name: str, eye: str, subject_id: str) -> None:
+    def subject_processed(measure_name: str, group_name: str, subject_id: str) -> None:
         nonlocal completed_steps
         completed_steps += 1
         report_progress(
             completed_steps,
             total_steps,
-            f"Processed {measure_name}: {eye} {subject_id}.",
+            f"Processed {measure_name}: {group_name} {subject_id}.",
         )
 
     workbook = Workbook()
@@ -643,7 +679,7 @@ def compile_step4_results(
         log_worksheet.append(
             [
                 "Measure",
-                "Eye",
+                "Group",
                 "ID",
                 "Subject folder",
                 "Nasal file used",
@@ -671,6 +707,10 @@ def compile_step4_results(
         for cell in log_worksheet[1]:
             cell.font = Font(bold=True)
             cell.alignment = Alignment(horizontal="center")
+        for row in log_worksheet.iter_rows(min_row=2):
+            for cell in row:
+                if isinstance(cell.value, str):
+                    cell.data_type = "s"
         for column in range(1, log_worksheet.max_column + 1):
             log_worksheet.column_dimensions[get_column_letter(column)].width = 28
 
@@ -683,8 +723,7 @@ def compile_step4_results(
     emit(f"\nSaved: {output}")
     return CompilationResult(
         output_path=output,
-        le_ids=le_ids,
-        re_ids=re_ids,
+        group_ids=group_ids,
         measures=tuple(measure_summaries),
     )
 

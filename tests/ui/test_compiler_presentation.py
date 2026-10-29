@@ -116,7 +116,6 @@ class CompilerPresentationTests(unittest.TestCase):
     def test_progress_keeps_each_views_fallback_and_ignores_invalid_payloads(self):
         for view_type, fallback in (
             (Step4CompilerDialog, "Compiling measurements…"),
-            (Step5Frame, "Creating the Excel file…"),
         ):
             with self.subTest(view=view_type.__name__):
                 view = object.__new__(view_type)
@@ -131,6 +130,15 @@ class CompilerPresentationTests(unittest.TestCase):
                     view._update_progress(payload)
                 view.progress.configure.assert_not_called()
                 view.status_var.set.assert_not_called()
+
+    def test_step5_does_not_replace_directory_canvas_with_worker_logs_or_progress(self):
+        view = object.__new__(Step5Frame)
+        view.status_var = mock.Mock()
+        # Step 5 deliberately has no progress or log widgets.
+        view._clear_log()
+        view._append_log("Processed subject A")
+        view._update_progress((3, 5, "Processed subject A"))
+        view.status_var.set.assert_not_called()
 
     def test_dialog_closing_does_not_drain_or_reschedule_events(self):
         view = self._view(Step4CompilerDialog)

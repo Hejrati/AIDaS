@@ -40,6 +40,8 @@ def _completion_frame() -> Step4Frame:
 class Step4CompletionTests(unittest.TestCase):
     def test_build_stack_replaces_auto_detect_as_highlighted_action_when_ready(self):
         frame = object.__new__(Step4Frame)
+        frame.image = object()
+        frame.current_path = Path("_flat_LIGHT.hdr")
         frame.rois = [mock.Mock(suffix="01"), mock.Mock(suffix="02")]
         frame.completed = {"01": object(), "02": object()}
         frame._stack_building = False
@@ -49,12 +51,15 @@ class Step4CompletionTests(unittest.TestCase):
 
         frame._update_build_stack_button_state()
 
+        frame.build_stacks_button.configure.assert_called_with(text="Build Stack (1/1 ready to build)")
         frame.build_stacks_button.set_variant.assert_called_once_with("primary")
         frame.build_stacks_button.state.assert_called_once_with(["!disabled"])
         frame.auto_detect_button.set_variant.assert_called_once_with("secondary")
 
     def test_auto_detect_remains_highlighted_until_every_roi_is_complete(self):
         frame = object.__new__(Step4Frame)
+        frame.image = object()
+        frame.current_path = Path("_flat_LIGHT.hdr")
         frame.rois = [mock.Mock(suffix="01"), mock.Mock(suffix="02")]
         frame.completed = {"01": object()}
         frame._stack_building = False
@@ -64,9 +69,26 @@ class Step4CompletionTests(unittest.TestCase):
 
         frame._update_build_stack_button_state()
 
+        frame.build_stacks_button.configure.assert_called_with(text="Build Stack (0/1 ready to build)")
         frame.build_stacks_button.set_variant.assert_called_once_with("secondary")
         frame.build_stacks_button.state.assert_called_once_with(["disabled"])
         frame.auto_detect_button.set_variant.assert_called_once_with("primary")
+
+    def test_build_stack_shows_empty_state_when_no_image_is_open(self):
+        frame = object.__new__(Step4Frame)
+        frame.build_stacks_button = mock.Mock()
+        frame.auto_detect_button = mock.Mock()
+        frame.batch_roi_tab_states = {}
+        frame.image = None
+        frame.current_path = None
+        # Stale ROI selections must not make an empty workspace actionable.
+        frame.rois = [mock.Mock(suffix="01")]
+        frame.completed = {"01": object()}
+        frame._update_build_stack_button_state()
+        frame.build_stacks_button.configure.assert_called_once_with(
+            text="Build Stack — no image loaded")
+        frame.build_stacks_button.state.assert_called_once_with(["disabled"])
+        frame.build_stacks_button.set_variant.assert_called_once_with("secondary")
 
     def test_step4_module_import_does_not_require_openpyxl(self):
         project_root = PROJECT_ROOT
@@ -112,6 +134,22 @@ class Step4CompletionTests(unittest.TestCase):
         frame._continue_to_step5()
 
         frame.on_continue_to_step5.assert_called_once_with(Path("measurement-root"))
+
+    def test_step4_handoff_uses_all_transferred_tabs_without_a_browse_root(self):
+        frame = object.__new__(Step4Frame)
+        frame.batch_roi_root = None
+        frame.batch_roi_paths = [
+            Path("measurement-root/Control/Subject_A/nasal/_flat_LIGHT.hdr"),
+            Path("measurement-root/Treatment/Subject_B/temporal/_flat_LIGHT.hdr"),
+        ]
+        frame.output_dir_var = mock.Mock()
+        frame.input_dir_var = mock.Mock()
+        frame.on_continue_to_step5 = mock.Mock()
+
+        frame._continue_to_step5()
+
+        self.assertEqual(Path(frame.on_continue_to_step5.call_args.args[0]), Path("measurement-root"))
+        frame.output_dir_var.get.assert_not_called()
 
     def test_roi_table_stays_compact_enough_to_reveal_its_actions(self):
         source = inspect.getsource(Step4Frame._build_ui)

@@ -94,7 +94,7 @@ class ClassicApplicationMenuTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def _build(self):
+    def _build(self, feedback_command=None):
         callback = lambda name: lambda *args: self.calls.append((name, *args))
         return classic.build_classic_application_menu(
             self.root,
@@ -109,8 +109,16 @@ class ClassicApplicationMenuTests(unittest.TestCase):
             check_updates_command=callback("updates"),
             about_command=callback("about"),
             tutorial_command=callback("tutorial"),
+            feedback_command=feedback_command,
             exit_command=callback("exit"),
         )
+
+    def test_feedback_entry_dispatches_the_same_application_command(self):
+        callback = mock.Mock()
+        menu = self._build(feedback_command=callback)
+        entry = next(options for _kind, options in menu.help_menu.items if options.get("label") == "Send feedback...")
+        entry["command"]()
+        callback.assert_called_once_with()
 
     def test_builds_native_file_view_and_help_menu_model(self):
         menu = self._build()

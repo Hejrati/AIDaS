@@ -87,6 +87,8 @@ class _TabWidgets:
     bottom_join: ctk.CTkFrame | None = None
     hovered: bool = False
     hover_after_id: str | None = None
+    border_signature: tuple | None = None
+    bottom_join_signature: tuple | None = None
 
 
 class _PixelAlignedTabFrame(ctk.CTkFrame):
@@ -616,21 +618,32 @@ class ClosableTabView(ctk.CTkFrame):
         inset = self._BORDER_PIXELS / scale
         sidebar = COLOR_PAIRS["sidebar"]
         lower_corner = COLOR_PAIRS["tab_selected_border"] if widgets.active else sidebar
-        widgets.frame.configure(
-            border_width=inset,
-            background_corner_colors=(sidebar, sidebar, lower_corner, lower_corner),
-        )
+        # Theme token pairs are live lists that mutate in place. Cache their
+        # resolved values so an interface change cannot rewrite the old key.
+        border_signature = (inset, resolve_color(sidebar), resolve_color(lower_corner))
+        if widgets.border_signature != border_signature:
+            widgets.frame.configure(
+                border_width=inset,
+                background_corner_colors=(sidebar, sidebar, lower_corner, lower_corner),
+            )
+            widgets.border_signature = border_signature
         if widgets.bottom_join is None:
             return
         if not widgets.active:
-            widgets.bottom_join.place_forget()
+            if widgets.bottom_join_signature != (False,):
+                widgets.bottom_join.place_forget()
+                widgets.bottom_join_signature = (False,)
             return
         width = widgets.frame.winfo_width()
         if width <= 1:
             width = round(widgets.frame.cget("width") * scale)
-        widgets.bottom_join.configure(width=max(1, width - 2 * self._BORDER_PIXELS) / scale)
-        widgets.bottom_join.place(x=inset, rely=1, y=-self._TAB_RADIUS)
-        widgets.close.tkraise()
+        join_width = max(1, width - 2 * self._BORDER_PIXELS) / scale
+        join_signature = (True, join_width, inset, self._TAB_RADIUS)
+        if widgets.bottom_join_signature != join_signature:
+            widgets.bottom_join.configure(width=join_width)
+            widgets.bottom_join.place(x=inset, rely=1, y=-self._TAB_RADIUS)
+            widgets.close.tkraise()
+            widgets.bottom_join_signature = join_signature
         self._draw_content_join()
 
     @staticmethod
@@ -740,23 +753,41 @@ class ClosableTabView(ctk.CTkFrame):
         try:
             widgets = self._tab_widgets.get(self._model.selected)
             border = COLOR_PAIRS["tab_selected_border" if widgets is not None else "tab_border"]
-            self._join_frame.configure(
-                height=self._BORDER_PIXELS / self._get_widget_scaling(), fg_color=border,
-            )
-            self._join_canvas.configure(background=resolve_color(border))
-            self._join_canvas.delete("selected_join")
-            if widgets is None:
+            scale = self._get_widget_scaling()
+            resolved_border = resolve_color(border)
+            border_signature = (scale, resolved_border)
+            if border_signature != self.__dict__.get("_join_border_signature"):
+                self._join_frame.configure(
+                    height=self._BORDER_PIXELS / scale, fg_color=border,
+                )
+                self._join_canvas.configure(background=resolved_border)
+                self._join_border_signature = border_signature
+
+            item_id = self.__dict__.get("_selected_join_id")
+            previous = self.__dict__.get("_selected_join_signature")
+            if widgets is not None:
+                left = widgets.frame.winfo_rootx() - self._join_canvas.winfo_rootx()
+                right = left + widgets.frame.winfo_width()
+                left = max(0, left + self._BORDER_PIXELS)
+                right = min(self._join_canvas.winfo_width(), right - self._BORDER_PIXELS)
+            if widgets is None or right <= left:
+                if item_id is not None and previous is not None:
+                    self._join_canvas.itemconfigure(item_id, state="hidden")
+                    self._selected_join_signature = None
                 return
-            left = widgets.frame.winfo_rootx() - self._join_canvas.winfo_rootx()
-            right = left + widgets.frame.winfo_width()
-            left = max(0, left + self._BORDER_PIXELS)
-            right = min(self._join_canvas.winfo_width(), right - self._BORDER_PIXELS)
-            if right <= left:
+            height = self._join_canvas.winfo_height()
+            fill = resolve_color(self._tab_background(widgets))
+            signature = (left, right, height, fill)
+            if signature == previous:
                 return
-            self._join_canvas.create_rectangle(
-                left, 0, right, self._join_canvas.winfo_height(),
-                fill=resolve_color(self._tab_background(widgets)), outline="", tags="selected_join",
-            )
+            if item_id is None:
+                self._selected_join_id = self._join_canvas.create_rectangle(
+                    left, 0, right, height, fill=fill, outline="", tags="selected_join",
+                )
+            else:
+                self._join_canvas.coords(item_id, left, 0, right, height)
+                self._join_canvas.itemconfigure(item_id, fill=fill, state="normal")
+            self._selected_join_signature = signature
         except tk.TclError:
             pass
 

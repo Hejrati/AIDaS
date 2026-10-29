@@ -11,8 +11,9 @@ from tkinter import filedialog, messagebox, ttk
 
 from aidas.ui.compiler import CompilerPresentationMixin
 from aidas.ui.components import AppButton
+from aidas.ui.measurement_tree import MeasurementDirectoryTree
 from aidas.ui.path_entry import bind_path_entry
-from aidas.ui.theme import COLORS, COLOR_PAIRS, CONTROLS
+from aidas.ui.theme import COLOR_PAIRS, CONTROLS
 from aidas.utils.filesystem import existing_directory, normalize_path_input
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
@@ -22,7 +23,7 @@ from aidas.utils.ui_utils import (
 )
 
 
-DEFAULT_OUTPUT_FILENAME = "LE_RE_rrMCPAR_ELMRPE_ONL.xlsx"
+DEFAULT_OUTPUT_FILENAME = "rrMCPAR_ELMRPE_ONL.xlsx"
 
 
 class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
@@ -47,7 +48,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._running = False
         self._output_user_selected = False
 
-        initial_input = self._source_input_folder()
+        # Step 4 folders arrive only through the explicit Go to Step 5 action.
+        initial_input = ""
         input_folder = self._existing_directory(initial_input)
         self._accepted_input_folder = str(input_folder) if input_folder is not None else ""
         output_folder = input_folder or Path.home()
@@ -61,6 +63,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self.output_var.trace_add("write", self._update_run_button_state)
         self._build_ui()
         self._update_run_button_state()
+        self._refresh_directory_view()
         self.after(self.EVENT_POLL_MS, self._poll_events)
 
     @staticmethod
@@ -76,14 +79,72 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         source = self.source_step
         if source is None:
             return ""
+        root = getattr(source, "batch_roi_root", None)
+        if root:
+            return str(root)
+        paths = getattr(source, "batch_roi_paths", None)
+        if paths:
+            # Step 3's handoff supplies exact side folders rather than a batch
+            # root. Include all those folders, not just Step 4's active tab.
+            try:
+                return os.path.commonpath([str(Path(path).parent) for path in paths])
+            except ValueError as exc:
+                raise ValueError(
+                    "The Step 4 folders have no shared root. Choose an input folder in Step 5 "
+                    "and use Create Excel File."
+                ) from exc
+        if not getattr(source, "current_path", None) and not getattr(source, "_last_results_dir", None):
+            return ""
         for value in (
-            getattr(source, "batch_roi_root", None),
             getattr(getattr(source, "output_dir_var", None), "get", lambda: "")(),
             getattr(getattr(source, "input_dir_var", None), "get", lambda: "")(),
         ):
             if value:
                 return str(value)
         return ""
+
+    @classmethod
+    def _measurement_root(cls, folder: str | os.PathLike) -> Path:
+        """Promote a Step 4 side/subject folder to include its group."""
+        path = cls._expanded_path(folder)
+        for ancestor in (path, *path.parents):
+            if ancestor.name.strip().lower() in ("nasal", "temporal"):
+                return ancestor.parent.parent
+        if path.is_dir() and any(
+            child.is_dir() and child.name.strip().lower() in ("nasal", "temporal")
+            for child in path.iterdir()
+        ):
+            return path.parent
+        return path
+
+    def start_from_step4(self, folder: str | os.PathLike | None = None) -> None:
+        """Accept the workflow handoff and start one background compilation."""
+        if self._running:
+            return
+        source = self.source_step
+        if folder is None and source is not None and not any(
+            getattr(source, name, None)
+            for name in ("batch_roi_root", "batch_roi_paths", "current_path", "_last_results_dir")
+        ):
+            # Merely visiting empty workflow tabs is not a measurement handoff.
+            return
+        try:
+            source_folder = folder or self._source_input_folder()
+            if not source_folder:
+                self.status_var.set("Choose an input folder to create the Excel file.")
+                return
+            source_path = self._existing_directory(source_folder)
+            accepted = (
+                source_path is not None
+                and self.set_input_folder(self._measurement_root(source_path))
+            )
+        except (OSError, ValueError) as exc:
+            self._compilation_failed(exc)
+            return
+        if not accepted:
+            self.status_var.set("The Step 4 input folder is unavailable. Choose an existing folder.")
+            return
+        self._run_clicked()
 
     def _build_ui(self) -> None:
         self.build_standard_layout(
@@ -98,8 +159,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         ttk.Label(
             input_group,
             text=(
-                "Choose the parent folder containing the LE and RE subject "
-                "folders produced by the earlier workflow steps."
+                "Choose a folder to search recursively for nasal and temporal Excel results. "
+                "Their parent folder supplies the subject ID; its parent supplies the group name."
             ),
             justify="left",
             wraplength=self.SIDEBAR_TEXT_WRAP,
@@ -115,7 +176,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             "Browse…",
             self._browse_input,
             "folder",
-            tooltip="Choose the parent folder containing LE and RE subfolders.",
+            tooltip="Search within this folder for group / subject / nasal or temporal results.",
         )
         self.input_browse_button.pack(side="right")
         self.include_fovea_checkbox = ttk.Checkbutton(
@@ -192,53 +253,24 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             wraplength=760,
         ).pack(fill="x", pady=(4, 12))
 
-        progress_group = ttk.LabelFrame(
-            self.content,
-            text="Excel file progress",
-            padding=(10, 8, 10, 10),
-        )
-        progress_group.pack(fill="x", pady=(0, 10))
-        self.progress = ttk.Progressbar(
-            progress_group,
-            mode="determinate",
-            maximum=1,
-            value=0,
-        )
-        self.progress.pack(fill="x")
+        self.directory_view = MeasurementDirectoryTree(self.content)
+        self.directory_view.pack(fill="both", expand=True)
         ttk.Label(
-            progress_group,
+            self.content,
             textvariable=self.status_var,
             style="AIDaS.Muted.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
+            wraplength=850,
+        ).pack(fill="x", pady=(8, 0))
 
-        log_group = ttk.LabelFrame(
-            self.content,
-            text="Excel file log",
-            padding=(6, 5, 6, 6),
-        )
-        log_group.pack(fill="both", expand=True)
-        log_group.rowconfigure(0, weight=1)
-        log_group.columnconfigure(0, weight=1)
-        self.log_text = tk.Text(
-            log_group,
-            height=12,
-            wrap="word",
-            state="disabled",
-            relief="flat",
-            borderwidth=0,
-            highlightthickness=1,
-            highlightbackground=COLORS.border,
-            highlightcolor=COLORS.primary,
-            background=COLORS.surface_subtle,
-            foreground=COLORS.text,
-            insertbackground=COLORS.text,
-            selectbackground=COLORS.primary,
-            selectforeground=COLORS.on_primary,
-        )
-        scrollbar = ttk.Scrollbar(log_group, orient="vertical", command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        scrollbar.grid(row=0, column=1, sticky="ns")
+    def _refresh_directory_view(self) -> None:
+        view = self.__dict__.get("directory_view")
+        if view is None:
+            return
+        folder = self._existing_directory(self.input_var.get())
+        if folder is not None:
+            output_text = normalize_path_input(self.output_var.get())
+            output = self._expanded_path(output_text) if output_text else None
+            view.set_directory(folder, output_path=output)
 
     def set_input_folder(self, folder: str | os.PathLike | None) -> bool:
         if getattr(self, "_running", False):
@@ -258,6 +290,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self._default_output_path = str(path / DEFAULT_OUTPUT_FILENAME)
             self.output_var.set(self._default_output_path)
         self.status_var.set(f"Ready to create an Excel file from measurements in {path}.")
+        self._refresh_directory_view()
         return True
 
     def _open_input_folder(self) -> None:
@@ -273,8 +306,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         )
 
     def on_show(self) -> None:
-        if not self.input_var.get().strip():
-            self.set_input_folder(self._source_input_folder())
+        """Refresh this workspace without accepting a new workflow handoff."""
+        self._refresh_directory_view()
 
     def _browse_input(self) -> None:
         initial_dir = (
@@ -283,7 +316,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             or Path.home()
         )
         selected = filedialog.askdirectory(
-            title="Select the parent folder containing LE and RE subfolders",
+            title="Select a folder containing group and subject results",
             initialdir=str(initial_dir),
             parent=self,
         )
@@ -315,13 +348,14 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         if selected:
             self._output_user_selected = True
             self.output_var.set(selected)
+            self._refresh_directory_view()
 
     def _validated_paths(self) -> tuple[Path, Path] | None:
         root_folder = self._existing_directory(self.input_var.get())
         if root_folder is None:
             messagebox.showerror(
                 "Missing folder",
-                "Choose a valid parent folder containing the LE and RE subfolders.",
+                "Choose an existing folder containing group and subject results.",
                 parent=self,
             )
             return None
@@ -373,6 +407,15 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         except tk.TclError:
             pass
 
+    def _clear_log(self) -> None:
+        """Step 5 presents the directory canvas instead of a compiler log."""
+
+    def _append_log(self, message: str) -> None:
+        """Detailed extraction information remains in the workbook's log sheet."""
+
+    def _update_progress(self, payload: object) -> None:
+        """Keep the directory visible while the compiler runs in the background."""
+
     def _update_run_button_state(self, *_args) -> None:
         if getattr(self, "run_button", None) is None:
             return
@@ -408,19 +451,16 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
                 image=self.run_button_disabled_icon,
             )
             self.status_var.set("Creating the Excel file…")
-            self.progress.configure(maximum=1, value=0)
         else:
             self.run_button.configure(text="Create Excel File")
             self._update_run_button_state()
 
     def _compilation_succeeded(self, result: object) -> None:
         self._set_running(False)
-        maximum = max(1.0, float(self.progress.cget("maximum")))
-        self.progress.configure(value=maximum)
         result_path = Path(getattr(result, "output_path", self.output_var.get()))
         self.output_var.set(str(result_path))
         self.status_var.set(f"Excel file saved: {result_path}")
-        self._append_log(f"Excel file saved: {result_path}")
+        self._refresh_directory_view()
         callback = getattr(self, "on_compilation_complete", None)
         if callable(callback):
             callback(result_path)
@@ -432,8 +472,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
 
     def _compilation_failed(self, error: object) -> None:
         self._set_running(False)
-        self.status_var.set("Could not create the Excel file. See the log for details.")
-        self._append_log(f"ERROR: {error}")
+        self.status_var.set(f"Could not create the Excel file: {error}")
         messagebox.showerror("Excel file creation failed", str(error), parent=self)
 
 

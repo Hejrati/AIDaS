@@ -37,6 +37,7 @@ class AnnotationGuide(ctk.CTkFrame):
         self._dismiss_callback = dismiss
         self._layout_signature = None
         self._illustrations = {}
+        self._illustration_signature = None
         self._tiles = {}
         self._heading_rows = {}
         self._shortcut_labels = {}
@@ -214,19 +215,27 @@ class AnnotationGuide(ctk.CTkFrame):
     def redraw_illustrations(self):
         """Render the standard information glyph in the current palette."""
         scale = self._get_widget_scaling()
+        signature = (scale, COLORS.surface, COLORS.primary_soft, COLORS.primary, TYPOGRAPHY.family)
+        if signature == self._illustration_signature:
+            return
         size = round(22 * scale)
         self.info_icon.configure(width=size, height=size, background=COLORS.surface)
-        self.info_icon.delete("all")
-        self.info_icon.create_oval(
-            *(value * scale for value in (1, 1, 21, 21)),
+        if not self._illustrations:
+            self._illustrations["circle"] = self.info_icon.create_oval(0, 0, 0, 0)
+            self._illustrations["text"] = self.info_icon.create_text(0, 0, text="i")
+        self.info_icon.coords(
+            self._illustrations["circle"], *(value * scale for value in (1, 1, 21, 21)),
+        )
+        self.info_icon.itemconfigure(
+            self._illustrations["circle"],
             fill=COLORS.primary_soft,
             outline=COLORS.primary,
             width=scale,
         )
-        self.info_icon.create_text(
-            11 * scale,
-            11 * scale,
-            text="i",
+        self.info_icon.coords(self._illustrations["text"], 11 * scale, 11 * scale)
+        self.info_icon.itemconfigure(
+            self._illustrations["text"],
             fill=COLORS.primary,
             font=(TYPOGRAPHY.family, -round(14 * scale), "bold"),
         )
+        self._illustration_signature = signature

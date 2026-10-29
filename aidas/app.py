@@ -34,6 +34,7 @@ from aidas.core.display import (
 from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
+from aidas.services.feedback import install_exception_capture, record_event, record_exception
 from aidas.ui.classic import build_classic_application_menu
 from aidas.ui.components import (
     AppButton,
@@ -1192,6 +1193,7 @@ class AIDaSApp(ctk.CTk):
         self._about_dialog = None
         self._settings_dialog = None
         self._tutorial_dialog = None
+        self._feedback_dialog = None
         self._set_app_icon()
 
         self._splash_started_at = time.monotonic()
@@ -1352,6 +1354,7 @@ class AIDaSApp(ctk.CTk):
             get_step2_core_usage=self._step2_core_usage,
             on_continue_to_step4=self._on_step3_continue_to_step4,
         )
+        self.step3.elapsed_time_var.trace_add("write", self._refresh_image_path_status)
         self.notebook.add(self.step3, text="  Step 3 — Flatten Retina  ")
 
         self._set_splash_progress(91, "Preparing Step 4 - rrMCP/AR...")
@@ -1608,6 +1611,7 @@ class AIDaSApp(ctk.CTk):
             on_step_selected=self._select_workflow_step,
             on_settings_selected=self._show_settings,
             on_help_selected=self._show_tutorial,
+            on_feedback_selected=self._show_feedback,
             logo_path=self._resource_path(os.path.join("assets", "aidas.png")),
             settings_icon_path=self._resource_path(
                 os.path.join("assets", "iconify-fluent-color--settings-32.png")
@@ -1849,6 +1853,7 @@ class AIDaSApp(ctk.CTk):
             check_updates_command=self.update_controller.check_now,
             about_command=self._show_about,
             tutorial_command=self._show_tutorial,
+            feedback_command=self._show_feedback,
             exit_command=self.destroy,
         )
 
@@ -1906,6 +1911,7 @@ class AIDaSApp(ctk.CTk):
                     check_updates_command=self.update_controller.check_now,
                     about_command=self._show_about,
                     tutorial_command=self._show_tutorial,
+                    feedback_command=self._show_feedback,
                     exit_command=self.destroy,
                 )
             else:
@@ -1960,8 +1966,8 @@ class AIDaSApp(ctk.CTk):
             status.configure(text=str(message))
             self._refresh_image_path_status()
 
-    def _refresh_image_path_status(self, _event=None) -> None:
-        """Display only the image belonging to the currently visible workflow."""
+    def _refresh_image_path_status(self, *_args) -> None:
+        """Show the active step's image path or Step 3 elapsed duration."""
         notebook = self.__dict__.get("notebook")
         status = self.__dict__.get("status")
         if notebook is None or status is None:
@@ -1971,6 +1977,7 @@ class AIDaSApp(ctk.CTk):
         except (tk.TclError, TypeError, ValueError):
             return
         path = None
+        text = ""
         if index == 1:
             step = self.__dict__.get("step2")
             if step is not None and not getattr(step, "batch_segmentation_panel", None):
@@ -1978,6 +1985,11 @@ class AIDaSApp(ctk.CTk):
                     getattr(step, "_active_batch_result_tab", None), {},
                 )
                 path = state.get("input") or getattr(step, "current_file", None)
+        elif index == 2:
+            step = self.__dict__.get("step3")
+            variable = getattr(step, "elapsed_time_var", None)
+            if variable is not None:
+                text = variable.get()
         elif index == 3:
             step = self.__dict__.get("step4")
             if step is not None and not getattr(step, "batch_roi_panel", None):
@@ -1985,9 +1997,10 @@ class AIDaSApp(ctk.CTk):
                     getattr(step, "_active_batch_roi_tab", None), {},
                 )
                 path = state.get("path") or getattr(step, "current_path", None)
-        address = os.path.abspath(os.fspath(path)) if path and path != "Step 1 output" else ""
-        if status.cget("text") != address:
-            status.configure(text=address)
+        if path and path != "Step 1 output":
+            text = os.path.abspath(os.fspath(path))
+        if status.cget("text") != text:
+            status.configure(text=text)
 
     def _select_workflow_step(self, index: int) -> None:
         """Select a workflow page without exposing its container to the header."""
@@ -1997,6 +2010,7 @@ class AIDaSApp(ctk.CTk):
             return
         try:
             notebook.select(int(index))
+            record_event("workflow_step", f"Selected Step {int(index)+1}")
         except (tk.TclError, TypeError, ValueError):
             return
 
@@ -2426,7 +2440,7 @@ class AIDaSApp(ctk.CTk):
         step4.open_batch_folders(folders)
 
     def _on_step4_continue_to_step5(self, folder=None) -> None:
-        """Open the dedicated compiler and prefill its measurement root."""
+        """Open Step 5 and automatically compile the Step 4 measurement tree."""
 
         step5 = self.__dict__.get("step5")
         if step5 is None:
@@ -2434,8 +2448,7 @@ class AIDaSApp(ctk.CTk):
         self._advance_workflow_progress(4)
         self.notebook.select(step5)
         self.update_idletasks()
-        if folder:
-            step5.set_input_folder(folder)
+        step5.start_from_step4(folder)
 
     def _on_step5_compilation_complete(self, _output_path=None) -> None:
         """Report final success in the existing status surface."""
@@ -2443,6 +2456,106 @@ class AIDaSApp(ctk.CTk):
         self._advance_workflow_progress(5)
         self._set_status_message("Excel file created successfully.")
 
+
+    def report_callback_exception(self, exc_type, value, tb):
+        record_exception(exc_type, value, tb, source="tk_callback")
+        super().report_callback_exception(exc_type, value, tb)
+
+    def _feedback_context(self):
+        """Snapshot Tk-owned state on the UI thread; no patient data is read."""
+        settings = {}
+        preferences = self.__dict__.get("preferences")
+        if preferences is not None:
+            for key in Config.DEFAULTS:
+                if key.startswith(("sdb_", "step1_", "step2_", "step4_")) or key in {
+                    "appearance_mode", "interface_mode", "theme", "show_step2_annotation_tutorial",
+                }:
+                    settings[key] = preferences.get(key)
+        workflow = {"active_step": self._selected_workflow_index()+1, "steps": {}}
+        private_paths = []
+        inputs = {}
+        for number in range(1, 6):
+            step = self.__dict__.get(f"step{number}")
+            if step is None:
+                continue
+            state = {}
+            for attr in ("_busy", "_active_r_core_allocation", "_r_run_elapsed_seconds", "_running",
+                         "_stack_building", "_stack_build_complete", "_segmenter_running",
+                         "_active_ai_core_limit", "_active_ai_using_gpu", "_ai_gpu_compatible",
+                         "_ai_runtime_using_gpu", "fovea_x", "current_roi_idx", "batch_roi_index"):
+                value = step.__dict__.get(attr)
+                if isinstance(value, (bool, int, float)):
+                    state[attr.lstrip("_")] = value
+            for attr in ("status_var", "progress_text_var", "width_var", "height_var", "offset_var",
+                         "include_fovea_var"):
+                variable = step.__dict__.get(attr)
+                if variable is not None:
+                    try:
+                        state[attr] = variable.get()
+                    except tk.TclError:
+                        pass
+            for attr in ("current_sdb_dir", "output_sdb_dir", "current_path", "current_file", "batch_roi_root"):
+                value = step.__dict__.get(attr)
+                if value:
+                    private_paths.append(str(value))
+                    if attr in {"current_path", "current_file"}:
+                        inputs[str(number)] = str(value)
+            for attr in ("volume", "original_light_volume", "image", "image_data", "raw_image", "processed_image", "stack"):
+                value = step.__dict__.get(attr)
+                shape = getattr(value, "shape", None)
+                if shape is not None:
+                    state[attr] = {"shape": list(shape), "dtype": str(value.dtype)}
+            for attr in ("completed", "boundary_traces", "batch_roi_tab_states", "_batch_tabs"):
+                value = step.__dict__.get(attr)
+                if isinstance(value, (list, tuple, dict)):
+                    state[attr + "_count"] = len(value)
+            roi = step.__dict__.get("_source_roi")
+            if isinstance(roi, (list, tuple)) and all(isinstance(v, (int, float)) for v in roi):
+                state["crop_roi"] = list(roi)
+            if number == 3:
+                state["pixel_width_um"] = getattr(step, "PIXEL_WIDTH_UM", None)
+            if number == 4:
+                state["roi_definitions"] = [
+                    {key: getattr(roi, key, None) for key in ("left", "right", "low", "high")}
+                    for roi in step.__dict__.get("rois", ())
+                ]
+            workflow["steps"][str(number)] = state
+        step3 = self.__dict__.get("step3")
+        scripts = {}
+        if step3 is not None:
+            for role in ("main", "output"):
+                try:
+                    selected = step3._selected_r_script_path(role)
+                    if selected is not None:
+                        scripts[role] = str(selected)
+                except (OSError, RuntimeError, TypeError):
+                    pass
+        library = None
+        if step3 is not None:
+            try:
+                library = str(step3._default_r_package_library())
+            except (OSError, RuntimeError, TypeError):
+                pass
+        step2 = self.__dict__.get("step2")
+        return {"settings": settings, "workflow": workflow, "private_paths": private_paths,
+                "inputs": inputs,
+                "model": step2.__dict__.get("ai_for_aidas_default_model") if step2 is not None else None,
+                "scripts": scripts,
+                "rscript": preferences.get("rscript_path") if preferences else None,
+                "r_library": library}
+
+    def _show_feedback(self):
+        dialog = getattr(self, "_feedback_dialog", None)
+        try:
+            if dialog is not None and dialog.winfo_exists():
+                dialog.deiconify()
+                dialog.lift()
+                dialog.focus_force()
+                return
+        except tk.TclError:
+            pass
+        from aidas.ui.feedback import FeedbackDialog
+        self._feedback_dialog = FeedbackDialog(self, context=self._feedback_context())
 
     def _show_about(self) -> None:
         """Open one modal About window, or focus the existing one."""
@@ -2520,6 +2633,7 @@ def _show_native_notice(title: str, message: str, *, error: bool = False) -> Non
 
 def main() -> int:
     """Run AIDaS if no other desktop instance owns the process guard."""
+    install_exception_capture()
     guard = SingleInstanceGuard()
     try:
         if not guard.acquire():

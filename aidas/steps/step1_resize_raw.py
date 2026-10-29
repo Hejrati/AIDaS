@@ -375,8 +375,8 @@ class Step1Frame(SidebarStepFrame):
         self.sdb_listbox.bind("<Double-1>", lambda e: self._open_selected_sdb())
         self.sdb_listbox.bind("<<ListboxSelect>>", self._on_sdb_list_select)
 
-        # Keep folder selection and the work queue first. The summary belongs
-        # outside the collapsible body so the import settings remain visible.
+        # Keep folder selection and the work queue first. Track summaries
+        # without displaying messages below the import controls.
         self.sdb_params_section.pack(after=sdb_section)
         self.sdb_params_summary_var = tk.StringVar()
         self.sdb_params_summary_label = ttk.Label(
@@ -385,12 +385,6 @@ class Step1Frame(SidebarStepFrame):
             style="AIDaS.Muted.TLabel",
             justify="left",
             wraplength=300,
-        )
-        self.sdb_params_summary_label.pack(
-            fill="x",
-            padx=LAYOUT.space_sm,
-            pady=(0, LAYOUT.space_sm),
-            after=self.sdb_params_section.header,
         )
         self._sdb_params_summary_tooltip = HoverToolTip(
             self.sdb_params_summary_label,
@@ -404,10 +398,6 @@ class Step1Frame(SidebarStepFrame):
             style="AIDaS.Muted.TLabel",
             justify="left",
             wraplength=300,
-        )
-        self.crop_region_summary_label.pack(
-            fill="x", padx=LAYOUT.space_sm, pady=(0, LAYOUT.space_sm),
-            after=self.sdb_params_summary_label,
         )
         self._update_import_settings_summary()
         self.sdb_params_section.toggle()
@@ -1102,7 +1092,7 @@ class Step1Frame(SidebarStepFrame):
             self._apply_width_preview_adjustment()
 
     def _update_import_settings_summary(self):
-        """Show validated import settings even while their controls are hidden."""
+        """Track validated import settings while their controls are hidden."""
         summary = self.__dict__.get("sdb_params_summary_var")
         if summary is None:
             return
@@ -2074,7 +2064,7 @@ class Step1Frame(SidebarStepFrame):
         return suggestion.confident
 
     def _set_crop_region_summary(self, kind, *, method=None):
-        """Keep the crop proposal visible while its box remains editable."""
+        """Track the crop proposal while its box remains editable."""
         summary = self.__dict__.get("crop_region_summary_var")
         if summary is None:
             return

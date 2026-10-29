@@ -8,18 +8,10 @@ from unittest import mock
 
 from aidas.app import AIDaSApp
 from aidas.ui.tutorial import (
-    CONNECTOR_TRAVEL_MS,
-    INPUT_HOLD_MS,
-    OUTPUT_HOLD_MS,
-    PIPELINE_CYCLE_MS,
-    PROCESS_HOLD_MS,
     TUTORIAL_PAGES,
     TutorialDialog,
-    _PipelineAnimationState,
     _WorkflowOverviewMap,
     _WorkflowPipeline,
-    _pipeline_animation_state,
-    _pipeline_orientation,
     tutorial_page_index_for_step,
 )
 
@@ -158,8 +150,12 @@ class TutorialContentTests(unittest.TestCase):
             "ELM-RPE",
             "ONL",
             "Create Excel File",
-            "LE_RE_rrMCPAR_ELMRPE_ONL.xlsx",
-            "100%",
+            "rrMCPAR_ELMRPE_ONL.xlsx",
+            "automatically",
+            "group",
+            "subject ID",
+            "Folder contents",
+            "Refresh",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, text)
@@ -283,6 +279,7 @@ class TutorialNavigationTests(unittest.TestCase):
         dialog._content_viewport_width = 650
         dialog._wrapped_labels = [(label, 30)]
         dialog._flow_visualizer = mock.Mock()
+        dialog.after = mock.Mock(return_value="resize-job")
 
         with mock.patch(
             "aidas.ui.tutorial.logical_window_size",
@@ -290,6 +287,7 @@ class TutorialNavigationTests(unittest.TestCase):
         ) as logical_size:
             dialog._on_content_resize(SimpleNamespace(width=800))
             dialog._on_content_resize(SimpleNamespace(width=800))
+        dialog._apply_content_resize()
 
         self.assertEqual(
             logical_size.call_args_list,
@@ -366,293 +364,109 @@ class TutorialNavigationTests(unittest.TestCase):
 
 
 class WorkflowPipelineTests(unittest.TestCase):
-    def test_orientation_switches_to_vertical_before_cards_can_clip(self):
-        self.assertEqual(_pipeline_orientation(649), "vertical")
-        self.assertEqual(_pipeline_orientation(650), "horizontal")
-        self.assertEqual(_pipeline_orientation(900), "horizontal")
+    def setUp(self):
+        import customtkinter as ctk
+        try:
+            self.root = ctk.CTk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        self.root.withdraw()
+        self.addCleanup(self.root.destroy)
 
-    def test_animation_state_moves_input_through_process_to_output(self):
-        self.assertEqual(
-            _pipeline_animation_state(0),
-            _PipelineAnimationState(0, (0.0, 0.0), 0.0),
-        )
-        input_midpoint = _pipeline_animation_state(INPUT_HOLD_MS / 2)
-        self.assertEqual(input_midpoint.active_stage, 0)
-        self.assertEqual(input_midpoint.connector_progress, (0.0, 0.0))
-        self.assertAlmostEqual(input_midpoint.stage_progress, 0.5)
-
-        first_travel = _pipeline_animation_state(
-            INPUT_HOLD_MS + (CONNECTOR_TRAVEL_MS / 2)
-        )
-        self.assertEqual(first_travel.active_stage, 0)
-        self.assertAlmostEqual(first_travel.connector_progress[0], 0.5)
-        self.assertEqual(first_travel.connector_progress[1], 0.0)
-        self.assertEqual(first_travel.stage_progress, 1.0)
-
-        process_start = INPUT_HOLD_MS + CONNECTOR_TRAVEL_MS
-        self.assertEqual(
-            _pipeline_animation_state(process_start),
-            _PipelineAnimationState(1, (1.0, 0.0), 0.0),
-        )
-        second_travel = _pipeline_animation_state(
-            process_start + PROCESS_HOLD_MS + (CONNECTOR_TRAVEL_MS / 2)
-        )
-        self.assertEqual(second_travel.active_stage, 1)
-        self.assertEqual(second_travel.connector_progress[0], 1.0)
-        self.assertAlmostEqual(second_travel.connector_progress[1], 0.5)
-
-        output_start = (
-            process_start + PROCESS_HOLD_MS + CONNECTOR_TRAVEL_MS
-        )
-        self.assertEqual(
-            _pipeline_animation_state(output_start),
-            _PipelineAnimationState(2, (1.0, 1.0), 0.0),
-        )
-        output_midpoint = _pipeline_animation_state(
-            output_start + (OUTPUT_HOLD_MS / 2)
-        )
-        self.assertAlmostEqual(output_midpoint.stage_progress, 0.5)
-        self.assertEqual(
-            _pipeline_animation_state(PIPELINE_CYCLE_MS),
-            _PipelineAnimationState(0, (0.0, 0.0), 0.0),
+    def make_guide(self, page_index=1, width=650):
+        page = TUTORIAL_PAGES[page_index]
+        return _WorkflowPipeline(
+            self.root,
+            (page.input_summary, page.function_summary, page.output_summary),
+            page.stage_points, page.completion_check, page.tips,
+            available_width=width,
         )
 
-    def test_start_schedules_only_one_animation_job(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._destroying = False
-        pipeline._stopped = True
-        pipeline._paused = False
-        pipeline._animation_after_id = None
-        pipeline.after = mock.Mock(return_value="animation-job")
+    def test_each_section_shows_all_its_instructions_immediately(self):
+        guide = self.make_guide()
+        page = TUTORIAL_PAGES[1]
+        for index, section in enumerate(guide.SECTIONS):
+            guide._select_section(section)
+            expected = page.tips if index == 3 else page.stage_points[index]
+            shown = [label.cget("text") for row, label in guide.rows if label.cget("text")]
+            self.assertEqual(shown, list(expected))
+            for row, label in guide.rows:
+                self.assertEqual(bool(row.winfo_manager()), bool(label.cget("text")))
+            self.assertEqual(guide.completion.cget("text"), page.completion_check)
 
-        pipeline.start()
-        pipeline.start()
+    def test_section_selection_and_navigation_schedule_no_repeating_jobs(self):
+        guide = self.make_guide()
+        before = set(self.root.tk.call("after", "info"))
+        for section in guide.SECTIONS:
+            guide._select_section(section)
+        self.assertEqual(set(self.root.tk.call("after", "info")), before)
 
-        pipeline.after.assert_called_once_with(
-            pipeline.ANIMATION_INTERVAL_MS,
-            pipeline._animation_tick,
-        )
-        self.assertEqual(pipeline._animation_after_id, "animation-job")
+    def test_narrow_sections_remain_selectable_and_content_wraps(self):
+        guide = self.make_guide(width=300)
+        values = guide.sections.cget("values")
+        guide.sections.cget("command")(values[2])
+        self.assertEqual(guide._section, 2)
+        for label, inset in guide._body_labels:
+            self.assertEqual(label.cget("wraplength"), max(100, 300 - inset))
+        guide.set_available_width(800)
+        self.assertEqual(guide.sections.get(), guide.SECTIONS[2])
 
-    def test_hidden_animation_uses_slow_retry_without_mutating_cards(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._animation_after_id = "current-job"
-        pipeline._destroying = False
-        pipeline._stopped = False
-        pipeline._paused = False
-        pipeline._hidden_since = None
-        pipeline.winfo_exists = mock.Mock(return_value=True)
-        pipeline.winfo_viewable = mock.Mock(return_value=False)
-        pipeline._schedule_tick = mock.Mock()
-        pipeline._apply_animation_state = mock.Mock()
+    def test_all_step_pages_reuse_rows_and_reset_to_prepare(self):
+        guide = self.make_guide()
+        rows = tuple(guide.rows)
+        for page in TUTORIAL_PAGES[1:]:
+            guide._select_section(guide.SECTIONS[3])
+            self.assertTrue(guide.replace_content(
+                (page.input_summary, page.function_summary, page.output_summary),
+                page.stage_points, page.completion_check, page.tips,
+            ))
+            self.assertEqual(tuple(guide.rows), rows)
+            self.assertEqual(guide._section, 0)
+            self.assertEqual(guide.sections.get(), guide.sections.cget("values")[0])
+            self.assertEqual(guide.rows[0][1].cget("text"), page.stage_points[0][0])
 
-        with mock.patch("aidas.ui.tutorial.time.monotonic", return_value=17.5):
-            pipeline._animation_tick()
-
-        self.assertIsNone(pipeline._animation_after_id)
-        self.assertEqual(pipeline._hidden_since, 17.5)
-        pipeline._apply_animation_state.assert_not_called()
-        pipeline._schedule_tick.assert_called_once_with(pipeline.HIDDEN_RETRY_MS)
-
-    def test_visible_animation_tick_updates_state_and_schedules_one_successor(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._animation_after_id = "current-job"
-        pipeline._destroying = False
-        pipeline._stopped = False
-        pipeline._paused = False
-        pipeline._hidden_since = None
-        pipeline._animation_started_at = 9.0
-        pipeline.winfo_exists = mock.Mock(return_value=True)
-        pipeline.winfo_viewable = mock.Mock(return_value=True)
-        pipeline._apply_animation_state = mock.Mock()
-        pipeline._schedule_tick = mock.Mock()
-
-        with mock.patch("aidas.ui.tutorial.time.monotonic", return_value=10.0):
-            pipeline._animation_tick()
-
-        self.assertIsNone(pipeline._animation_after_id)
-        pipeline._apply_animation_state.assert_called_once_with(
-            _pipeline_animation_state(1000.0)
-        )
-        pipeline._schedule_tick.assert_called_once_with(
-            pipeline.ANIMATION_INTERVAL_MS
-        )
-
-    def test_duplicate_available_width_does_not_queue_another_layout(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._viewport_logical_width = 720
-        pipeline._queue_responsive_layout = mock.Mock()
-
-        pipeline.set_available_width(720)
-
-        pipeline._queue_responsive_layout.assert_not_called()
-
-        pipeline.set_available_width(740)
-        pipeline._queue_responsive_layout.assert_called_once_with(740)
-
-    def test_same_responsive_width_is_a_complete_noop(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._applied_layout_width = 720
-        pipeline._layout_stage_points = mock.Mock()
-
-        pipeline._apply_responsive_layout(720)
-
-        pipeline._layout_stage_points.assert_not_called()
-
-    def test_duplicate_pending_width_does_not_restart_resize_debounce(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._destroying = False
-        pipeline._stopped = False
-        pipeline._applied_layout_width = 700
-        pipeline._pending_logical_width = 720
-        pipeline._resize_after_id = "resize-job"
-        pipeline._cancel_after_job = mock.Mock()
-        pipeline.after = mock.Mock()
-
-        pipeline._queue_responsive_layout(720)
-
-        pipeline._cancel_after_job.assert_not_called()
-        pipeline.after.assert_not_called()
-
-    def test_same_active_stage_only_moves_canvas_items(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._cards = [mock.Mock(), mock.Mock(), mock.Mock()]
-        pipeline.motion_status = mock.Mock()
-        pipeline._paused = False
-        pipeline._rendered_active_stage = 1
-        pipeline._rendered_paused = False
-        pipeline._update_connector = mock.Mock()
-        pipeline._apply_stage_reveal = mock.Mock()
-        state = _PipelineAnimationState(1, (1.0, 0.4), 0.6)
-
-        pipeline._apply_animation_state(state)
-
-        for card in pipeline._cards:
-            card.configure.assert_not_called()
-        pipeline.motion_status.configure.assert_not_called()
-        pipeline._apply_stage_reveal.assert_called_once_with(1, 0.6)
-        self.assertEqual(
-            pipeline._update_connector.call_args_list,
-            [mock.call(0, 1.0), mock.call(1, 0.4)],
-        )
-
-    def test_keyboard_activation_toggles_animation_and_stops_event(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._toggle_animation = mock.Mock()
-
-        self.assertEqual(pipeline._toggle_animation_from_keyboard(), "break")
-
-        pipeline._toggle_animation.assert_called_once_with()
-
-    def test_animation_control_shows_the_available_action_as_an_icon(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pause_icon = object()
-        play_icon = object()
-        pipeline._pause_animation_icon = pause_icon
-        pipeline._play_animation_icon = play_icon
-        pipeline.animation_button = mock.Mock()
-        pipeline._animation_tooltip = SimpleNamespace(text="")
-
-        pipeline._paused = False
-        pipeline._sync_animation_control()
-        self.assertIs(pipeline.animation_button.image, pause_icon)
-        pipeline.animation_button.configure.assert_called_with(image=pause_icon)
-        self.assertEqual(pipeline._animation_tooltip.text, "Pause animation")
-
-        pipeline.animation_button.reset_mock()
-        pipeline._paused = True
-        pipeline._sync_animation_control()
-        self.assertIs(pipeline.animation_button.image, play_icon)
-        pipeline.animation_button.configure.assert_called_with(image=play_icon)
-        self.assertEqual(pipeline._animation_tooltip.text, "Play animation")
-
-    def test_stage_reveal_raises_only_the_active_group_and_reveals_its_points(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._stage_group_frames = [mock.Mock() for _index in range(3)]
-        pipeline._stage_point_widgets = [
-            [(mock.Mock(), mock.Mock(), mock.Mock()) for _index in range(count)]
-            for count in (4, 2, 3)
-        ]
-        pipeline._rendered_reveal = None
-
-        pipeline._apply_stage_reveal(0, 0.30)
-
-        pipeline._stage_group_frames[0].tkraise.assert_called_once_with()
-        pipeline._stage_group_frames[1].tkraise.assert_not_called()
-        input_widgets = pipeline._stage_point_widgets[0]
-        self.assertEqual(
-            [widget[0].configure.call_count for widget in input_widgets],
-            [1, 1, 1, 1],
-        )
-        self.assertIn("fg_color", input_widgets[0][0].configure.call_args.kwargs)
-        self.assertIn("fg_color", input_widgets[1][0].configure.call_args.kwargs)
-        self.assertTrue(
-            all(
-                "font" not in label.configure.call_args.kwargs
-                for _point_card, _badge, label in input_widgets
+    def test_visible_rows_keep_the_template_positions_and_empty_rows_collapse(self):
+        guide = self.make_guide(width=800)
+        guide.pack(fill="x")
+        self.root.geometry("800x1000")
+        self.root.deiconify()
+        self.root.update_idletasks()
+        before = [(row.winfo_y(), row.winfo_height()) for row, _label in guide.rows]
+        ready_y = guide.ready.winfo_y()
+        for page in TUTORIAL_PAGES[1:]:
+            guide.replace_content(
+                (page.input_summary, page.function_summary, page.output_summary),
+                page.stage_points, page.completion_check, page.tips,
             )
-        )
-        self.assertEqual(pipeline._rendered_reveal, (0, 2))
+            for section in guide.SECTIONS:
+                guide._select_section(section)
+                self.root.update_idletasks()
+                visible = [(row, label) for row, label in guide.rows if row.winfo_manager()]
+                self.assertEqual(
+                    [(row.winfo_y(), row.winfo_height()) for row, _label in visible],
+                    before[:len(visible)],
+                )
+                if len(visible) == len(guide.rows):
+                    self.assertEqual(guide.ready.winfo_y(), ready_y)
+                else:
+                    self.assertLess(guide.ready.winfo_y(), ready_y)
+                for row, label in visible:
+                    self.assertLessEqual(label.winfo_reqheight() + 24, row.winfo_height())
 
-        for point_card, badge, label in input_widgets:
-            point_card.reset_mock()
-            badge.reset_mock()
-            label.reset_mock()
-        pipeline._apply_stage_reveal(0, 0.31)
-        self.assertTrue(
-            all(point_card.configure.call_count == 0 for point_card, _b, _l in input_widgets)
-        )
-
-    def test_animation_icon_renderer_creates_crisp_transparent_glyphs(self):
-        for kind in ("play", "pause"):
-            icon = _WorkflowPipeline._render_animation_icon(kind, "#1565C0")
-            self.assertEqual(icon.mode, "RGBA")
-            self.assertEqual(icon.size, (72, 72))
-            alpha_min, alpha_max = icon.getchannel("A").getextrema()
-            self.assertEqual(alpha_min, 0)
-            self.assertEqual(alpha_max, 255)
-
-        with self.assertRaisesRegex(ValueError, "Unknown animation icon"):
-            _WorkflowPipeline._render_animation_icon("stop", "#1565C0")
-
-    def test_stop_cancels_animation_and_resize_jobs_idempotently(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._stopped = False
-        pipeline._animation_after_id = "animation-job"
-        pipeline._resize_after_id = "resize-job"
-        pipeline.after_cancel = mock.Mock()
-
-        pipeline.stop()
-        pipeline.stop()
-
-        self.assertTrue(pipeline._stopped)
-        self.assertIsNone(pipeline._animation_after_id)
-        self.assertIsNone(pipeline._resize_after_id)
-        self.assertEqual(
-            pipeline.after_cancel.call_args_list,
-            [mock.call("animation-job"), mock.call("resize-job")],
-        )
-
-    def test_cancel_job_clears_id_even_when_tk_rejects_cancellation(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._animation_after_id = "stale-job"
-        pipeline.after_cancel = mock.Mock(side_effect=tk.TclError("gone"))
-
-        pipeline._cancel_after_job("_animation_after_id")
-
-        self.assertIsNone(pipeline._animation_after_id)
-        pipeline.after_cancel.assert_called_once_with("stale-job")
-
-    def test_page_replacement_stops_the_previous_visualizer(self):
-        dialog = TutorialDialog.__new__(TutorialDialog)
-        visualizer = mock.Mock()
-        dialog._flow_visualizer = visualizer
-
-        dialog._stop_flow_visualizer()
-        dialog._stop_flow_visualizer()
-
-        visualizer.stop.assert_called_once_with()
-        self.assertIsNone(dialog._flow_visualizer)
+    def test_overview_navigation_preserves_the_existing_step_template(self):
+        dialog = TutorialDialog(self.root, initial_page=1)
+        self.addCleanup(dialog.close)
+        guide = dialog._flow_visualizer
+        rows = tuple(guide.rows)
+        dialog.show_page(0)
+        overview = dialog._flow_visualizer
+        for index in range(1, 6):
+            dialog.show_page(index)
+            self.assertIs(dialog._flow_visualizer, guide)
+            self.assertEqual(tuple(guide.rows), rows)
+            dialog.show_page(0)
+            self.assertIs(dialog._flow_visualizer, overview)
+        self.assertTrue(guide.winfo_exists())
 
     def test_adjacent_detailed_pages_reuse_the_existing_pipeline(self):
         dialog = TutorialDialog.__new__(TutorialDialog)
@@ -679,70 +493,6 @@ class WorkflowPipelineTests(unittest.TestCase):
         dialog._page_title_label.configure.assert_called_once_with(text=page.title)
         dialog._page_purpose_label.configure.assert_called_once_with(text=page.purpose)
         dialog._stop_flow_visualizer.assert_not_called()
-
-    def test_replacing_pipeline_copy_does_not_rebuild_its_layout(self):
-        pipeline = _WorkflowPipeline.__new__(_WorkflowPipeline)
-        pipeline._summary_labels = [mock.Mock() for _index in range(3)]
-        pipeline._stage_point_widgets = [
-            [(mock.Mock(), mock.Mock(), mock.Mock()) for _index in range(count)]
-            for count in (4, 2, 3)
-        ]
-        pipeline._completion_label = mock.Mock()
-        pipeline._tips_label = mock.Mock()
-        pipeline._cancel_after_job = mock.Mock()
-        pipeline._sync_animation_control = mock.Mock()
-        pipeline._apply_animation_state = mock.Mock()
-        pipeline.start = mock.Mock()
-        page = TUTORIAL_PAGES[2]
-
-        with mock.patch("aidas.ui.tutorial.time.monotonic", return_value=10.0):
-            replaced = pipeline.replace_content(
-                (
-                    page.input_summary,
-                    page.function_summary,
-                    page.output_summary,
-                ),
-                page.stage_points,
-                page.completion_check,
-                page.tips,
-            )
-
-        self.assertTrue(replaced)
-        pipeline._cancel_after_job.assert_called_once_with("_animation_after_id")
-        pipeline._apply_animation_state.assert_called_once_with(
-            _pipeline_animation_state(0.0)
-        )
-        pipeline.start.assert_called_once_with()
-        for widgets in pipeline._stage_point_widgets:
-            for point_card, badge, label in widgets:
-                point_card.grid.assert_not_called()
-                badge.grid.assert_not_called()
-                self.assertEqual(set(label.configure.call_args.kwargs), {"text"})
-
-    def test_visualizer_uses_real_labels_vector_icons_and_resolved_canvas_colors(self):
-        source = inspect.getsource(_WorkflowPipeline)
-        init_source = inspect.getsource(_WorkflowPipeline.__init__)
-        reveal_source = inspect.getsource(_WorkflowPipeline._apply_stage_reveal)
-        self.assertIn("summary_label = ctk.CTkLabel", source)
-        self.assertIn("canvas.create_polygon", source)
-        self.assertIn("canvas.create_line", source)
-        self.assertIn("resolve_color", source)
-        self.assertIn('text=""', source)
-        self.assertIn("image=self._pause_animation_icon", source)
-        self.assertIn("HoverToolTip", source)
-        self.assertIn("self.stage_detail_shell", source)
-        self.assertIn("self.context_card", source)
-        self.assertIn("self._stage_group_frames", source)
-        self.assertIn("self._apply_stage_reveal", source)
-        self.assertNotIn("CTkProgressBar", source)
-        self.assertNotIn('"packet_text"', source)
-        self.assertIn("takefocus=1", source)
-        self.assertIn('self.animation_button.bind(\n            "<Return>"', source)
-        self.assertIn('self.animation_button.bind(\n            "<space>"', source)
-        self.assertIn("_apply_responsive_layout(initial_width)", init_source)
-        self.assertNotIn("_on_pipeline_configure", init_source)
-        self.assertNotIn("font=", reveal_source)
-        self.assertNotIn("border_width", reveal_source)
 
 
 class WorkflowOverviewMapTests(unittest.TestCase):

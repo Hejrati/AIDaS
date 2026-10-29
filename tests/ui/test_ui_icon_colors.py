@@ -31,6 +31,30 @@ def _contrast(foreground, background):
 
 
 class UIIconColorTests(unittest.TestCase):
+    def test_build_stack_keeps_source_colors_when_enabled_after_emphasis_changes(self):
+        try:
+            root = ctk.CTk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        source = load_ctk_image(root, "flat-color-icons--stack-of-photos.png", size=20)
+        original = {mode: source.cget(mode).tobytes()
+                    for mode in ("light_image", "dark_image")}
+        button = AppButton(root, image=source, preserve_icon_colors=True,
+                           variant="secondary", state="disabled")
+        for _ in range(3):
+            button.set_variant("primary")
+            button.configure(state="normal")
+            self.assertIs(button.cget("image"), source)
+            for mode, expected in original.items():
+                self.assertEqual(button.cget("image").cget(mode).tobytes(), expected)
+            button.configure(state="disabled")
+            self.assertIsNot(button.cget("image"), source)
+            button.set_variant("secondary")
+        for mode, expected in original.items():
+            self.assertEqual(source.cget(mode).tobytes(), expected)
+
     def test_dark_mode_preserves_saturated_red_and_blue_pixels(self):
         source = Image.new("RGBA", (3, 1), (0, 0, 0, 0))
         source.putpixel((0, 0), (255, 0, 0, 255))

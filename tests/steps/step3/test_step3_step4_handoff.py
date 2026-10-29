@@ -185,11 +185,13 @@ class Step3Step4HandoffTests(unittest.TestCase):
             second = _write_flat_light_pair(root / "second")
             received_rows = []
             frame = Step4Frame.__new__(Step4Frame)
+            frame.batch_roi_root = root / "stale-previous-batch"
             frame._start_batch_roi_from_rows = received_rows.extend
 
             opened = frame.open_batch_folders([first, second])
 
             self.assertTrue(opened)
+            self.assertEqual(frame.batch_roi_root, root.resolve())
             self.assertEqual(
                 [row["flat_light"] for row in received_rows],
                 [

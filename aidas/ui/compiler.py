@@ -9,6 +9,8 @@ import threading
 class CompilerPresentationMixin:
     """Keep computation off Tk while leaving presentation and lifecycle to views."""
 
+    MAX_COMPILE_EVENTS_PER_POLL = 200
+
     def _compiler_function(self):
         # Step 5 keeps the workbook dependency lazy until compilation starts.
         from aidas.services.step4_compiler import compile_step4_results
@@ -52,18 +54,27 @@ class CompilerPresentationMixin:
         self._events.put(("success", result))
 
     def _drain_compile_events(self) -> None:
-        # Tk is the sole consumer; workers only publish events. Checking for
-        # pending events is safe here and avoids raising Empty on every poll.
-        while not self._events.empty():
+        # Consume a bounded snapshot so a busy worker cannot monopolize Tk.
+        # Keep log/progress/completion boundaries in order, but insert adjacent
+        # log lines together to avoid a state toggle and scroll for every line.
+        messages = []
+        pending = min(self._events.qsize(), self.MAX_COMPILE_EVENTS_PER_POLL)
+        for _ in range(pending):
             kind, payload = self._events.get_nowait()
             if kind == "log":
-                self._append_log(str(payload))
-            elif kind == "progress":
+                messages.append(str(payload))
+                continue
+            if messages:
+                self._append_log("\n".join(messages))
+                messages.clear()
+            if kind == "progress":
                 self._update_progress(payload)
             elif kind == "success":
                 self._compilation_succeeded(payload)
             elif kind == "error":
                 self._compilation_failed(payload)
+        if messages:
+            self._append_log("\n".join(messages))
 
     def _update_progress(self, payload: object) -> None:
         try:

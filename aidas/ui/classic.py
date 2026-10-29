@@ -58,6 +58,7 @@ class ClassicApplicationMenu:
         about_command: Callable[[], None],
         exit_command: Callable[[], None] | None = None,
         tutorial_command: Callable[[], None] | None = None,
+        feedback_command: Callable[[], None] | None = None,
     ) -> None:
         self.master = master
         self.interface_modes = tuple(str(mode) for mode in interface_modes)
@@ -125,6 +126,8 @@ class ClassicApplicationMenu:
                 command=tutorial_command,
             )
             self.help_menu.add_separator()
+        if feedback_command is not None:
+            self.help_menu.add_command(label="Send feedback...", command=feedback_command)
         self.help_menu.add_command(
             label="Check for Updates...",
             command=check_updates_command,

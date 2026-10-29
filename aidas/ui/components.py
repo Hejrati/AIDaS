@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from math import cos, sin, pi
 import tkinter as tk
 from typing import Callable, Sequence
 
@@ -33,7 +34,10 @@ class AppButton(ctk.CTkButton):
         "border_width": SHAPES.border_width,
     }
 
-    def __init__(self, master, *, variant: str = "secondary", **kwargs):
+    def __init__(self, master, *, variant: str = "secondary", preserve_icon_colors: bool = False,
+                 raised: bool = False, **kwargs):
+        self._raised = raised
+        self._preserve_icon_colors = preserve_icon_colors
         legacy_style = str(kwargs.pop("style", ""))
         kwargs.pop("padding", None)
         if kwargs.get("image") is not None:
@@ -76,6 +80,48 @@ class AppButton(ctk.CTkButton):
                 options["text_color"], options["text_color_disabled"],
             )
         super().__init__(master, **options)
+
+    def _draw(self, no_color_updates=False):
+        result = super()._draw(no_color_updates)
+        self._draw_depth()
+        return result
+
+    def _draw_depth(self, *, hovered=False):
+        """Add a DPI-aware bevel without changing layout or scheduling animation."""
+        if not self._raised:
+            return
+        self._canvas.delete("aidas_depth")
+        if self._state == "disabled":
+            return
+        color = self._hover_color if hovered else self._fg_color
+        if color is None or color == "transparent":
+            return
+        rgb = [value // 257 for value in self.winfo_rgb(self._apply_appearance_mode(color))]
+
+        def shade(target, strength):
+            return "#" + "".join(f"{round(value + (target-value)*strength):02x}" for value in rgb)
+
+        width = self._apply_widget_scaling(self._current_width)
+        height = self._apply_widget_scaling(self._current_height)
+        unit = self._apply_widget_scaling(1)
+        radius = min(self._apply_widget_scaling(self._corner_radius), height / 2)
+        inset = max(radius, 6 * unit)
+        self._canvas.create_line(
+            inset, height - 3 * unit, width - inset, height - 3 * unit,
+            fill=shade(0, .34), width=4 * unit, capstyle="round", tags="aidas_depth",
+        )
+        self._canvas.create_line(
+            inset, 2.5 * unit, width - inset, 2.5 * unit,
+            fill=shade(255, .42), width=1.5 * unit, capstyle="round", tags="aidas_depth",
+        )
+
+    def _on_enter(self, event=None):
+        super()._on_enter(event)
+        self._draw_depth(hovered=self._hover and self._state == "normal")
+
+    def _on_leave(self, event=None):
+        super()._on_leave(event)
+        self._draw_depth()
 
     def _remember_workflow_origin(self):
         """Capture the button before its action can close or replace the view."""
@@ -194,6 +240,11 @@ class AppButton(ctk.CTkButton):
                 self._enabled_palette.get("text_color", COLOR_PAIRS["text"]),
                 kwargs.get("text_color_disabled", getattr(self, "_text_color_disabled", COLOR_PAIRS["disabled_text"])),
             )
+            # Retinting updates an existing CTkImage through its callbacks.
+            # Resubmitting that same object also rebinds callbacks and updates
+            # the image label on every unrelated text/state/cursor change.
+            if kwargs["image"] is getattr(self, "_image", None):
+                kwargs.pop("image")
 
         return super().configure(require_redraw, **kwargs)
 
@@ -202,9 +253,12 @@ class AppButton(ctk.CTkButton):
     def _action_icon_for_state(self, state, enabled_color, disabled_color):
         """Match action glyphs to their labels without altering shared images."""
         source = self._aidas_action_icon_source
+        if state != "disabled" and getattr(self, "_preserve_icon_colors", False):
+            return source
         if not isinstance(source, ctk.CTkImage) or not (
             self._variant in {"primary", "success", "danger"}
             or getattr(source, "_aidas_monochrome_action", False)
+            or getattr(self, "_preserve_icon_colors", False)
         ):
             return source
         color = disabled_color if state == "disabled" else enabled_color
@@ -575,6 +629,73 @@ class WorkflowNavigation(ctk.CTkFrame):
         )
 
 
+def _header_action_icon(kind: str, color: str) -> Image.Image:
+    """Render matching 384px glyphs from geometry, independent of installed fonts."""
+
+    scale = 16
+    icon = Image.new("RGBA", (24 * scale, 24 * scale))
+    draw = ImageDraw.Draw(icon)
+
+    def points(values):
+        return [(round(x * scale), round(y * scale)) for x, y in values]
+
+    if kind == "settings":
+        gear = []
+        for tooth in range(8):
+            for offset, radius in ((-.5, 7), (-.3, 7), (-.2, 10),
+                                   (.2, 10), (.3, 7), (.5, 7)):
+                angle = (tooth + offset) * pi / 4
+                gear.append((12 + cos(angle) * radius, 12 + sin(angle) * radius))
+        draw.polygon(points(gear), fill=color)
+        draw.ellipse((9 * scale, 9 * scale, 15 * scale, 15 * scale), fill=(0, 0, 0, 0))
+    elif kind == "help":
+        draw.ellipse((2 * scale, 2 * scale, 22 * scale, 22 * scale),
+                     outline=color, width=round(1.7 * scale))
+        # Two cubic curves form a smooth question mark at any display scale.
+        curve = []
+        for start, control1, control2, end in (
+            ((9, 8), (9, 4.5), (15.5, 4.5), (15.5, 8)),
+            ((15.5, 8), (15.5, 10.5), (12, 10), (12, 13)),
+        ):
+            for i in range(33):
+                t = i / 32
+                curve.append(tuple((1-t)**3 * start[j] + 3*(1-t)**2*t * control1[j]
+                                   + 3*(1-t)*t*t * control2[j] + t**3 * end[j]
+                                   for j in (0, 1)))
+        draw.line(points(curve), fill=color, width=round(1.8 * scale), joint="curve")
+        draw.ellipse((11 * scale, 15.5 * scale, 13 * scale, 17.5 * scale), fill=color)
+    elif kind == "feedback":
+        # A silver extrusion and pearl face echo the dimensional settings asset.
+        draw.polygon(points(((6, 16), (5, 22), (13, 17))), fill="#657787")
+        draw.rounded_rectangle((2 * scale, 4 * scale, 22 * scale, 19 * scale),
+                               radius=4 * scale, fill="#657787")
+        mask = Image.new("L", icon.size)
+        face = ImageDraw.Draw(mask)
+        face.polygon(points(((6, 15), (5, 21), (13, 16))), fill=255)
+        face.rounded_rectangle((2 * scale, 3 * scale, 22 * scale, 18 * scale),
+                               radius=4 * scale, fill=255)
+        gradient = Image.new("RGBA", icon.size)
+        shading = ImageDraw.Draw(gradient)
+        top, bottom = (255, 255, 255), (163, 180, 197)
+        for y in range(icon.height):
+            fraction = max(0, min(1, (y / scale - 3) / 18))
+            shade = tuple(round(a + (b-a) * fraction) for a, b in zip(top, bottom))
+            shading.line((0, y, icon.width, y), fill=(*shade, 255))
+        icon.paste(gradient, (0, 0), mask)
+        draw = ImageDraw.Draw(icon)
+        draw.rounded_rectangle((2.5 * scale, 3.5 * scale, 21.5 * scale, 17.5 * scale),
+                               radius=3.5 * scale, outline="#F7FAFD", width=round(.5 * scale))
+        for center in (7.5, 12, 16.5):
+            # A small lower highlight makes each dot read as an inset.
+            draw.ellipse(((center-1) * scale, 10 * scale,
+                          (center+1) * scale, 12 * scale), fill="#F4F7FA")
+            draw.ellipse(((center-1) * scale, 9.5 * scale,
+                          (center+1) * scale, 11.5 * scale), fill="#46596A")
+    else:
+        raise ValueError(f"Unknown header action icon: {kind}")
+    return icon
+
+
 class WorkflowHeader(ctk.CTkFrame):
     """Brand bar, workflow navigation, and appearance control for the app."""
 
@@ -594,6 +715,7 @@ class WorkflowHeader(ctk.CTkFrame):
         on_step_selected: Callable[[int], None],
         on_settings_selected: Callable[[], None] | None = None,
         on_help_selected: Callable[[], None] | None = None,
+        on_feedback_selected: Callable[[], None] | None = None,
         logo_path: str | None = None,
         settings_icon_path: str | None = None,
         help_icon_path: str | None = None,
@@ -687,22 +809,38 @@ class WorkflowHeader(ctk.CTkFrame):
         header_actions = ctk.CTkFrame(top, fg_color="transparent", corner_radius=0)
         header_actions.grid(row=0, column=2, rowspan=2, sticky="e")
 
-        def load_header_action_icon(icon_path):
-            if not icon_path or not Path(icon_path).is_file():
-                return None
-            with Image.open(icon_path) as source:
-                icon = source.convert("RGBA").copy()
-            return ctk.CTkImage(
-                light_image=icon,
-                dark_image=icon,
+        # Keep DPI-aware generated fallbacks; use the original gear/help assets
+        # supplied by the application and a matching shaded feedback glyph.
+        def action_image(kind, light, dark):
+            return OwnedCTkImage(
+                header_actions,
+                light_image=_header_action_icon(kind, light),
+                dark_image=_header_action_icon(kind, dark),
                 size=(24, 24),
             )
 
-        self.settings_image = load_header_action_icon(settings_icon_path)
-        self.help_image = load_header_action_icon(help_icon_path)
+        if settings_icon_path and Path(settings_icon_path).is_file():
+            with Image.open(settings_icon_path) as source:
+                settings_icon = source.convert("RGBA").copy()
+            self.settings_image = OwnedCTkImage(
+                header_actions, light_image=settings_icon, dark_image=settings_icon,
+                size=(24, 24),
+            )
+        else:
+            self.settings_image = action_image("settings", "#526174", "#E2E8F0")
+        if help_icon_path and Path(help_icon_path).is_file():
+            with Image.open(help_icon_path) as source:
+                help_icon = source.convert("RGBA").copy()
+            self.help_image = OwnedCTkImage(
+                header_actions, light_image=help_icon, dark_image=help_icon,
+                size=(24, 24),
+            )
+        else:
+            self.help_image = action_image("help", "#176DA6", "#69C2FF")
+        self.feedback_image = action_image("feedback", "#334155", "#FFFFFF")
         self.settings_button = ctk.CTkButton(
             header_actions,
-            text="" if self.settings_image is not None else "\ue713",
+            text="",
             image=self.settings_image,
             command=on_settings_selected,
             state="normal" if on_settings_selected is not None else "disabled",
@@ -718,9 +856,10 @@ class WorkflowHeader(ctk.CTkFrame):
             anchor="center",
         )
         self.settings_button.pack(side="left", padx=(0, 4))
+        self.settings_tooltip = HoverToolTip(self.settings_button, "Open settings")
         self.help_button = ctk.CTkButton(
             header_actions,
-            text="" if self.help_image is not None else "\ue897",
+            text="",
             image=self.help_image,
             command=on_help_selected,
             state="normal" if on_help_selected is not None else "disabled",
@@ -743,6 +882,20 @@ class WorkflowHeader(ctk.CTkFrame):
             self.help_button,
             "Open the AIDaS workflow tutorial",
         )
+
+        self.feedback_button = ctk.CTkButton(
+            header_actions, text="", image=self.feedback_image, command=on_feedback_selected,
+            state="normal" if on_feedback_selected is not None else "disabled",
+            width=36, height=36, corner_radius=SHAPES.corner_radius_md,
+            border_width=SHAPES.border_width, border_color=COLOR_PAIRS["border_strong"],
+            fg_color=COLOR_PAIRS["button"], hover_color=COLOR_PAIRS["button_hover"],
+            anchor="center",
+        )
+        self.feedback_button.pack(side="left", padx=(4, 0))
+        self.feedback_button._canvas.configure(takefocus=1)
+        self.feedback_button.bind("<Return>", lambda _event: self.feedback_button.invoke(), add="+")
+        self.feedback_button.bind("<space>", lambda _event: self.feedback_button.invoke(), add="+")
+        self.feedback_tooltip = HoverToolTip(self.feedback_button, "Send feedback or report a problem")
 
         self.navigation = WorkflowNavigation(
             self,
@@ -858,10 +1011,15 @@ class ProgressCircle(tk.Canvas):
 
         f_color = _resolve_color(self.master, self._fill_color_ref)
         t_color = _resolve_color(self.master, self._text_color_ref)
+        background = _resolve_color(self.master, self.bg_color_ref) if self.bg_color_ref else None
+        signature = (background, f_color, t_color, self._state_text)
+        if signature == self.__dict__.get("_rendered_state"):
+            return
         if self.bg_color_ref:
-            self.configure(bg=_resolve_color(self.master, self.bg_color_ref))
+            self.configure(bg=background)
         self.itemconfig(self.oval_id, fill=f_color, outline=f_color)
         self.itemconfig(self.text_id, fill=t_color, text=self._state_text)
+        self._rendered_state = signature
 
 
 class WorkflowProgressStrip(ctk.CTkFrame):

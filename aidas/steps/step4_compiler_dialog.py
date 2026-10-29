@@ -120,7 +120,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         ttk.Label(
             panel,
             text=(
-                "Choose the parent folder containing the LE and RE subject folders, "
+                "Choose a folder to search recursively for group and subject results, "
                 "then choose the name and location of the combined Excel workbook. "
                 "Legacy-compatible LIGHT2 cleaned files may be created beside the "
                 "source LIGHT text files."
@@ -141,7 +141,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
             "Browse…",
             self._browse_input,
             "folder",
-            tooltip="Choose the parent folder containing LE and RE subfolders.",
+            tooltip="Choose a folder containing group / subject / nasal or temporal results.",
         )
         self.input_browse_button.grid(row=0, column=1, sticky="e")
         self.include_fovea_checkbox = ttk.Checkbutton(
@@ -269,7 +269,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
             or Path.home()
         )
         selected = filedialog.askdirectory(
-            title="Select the parent folder containing LE and RE subfolders",
+            title="Select a folder containing group and subject results",
             initialdir=str(initial_dir),
             parent=self,
         )
@@ -309,7 +309,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         if root_folder is None:
             messagebox.showerror(
                 "Missing folder",
-                "Choose a valid parent folder containing the LE and RE subfolders.",
+                "Choose an existing folder containing group and subject results.",
                 parent=self,
             )
             return None

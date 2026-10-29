@@ -2088,8 +2088,7 @@ class RBatchRunPanel(ttk.Frame):
         self.summary_label.pack(side="left", fill="x", expand=True)
         summary_row.bind("<Configure>", self._resize_summary_footer, add="+")
 
-        ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w")
-        ttk.Label(wrapper, textvariable=self.step_frame.elapsed_time_var).pack(anchor="w", pady=(2, 6))
+        ttk.Label(wrapper, text="Running Batch Step 3", font=("", 12, "bold")).pack(anchor="w", pady=(0, 6))
 
         # Step details have their own scrollbar and a bounded requested height.
         # Pack them above the already-reserved footer and before the table so
@@ -2627,9 +2626,6 @@ class Step3Frame(SidebarStepFrame):
         ttk.Separator(self.step_actions_footer, orient="horizontal").pack(
             fill="x",
             pady=(LAYOUT.space_xs, 6),
-        )
-        ttk.Label(self.step_actions_footer, textvariable=self.elapsed_time_var).pack(
-            anchor="w", padx=2, pady=(0, 6),
         )
         self.continue_to_step4_button_icon = load_ctk_image(
             self, "flat-color-icons--right.png", size=20

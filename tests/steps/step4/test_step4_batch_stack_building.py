@@ -57,6 +57,16 @@ class BatchStackBuildingTests(unittest.TestCase):
         self.workers.pop()()
         self.callbacks.pop(0)()
 
+    def test_counter_counts_ready_tabs_and_excludes_unfinished_and_built(self):
+        self.frame._update_build_stack_button_state()
+        self.frame.build_stacks_button.configure.assert_called_with(
+            text="Build Stack (2/4 ready to build)")
+        self.frame._stack_building = True
+        self.frame._update_build_stack_button_state()
+        self.frame.build_stacks_button.configure.assert_called_with(
+            text="Build Stack (2/4 ready to build)")
+        self.frame.build_stacks_button.state.assert_called_with(["disabled"])
+
     def test_one_click_builds_every_ready_tab_and_skips_unfinished_and_built(self):
         self.frame._build_stack_outputs()
         self.assertTrue(self.frame._stack_building)
@@ -69,7 +79,7 @@ class BatchStackBuildingTests(unittest.TestCase):
         self.assertTrue(self.states["ready"]["complete"])
         self.assertFalse(self.states["unfinished"]["complete"])
         self.assertEqual(self.frame._active_batch_roi_tab, "active")
-        self.frame.build_stacks_button.configure.assert_called_with(text="Build Stack (3/4 completed)")
+        self.frame.build_stacks_button.configure.assert_called_with(text="Build Stack (0/4 ready to build)")
         self.assertFalse(self.frame._stack_building)
         self.error.assert_not_called()
 
@@ -77,6 +87,8 @@ class BatchStackBuildingTests(unittest.TestCase):
         self.frame.completed = self.states["active"]["completed"] = {}
         self.frame._update_build_stack_button_state()
         self.frame.build_stacks_button.state.assert_called_with(["!disabled"])
+        self.frame.build_stacks_button.configure.assert_called_with(
+            text="Build Stack (1/4 ready to build)")
         self.frame._build_stack_outputs()
         self.finish()
         self.assertEqual(self.frame._write_stack_output_files.call_count, 1)
@@ -90,6 +102,8 @@ class BatchStackBuildingTests(unittest.TestCase):
         self.assertFalse(self.states["active"]["complete"])
         self.assertTrue(self.states["ready"]["complete"])
         self.assertIn("Disk full", self.error.call_args.args[1])
+        self.frame.build_stacks_button.configure.assert_called_with(
+            text="Build Stack (1/4 ready to build)")
         self.frame.build_stacks_button.state.assert_called_with(["!disabled"])
 
     def test_pending_build_survives_tab_context_change_but_session_cancel_detaches_it(self):
@@ -197,7 +211,7 @@ class BatchStackBuildingTests(unittest.TestCase):
                     state['_prepared_load'] = ('loaded', volume)
                     frame._update_build_stack_button_state()
                     assert 'disabled' not in frame.build_stacks_button.state()
-                    assert frame.build_stacks_button.cget('text') == 'Build Stack (0/2 completed)'
+                    assert frame.build_stacks_button.cget('text') == 'Build Stack (1/2 ready to build)'
                     active = frame.batch_roi_notebook.select()
                     frame.build_stacks_button.invoke()
                     assert frame._stack_building
@@ -207,7 +221,7 @@ class BatchStackBuildingTests(unittest.TestCase):
                     assert beats and workers and all(worker != owner for worker in workers)
                     assert state['complete']
                     assert frame.batch_roi_notebook.select() == active
-                    assert frame.build_stacks_button.cget('text') == 'Build Stack (1/2 completed)'
+                    assert frame.build_stacks_button.cget('text') == 'Build Stack (0/2 ready to build)'
                     assert frame.continue_to_step5_button.cget('text') == 'Go to Step 5 (1/2 completed)'
                     assert 'disabled' in frame.build_stacks_button.state()
                     for filename in ('MAX_Stack.tif', 'ROI_to_move_stck.tif', module.STEP4_RESULTS_FILENAME):

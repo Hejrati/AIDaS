@@ -23,6 +23,9 @@ _GEOMETRY_SCALE = 64
 _SURFACE_TAG = "aidas_smooth_surface"
 _HIT_TAG = "aidas_smooth_hit_region"
 _INSTALLED = False
+# Cache only small, color-independent masks: at most 8 MiB across the UI.
+# Large panels retain no full-size mask buffers between paints.
+_MASK_CACHE_MAX_PIXELS = 64 * 1024
 _PART_TAGS = (
     "background_corner_top_left", "background_corner_top_right",
     "background_corner_bottom_right", "background_corner_bottom_left",
@@ -172,6 +175,10 @@ class _ScaledCanvas:
 
 
 def _schedule(canvas: CTkCanvas) -> None:
+    # Native destruction can emit final Configure events after paint cancellation.
+    # Never register another Tcl callback on a canvas that is being destroyed.
+    if getattr(canvas, "_aidas_destroying", False):
+        return
     # Construction changes can arrive between successive splash updates. Once
     # registered for the final paint, this canvas needs no more idle callbacks.
     if getattr(canvas, "_aidas_paint_deferred", False):
@@ -235,20 +242,33 @@ def _path_mask(size, coords, width, kind, smooth=False):
     return mask
 
 
-def _item_mask(canvas: CTkCanvas, item: int, size) -> Image.Image:
-    kind = canvas.type(item)
-    coords = canvas.coords(item)
-    width = float(canvas.itemcget(item, "width") or 0)
+def _rasterize_item_mask(size, kind, coords, width, smooth) -> Image.Image:
     if kind == "rectangle":
-        return _rounded_mask(size, tuple(coords), 0)
+        return _rounded_mask(size, coords, 0)
     if kind == "polygon":
         xs, ys = coords[::2], coords[1::2]
         if len(coords) >= 8 and len(set(xs)) <= 2 and len(set(ys)) <= 2:
             radius = width / 2
             return _rounded_mask(size, (min(xs) - radius, min(ys) - radius,
                                        max(xs) + radius, max(ys) + radius), radius)
-    return _path_mask(size, coords, width, kind,
-                      canvas.itemcget(item, "joinstyle") == "round" if kind == "line" else False)
+    return _path_mask(size, coords, width, kind, smooth)
+
+
+@lru_cache(maxsize=128)
+def _cached_item_mask(size, kind, coords, width, smooth) -> Image.Image:
+    """Share read-only coverage across identical geometry, including hover paints."""
+    return _rasterize_item_mask(size, kind, coords, width, smooth)
+
+
+def _item_mask(canvas: CTkCanvas, item: int, size) -> Image.Image:
+    kind = canvas.type(item)
+    coords = tuple(canvas.coords(item))
+    width = float(canvas.itemcget(item, "width") or 0)
+    smooth = canvas.itemcget(item, "joinstyle") == "round" if kind == "line" else False
+    geometry = tuple(size), kind, coords, width, smooth
+    if size[0] * size[1] <= _MASK_CACHE_MAX_PIXELS:
+        return _cached_item_mask(*geometry)
+    return _rasterize_item_mask(*geometry)
 
 
 def _paint_pair(base: Image.Image, outer: Image.Image, border_color,
@@ -651,6 +671,7 @@ def install_smooth_borders() -> None:
 
     @wraps(original_destroy)
     def destroy(self):
+        self._aidas_destroying = True
         pending = getattr(self, "_aidas_paint_pending", None)
         if pending is not None:
             try:

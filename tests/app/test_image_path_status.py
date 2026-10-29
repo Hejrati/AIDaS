@@ -18,6 +18,40 @@ from aidas.steps.step4_analyze_isez import Step4Frame
 
 
 class ImagePathStatusTests(unittest.TestCase):
+    def test_step3_elapsed_time_only_appears_while_step3_is_selected(self):
+        app = AIDaSApp.__new__(AIDaSApp)
+        selection = [2]
+        app.notebook = SimpleNamespace(select=lambda: selection[0], index=int)
+        app.status = mock.Mock()
+        app.status.cget.return_value = ""
+        variable = mock.Mock()
+        variable.get.return_value = "Elapsed: 00:00:09"
+        app.step3 = SimpleNamespace(elapsed_time_var=variable)
+        app.step4 = SimpleNamespace(current_path=Path("roi/_flat_LIGHT.hdr"))
+
+        app._refresh_image_path_status("elapsed", "", "write")
+        app.status.configure.assert_called_with(text="Elapsed: 00:00:09")
+        selection[0] = 3
+        app._refresh_image_path_status()
+        app.status.configure.assert_called_with(text=os.path.abspath("roi/_flat_LIGHT.hdr"))
+        variable.get.return_value = "Elapsed: 00:00:10"
+        app._refresh_image_path_status("elapsed", "", "write")
+        app.status.configure.assert_called_with(text=os.path.abspath("roi/_flat_LIGHT.hdr"))
+
+        for index in (0, 4):
+            selection[0] = index
+            app.status.cget.return_value = "previous step's status"
+            app._refresh_image_path_status()
+            app.status.configure.assert_called_with(text="")
+
+        selection[0] = 2
+        variable.get.return_value = "Total elapsed: 00:00:12"
+        app._refresh_image_path_status()
+        app.status.configure.assert_called_with(text="Total elapsed: 00:00:12")
+        variable.get.return_value = ""
+        app._refresh_image_path_status("elapsed", "", "write")
+        app.status.configure.assert_called_with(text="")
+
     def test_visible_workflow_owns_footer_and_inactive_work_cannot_replace_it(self):
         app = AIDaSApp.__new__(AIDaSApp)
         selection = [1]
@@ -108,7 +142,13 @@ class ImagePathStatusTests(unittest.TestCase):
                         app.notebook.select(app.step3)
                         app.update()
                         self.assertEqual(app.status.cget("text"), "")
+                        app.step3.elapsed_time_var.set("Elapsed: 00:00:09")
+                        app.update()
+                        self.assertEqual(app.status.cget("text"), "Elapsed: 00:00:09")
                         app.notebook.select(roi)
+                        app.update()
+                        self.assertEqual(app.status.cget("text"), str(roi_paths[0]))
+                        app.step3.elapsed_time_var.set("Elapsed: 00:00:10")
                         app.update()
                         self.assertEqual(app.status.cget("text"), str(roi_paths[0]))
                         roi._close_batch_roi_tab(roi.batch_roi_notebook, tabs[0])

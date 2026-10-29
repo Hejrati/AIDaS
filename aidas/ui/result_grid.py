@@ -32,6 +32,7 @@ class ResultGridCanvas(tk.Canvas):
         self._pages = OrderedDict()
         self._resize_sources = {}
         self._page_size = None
+        self._pending_page_size = None
         self._visible_pages = set()
         self._refresh_after_id = None
         self._wheel_after_id = None
@@ -67,7 +68,15 @@ class ResultGridCanvas(tk.Canvas):
 
     def _resize_pages(self, event):
         size = (event.width, event.height)
-        if size == self._page_size or min(size) <= 1:
+        if min(size) <= 1 or (size == self._page_size and self._pending_page_size is None):
+            return
+        # Configure can arrive in bursts before Tk paints. Retain the current
+        # pages until the existing idle refresh can apply the final geometry.
+        self._pending_page_size = size
+        self._queue_refresh()
+
+    def _apply_page_size(self, size):
+        if size == self._page_size:
             return
         self._dismiss_hover()
         self._generation += 1
@@ -79,8 +88,7 @@ class ResultGridCanvas(tk.Canvas):
         self.delete("all")
         self._pages.clear()
         self._visible_pages.clear()
-        self.configure(scrollregion=(0, 0, event.width, self._extent()))
-        self._queue_refresh()
+        self.configure(scrollregion=(0, 0, size[0], self._extent()))
 
     def _extent(self):
         height = self._page_size[1] if self._page_size else self.winfo_height()
@@ -92,6 +100,9 @@ class ResultGridCanvas(tk.Canvas):
 
     def _refresh_pages(self):
         self._refresh_after_id = None
+        size, self._pending_page_size = self._pending_page_size, None
+        if size is not None:
+            self._apply_page_size(size)
         if self._page_size is None or not self._page_count:
             return
         height = self._page_size[1]
@@ -467,6 +478,7 @@ class ResultGridCanvas(tk.Canvas):
 
     def destroy(self):
         self._generation += 1
+        self._pending_page_size = None
         self._render_requests.clear()
         self._executor.shutdown(wait=False, cancel_futures=True)
         self._render_future = None
