@@ -9,6 +9,13 @@ are retained as workflow artifacts for seven days.
 New pushes cancel superseded validations of the same branch or pull request;
 release-tag builds continue independently.
 
+The test runner collects cyclic garbage on the main thread before each test.
+Automatic collection stays disabled during discovery and execution so an old
+test's Tk objects cannot be finalized on a background worker. Reference-counted
+cleanup and explicit collection assertions still run normally; the original
+collection setting is restored afterward. Test discovery, assertions, and failure
+exit status are unchanged.
+
 Tagging runs those checks again. Before building a tagged release, the
 workflow requires a successful validation run for the **exact source commit**
 from a push to `main`. A check from another commit, a pull request, or a
@@ -61,6 +68,11 @@ commit, a successful main validation, and a new version/tag. A failed
 infrastructure attempt can be rerun against the same unchanged tag through
 the Actions page, or with the workflow's **Run workflow** action and its
 existing-tag input.
+
+A workflow-only repair can be used for an existing, unchanged tag by running
+the workflow from `main` with that tag as its input. The checked-out application,
+tests, version, notes, and validated source SHA still come from the tag. This
+does not authorize changing the tagged source or bypassing any validation step.
 
 Repository administrators can additionally require the **Windows validation**
 status check in the `main` branch ruleset. The workflow itself does not change

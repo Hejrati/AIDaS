@@ -78,7 +78,8 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_main_and_pull_requests_use_the_complete_windows_release_validation(self):
         self.assertIn("branches:\n      - main", self.workflow)
         self.assertIn("  pull_request:", self.workflow)
-        self.assertEqual(self.workflow.count("python -m unittest discover -s tests -t . -v"), 1)
+        self.assertIn('unittest.defaultTestLoader.discover("tests", top_level_dir=".")', self.workflow)
+        self.assertIn("raise SystemExit(0 if result.wasSuccessful() else 1)", self.workflow)
         self.assertIn("python -m PyInstaller AIDaS.spec --clean --noconfirm", self.workflow)
         self.assertIn("python release_tools/smoke_test_binary.py dist/AIDaS/AIDaS.exe", self.workflow)
         self.assertIn("python release_tools/smoke_test_binary.py $installedExecutable", self.workflow)

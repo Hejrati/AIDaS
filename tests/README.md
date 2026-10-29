@@ -9,7 +9,9 @@ python -m unittest discover -s tests -t . -v
 
 The `-t .` option gives tests their full package names, such as
 `tests.ui.test_ui_splash`, and keeps shared fixture imports consistent. The
-release workflow uses the same command.
+release workflow uses the same discovery and assertions. Its runner collects
+cyclic garbage on the main thread between tests, so stale Tk objects from a
+previous test cannot be finalized by a later test's background worker.
 
 ## Organization
 

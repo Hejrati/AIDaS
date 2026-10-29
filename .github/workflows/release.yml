@@ -150,7 +150,32 @@ jobs:
         shell: pwsh
         env:
           AIDAS_REQUIRE_R331_INTEGRATION: "1"
-        run: python -m unittest discover -s tests -t . -v
+        run: |
+          @'
+          import gc
+          import unittest
+
+          class MainThreadCollectionResult(unittest.TextTestResult):
+              def startTest(self, test):
+                  gc.collect()
+                  super().startTest(test)
+
+          # Tk finalizers must run on the main thread. Automatic cyclic GC
+          # can otherwise collect a previous test's widgets on a new worker.
+          # Keep discovery equivalent to python -m unittest discover -s tests -t . -v.
+          collection_enabled = gc.isenabled()
+          gc.disable()
+          try:
+              suite = unittest.defaultTestLoader.discover("tests", top_level_dir=".")
+              result = unittest.TextTestRunner(
+                  verbosity=2, resultclass=MainThreadCollectionResult
+              ).run(suite)
+          finally:
+              gc.collect()
+              if collection_enabled:
+                  gc.enable()
+          raise SystemExit(0 if result.wasSuccessful() else 1)
+          '@ | python -
 
       - name: Build the PyInstaller executable
         shell: pwsh
