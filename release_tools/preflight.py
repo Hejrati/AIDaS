@@ -92,14 +92,52 @@ def run_command(arguments: list[str], *, cwd: Path) -> str:
     """Run without a shell so branch names and API parameters remain literal."""
     try:
         result = subprocess.run(
-            arguments, cwd=cwd, text=True, capture_output=True, check=True,
+            arguments, cwd=cwd, text=True, capture_output=True, check=True, timeout=30,
         )
     except FileNotFoundError as exc:
         raise ValueError(f"Required command is not installed: {arguments[0]}") from exc
     except subprocess.CalledProcessError as exc:
         detail = (exc.stderr or exc.stdout or "command failed").strip()
         raise ValueError(f"{arguments[0]}: {detail}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError(f"{arguments[0]} did not finish within 30 seconds. Try again before tagging.") from exc
     return result.stdout.strip()
+
+
+def require_matching_tag(tag: str, commit: str, *, project_root: Path) -> None:
+    """An existing local or remote tag must already identify this exact commit."""
+    reference = f"refs/tags/{tag}"
+    local_tag = run_command(["git", "tag", "--list", tag], cwd=project_root)
+    if local_tag:
+        local_commit = run_command(
+            ["git", "rev-parse", "--verify", f"{reference}^{{commit}}"], cwd=project_root,
+        )
+        if local_tag != tag or local_commit != commit:
+            raise ValueError(
+                f"Existing local tag {tag!r} does not identify HEAD. "
+                "Do not move release tags; choose a new version and tag."
+            )
+
+    peeled_reference = f"{reference}^{{}}"
+    remote_output = run_command(
+        ["git", "ls-remote", "origin", reference, peeled_reference], cwd=project_root,
+    )
+    remote_refs = {}
+    for line in remote_output.splitlines():
+        fields = line.split()
+        if (
+            len(fields) != 2
+            or fields[1] not in {reference, peeled_reference}
+            or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", fields[0])
+        ):
+            raise ValueError("Git did not return valid remote tag references. Release preflight stopped.")
+        remote_refs[fields[1]] = fields[0]
+    remote_commit = remote_refs.get(peeled_reference, remote_refs.get(reference))
+    if remote_commit is not None and remote_commit != commit:
+        raise ValueError(
+            f"Existing remote tag {tag!r} does not identify HEAD. "
+            "Do not move release tags; choose a new version and tag."
+        )
 
 
 def require_successful_validation(payload: dict, commit: str) -> dict:
@@ -131,7 +169,9 @@ def check_release(tag: str, *, project_root: Path = PROJECT_ROOT) -> tuple[str, 
         raise ValueError("The working tree has uncommitted changes. Commit the release source first.")
     commit = run_command(["git", "rev-parse", "HEAD"], cwd=project_root)
     origin = run_command(["git", "remote", "get-url", "origin"], cwd=project_root)
-    payload = fetch_validation_runs(github_repository(origin), commit)
+    repository = github_repository(origin)
+    require_matching_tag(tag, commit, project_root=project_root)
+    payload = fetch_validation_runs(repository, commit)
     return commit, require_successful_validation(payload, commit)
 
 

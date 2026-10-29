@@ -89,6 +89,13 @@ class ReleaseWorkflowTests(unittest.TestCase):
         self.assertLess(gate, build)
         self.assertIn("if: env.RELEASE_TAG != ''", self.workflow)
 
+    def test_new_branch_validation_supersedes_old_work_without_cancelling_tags(self):
+        self.assertIn(
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' || "
+            "(github.event_name == 'push' && github.ref == 'refs/heads/main') }}",
+            self.workflow,
+        )
+
     def test_publication_requires_the_successful_validation_artifact(self):
         validation, publication = self.workflow.split("  publish:\n", 1)
         self.assertNotIn("contents: write", validation)

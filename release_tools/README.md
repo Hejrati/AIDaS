@@ -6,6 +6,8 @@ test suite, including the required R 3.3.1 integration checks, builds the
 PyInstaller executable, exercises its ONNX worker, builds the Inno Setup
 installer, and installs and smoke-tests that installer. Validated installers
 are retained as workflow artifacts for seven days.
+New pushes cancel superseded validations of the same branch or pull request;
+release-tag builds continue independently.
 
 Tagging runs those checks again. Before building a tagged release, the
 workflow requires a successful validation run for the **exact source commit**
@@ -32,6 +34,10 @@ publish releases.
    The proposed tag must exactly match the application version. The command
    refuses uncommitted source and verifies the latest main-push validation
    result for `HEAD` using GitHub Actions. It does not create or push a tag.
+   If the tag already exists locally or on `origin`, it must identify that
+   same commit. An existing release tag on older source is rejected even when
+   the current application version still matches its name. Annotated and
+   lightweight tags are both checked; unavailable remote lookups stop release.
    Python contacts the GitHub API directly using the GitHub repository in the
    `origin` remote; no GitHub CLI installation is required. Public repositories
    work without authentication. For private repositories or API rate limits,

@@ -13,6 +13,7 @@ from release_tools.preflight import (
     check_release,
     fetch_validation_runs,
     github_repository,
+    require_matching_tag,
     require_successful_validation,
     run_command,
 )
@@ -82,7 +83,7 @@ class ReleasePreflightTests(unittest.TestCase):
     def test_checks_clean_source_and_queries_the_exact_commit_without_mutating_git(self):
         payload = {"workflow_runs": [validation_run()]}
         with (
-            patch("release_tools.preflight.run_command", side_effect=["", COMMIT, "https://github.com/example/AIDaS.git"]) as command,
+            patch("release_tools.preflight.run_command", side_effect=["", COMMIT, "https://github.com/example/AIDaS.git", "", ""]) as command,
             patch("release_tools.preflight.fetch_validation_runs", return_value=payload) as fetch,
         ):
             commit, run = check_release("v3.4.5a1", project_root=self.root)
@@ -92,7 +93,7 @@ class ReleasePreflightTests(unittest.TestCase):
         self.assertEqual(command.call_args_list[1].args[0], ["git", "rev-parse", "HEAD"])
         self.assertEqual(command.call_args_list[2].args[0], ["git", "remote", "get-url", "origin"])
         fetch.assert_called_once_with("example/AIDaS", COMMIT)
-        self.assertEqual(command.call_count, 3)
+        self.assertEqual(command.call_count, 5)
 
     def test_wrong_version_stops_before_git_or_github_checks(self):
         with patch("release_tools.preflight.run_command") as command:
@@ -125,6 +126,88 @@ class ReleasePreflightTests(unittest.TestCase):
         with patch("release_tools.preflight.subprocess.run", side_effect=failure):
             with self.assertRaisesRegex(ValueError, "git: origin is not configured"):
                 run_command(["git", "remote"], cwd=self.root)
+
+    def test_existing_remote_tag_on_other_source_stops_before_github_validation(self):
+        old_tag = f"{'b' * 40}\trefs/tags/v3.4.5a1"
+        with (
+            patch("release_tools.preflight.run_command", side_effect=["", COMMIT, "https://github.com/example/AIDaS.git", "", old_tag]),
+            patch("release_tools.preflight.fetch_validation_runs") as fetch,
+        ):
+            with self.assertRaisesRegex(ValueError, "Existing remote tag.*does not identify HEAD"):
+                check_release("v3.4.5a1", project_root=self.root)
+        fetch.assert_not_called()
+
+    def test_git_commands_have_a_timeout(self):
+        result = subprocess.CompletedProcess(["git", "status"], 0, stdout="", stderr="")
+        with patch("release_tools.preflight.subprocess.run", return_value=result) as command:
+            run_command(["git", "status"], cwd=self.root)
+        self.assertEqual(command.call_args.kwargs["timeout"], 30)
+
+    def test_remote_git_timeout_is_reported_without_approving_a_release(self):
+        failure = subprocess.TimeoutExpired(["git", "ls-remote"], 30)
+        with patch("release_tools.preflight.subprocess.run", side_effect=failure):
+            with self.assertRaisesRegex(ValueError, "did not finish within 30 seconds"):
+                run_command(["git", "ls-remote"], cwd=self.root)
+
+
+class ExistingTagTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(".")
+        self.tag = "v3.4.5a1"
+        self.reference = f"refs/tags/{self.tag}"
+
+    def test_absent_local_and_remote_tags_allow_a_proposed_release(self):
+        with patch("release_tools.preflight.run_command", side_effect=["", ""]) as command:
+            require_matching_tag(self.tag, COMMIT, project_root=self.root)
+        self.assertEqual(command.call_args_list[0].args[0], ["git", "tag", "--list", self.tag])
+        self.assertEqual(command.call_args_list[1].args[0], [
+            "git", "ls-remote", "origin", self.reference, f"{self.reference}^{{}}",
+        ])
+
+    def test_existing_local_and_remote_lightweight_tags_on_head_allow_retry(self):
+        remote = f"{COMMIT}\t{self.reference}"
+        with patch("release_tools.preflight.run_command", side_effect=[self.tag, COMMIT, remote]) as command:
+            require_matching_tag(self.tag, COMMIT, project_root=self.root)
+        self.assertEqual(command.call_args_list[1].args[0], [
+            "git", "rev-parse", "--verify", f"{self.reference}^{{commit}}",
+        ])
+
+    def test_annotated_remote_tag_uses_peeled_commit_instead_of_tag_object(self):
+        remote = f"{'b' * 40}\t{self.reference}\n{COMMIT}\t{self.reference}^{{}}"
+        with patch("release_tools.preflight.run_command", side_effect=["", remote]):
+            require_matching_tag(self.tag, COMMIT, project_root=self.root)
+
+    def test_local_tag_on_other_source_is_rejected_before_remote_lookup(self):
+        with patch("release_tools.preflight.run_command", side_effect=[self.tag, "b" * 40]) as command:
+            with self.assertRaisesRegex(ValueError, "Existing local tag.*does not identify HEAD"):
+                require_matching_tag(self.tag, COMMIT, project_root=self.root)
+        self.assertEqual(command.call_count, 2)
+
+    def test_remote_tag_on_other_source_is_rejected_when_local_tag_is_absent(self):
+        for remote in (
+            f"{'b' * 40}\t{self.reference}",
+            f"{'c' * 40}\t{self.reference}\n{'b' * 40}\t{self.reference}^{{}}",
+        ):
+            with self.subTest(remote=remote), patch("release_tools.preflight.run_command", side_effect=["", remote]):
+                with self.assertRaisesRegex(ValueError, "Existing remote tag.*does not identify HEAD"):
+                    require_matching_tag(self.tag, COMMIT, project_root=self.root)
+
+    def test_matching_local_tag_does_not_override_mismatched_remote_tag(self):
+        remote = f"{'b' * 40}\t{self.reference}"
+        with patch("release_tools.preflight.run_command", side_effect=[self.tag, COMMIT, remote]):
+            with self.assertRaisesRegex(ValueError, "Existing remote tag"):
+                require_matching_tag(self.tag, COMMIT, project_root=self.root)
+
+    def test_failed_remote_lookup_is_not_treated_as_an_absent_tag(self):
+        with patch("release_tools.preflight.run_command", side_effect=["", ValueError("git: remote unavailable")]):
+            with self.assertRaisesRegex(ValueError, "remote unavailable"):
+                require_matching_tag(self.tag, COMMIT, project_root=self.root)
+
+    def test_malformed_remote_tag_response_fails_closed(self):
+        for remote in ("bad response", f"not-a-sha\t{self.reference}", f"{COMMIT}\trefs/heads/main"):
+            with self.subTest(remote=remote), patch("release_tools.preflight.run_command", side_effect=["", remote]):
+                with self.assertRaisesRegex(ValueError, "valid remote tag references"):
+                    require_matching_tag(self.tag, COMMIT, project_root=self.root)
 
 
 class GitHubRepositoryTests(unittest.TestCase):
