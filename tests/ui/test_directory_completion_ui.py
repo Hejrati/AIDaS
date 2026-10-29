@@ -49,16 +49,48 @@ class DirectoryCompletionInteractionTests(unittest.TestCase):
             if predicate():
                 return
             time.sleep(0.005)
-        self.assertTrue(predicate(), message)
+        if not predicate():
+            self.fail(message() if callable(message) else message)
+
+    def _completion_diagnostics(self, entry, target):
+        controller = getattr(entry, "_path_completion", None)
+
+        def read(callback):
+            try:
+                return callback()
+            except (tk.TclError, AttributeError) as exc:
+                return f"unavailable: {exc}"
+
+        return {
+            "focus": read(lambda: str(self.root.focus_get())),
+            "target": str(target),
+            "text": read(target.get),
+            "query": getattr(controller, "_query_text", None),
+            "pending": getattr(controller, "_pending", None),
+            "generation": getattr(controller, "_generation", None),
+            "suggestions": getattr(controller, "suggestions", None),
+            "popup_visible": read(lambda: self._visible(controller)) if controller else False,
+            "root_geometry": read(self.root.geometry),
+            "target_mapped": read(target.winfo_ismapped),
+        }
+
+    def _focus_target(self, entry, target):
+        target.focus_force()
+        self._wait_for(
+            lambda: self.root.focus_get() is target,
+            lambda: f"The test input did not receive focus: {self._completion_diagnostics(entry, target)!r}",
+        )
 
     def _entry(self, kind, command=None):
+        # Settle the previous subtest's destruction and focus restoration
+        # before mapping another native input in the shared test window.
+        self.root.update()
         entry = kind(self.root)
         entry.pack(fill="x", padx=12, pady=12)
         bind_path_entry(entry, command)
         target = getattr(entry, "_entry", entry)
         self.root.update()
-        target.focus_force()
-        self.root.update()
+        self._focus_target(entry, target)
         return entry, target
 
     @staticmethod
@@ -67,8 +99,7 @@ class DirectoryCompletionInteractionTests(unittest.TestCase):
         return popup is not None and popup.winfo_exists() and popup.winfo_viewable()
 
     def _complete(self, entry, target, text, expected_names):
-        target.focus_force()
-        self.root.update()
+        self._focus_target(entry, target)
         target.event_generate("<Escape>")
         self.root.update()
         target.delete(0, "end")
@@ -79,7 +110,8 @@ class DirectoryCompletionInteractionTests(unittest.TestCase):
         self._wait_for(
             lambda: [name for name, _path in controller.suggestions] == expected_names
             and self._visible(controller),
-            f"Expected directory suggestions {expected_names!r}",
+            lambda: f"Expected directory suggestions {expected_names!r}: "
+            f"{self._completion_diagnostics(entry, target)!r}",
         )
         return controller
 
