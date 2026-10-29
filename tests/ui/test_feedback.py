@@ -123,7 +123,7 @@ class FeedbackDialogTests(unittest.TestCase):
         self.dialog.approved.set(True)
         with mock.patch("aidas.ui.feedback.filedialog.askopenfilenames", return_value=(str(sample),)):
             self.dialog._add_files()
-        self.assertEqual(self.dialog._attachments, [sample])
+        self.assertEqual(self.dialog._attachments, [sample.resolve()])
         self.assertFalse(self.dialog.approved.get())
         self.assertIn("sample.img", self.dialog.files_label.cget("text"))
         self.dialog._clear_files()

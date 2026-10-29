@@ -261,10 +261,10 @@ class TutorialTextAndControlReuseTests(unittest.TestCase):
         self.root.withdraw()
         self.addCleanup(self.root.destroy)
 
-    def make_guide(self, width=650):
+    def make_guide(self, width=650, *, master=None):
         page = TUTORIAL_PAGES[1]
         return _WorkflowPipeline(
-            self.root,
+            self.root if master is None else master,
             (page.input_summary, page.function_summary, page.output_summary),
             page.stage_points,
             page.completion_check,
@@ -398,18 +398,27 @@ class TutorialTextAndControlReuseTests(unittest.TestCase):
             size.assert_not_called()
 
     def test_reserved_rows_fit_long_instructions_at_narrow_and_wide_widths(self):
-        guide = self.make_guide()
+        # The real tutorial gives its instructions an unconstrained content
+        # height inside a scrollable viewport. Packing directly into a 1600px
+        # toplevel lets the window manager clip the final rows on small CI
+        # displays, testing pack's space allocation rather than text sizing.
+        self.root.attributes("-alpha", 0)
+        self.root.maxsize(1000, 480)
+        viewport = ctk.CTkScrollableFrame(self.root)
+        viewport.pack(fill="both", expand=True)
+        guide = self.make_guide(master=viewport)
         guide.pack(fill="x")
         self.root.deiconify()
         for width in (360, 650):
-            self.root.geometry(f"{width}x1600")
+            self.root.geometry(f"{width}x480")
             guide.set_available_width(width)
-            for page in (TUTORIAL_PAGES[3], TUTORIAL_PAGES[4]):
-                guide.replace_content(
+            overflow_seen = False
+            for page in TUTORIAL_PAGES[1:]:
+                self.assertTrue(guide.replace_content(
                     (page.input_summary, page.function_summary, page.output_summary),
                     page.stage_points, page.completion_check, page.tips,
-                )
-                for section in (guide.SECTIONS[0], guide.SECTIONS[3]):
+                ))
+                for section in guide.SECTIONS:
                     guide._select_section(section)
                     self.root.update_idletasks()
                     for row, label in guide.rows:
@@ -418,6 +427,20 @@ class TutorialTextAndControlReuseTests(unittest.TestCase):
                                 self.assertLessEqual(
                                     label.winfo_reqheight() + 24, row.winfo_height(),
                                 )
+                                self.assertLessEqual(
+                                    label._label.winfo_reqheight(), label.winfo_height(),
+                                )
+                    # Long sections must overflow by scrolling, without
+                    # reducing any instruction row to fit the window height.
+                    canvas = viewport._parent_canvas
+                    bounds = canvas.bbox("all")
+                    self.assertIsNotNone(bounds)
+                    self.assertEqual(guide.winfo_height(), guide.winfo_reqheight())
+                    overflow_seen |= bounds[3] - bounds[1] > canvas.winfo_height()
+                    canvas.yview_moveto(1.0)
+                    self.root.update_idletasks()
+                    self.assertAlmostEqual(canvas.yview()[1], 1.0)
+            self.assertTrue(overflow_seen, "Long sections must scroll in the constrained viewport.")
 
 
 if __name__ == "__main__":

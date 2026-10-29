@@ -554,6 +554,10 @@ python -m venv .venv-release
 
 See [tests/README.md](tests/README.md) for the test layout, focused runs, and
 optional GUI and R integration requirements.
+Before creating a release tag, follow the
+[validated release procedure](release_tools/README.md). Main pushes and pull
+requests run the complete Windows test, executable, and installer checks; a
+tagged release requires a successful check of that exact commit on main.
 
 The build is created at `dist/AIDaS/`, with the launch executable at
 `dist/AIDaS/AIDaS.exe`. The spec requires and bundles every Python runtime

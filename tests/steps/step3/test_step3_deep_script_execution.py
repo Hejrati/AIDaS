@@ -121,7 +121,7 @@ class Step3DeepScriptExecutionTests(unittest.TestCase):
         self.assertEqual(result["returncode"], 0)
         self.assertEqual(self.frame._run_supervised_r_command.call_count, 2)
         output_cmd = self.frame._run_supervised_r_command.call_args.args[0]
-        self.assertIn(self._output().as_posix(), output_cmd[3])
+        self.assertIn(self._output().resolve().as_posix(), output_cmd[3])
 
     def test_new_companion_remains_usable_after_old_main(self):
         self.frame._run_supervised_r_command = mock.Mock(return_value=(0, "", "completed"))
@@ -184,7 +184,7 @@ class Step3DeepScriptExecutionTests(unittest.TestCase):
                     def run(command, cwd, env, _on_line):
                         if "-e" in command:
                             self.assertTrue(compatible)
-                            self.assertIn(self._output().as_posix(), command[3])
+                            self.assertIn(self._output().resolve().as_posix(), command[3])
                             for channel in ("DARK", "Light"):
                                 (Path(cwd) / f"_thickness_vs_distance_from_fovea_{channel}.txt").write_text(
                                     "retained thickness", encoding="utf-8",

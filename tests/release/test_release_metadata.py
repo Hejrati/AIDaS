@@ -72,7 +72,39 @@ class ReleaseWorkflowTests(unittest.TestCase):
     def test_release_can_be_started_manually_for_an_existing_tag(self):
         self.assertIn("workflow_dispatch:", self.workflow)
         self.assertIn("ref: ${{ inputs.tag || github.ref }}", self.workflow)
-        self.assertEqual(self.workflow.count("${{ inputs.tag || github.ref_name }}"), 2)
+        self.assertIn("RELEASE_TAG: ${{ inputs.tag ||", self.workflow)
+        self.assertIn('$tag = $env:RELEASE_TAG', self.workflow)
+
+    def test_main_and_pull_requests_use_the_complete_windows_release_validation(self):
+        self.assertIn("branches:\n      - main", self.workflow)
+        self.assertIn("  pull_request:", self.workflow)
+        self.assertEqual(self.workflow.count("python -m unittest discover -s tests -t . -v"), 1)
+        self.assertIn("python -m PyInstaller AIDaS.spec --clean --noconfirm", self.workflow)
+        self.assertIn("python release_tools/smoke_test_binary.py dist/AIDaS/AIDaS.exe", self.workflow)
+        self.assertIn("python release_tools/smoke_test_binary.py $installedExecutable", self.workflow)
+
+    def test_tag_cannot_build_until_the_exact_commit_has_passed_validation(self):
+        gate = self.workflow.index('python release_tools/preflight.py --tag "$env:RELEASE_TAG"')
+        build = self.workflow.index("python -m PyInstaller")
+        self.assertLess(gate, build)
+        self.assertIn("if: env.RELEASE_TAG != ''", self.workflow)
+
+    def test_publication_requires_the_successful_validation_artifact(self):
+        validation, publication = self.workflow.split("  publish:\n", 1)
+        self.assertNotIn("contents: write", validation)
+        self.assertIn("permissions:\n  contents: read\n  actions: read", validation)
+        self.assertIn("needs: windows-release", publication)
+        self.assertIn("needs.windows-release.result == 'success'", publication)
+        self.assertIn("startsWith(github.ref, 'refs/tags/v')", publication)
+        self.assertIn("contents: write", publication)
+        self.assertIn("actions/upload-artifact@v4", validation)
+        self.assertIn("actions/download-artifact@v4", publication)
+        self.assertIn("$taggedSha -ne $env:VALIDATED_SHA", publication)
+
+    def test_signing_credentials_are_only_available_to_release_steps(self):
+        signing = self.workflow.split("      - name: Optionally sign the application executable\n", 1)[1]
+        self.assertTrue(signing.startswith("        if: env.RELEASE_TAG != ''\n"))
+        self.assertIn("if: steps.signing.outputs.enabled == 'true'", self.workflow)
 
 
 if __name__ == "__main__":

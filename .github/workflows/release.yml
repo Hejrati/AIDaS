@@ -1,9 +1,12 @@
-name: Build and publish AIDaS
+name: Validate and release AIDaS
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
+  pull_request:
   workflow_dispatch:
     inputs:
       tag:
@@ -12,16 +15,29 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
+
+concurrency:
+  group: windows-validation-${{ github.event_name }}-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
 
 jobs:
   windows-release:
-    name: Windows installer
+    name: Windows validation
     runs-on: windows-latest
     timeout-minutes: 90
+    outputs:
+      source_sha: ${{ steps.metadata.outputs.source_sha }}
+      version: ${{ steps.metadata.outputs.version }}
+      installer_name: ${{ steps.metadata.outputs.installer_name }}
+      prerelease: ${{ steps.metadata.outputs.prerelease }}
 
     steps:
-      - name: Check out the tagged source
+      - name: Check out the source to validate
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -39,13 +55,29 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
-      - name: Validate tag and calculate release names
+      - name: Require a validated release commit
+        if: env.RELEASE_TAG != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python release_tools/preflight.py --tag "$env:RELEASE_TAG"
+
+      - name: Validate version and calculate release names
         id: metadata
         shell: pwsh
         run: |
+          $tag = $env:RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = python -c "from release_tools.release_metadata import read_project_version; from pathlib import Path; print('v' + str(read_project_version(Path('aidas/__init__.py'))))"
+            if ($LASTEXITCODE -ne 0) { throw "Could not read the application version." }
+          }
           python release_tools/release_metadata.py `
-            --tag "${{ inputs.tag || github.ref_name }}" `
+            --tag "$tag" `
             --github-output "$env:GITHUB_OUTPUT"
+          if ($LASTEXITCODE -ne 0) { throw "Release metadata validation failed." }
+          $sourceSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) { throw "Could not read the source commit." }
+          "source_sha=$sourceSha" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Install R 3.3.1 for integration tests
         shell: pwsh
@@ -129,6 +161,7 @@ jobs:
         run: python release_tools/smoke_test_binary.py dist/AIDaS/AIDaS.exe
 
       - name: Optionally sign the application executable
+        if: env.RELEASE_TAG != ''
         id: signing
         shell: pwsh
         env:
@@ -207,7 +240,7 @@ jobs:
         run: |
           $installer = (Resolve-Path (Join-Path "release" $env:INSTALLER_NAME)).Path
           $installDirectory = Join-Path $env:RUNNER_TEMP "AIDaS-installer-smoke"
-          $installResult = Start-Process -FilePath $installer -Wait -PassThru -ArgumentList @(
+          $installResult = Start-Process -FilePath $installer -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
             "/VERYSILENT",
             "/SUPPRESSMSGBOXES",
             "/NORESTART",
@@ -226,7 +259,7 @@ jobs:
           finally {
             $uninstaller = Join-Path $installDirectory "unins000.exe"
             if (Test-Path -LiteralPath $uninstaller) {
-              $uninstallResult = Start-Process -FilePath $uninstaller -Wait -PassThru -ArgumentList @(
+              $uninstallResult = Start-Process -FilePath $uninstaller -Wait -PassThru -WindowStyle Hidden -ArgumentList @(
                 "/VERYSILENT",
                 "/SUPPRESSMSGBOXES",
                 "/NORESTART"
@@ -250,16 +283,57 @@ jobs:
           "$digest  $env:INSTALLER_NAME" |
             Set-Content -LiteralPath "$installer.sha256" -Encoding ascii -NoNewline
 
+      - name: Retain the validated Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            release/${{ steps.metadata.outputs.installer_name }}
+            release/${{ steps.metadata.outputs.installer_name }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish validated release
+    needs: windows-release
+    if: ${{ (startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.tag != '')) && needs.windows-release.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out the tagged release notes
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Download the validated installer
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: release
+
+      - name: Confirm the tag still identifies the validated source
+        shell: pwsh
+        env:
+          VALIDATED_SHA: ${{ needs.windows-release.outputs.source_sha }}
+        run: |
+          $taggedSha = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $taggedSha -ne $env:VALIDATED_SHA) {
+            throw "The release tag no longer points to the validated source commit."
+          }
+
       - name: Publish the GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.metadata.outputs.version }}
-          INSTALLER_NAME: ${{ steps.metadata.outputs.installer_name }}
-          IS_PRERELEASE: ${{ steps.metadata.outputs.prerelease }}
+          VERSION: ${{ needs.windows-release.outputs.version }}
+          INSTALLER_NAME: ${{ needs.windows-release.outputs.installer_name }}
+          IS_PRERELEASE: ${{ needs.windows-release.outputs.prerelease }}
         run: |
           $installer = Join-Path "release" $env:INSTALLER_NAME
-          $tag = "${{ inputs.tag || github.ref_name }}"
+          $tag = $env:RELEASE_TAG
           $notesFile = Join-Path "release_tools/notes" "$tag.md"
 
           # A rerun may find a draft or partially published release left by a

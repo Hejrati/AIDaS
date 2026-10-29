@@ -74,7 +74,7 @@ class BatchStackBuildingTests(unittest.TestCase):
         self.finish()
         calls = self.frame._write_stack_output_files.call_args_list
         self.assertEqual([call.args[2] for call in calls],
-                         [self.root / "active", self.root / "ready"])
+                         [(self.root / "active").resolve(), (self.root / "ready").resolve()])
         self.assertTrue(self.states["active"]["complete"])
         self.assertTrue(self.states["ready"]["complete"])
         self.assertFalse(self.states["unfinished"]["complete"])
