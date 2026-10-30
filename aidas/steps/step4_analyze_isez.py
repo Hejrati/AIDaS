@@ -2559,6 +2559,8 @@ class Step4Frame(SidebarStepFrame):
         self._last_results_dir = None
         self._stack_building = False
         self._stack_build_complete = False
+        self._automatic_step5_handoff = False
+        self._step5_handoff_generation = 0
         self._auto_detection_events = None
         self._stack_build_events = None
         self._roi_context_generation = 0
@@ -3007,6 +3009,18 @@ class Step4Frame(SidebarStepFrame):
             f"{message}\n\nSaved results:\n{outdir}",
             output_dir=outdir,
         )
+
+    def _auto_continue_to_step5(self) -> None:
+        """Compile Excel once after every stack in the current run is saved."""
+        if (
+            self.__dict__.get("_stack_building", False)
+            or self.__dict__.get("_automatic_step5_handoff", False)
+            or not callable(self.__dict__.get("on_continue_to_step5"))
+            or not self._completion_step5_handoff_ready()
+        ):
+            return
+        self._automatic_step5_handoff = True
+        self._continue_to_step5()
 
     def _completion_step5_handoff_ready(self) -> bool:
         """Return whether a completion card may advance the whole Step 4 run."""
@@ -4203,6 +4217,7 @@ class Step4Frame(SidebarStepFrame):
                 "Every selected Step 4 folder in this batch is complete.",
                 output_dir=getattr(self, "_last_results_dir", None),
             )
+            self._auto_continue_to_step5()
             return
 
         self.batch_roi_index = next_index
@@ -5908,6 +5923,8 @@ class Step4Frame(SidebarStepFrame):
 
         ordered = [self.completed[roi.suffix] for roi in self.rois if roi.suffix in self.completed]
         outdir = Path(self.output_dir_var.get() or ".").expanduser().resolve()
+        self._automatic_step5_handoff = False
+        self._step5_handoff_generation = self.__dict__.get("_step5_handoff_generation", 0) + 1
         self._stack_building = True
         self._stack_build_complete = False
         self._update_build_stack_button_state()
@@ -5988,6 +6005,8 @@ class Step4Frame(SidebarStepFrame):
 
         cancelled = self._batch_stack_cancel = threading.Event()
         events = self._stack_build_events = queue.Queue()
+        self._automatic_step5_handoff = False
+        self._step5_handoff_generation = self.__dict__.get("_step5_handoff_generation", 0) + 1
         self._stack_building = True
         self._update_build_stack_button_state()
         self._update_auto_detect_button_state()
@@ -6029,6 +6048,8 @@ class Step4Frame(SidebarStepFrame):
                     self.status_var.set(f"Stack building finished. {completed}/{total} tabs completed.")
                     if failures:
                         messagebox.showerror("Step 4", "Some stacks could not be built:\n" + "\n".join(failures))
+                    else:
+                        self._auto_continue_to_step5()
                     return
                 key, state, ordered, outdir, error = payload
                 if self.batch_roi_tab_states.get(key) is not state:
@@ -6088,6 +6109,7 @@ class Step4Frame(SidebarStepFrame):
                     "File processed. Use Go to next tab when you are ready to continue."
                 )
             self._update_continue_to_step5_button_state()
+            self._auto_continue_to_step5()
             return
         if self.batch_roi_paths and self.batch_roi_index >= 0:
             self._show_processed_grid_notice(outdir)
@@ -6100,6 +6122,7 @@ class Step4Frame(SidebarStepFrame):
             output_dir=self._last_results_dir,
         )
         self._update_continue_to_step5_button_state()
+        self._auto_continue_to_step5()
 
 
 def main() -> None:

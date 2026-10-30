@@ -20,13 +20,20 @@ class CompilerPresentationMixin:
     def _start_compiler(self, root_folder, output_path, include_fovea, *, thread_name):
         self._clear_log()
         self._set_running(True)
-        self._worker = threading.Thread(
-            target=self._compile_worker,
-            args=(root_folder, output_path, include_fovea),
-            name=thread_name,
-            daemon=True,
-        )
-        self._worker.start()
+        self._worker = None
+        try:
+            self._worker = threading.Thread(
+                target=self._compile_worker,
+                args=(root_folder, output_path, include_fovea),
+                name=thread_name,
+                daemon=True,
+            )
+            self._worker.start()
+        except Exception as exc:
+            # A failed start produces no terminal queue event. Restore the
+            # controls immediately instead of leaving the view waiting for it.
+            self._worker = None
+            self._compilation_failed(exc)
 
     def _compile_worker(
         self,

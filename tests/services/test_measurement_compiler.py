@@ -11,10 +11,15 @@ from openpyxl import Workbook, load_workbook
 from aidas.services.step4_compiler import (
     DEFAULT_OUTPUT_FILENAME,
     MeasureCompilation,
+    clean_light_thickness_file,
     compile_step4_results,
+    extract_elmrpe_onl_from_subject,
+    find_light_files,
     find_subject_folders,
     find_results_file,
+    find_thickness_file,
     make_light2_from_light,
+    read_tsv_rows,
 )
 
 
@@ -77,18 +82,208 @@ class Step4CompilerTests(unittest.TestCase):
             self.assertEqual(set(folders["LE"]), {"999_0_0", "1000_0_0"})
             self.assertEqual(result.group_ids, {"LE": ("999_0_0", "1000_0_0")})
 
-    def test_light_cleanup_falls_back_to_original_on_any_os_error(self):
+    def test_light_cleanup_preserves_original_and_removes_temporary_file_on_os_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "LIGHT.txt"
-            source.write_text("Distance\tValue\n0\t1\n", encoding="utf-8")
+            source.write_bytes(b"Distance\tWhole\tELM\tONL\r\n-1\t0\tNA\t9\r\n0\t0\t1\t2\r\n")
+            original = source.read_bytes()
 
-            with mock.patch(
-                "aidas.services.step4_compiler.write_tsv_rows",
-                side_effect=OSError("disk full"),
-            ):
-                result = make_light2_from_light(source, 2)
+            for operation in ("write_tsv_rows", "os.replace"):
+                with self.subTest(operation=operation), mock.patch(
+                    "aidas.services.step4_compiler." + operation,
+                    side_effect=OSError("disk full"),
+                ):
+                    with self.assertRaisesRegex(OSError, "disk full"):
+                        clean_light_thickness_file(source)
 
-            self.assertEqual(result, str(source))
+                self.assertEqual(source.read_bytes(), original)
+                self.assertEqual(list(Path(temp_dir).iterdir()), [source])
+
+    def test_light_cleanup_uses_fixed_elm_column_and_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            source.write_text(
+                "Distance\tWhole\tELM\tONL\n"
+                "-3\t0\tNA\t999\n"
+                "-2\t0\t20\tNA\n"
+                "-1\t0\t30\t300\n"
+                "0\t0\tNA\t400\n"
+                "1\t0\tNA\t500\n"
+                "0\t0\tNA\t600\n"
+                "2\t0\t40\t700\n"
+                "3\tshort\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(make_light2_from_light(source, 4), str(source))
+            self.assertEqual(read_tsv_rows(source), [
+                ["Distance", "Whole", "ELM", "ONL"],
+                ["-2", "0", "20", "NA"],
+                ["-1", "0", "30", "300"],
+                ["0", "0", "NA", "400"],
+                ["2", "0", "40", "700"],
+            ])
+            cleaned = source.read_bytes()
+            modified = source.stat().st_mtime_ns
+            with mock.patch("aidas.services.step4_compiler.write_tsv_rows") as write:
+                self.assertEqual(clean_light_thickness_file(source), str(source))
+            write.assert_not_called()
+            self.assertEqual(source.read_bytes(), cleaned)
+            self.assertEqual(source.stat().st_mtime_ns, modified)
+            self.assertEqual(list(Path(temp_dir).iterdir()), [source])
+
+    def test_already_clean_light_retains_exact_bytes_without_a_rewrite(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "LIGHT.txt"
+            original = b"Distance\tWhole\tELM\tONL\r\n-1\t0\t1\t2\r\n0\t0\tNA\t3\r\n"
+            source.write_bytes(original)
+
+            with mock.patch("aidas.services.step4_compiler.tempfile.mkstemp") as create:
+                self.assertEqual(clean_light_thickness_file(source), str(source))
+
+            create.assert_not_called()
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_current_light_is_preferred_over_stale_light2_in_direct_and_recursive_paths(self):
+        cases = (
+            ("nasal", "nasal"),
+            ("nasal", "nasal/exports/final"),
+            ("rrMCPAR", "nasal/exports/final"),
+            ("nasal", "other exports"),
+        )
+        for legacy_directory, current_directory in cases:
+            with self.subTest(legacy=legacy_directory, current=current_directory), \
+                    tempfile.TemporaryDirectory() as temp_dir:
+                subject = Path(temp_dir)
+                legacy = subject / legacy_directory / "_thickness_vs_distance_from_fovea_LIGHT2.txt"
+                current = subject / current_directory / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+                legacy.parent.mkdir(parents=True, exist_ok=True)
+                current.parent.mkdir(parents=True, exist_ok=True)
+                legacy.write_text("stale", encoding="utf-8")
+                current.write_text("current", encoding="utf-8")
+
+                self.assertEqual(Path(find_thickness_file(subject)), current)
+                nasal, _temporal = find_light_files(subject)
+                self.assertEqual(Path(nasal), current)
+
+    def test_current_temporal_light_is_preferred_over_direct_legacy_light2(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subject = Path(temp_dir)
+            side = subject / "temporal"
+            current = side / "exports" / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            current.parent.mkdir(parents=True)
+            current.write_text("current", encoding="utf-8")
+            (side / "_thickness_vs_distance_from_fovea_LIGHT2.txt").write_text("stale", encoding="utf-8")
+
+            _nasal, temporal = find_light_files(subject)
+
+            self.assertEqual(Path(temporal), current)
+
+    def test_legacy_light2_remains_a_read_only_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subject = Path(temp_dir)
+            side = subject / "nasal"
+            side.mkdir()
+            legacy = side / "_thickness_vs_distance_from_fovea_LIGHT2.txt"
+            original = b"Distance\tWhole\tELM\tONL\r\n-1\t0\tNA\t100\r\n0\t0\t20\t200\r\n"
+            legacy.write_bytes(original)
+
+            self.assertEqual(Path(find_thickness_file(subject)), legacy)
+            self.assertEqual(clean_light_thickness_file(legacy), str(legacy))
+            blocks, _temporal, filename, _other, count, _other_count = extract_elmrpe_onl_from_subject(
+                subject, "ONL", False,
+            )
+
+            self.assertEqual(Path(filename), legacy)
+            self.assertEqual(blocks[0], 150)
+            self.assertEqual(count, 2)
+            self.assertEqual(legacy.read_bytes(), original)
+            self.assertEqual(list(side.iterdir()), [legacy])
+
+    def test_legacy_thickness_is_preferred_to_unrelated_current_light_profiles(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subject = Path(temp_dir)
+            side = subject / "nasal"
+            side.mkdir()
+            legacy = side / "_thickness_vs_distance_from_fovea_LIGHT2.txt"
+            original = b"Distance\tWhole\tELM\tONL\n-1\t0\t10\t20\n0\t0\t30\t40\n"
+            legacy.write_bytes(original)
+            profile = side / "_fovea_light_profiles_LIGHT.txt"
+            _write_fovea(profile, 55.77)
+            profile_bytes = profile.read_bytes()
+
+            self.assertEqual(Path(find_thickness_file(side)), legacy)
+            nasal, _temporal = find_light_files(subject)
+            self.assertEqual(Path(nasal), legacy)
+            blocks, _temporal, filename, _other, count, _other_count = extract_elmrpe_onl_from_subject(
+                subject, "ONL", False,
+            )
+
+            self.assertEqual(Path(filename), legacy)
+            self.assertEqual(blocks[0], 30)
+            self.assertEqual(count, 2)
+            self.assertEqual(legacy.read_bytes(), original)
+            self.assertEqual(profile.read_bytes(), profile_bytes)
+
+    def test_profile_only_folders_are_not_cleaned_or_used_as_thickness_tables(self):
+        for filename in ("_light_profiles_LIGHT.txt", "_fovea_light_profiles_LIGHT.txt",
+                         "_fovea_light_LIGHT.txt", "_fovea_light_profiles_LIGHT2.txt"):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temp_dir:
+                subject = Path(temp_dir)
+                side = subject / "nasal"
+                side.mkdir()
+                profile = side / filename
+                original = b"foveaLIGHT\t1\t2\r\nRPEtoOLM\tNA\tNA\r\n"
+                profile.write_bytes(original)
+
+                self.assertIsNone(find_thickness_file(side))
+                self.assertEqual(find_light_files(subject), (None, None))
+                for measurement in ("ELM-RPE", "ONL"):
+                    nasal, temporal, nasal_file, temporal_file, nasal_count, temporal_count = (
+                        extract_elmrpe_onl_from_subject(subject, measurement, False)
+                    )
+                    self.assertTrue(all(value is None for value in nasal + temporal))
+                    self.assertIsNone(nasal_file)
+                    self.assertIsNone(temporal_file)
+                    self.assertEqual((nasal_count, temporal_count), (0, 0))
+                self.assertEqual(profile.read_bytes(), original)
+                self.assertEqual(list(side.iterdir()), [profile])
+
+    def test_mixed_missing_elm_and_onl_rows_keep_former_compilation_values_without_light2(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            side = root / "Control" / "Subject_1" / "nasal"
+            side.mkdir(parents=True)
+            _write_results(side / "rr_MCPAR.xlsx", 1)
+            source = side / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            source.write_text(
+                "Distance\tWhole\tELM\tONL\n"
+                "-3\t0\tNA\t999\n"
+                "-2\t0\t20\tNA\n"
+                "-1\t0\t30\t300\n"
+                "0\t0\tNA\t400\n"
+                "1\t0\tNA\t500\n"
+                "0\t0\tNA\t600\n"
+                "2\t0\t40\t700\n",
+                encoding="utf-8",
+            )
+            output = root / "compiled.xlsx"
+
+            compile_step4_results(root, output, include_fovea=False)
+
+            workbook = load_workbook(output, data_only=True)
+            try:
+                self.assertEqual(workbook["ELM-RPE"]["B3"].value, 30)
+                self.assertAlmostEqual(workbook["ONL"]["B3"].value, (300 + 400 + 700) / 3)
+                log = workbook["Extraction_log"]
+                self.assertEqual(log["G3"].value, 3)
+                self.assertEqual(log["G4"].value, 3)
+            finally:
+                workbook.close()
+            self.assertEqual(
+                sorted(path.name for path in side.iterdir()),
+                ["_thickness_vs_distance_from_fovea_LIGHT.txt", "rr_MCPAR.xlsx"],
+            )
 
     def test_compile_matches_legacy_layout_and_reads_current_step4_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -194,10 +389,10 @@ class Step4CompilerTests(unittest.TestCase):
             finally:
                 workbook.close()
 
-            self.assertTrue(
+            self.assertFalse(
                 (subject / "nasal" / "_thickness_vs_distance_from_fovea_LIGHT2.txt").is_file()
             )
-            self.assertTrue(
+            self.assertFalse(
                 (subject / "temporal" / "_thickness_vs_distance_from_fovea_LIGHT2.txt").is_file()
             )
 

@@ -24,7 +24,6 @@ from aidas.ui.windowing import synchronize_window_chrome
 from aidas.utils.ui_utils import apply_app_icon_to
 
 
-AUTO_CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 RELEASE_NOTES_LIMIT = 1600
 
 
@@ -141,20 +140,16 @@ class UpdateController:
         self.restart_blocker_callback = restart_blocker_callback
         self.install_callback = install_callback
         self._checking = False
+        self._automatic_check_started = False
         self._downloading = False
         self._cancel_event: threading.Event | None = None
         self._progress_dialog: DownloadProgressDialog | None = None
 
     def check_automatically(self) -> None:
-        """Check at most daily, and only from an installed Windows build."""
-        if not supports_in_app_install() or not self.preferences.get("check_for_updates", True):
+        """Check once per app launch, independently of earlier launches."""
+        if self._automatic_check_started or not self.preferences.get("check_for_updates", True):
             return
-        try:
-            last_check = float(self.preferences.get("last_successful_update_check", 0) or 0)
-        except (TypeError, ValueError):
-            last_check = 0
-        if time.time() - last_check < AUTO_CHECK_INTERVAL_SECONDS:
-            return
+        self._automatic_check_started = True
         self._begin_check(manual=False)
 
     def check_now(self) -> None:
@@ -325,7 +320,14 @@ class UpdateController:
         self.install_callback(installer)
 
     def _schedule(self, callback) -> None:
+        if self.root.__dict__.get("_aidas_destroying", False):
+            return
+
+        def deliver() -> None:
+            if not self.root.__dict__.get("_aidas_destroying", False):
+                callback()
+
         try:
-            self.root.after(0, callback)
+            self.root.after(0, deliver)
         except (RuntimeError, tk.TclError):
             pass

@@ -51,9 +51,10 @@ class Step5CompileTests(unittest.TestCase):
         frame.on_compilation_complete = mock.Mock()
         result = SimpleNamespace(output_path=Path("compiled.xlsx"))
 
-        with mock.patch("aidas.steps.step5_compile.messagebox.showinfo"):
+        with mock.patch("aidas.steps.step5_compile.messagebox.showinfo") as popup:
             frame._compilation_succeeded(result)
 
+        popup.assert_not_called()
         frame.on_compilation_complete.assert_called_once_with(Path("compiled.xlsx"))
 
     def test_final_success_updates_status_without_a_completion_popup(self):
@@ -195,6 +196,7 @@ class Step5CompileTests(unittest.TestCase):
         frame = object.__new__(Step5Frame)
         frame._running = False
         frame._output_user_selected = False
+        frame.after = mock.Mock(return_value="compile-poll")
         frame.input_var = _Var("old-input")
         frame.output_var = _Var()
         frame.status_var = _Var()
@@ -267,6 +269,58 @@ class Step5CompileTests(unittest.TestCase):
         frame.set_input_folder.assert_not_called()
         frame._start_compiler.assert_not_called()
 
+    def test_completed_step4_runs_are_queued_without_overlapping_workers(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            first = root / "first"
+            latest = root / "latest"
+            first.mkdir()
+            latest.mkdir()
+            frame = self._handoff_frame(None)
+            frame._running = True
+            frame._drain_compile_events = mock.Mock()
+            frame.winfo_exists = mock.Mock(return_value=True)
+            frame.after = mock.Mock()
+            frame._start_compiler.side_effect = lambda *_args, **_kwargs: setattr(frame, "_running", True)
+
+            frame.start_from_step4(first)
+            frame.start_from_step4(latest)
+            frame.start_from_step4(latest)
+            frame._poll_events()
+            frame._start_compiler.assert_not_called()
+
+            frame._running = False
+            frame._poll_events()
+            frame._poll_events()
+            frame._start_compiler.assert_called_once_with(
+                first, first / DEFAULT_OUTPUT_FILENAME, True,
+                thread_name="aidas-step5-compiler",
+            )
+            frame._running = False
+            frame._poll_events()
+            frame._running = False
+            frame._poll_events()
+            self.assertEqual(frame._start_compiler.call_args_list, [mock.call(
+                first, first / DEFAULT_OUTPUT_FILENAME, True,
+                thread_name="aidas-step5-compiler",
+            ), mock.call(
+                latest, latest / DEFAULT_OUTPUT_FILENAME, True,
+                thread_name="aidas-step5-compiler",
+            )])
+
+    def test_a_queued_export_does_not_start_after_step5_is_destroyed(self):
+        frame = self._handoff_frame(None)
+        frame._running = True
+        frame.start_from_step4("latest-input")
+        frame._running = False
+        frame._drain_compile_events = mock.Mock()
+        frame.winfo_exists = mock.Mock(return_value=False)
+        frame.after = mock.Mock()
+
+        frame._poll_events()
+
+        frame._start_compiler.assert_not_called()
+
     def test_visiting_step5_before_any_step4_file_is_loaded_does_not_compile_defaults(self):
         frame = self._handoff_frame(None)
         frame.source_step.output_dir_var = _Var("default-output-directory")
@@ -313,16 +367,17 @@ class Step5CompileTests(unittest.TestCase):
             frame._set_running = mock.Mock(side_effect=lambda state: setattr(frame, "_running", state))
             frame.on_compilation_complete = mock.Mock()
 
-            with mock.patch("aidas.steps.step5_compile.messagebox.showinfo"), mock.patch(
-                "aidas.steps.step5_compile.messagebox.showerror",
-            ) as error:
+            with mock.patch("aidas.steps.step5_compile.messagebox") as dialogs, mock.patch(
+                "aidas.steps.step5_compile.filedialog",
+            ) as file_dialogs:
                 frame.start_from_step4()
                 frame._worker.join(timeout=10)
                 self.assertFalse(frame._worker.is_alive())
                 frame._drain_compile_events()
 
             output = root / DEFAULT_OUTPUT_FILENAME
-            error.assert_not_called()
+            self.assertEqual(dialogs.mock_calls, [])
+            self.assertEqual(file_dialogs.mock_calls, [])
             self.assertFalse(frame._running)
             frame.on_compilation_complete.assert_called_once_with(output)
             self.assertIn("Excel file saved", frame.status_var.get())

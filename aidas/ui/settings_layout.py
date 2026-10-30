@@ -318,7 +318,7 @@ class SettingsLayoutMixin:
         self._sync_interface_controls(self._presentation_mode, self._initial_appearance_mode)
         updates = self._page_section(page, "Application Updates", row=3)
         self.update_switch = self._page_check(
-            updates, "Check automatically for application updates", self.update_checks_var,
+            updates, "Check for updates whenever AIDaS opens", self.update_checks_var,
             self._mark_dirty,
         )
         self.update_switch.grid(row=0, column=0, columnspan=2, sticky="w", pady=6)

@@ -129,7 +129,17 @@ class StartupImportTests(unittest.TestCase):
                         assert len(stages) > 5, 'Loading progress did not advance'
                         assert tutorials == [app.step3], 'Tutorial rendered repeatedly'
                         assert not unmapped, (mode, 'Splash blinked while loading', unmapped)
-                        app._finish_startup()
+                        launch_checks = []
+                        original_after = app.after
+                        def record_after(delay, callback=None, *args):
+                            if callback == app.update_controller.check_automatically:
+                                assert app.winfo_viewable(), 'Update check queued before window reveal'
+                                launch_checks.append(delay)
+                            return original_after(delay, callback, *args)
+                        with patch.object(app, 'after', side_effect=record_after):
+                            app._finish_startup()
+                            app._finish_startup()
+                        assert launch_checks == [1500], (mode, launch_checks)
                         app.update()
                         assert not app._aidas_defer_canvas_updates
                         assert not app._aidas_deferred_surfaces

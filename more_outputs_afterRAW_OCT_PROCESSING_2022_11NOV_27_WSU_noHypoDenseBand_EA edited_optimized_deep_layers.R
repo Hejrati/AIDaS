@@ -4,6 +4,10 @@
 ## Default graphics preserve legacy rendering. Set AIDAS_STEP3_RASTER=1 only
 ## when faster raster rendering is preferred over byte-identical PNGs.
 
+# App runs export the acquired LIGHT channel without duplicate DARK files.
+# Standalone use keeps the legacy two-channel exports.
+.LIGHT.ONLY <- identical(Sys.getenv("AIDAS_LIGHT_ONLY", unset=""), "1")
+
 # New workspaces retain their processing mode; older ones use full outputs.
 if (!exists("deep_layers_only", inherits = FALSE)) {
   deep_layers_only <- FALSE
@@ -125,26 +129,28 @@ save.tissue.border.output <- function(filename, flattened, rpe, olm, onl.opl, in
 )
 .output.same.borders <- same_export_borders(.output.light.borders, .output.dark.borders)
 
-.output.dark.target <- save.tissue.border.output(
-  paste("_tissueBorders__",TO.PROCESS.DARK,".png",sep=""),
-  FLATTENED.DARK.RETINA.RRC,
-  R.RPE.POSITION.DARK, R.OLM.POSITION.DARK, R.ONL.OPL.POSITION.DARK,
-  R.INL.IPL.POSITION.DARK, R.RNFL.GCL.POSITION.DARK, R.VITREOUS.RETINA.POSITION.DARK
-)
 .output.light.filename <- paste("_tissueBorders__",TO.PROCESS.LIGHT,".png",sep="")
 .output.light.target <- file.path(getwd(), .output.light.filename)
-.output.same.plot <- .output.same.borders &&
-  identical(FLATTENED.DARK.RETINA.RRC[,,1L], FLATTENED.LIGHT.RETINA.RRC[,,1L])
 .output.plot.copied <- FALSE
-if(.output.same.plot) {
-  .output.dark.path <- normalizePath(.output.dark.target, winslash="/", mustWork=FALSE)
-  .output.light.path <- normalizePath(.output.light.target, winslash="/", mustWork=FALSE)
-  if(.Platform$OS.type == "windows") {
-    .output.dark.path <- tolower(.output.dark.path)
-    .output.light.path <- tolower(.output.light.path)
+if (!.LIGHT.ONLY) {
+  .output.dark.target <- save.tissue.border.output(
+    paste("_tissueBorders__",TO.PROCESS.DARK,".png",sep=""),
+    FLATTENED.DARK.RETINA.RRC,
+    R.RPE.POSITION.DARK, R.OLM.POSITION.DARK, R.ONL.OPL.POSITION.DARK,
+    R.INL.IPL.POSITION.DARK, R.RNFL.GCL.POSITION.DARK, R.VITREOUS.RETINA.POSITION.DARK
+  )
+  .output.same.plot <- .output.same.borders &&
+    identical(FLATTENED.DARK.RETINA.RRC[,,1L], FLATTENED.LIGHT.RETINA.RRC[,,1L])
+  if(.output.same.plot) {
+    .output.dark.path <- normalizePath(.output.dark.target, winslash="/", mustWork=FALSE)
+    .output.light.path <- normalizePath(.output.light.target, winslash="/", mustWork=FALSE)
+    if(.Platform$OS.type == "windows") {
+      .output.dark.path <- tolower(.output.dark.path)
+      .output.light.path <- tolower(.output.light.path)
+    }
+    .output.plot.copied <- identical(.output.dark.path, .output.light.path) ||
+      isTRUE(file.copy(.output.dark.target, .output.light.target, overwrite=TRUE))
   }
-  .output.plot.copied <- identical(.output.dark.path, .output.light.path) ||
-    isTRUE(file.copy(.output.dark.target, .output.light.target, overwrite=TRUE))
 }
 if(!.output.plot.copied) {
   save.tissue.border.output(
@@ -156,10 +162,11 @@ if(!.output.plot.copied) {
 }
 
 THICKNESS.EXPORT.LIGHT <- do.call(make_thickness_export, .output.light.borders)
-THICKNESS.EXPORT.DARK <- if(.output.same.borders) THICKNESS.EXPORT.LIGHT else
-                       do.call(make_thickness_export, .output.dark.borders)
-
-write_thickness_export(THICKNESS.EXPORT.DARK, TO.PROCESS.DARK)
+if (!.LIGHT.ONLY) {
+  THICKNESS.EXPORT.DARK <- if(.output.same.borders) THICKNESS.EXPORT.LIGHT else
+                         do.call(make_thickness_export, .output.dark.borders)
+  write_thickness_export(THICKNESS.EXPORT.DARK, TO.PROCESS.DARK)
+}
 write_thickness_export(THICKNESS.EXPORT.LIGHT, TO.PROCESS.LIGHT)
 
 rm(list=intersect(c(".output.light.borders", ".output.dark.borders", ".output.same.borders",

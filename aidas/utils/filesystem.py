@@ -5,9 +5,68 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Callable
 
 
 DirectoryScanError = tuple[Path, str]
+
+
+def walk_unique_directories(
+    root: str | os.PathLike,
+    *,
+    onerror: Callable[[OSError], None] | None = None,
+    followlinks: bool = False,
+):
+    """Walk each physical directory once, including across Windows junctions.
+
+    Keep ``os.walk``'s mutable, top-down directory list so callers can sort or
+    prune branches. Canonical paths and file IDs prevent linked folders from
+    revisiting an ancestor or duplicating a previously scanned branch, without
+    limiting the depth of legitimate nested results.
+    """
+    seen_paths = set()
+    seen_ids = set()
+    identities = {}
+
+    def identity(path):
+        key = os.fspath(path)
+        if key in identities:
+            return identities[key]
+        try:
+            canonical = os.path.normcase(os.path.realpath(path))
+        except (OSError, RuntimeError):
+            canonical = os.path.normcase(os.path.abspath(path))
+        try:
+            status = os.stat(path)
+        except OSError:
+            file_id = None
+        else:
+            # Some filesystems do not supply a usable inode/file ID.
+            file_id = (status.st_dev, status.st_ino) if status.st_ino else None
+        identities[key] = canonical, file_id
+        return identities[key]
+
+    def visited(path):
+        canonical, file_id = identity(path)
+        return canonical in seen_paths or (file_id is not None and file_id in seen_ids)
+
+    options = {"followlinks": True} if followlinks else {}
+    for directory, subdirectories, filenames in os.walk(root, onerror=onerror, **options):
+        canonical, file_id = identity(directory)
+        if canonical in seen_paths or (file_id is not None and file_id in seen_ids):
+            subdirectories.clear()
+            continue
+        seen_paths.add(canonical)
+        if file_id is not None:
+            seen_ids.add(file_id)
+        subdirectories[:] = [
+            name for name in subdirectories if not visited(os.path.join(directory, name))
+        ]
+        yield directory, subdirectories, filenames
+        # A caller may have changed the branch list while consuming this row.
+        subdirectories[:] = [
+            name for name in subdirectories if not visited(os.path.join(directory, name))
+        ]
 
 
 def normalize_path_input(value: str | os.PathLike) -> str:

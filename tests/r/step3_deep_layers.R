@@ -39,6 +39,7 @@ main <- function() {
     environment <- new.env(parent=globalenv())
     define.functions(expressions,environment)
     environment$deep_layers_only <- FALSE
+    environment$.LIGHT.ONLY <- FALSE
     environment
   })
   raw.file <- function(path) readBin(path,"raw",n=file.info(path)$size)
@@ -134,6 +135,7 @@ main <- function() {
   run.smoothing <- function(expressions,deep) {
     environment <- list2env(smooth.input,parent=globalenv())
     environment$deep_layers_only <- deep
+    environment$.LIGHT.ONLY <- FALSE
     if(deep) for(channel in c("DARK","LIGHT"))
       environment[[paste0("R.RNFL.GCL.POSITION.",channel)]][,] <- NA_real_
     loops <- smoothing.loops(expressions)
@@ -184,6 +186,7 @@ main <- function() {
   run.numerical <- function(expressions,deep) {
     environment <- list2env(input,parent=globalenv())
     environment$deep_layers_only <- deep
+    environment$.LIGHT.ONLY <- FALSE
     environment$dbg <- function(...) invisible(NULL)
     environment$f.write.analyze <- function(...) invisible(NULL)
     if(deep) for(channel in c("DARK","LIGHT")) {
@@ -293,7 +296,9 @@ main <- function() {
     }
   }
   # Companion defaults must not inherit a stale mode from another environment.
-  startup <- as.list(scripts$candidate.output)[1:2]
+  startup <- Filter(function(expr) is.call(expr) &&
+    (identical(expr[[1L]], as.name("if")) || call.to(expr,"stopifnot")) &&
+    "deep_layers_only" %in% all.names(expr), as.list(scripts$candidate.output))
   parent <- list2env(list(deep_layers_only=TRUE),parent=baseenv())
   environment <- new.env(parent=parent)
   for(expr in startup) eval(expr,environment)

@@ -35,6 +35,13 @@
 ############
 ############
 
+# App runs publish only the acquired LIGHT channel; paired arrays remain in memory
+# so the legacy numerical calculations and LIGHT measurements stay unchanged.
+.LIGHT.ONLY <- identical(Sys.getenv("AIDAS_LIGHT_ONLY", unset=""), "1")
+.is.dark.output <- function(filename) {
+  .LIGHT.ONLY && grepl("dark", basename(filename), ignore.case=TRUE)
+}
+
 .DEBUG.STEP <- "startup"
 .DIAGNOSTICS.ENABLED <- tolower(Sys.getenv("AIDAS_STEP3_DIAGNOSTICS", unset="")) %in% c("1", "true", "yes", "on")
 
@@ -138,7 +145,7 @@ PIXEL.WIDTH=as.numeric(arg.or.env(9, "AIDAS_PIXEL_WIDTH", "3.89")) #<-- microns 
 # dir.create(PYEXPORTDIR, showWarnings=FALSE, recursive=TRUE)
 
 write.python.array <- function(name, value) {
-  if(is.null(value)) return(invisible(FALSE))
+  if(.is.dark.output(name) || is.null(value)) return(invisible(FALSE))
   target <- file.path(PYEXPORTDIR, paste0(name, ".bin"))
   dims <- dim(value)
   if(is.null(dims)) dims <- length(value)
@@ -180,6 +187,7 @@ export.python.final.arrays <- function() {
 }
 
 save.tissue.border.plot <- function(filename, flattened, rpe, olm, onl.opl, inl.ipl, rnfl.gcl, vitreous.retina) {
+  if(.is.dark.output(filename)) return(invisible(NULL))
   target <- file.path(OUTDIR, filename)
   x.axis <- seq(-100, 2750, 1)
   y.axis <- seq(-30, 430, 1)
@@ -1189,7 +1197,7 @@ for(x in 1:nrow(GRAND.PROFILE)) GRAND.PROFILE[x,2]=mean(na.rm=T,FINAL.GRAND.MEAN
 # abline(v=450)
 # abline(v=434)
 # abline(v=466)
-png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_find_vertex.png",sep="")), width=1200, height=900)
+png(filename=file.path(OUTDIR, paste(if(.LIGHT.ONLY) "LIGHT_MARKED" else REFERENCE.DARK,"_find_vertex.png",sep="")), width=1200, height=900)
 plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2],type="l")
 abline(v=450)
 abline(v=434)
@@ -1215,7 +1223,7 @@ vertex=check.spline[which(check.spline[,3]>0)[length(which(check.spline[,3]>0))]
 # abline(v=vertex)
 ## 
 ## so, we're selecting the farthest-out positive value
-png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
+png(filename=file.path(OUTDIR, paste(if(.LIGHT.ONLY) "LIGHT_MARKED" else REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
 plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2])
 matlines(check.spline[,1],check.spline[,2])
 abline(v=vertex)
@@ -1240,7 +1248,7 @@ if(length(vertex)==0)
   check.spline[,3]=check.spline[,3]-median(na.rm=T,check.spline[,3]);
   vertex=check.spline[which(check.spline[,3]>=0)[length(which(check.spline[,3]>=0))],1]+1;
   # abline(v=vertex,col="red");
-  png(filename=file.path(OUTDIR, paste(REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
+  png(filename=file.path(OUTDIR, paste(if(.LIGHT.ONLY) "LIGHT_MARKED" else REFERENCE.DARK,"_vertex.png",sep="")), width=1200, height=900)
   plot(GRAND.PROFILE[,1],GRAND.PROFILE[,2])
   matlines(check.spline[,1],check.spline[,2])
   abline(v=vertex,col="red")
@@ -1257,9 +1265,11 @@ FLATTENED.LIGHT.RETINA.RRC=FLATTENED.LIGHT.RETINA.RRC[,(vertex-430):(vertex+30),
 ## and make some images to help with visualization:
 
 
-EXPORT=FLATTENED.DARK.RETINA.RRC
-EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat_",TO.PROCESS.DARK,sep="")),size="float")
+if(!.LIGHT.ONLY) {
+  EXPORT=FLATTENED.DARK.RETINA.RRC
+  EXPORT[which(is.na(EXPORT))]=0
+  f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat_",TO.PROCESS.DARK,sep="")),size="float")
+}
 EXPORT=FLATTENED.LIGHT.RETINA.RRC
 EXPORT[which(is.na(EXPORT))]=0
 f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat_",TO.PROCESS.LIGHT,sep="")),size="float")
@@ -1284,7 +1294,8 @@ rm(start.move,threshold,top.range,vertex,window.factor,window.width.in.pixels,x,
 
 # b.Rdata
 
-save.image(file.path(OUTDIR, paste(TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,"__flat.RData",sep="")))
+save.image(file.path(OUTDIR, if(.LIGHT.ONLY) "_flat_LIGHT.RData" else
+  paste(TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,"__flat.RData",sep="")))
 
 
 #################################################
@@ -3401,9 +3412,11 @@ FLATTENED.DARK.RETINA.RRC.N[50:152,,]=FLATTENED.DARK.RETINA.RRC.N.fovea[50:152,,
 
 ## and save!
 ## the pixel dimensions of this are 1 micron in the x, and 1.25% of the retinal thickness in the y
-EXPORT=FLATTENED.DARK.RETINA.RRC.N
-EXPORT[which(is.na(EXPORT))]=0
-f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat-normed_",TO.PROCESS.DARK,sep="")),size="float")
+if(!.LIGHT.ONLY) {
+  EXPORT=FLATTENED.DARK.RETINA.RRC.N
+  EXPORT[which(is.na(EXPORT))]=0
+  f.write.analyze(EXPORT[,dim(EXPORT)[2]:1,],file.path(OUTDIR,paste("_flat-normed_",TO.PROCESS.DARK,sep="")),size="float")
+}
 
 
 ######################################################################################################################################################################################################################################
@@ -3672,7 +3685,7 @@ EXPORT=round(EXPORT,3)
 EXPORT=rbind(EXPORT[1,],EXPORT)
 EXPORT[1,]=t(as.data.frame(c(TO.PROCESS.DARK,"angle","whole","RPEtoOLM","RNFL",seq(-3.75,107.5,1.25))))
 EXPORT=t(EXPORT)
-write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_dark_profiles_",TO.PROCESS.DARK,".txt",sep="")))
+if(!.LIGHT.ONLY) write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_dark_profiles_",TO.PROCESS.DARK,".txt",sep="")))
 
 EXPORT=as.data.frame(cbind(MAIN.LIGHT.OUTPUTS,t(FLATTENED.LIGHT.RETINA.RRC.N.profiles[,2:ncol(FLATTENED.LIGHT.RETINA.RRC.N.profiles)])))
 EXPORT=round(EXPORT,3)
@@ -3693,7 +3706,7 @@ EXPORT=round(EXPORT,3)
 EXPORT=rbind(EXPORT[1,],EXPORT)
 EXPORT[1,]=t(as.data.frame(c(paste("fovea",TO.PROCESS.DARK,sep=""),"angle","whole","RPEtoOLM","RNFL",seq(-3.75,107.5,1.25))))
 EXPORT=t(EXPORT)
-write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_fovea_dark_profiles_",TO.PROCESS.DARK,".txt",sep="")))
+if(!.LIGHT.ONLY) write(t(EXPORT),ncol=ncol(EXPORT),file=file.path(OUTDIR, paste("_fovea_dark_profiles_",TO.PROCESS.DARK,".txt",sep="")))
 
 EXPORT=MAIN.LIGHT.OUTPUTS.fovea[,c(1,2,2,3,3)]
 EXPORT[,3]<-NA
@@ -3719,6 +3732,7 @@ write.thickness.table <- function(channel.name,
                                   inl.ipl.position,
                                   rnfl.gcl.position,
                                   vitreous.position) {
+  if(.is.dark.output(channel.name)) return(invisible(NULL))
   THICKNESS.EXPORT=as.data.frame(matrix(,7,2852))
   THICKNESS.EXPORT[1,]=c(NA,seq(-100,2750,1))
   THICKNESS.EXPORT[2,]=c(NA,(rpe.position[1:2851,1]-vitreous.position[1:2851,1]))
@@ -3769,7 +3783,8 @@ write.thickness.table(
 ## and cleanup before a final Save
 rm(EXPORT.2.buff,EXPORT.2,EXPORT,write.thickness.table)
 
-save.image(file.path(OUTDIR, paste("_done_",TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,".RData",sep="")))
+save.image(file.path(OUTDIR, if(.LIGHT.ONLY) "_done_LIGHT.RData" else
+  paste("_done_",TO.PROCESS.DARK,"__and__",TO.PROCESS.LIGHT,".RData",sep="")))
 dbg("done", "R processing complete")
 
 

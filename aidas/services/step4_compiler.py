@@ -2,23 +2,26 @@
 
 This module is the non-UI implementation of the legacy
 ``rrMCPAR_ELMRPE_ONL_Compiler`` utility.  It preserves the workbook layout,
-row grouping, extraction order, and ``LIGHT2`` preparation behavior while
-also recognizing the ``rr_MCPAR.xlsx`` files written by AIDaS Step 4.
+row grouping, extraction order, and legacy thickness cleanup while retaining
+the original ``LIGHT`` filename and recognizing AIDaS Step 4 workbooks.
 """
 
 from __future__ import annotations
 
 import csv
 from dataclasses import dataclass
-import glob
+import fnmatch
 import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Callable
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
+
+from aidas.utils.filesystem import walk_unique_directories
 
 
 ID_ROW_START = 3
@@ -120,7 +123,7 @@ def find_results_file(folder_path: PathLike | None) -> str | None:
         return None
 
     candidates = []
-    for directory, subdirectories, filenames in os.walk(folder, onerror=_raise_walk_error):
+    for directory, subdirectories, filenames in walk_unique_directories(folder, onerror=_raise_walk_error):
         subdirectories.sort(key=_natural_key)
         for filename in filenames:
             lower = filename.lower()
@@ -201,28 +204,63 @@ def block_means(
     return means
 
 
+def _is_light_profile_file(path: PathLike) -> bool:
+    name = os.path.basename(path).lower()
+    return "profiles" in name or ("fovea" in name and "thickness" not in name)
+
+
 def find_thickness_file(search_root: PathLike | None) -> str | None:
     if not search_root:
         return None
     root = os.fspath(search_root)
     if not os.path.isdir(root):
         return None
-    patterns = (
-        "**/*_thickness_vs_distance_from_fovea_LIGHT2*.txt",
-        "**/*thickness*distance*fovea*LIGHT2*.txt",
-        "**/*LIGHT2*.txt",
-        "**/*light2*.txt",
-        "**/*_thickness_vs_distance_from_fovea_LIGHT*.txt",
-        "**/*thickness*distance*fovea*LIGHT*.txt",
-        "**/*LIGHT*.txt",
-        "**/*light*.txt",
+    pattern_groups = (
+        ("*_thickness_vs_distance_from_fovea_LIGHT*.txt",
+         "*thickness*distance*fovea*LIGHT*.txt"),
+        ("*LIGHT*.txt", "*light*.txt"),
     )
-    for pattern in patterns:
-        matches = sorted(glob.glob(os.path.join(root, pattern), recursive=True))
-        matches = [match for match in matches if os.path.isfile(match)]
-        if matches:
-            return matches[0]
+    candidates = []
+    for directory, subdirectories, filenames in walk_unique_directories(root, followlinks=True):
+        # Match recursive glob's default treatment of hidden files/folders.
+        subdirectories[:] = [name for name in subdirectories if not name.startswith(".")]
+        subdirectories.sort()
+        candidates.extend(
+            os.path.join(directory, filename)
+            for filename in filenames
+            if not filename.startswith(".")
+            and filename.lower().endswith(".txt")
+            and "light" in filename.lower()
+            and not _is_light_profile_file(filename)
+            and os.path.isfile(os.path.join(directory, filename))
+        )
+    candidates.sort()
+    for patterns in pattern_groups:
+        legacy_match = None
+        for pattern in patterns:
+            matches = [path for path in candidates if fnmatch.fnmatch(os.path.basename(path), pattern)]
+            for match in matches:
+                if "light2" not in os.path.basename(match).lower():
+                    return match
+            if matches and legacy_match is None:
+                legacy_match = matches[0]
+        # A known thickness table takes precedence over a generic LIGHT profile.
+        if legacy_match is not None:
+            return legacy_match
     return None
+
+
+def _prefer_current_light_file(paths) -> str | None:
+    """Keep candidate order, using a historical LIGHT2 file only as fallback."""
+    existing = [path for path in paths if path]
+    return next(
+        (path for path in existing if "light2" not in os.path.basename(path).lower()),
+        existing[0] if existing else None,
+    )
+
+
+def _is_legacy_light_file(path: str | None) -> bool:
+    return bool(path and "light2" in os.path.basename(path).lower())
 
 
 def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
@@ -242,23 +280,29 @@ def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
         existing_file(subject, "temporal", "rrMCPAR", "_thickness_vs_distance_from_fovea_LIGHT.txt"),
     )
 
-    nasal_file = next((path for path in nasal_candidates if path), None)
-    temporal_file = next((path for path in temporal_candidates if path), None)
+    nasal_file = _prefer_current_light_file(nasal_candidates)
+    temporal_file = _prefer_current_light_file(temporal_candidates)
 
-    if not nasal_file:
+    if not nasal_file or _is_legacy_light_file(nasal_file):
         for folder in ("nasal", "Nasal", "rrMCPAR"):
-            nasal_file = find_thickness_file(os.path.join(subject, folder))
-            if nasal_file:
+            nasal_file = _prefer_current_light_file((
+                nasal_file, find_thickness_file(os.path.join(subject, folder)),
+            ))
+            if nasal_file and not _is_legacy_light_file(nasal_file):
                 break
-    if not temporal_file:
+    if not temporal_file or _is_legacy_light_file(temporal_file):
         for folder in ("temporal", "Temporal", "temp", "Temp", os.path.join("temporal", "rrMCPAR")):
-            temporal_file = find_thickness_file(os.path.join(subject, folder))
-            if temporal_file:
+            temporal_file = _prefer_current_light_file((
+                temporal_file, find_thickness_file(os.path.join(subject, folder)),
+            ))
+            if temporal_file and not _is_legacy_light_file(temporal_file):
                 break
 
-    if not nasal_file or not temporal_file:
+    if not nasal_file or not temporal_file or any(
+        _is_legacy_light_file(path) for path in (nasal_file, temporal_file)
+    ):
         all_text_files = []
-        for root, _directories, filenames in os.walk(subject):
+        for root, _directories, filenames in walk_unique_directories(subject):
             for filename in filenames:
                 lower = filename.lower()
                 if (
@@ -267,23 +311,27 @@ def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
                     and "distance" in lower
                     and "fovea" in lower
                     and "light" in lower
+                    and not _is_light_profile_file(filename)
                 ):
                     all_text_files.append(os.path.join(root, filename))
-        all_text_files.sort(key=lambda path: ("light2" not in path.lower(), path.lower()))
+        all_text_files.sort(key=lambda path: (_is_legacy_light_file(path), path.lower()))
         for filepath in all_text_files:
             relative_parts = Path(os.path.relpath(filepath, subject)).parts[:-1]
             is_temporal = any(part.lower() in ("temporal", "temp") for part in relative_parts)
             if is_temporal:
-                if not temporal_file:
-                    temporal_file = filepath
-            elif not nasal_file:
-                nasal_file = filepath
+                temporal_file = _prefer_current_light_file((temporal_file, filepath))
+            else:
+                nasal_file = _prefer_current_light_file((nasal_file, filepath))
 
     return nasal_file, temporal_file
 
 
-def make_light2_from_light(light_path: PathLike | None, required_col: int) -> str | None:
-    """Create the legacy cleaned ``LIGHT2`` file and return its path."""
+def clean_light_thickness_file(light_path: PathLike | None) -> str | None:
+    """Apply legacy ELM-RPE row cleanup atomically to the original LIGHT file.
+
+    Historical LIGHT2 inputs are already cleaned and remain read-only. ONL uses
+    the same retained rows as ELM-RPE, preserving the former compilation order.
+    """
 
     if not light_path:
         return None
@@ -298,10 +346,10 @@ def make_light2_from_light(light_path: PathLike | None, required_col: int) -> st
     cleaned = [rows[0]]
     kept_zero = False
     for row in rows[1:]:
-        if len(row) < required_col:
+        if len(row) < ELMRPE_COL:
             continue
         distance = parse_float_or_none(row[0])
-        value = parse_float_or_none(row[required_col - 1])
+        value = parse_float_or_none(row[ELMRPE_COL - 1])
         if distance == 0 and not kept_zero:
             cleaned.append(row)
             kept_zero = True
@@ -309,12 +357,28 @@ def make_light2_from_light(light_path: PathLike | None, required_col: int) -> st
         if value is not None:
             cleaned.append(row)
 
-    output_path = path[:-4] + "2.txt" if path.lower().endswith(".txt") else path + "2.txt"
-    try:
-        write_tsv_rows(output_path, cleaned)
-        return output_path
-    except OSError:
+    if rows == cleaned:
         return path
+
+    source = Path(path)
+    temporary_path = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{source.name}.", suffix=".tmp", dir=source.parent,
+        )
+        temporary_path = Path(temporary_name)
+        os.close(descriptor)
+        write_tsv_rows(temporary_path, cleaned)
+        os.replace(temporary_path, source)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return path
+
+
+def make_light2_from_light(light_path: PathLike | None, required_col: int) -> str | None:
+    """Compatibility entry point; clean LIGHT in place using ELM-RPE column 3."""
+    return clean_light_thickness_file(light_path)
 
 
 def get_column_values(light_path: PathLike | None, column_index: int) -> list[float]:
@@ -402,11 +466,11 @@ def extract_elmrpe_onl_from_subject(
 ):
     column_index = ELMRPE_COL if measure_name == "ELM-RPE" else ONL_COL
     nasal_file, temporal_file = find_light_files(subject_path)
-    nasal_light2 = make_light2_from_light(nasal_file, column_index) if nasal_file else None
-    temporal_light2 = make_light2_from_light(temporal_file, column_index) if temporal_file else None
+    nasal_light = clean_light_thickness_file(nasal_file) if nasal_file else None
+    temporal_light = clean_light_thickness_file(temporal_file) if temporal_file else None
 
-    nasal_values = get_column_values(nasal_light2, column_index) if nasal_light2 else []
-    temporal_values = get_column_values(temporal_light2, column_index) if temporal_light2 else []
+    nasal_values = get_column_values(nasal_light, column_index) if nasal_light else []
+    temporal_values = get_column_values(temporal_light, column_index) if temporal_light else []
     nasal_blocks = block_means(nasal_values)
     temporal_blocks = block_means(temporal_values)
 
@@ -437,7 +501,7 @@ def find_subject_folders(root_folder: PathLike) -> dict[str, dict[str, str]]:
     only thickness text files is ignored; one side's workbook is sufficient.
     """
     subject_folders: dict[str, dict[str, str]] = {}
-    for directory, subdirectories, _filenames in os.walk(
+    for directory, subdirectories, _filenames in walk_unique_directories(
         os.fspath(root_folder), onerror=_raise_walk_error,
     ):
         subdirectories.sort(key=_natural_key)

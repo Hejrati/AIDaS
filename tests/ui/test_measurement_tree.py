@@ -115,6 +115,36 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
         self.root.update()
         self.assertTrue(all(node.kind in ("folder", "excel", "output") for node, _, _, _ in tree._rows))
 
+    def test_successful_step5_export_stops_polling_and_ignores_completion_reentry(self):
+        from openpyxl import Workbook
+        from aidas.services.step4_compiler import compile_step4_results
+
+        side = self.directory / "Control" / "Subject_A" / "nasal"
+        side.mkdir(parents=True)
+        workbook = Workbook()
+        workbook.active.cell(1, 7, "Round")
+        workbook.active.cell(2, 7, 0.75)
+        workbook.save(side / "rr_MCPAR.xlsx")
+        workbook.close()
+        frame = Step5Frame(
+            self.root, source_step=SimpleNamespace(batch_roi_root=self.directory),
+        )
+        frame.pack(fill="both", expand=True)
+        frame.on_compilation_complete = lambda _result: frame.start_from_step4(self.directory)
+        with mock.patch(
+            "aidas.services.step4_compiler.compile_step4_results", wraps=compile_step4_results,
+        ) as compile_workbook, mock.patch("aidas.steps.step5_compile.messagebox.showerror") as error:
+            frame.start_from_step4(self.directory)
+            self._wait(lambda: not frame._running and frame.directory_view._inventory is not None)
+
+        compile_workbook.assert_called_once()
+        error.assert_not_called()
+        self.assertTrue((self.directory / "rrMCPAR_ELMRPE_ONL.xlsx").is_file())
+        self.assertEqual(frame._pending_step4_handoffs, [])
+        self.assertIsNone(frame._poll_after_id)
+        self.assertIsNone(frame.directory_view._poll_id)
+        self.assertIn("Excel file saved", frame.status_var.get())
+
     def test_folders_expand_collapse_and_new_output_appears_after_refresh(self):
         side = self.directory / "Control" / "Subject_A" / "nasal"
         side.mkdir(parents=True)

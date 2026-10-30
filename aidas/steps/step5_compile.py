@@ -30,6 +30,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
     """Dedicated final-step UI for compiling Step 3 and Step 4 results."""
 
     EVENT_POLL_MS = 75
+    MAX_AUTOMATIC_COMPILE_ATTEMPTS = 5
+    MAX_MISSING_COMPLETION_POLLS = 5
     COMPILER_PROGRESS_MESSAGE = "Creating the Excel file…"
 
     def __init__(
@@ -47,8 +49,16 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._worker: threading.Thread | None = None
         self._running = False
         self._output_user_selected = False
+        self._pending_step4_handoffs = []
+        self._automatic_compile_attempts = {}
+        self._active_step4_handoff = None
+        self._poll_after_id = None
+        self._polling_compile_events = False
+        self._handling_completion = False
+        self._closing = False
+        self._missing_completion_polls = 0
 
-        # Step 4 folders arrive only through the explicit Go to Step 5 action.
+        # Step 4 passes folders after stack completion or through Go to Step 5.
         initial_input = ""
         input_folder = self._existing_directory(initial_input)
         self._accepted_input_folder = str(input_folder) if input_folder is not None else ""
@@ -64,7 +74,6 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._build_ui()
         self._update_run_button_state()
         self._refresh_directory_view()
-        self.after(self.EVENT_POLL_MS, self._poll_events)
 
     @staticmethod
     def _expanded_path(value: str | os.PathLike) -> Path:
@@ -117,9 +126,11 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             return path.parent
         return path
 
-    def start_from_step4(self, folder: str | os.PathLike | None = None) -> None:
+    def start_from_step4(
+        self, folder: str | os.PathLike | None = None, *, _generation=None,
+    ) -> None:
         """Accept the workflow handoff and start one background compilation."""
-        if self._running:
+        if self.__dict__.get("_closing", False):
             return
         source = self.source_step
         if folder is None and source is not None and not any(
@@ -134,17 +145,45 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
                 self.status_var.set("Choose an input folder to create the Excel file.")
                 return
             source_path = self._existing_directory(source_folder)
-            accepted = (
-                source_path is not None
-                and self.set_input_folder(self._measurement_root(source_path))
-            )
+            root = self._measurement_root(source_path) if source_path is not None else None
         except (OSError, ValueError) as exc:
-            self._compilation_failed(exc)
+            self.status_var.set(f"Could not accept the Step 4 input folder: {exc}")
             return
-        if not accepted:
+        if root is None:
             self.status_var.set("The Step 4 input folder is unavailable. Choose an existing folder.")
             return
-        self._run_clicked()
+        generation = (
+            getattr(source, "_step5_handoff_generation", 0)
+            if _generation is None else _generation
+        )
+        key = (os.path.normcase(str(root)), generation)
+        if key == self.__dict__.get("_active_step4_handoff"):
+            return
+        attempts = self.__dict__.setdefault("_automatic_compile_attempts", {})
+        if attempts.get(key, 0) >= self.MAX_AUTOMATIC_COMPILE_ATTEMPTS:
+            self.status_var.set(
+                "Automatic Excel creation stopped after 5 attempts for this input. "
+                "Use Create Excel File to run again."
+            )
+            return
+        if self._running or self.__dict__.get("_handling_completion", False):
+            pending = self.__dict__.setdefault("_pending_step4_handoffs", [])
+            request = (root, generation)
+            if request not in pending:
+                pending.append(request)
+            self._ensure_event_poll()
+            return
+        if not self.set_input_folder(root):
+            return
+        attempts[key] = attempts.get(key, 0) + 1
+        self._active_step4_handoff = key
+        self._automatic_compile_start = True
+        try:
+            self._run_clicked()
+        finally:
+            self._automatic_compile_start = False
+            if not self._running:
+                self._active_step4_handoff = None
 
     def _build_ui(self) -> None:
         self.build_standard_layout(
@@ -390,22 +429,75 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         return root_folder, output_path
 
     def _run_clicked(self) -> None:
-        if self._running:
+        if (self._running or self.__dict__.get("_handling_completion", False)
+                or self.__dict__.get("_closing", False)):
             return
         paths = self._validated_paths()
         if paths is None:
             return
+        if not self.__dict__.get("_automatic_compile_start", False):
+            self.__dict__.setdefault("_automatic_compile_attempts", {}).clear()
+            self._active_step4_handoff = None
         self._start_compiler(
             *paths, bool(self.include_fovea_var.get()),
             thread_name="aidas-step5-compiler",
         )
 
-    def _poll_events(self) -> None:
-        self._drain_compile_events()
+    def _start_compiler(self, *args, **kwargs):
+        self._missing_completion_polls = 0
+        super()._start_compiler(*args, **kwargs)
+        self._ensure_event_poll()
+
+    def _ensure_event_poll(self):
+        if (self.__dict__.get("_closing", False)
+                or self.__dict__.get("_polling_compile_events", False)
+                or self.__dict__.get("_poll_after_id") is not None):
+            return
+        events = self.__dict__.get("_events")
+        if not (self.__dict__.get("_running", False) or self.__dict__.get("_pending_step4_handoffs")
+                or (events is not None and not events.empty())):
+            return
         try:
-            self.after(self.EVENT_POLL_MS, self._poll_events)
+            self._poll_after_id = self.after(self.EVENT_POLL_MS, self._poll_events)
         except tk.TclError:
             pass
+
+    def _poll_events(self) -> None:
+        if (self.__dict__.get("_closing", False)
+                or self.__dict__.get("_polling_compile_events", False)):
+            return
+        self._poll_after_id = None
+        self._polling_compile_events = True
+        try:
+            self._drain_compile_events()
+            if self.__dict__.get("_closing", False):
+                return
+            worker = self.__dict__.get("_worker")
+            events = self.__dict__.get("_events")
+            if (self.__dict__.get("_running", False) and worker is not None
+                    and not worker.is_alive() and (events is None or events.empty())):
+                self._missing_completion_polls = self.__dict__.get("_missing_completion_polls", 0) + 1
+                if self._missing_completion_polls >= self.MAX_MISSING_COMPLETION_POLLS:
+                    self._compilation_failed(RuntimeError(
+                        "The Excel worker ended without reporting a result. "
+                        "Use Create Excel File to try again."
+                    ))
+            else:
+                self._missing_completion_polls = 0
+            if not self.__dict__.get("_running", False):
+                pending = self.__dict__.get("_pending_step4_handoffs", [])
+                if pending:
+                    if self.winfo_exists():
+                        folder, generation = pending.pop(0)
+                        self.start_from_step4(folder, _generation=generation)
+                    else:
+                        pending.clear()
+                        self._closing = True
+        except tk.TclError:
+            self._closing = True
+        finally:
+            self._polling_compile_events = False
+            self._ensure_event_poll()
 
     def _clear_log(self) -> None:
         """Step 5 presents the directory canvas instead of a compiler log."""
@@ -456,24 +548,41 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self._update_run_button_state()
 
     def _compilation_succeeded(self, result: object) -> None:
-        self._set_running(False)
-        result_path = Path(getattr(result, "output_path", self.output_var.get()))
-        self.output_var.set(str(result_path))
-        self.status_var.set(f"Excel file saved: {result_path}")
-        self._refresh_directory_view()
-        callback = getattr(self, "on_compilation_complete", None)
-        if callable(callback):
-            callback(result_path)
-        messagebox.showinfo(
-            "Excel file created",
-            f"All measurements were saved to:\n{result_path}",
-            parent=self,
-        )
+        self._handling_completion = True
+        try:
+            self._set_running(False)
+            result_path = Path(getattr(result, "output_path", self.output_var.get()))
+            self.output_var.set(str(result_path))
+            self.status_var.set(f"Excel file saved: {result_path}")
+            self._refresh_directory_view()
+            callback = getattr(self, "on_compilation_complete", None)
+            if callable(callback):
+                callback(result_path)
+        finally:
+            self._active_step4_handoff = None
+            self._handling_completion = False
 
     def _compilation_failed(self, error: object) -> None:
-        self._set_running(False)
-        self.status_var.set(f"Could not create the Excel file: {error}")
-        messagebox.showerror("Excel file creation failed", str(error), parent=self)
+        self._handling_completion = True
+        try:
+            self._set_running(False)
+            self.status_var.set(f"Could not create the Excel file: {error}")
+            messagebox.showerror("Excel file creation failed", str(error), parent=self)
+        finally:
+            self._active_step4_handoff = None
+            self._handling_completion = False
+
+    def destroy(self):
+        self._closing = True
+        self.__dict__.get("_pending_step4_handoffs", []).clear()
+        poll = self.__dict__.get("_poll_after_id")
+        self._poll_after_id = None
+        if poll is not None:
+            try:
+                self.after_cancel(poll)
+            except tk.TclError:
+                pass
+        super().destroy()
 
 
 __all__ = ["Step5Frame"]

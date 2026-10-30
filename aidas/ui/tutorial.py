@@ -162,8 +162,8 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         function_summary="Run the main and output R scripts, monitor progress, and review diagnostics",
         output_summary="_flat_LIGHT.hdr/_flat_LIGHT.img, R workspaces, plots, profiles, and logs",
         completion_check=(
-            "A successful R batch result contains both _thickness_vs_distance_from_fovea_DARK.txt "
-            "and _thickness_vs_distance_from_fovea_LIGHT.txt. The previews should show a plausible "
+            "A successful R batch result contains the cleaned _thickness_vs_distance_from_fovea_LIGHT.txt. "
+            "The previews should show a plausible "
             "foveal vertex and tissue borders; every folder handed to Step 4 must also contain a "
             "complete _flat_LIGHT Analyze pair."
         ),
@@ -180,7 +180,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             ),
             (
                 "Each valid result contains a complete _flat_LIGHT.hdr and _flat_LIGHT.img Analyze pair.",
-                "The run also produces R workspaces, diagnostic plots, profiles, logs, _thickness_vs_distance_from_fovea_DARK.txt, and _thickness_vs_distance_from_fovea_LIGHT.txt.",
+                "The run also produces LIGHT R workspaces, diagnostic plots, profiles, logs, and _thickness_vs_distance_from_fovea_LIGHT.txt.",
                 "Go to Step 4 becomes available for valid flattened folders and transfers them to ROI analysis.",
             ),
         ),

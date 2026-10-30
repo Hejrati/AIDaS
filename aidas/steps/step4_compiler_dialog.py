@@ -122,8 +122,8 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
             text=(
                 "Choose a folder to search recursively for group and subject results, "
                 "then choose the name and location of the combined Excel workbook. "
-                "Legacy-compatible LIGHT2 cleaned files may be created beside the "
-                "source LIGHT text files."
+                "Thickness tables are cleaned in place and keep their original "
+                "LIGHT filenames."
             ),
             justify="left",
             wraplength=660,

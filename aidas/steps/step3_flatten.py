@@ -1110,7 +1110,7 @@ class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
         "Computing apparent angles",
         "Building perpendicular sampling lines",
         "Flattening marker image",
-        "Flattening DARK slices",
+        "Preparing LIGHT slice alignment",
         "Flattening LIGHT slices",
         "Converting flattened data to raw scale",
         "Building grand mean image",
@@ -2438,8 +2438,8 @@ class Step3Frame(SidebarStepFrame):
         ("LIGHT", ("LIGHT", "Light"), "LIGHT.hdr/.img", 16),
     )
     RESULT_IMAGE_ROWS = (
-        ("Vertex", "DARK_MARKED_find_vertex.png"),
-        ("Tissue", "_tissueBorders__DARK.png"),
+        ("Vertex", "LIGHT_MARKED_find_vertex.png"),
+        ("Tissue", "_tissueBorders__LIGHT.png"),
     )
     RESULT_SIDE_ORDER = ("temporal", "nasal")
     R_SCRIPT_NAME = "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R"
@@ -2485,6 +2485,10 @@ class Step3Frame(SidebarStepFrame):
         "R.utils": "R.utils.zip",
     }
     R_WORKSPACE_FILES = (
+        "_flat_LIGHT.RData",
+        "_done_LIGHT.RData",
+    )
+    R_LEGACY_WORKSPACE_FILES = (
         "DARK__and__LIGHT__flat.RData",
         "_done_DARK__and__LIGHT.RData",
     )
@@ -2499,7 +2503,7 @@ class Step3Frame(SidebarStepFrame):
         "apparent-angle": (17, "Computing apparent angles"),
         "perpendiculars": (21, "Building perpendicular sampling lines"),
         "flattened-markers": (25, "Flattening marker image"),
-        "dark-loop": (36, "Flattening DARK slices"),
+        "dark-loop": (36, "Preparing LIGHT slice alignment"),
         "light-loop": (47, "Flattening LIGHT slices"),
         "post-log-convert": (54, "Converting flattened data to raw scale"),
         "grand-mean": (59, "Building grand mean image"),
@@ -3326,6 +3330,16 @@ class Step3Frame(SidebarStepFrame):
             value = value.to_numpy()
         return np.asarray(value)
 
+    @classmethod
+    def _r_workspace_paths(cls, output_dir):
+        """Prefer current LIGHT workspaces while retaining historical readers."""
+        output_dir = Path(output_dir)
+        for names in (cls.R_WORKSPACE_FILES, cls.R_LEGACY_WORKSPACE_FILES):
+            paths = tuple(output_dir / name for name in names)
+            if all(path.is_file() for path in paths):
+                return paths
+        return tuple(output_dir / name for name in cls.R_WORKSPACE_FILES)
+
     def _load_r_workspace_results(self, output_dir):
         try:
             import pyreadr
@@ -3333,8 +3347,7 @@ class Step3Frame(SidebarStepFrame):
             raise RuntimeError("pyreadr is not installed, so R workspace files cannot be loaded.") from exc
 
         output_dir = Path(output_dir)
-        flat_rdata = output_dir / self.R_WORKSPACE_FILES[0]
-        done_rdata = output_dir / self.R_WORKSPACE_FILES[1]
+        flat_rdata, done_rdata = self._r_workspace_paths(output_dir)
         if not flat_rdata.is_file() or not done_rdata.is_file():
             missing = [name for name in self.R_WORKSPACE_FILES if not (output_dir / name).is_file()]
             raise FileNotFoundError("Missing R workspace file(s): " + ", ".join(missing))
@@ -3347,19 +3360,23 @@ class Step3Frame(SidebarStepFrame):
                 raise KeyError(f"R workspace file is missing required object: {key}")
             return self._to_numpy(dataset[key])
 
-        flattened_dark = require(flat_data, "FLATTENED.DARK.RETINA.RRC")
         flattened_light = require(flat_data, "FLATTENED.LIGHT.RETINA.RRC")
+        has_dark = "FLATTENED.DARK.RETINA.RRC" in flat_data
+        flattened_dark = require(flat_data, "FLATTENED.DARK.RETINA.RRC") if has_dark else flattened_light
         markers = require(flat_data, "FLATTENED.MARKERS.RRC")
 
         first_grand_mean = require(done_data, "FIRST.GRAND.MEAN") if "FIRST.GRAND.MEAN" in done_data else None
         second_grand_mean = require(done_data, "SECOND.GRAND.MEAN") if "SECOND.GRAND.MEAN" in done_data else None
 
-        final_grand_mean = np.array(flattened_dark[:, :, 0], copy=True)
-        for z in range(1, flattened_dark.shape[2]):
-            final_grand_mean = final_grand_mean + flattened_dark[:, :, z]
-        for z in range(1, flattened_light.shape[2]):
-            final_grand_mean = final_grand_mean + flattened_light[:, :, z]
-        final_grand_mean = final_grand_mean / (flattened_dark.shape[2] + flattened_light.shape[2])
+        if has_dark:
+            final_grand_mean = np.array(flattened_dark[:, :, 0], copy=True)
+            for z in range(1, flattened_dark.shape[2]):
+                final_grand_mean = final_grand_mean + flattened_dark[:, :, z]
+            for z in range(1, flattened_light.shape[2]):
+                final_grand_mean = final_grand_mean + flattened_light[:, :, z]
+            final_grand_mean = final_grand_mean / (flattened_dark.shape[2] + flattened_light.shape[2])
+        else:
+            final_grand_mean = np.nanmean(flattened_light, axis=2)
 
         if "vertex" in done_data:
             vertex = int(np.ravel(self._to_numpy(done_data["vertex"]))[0])
@@ -3430,15 +3447,19 @@ class Step3Frame(SidebarStepFrame):
                 return data
             return data.reshape(shape, order="F")
 
-        flattened_dark = np.asarray(load_array("FLATTENED_DARK_RETINA_RRC"), dtype=np.float64)
         flattened_light = np.asarray(load_array("FLATTENED_LIGHT_RETINA_RRC"), dtype=np.float64)
+        dark_array = load_array("FLATTENED_DARK_RETINA_RRC", required=False)
+        flattened_dark = np.asarray(dark_array, dtype=np.float64) if dark_array is not None else flattened_light
         markers = np.asarray(load_array("FLATTENED_MARKERS_RRC"), dtype=np.float64)
 
         first_grand_mean = load_array("FIRST_GRAND_MEAN", required=False)
         second_grand_mean = load_array("SECOND_GRAND_MEAN", required=False)
         final_grand_mean = load_array("FINAL_GRAND_MEAN", required=False)
         if final_grand_mean is None:
-            final_grand_mean = np.nanmean(np.concatenate((flattened_dark, flattened_light), axis=2), axis=2)
+            final_grand_mean = (
+                np.nanmean(np.concatenate((flattened_dark, flattened_light), axis=2), axis=2)
+                if dark_array is not None else np.nanmean(flattened_light, axis=2)
+            )
         if first_grand_mean is None:
             first_grand_mean = np.array(final_grand_mean, copy=True)
         if second_grand_mean is None:
@@ -3494,12 +3515,16 @@ class Step3Frame(SidebarStepFrame):
         output_dir = Path(output_dir)
         dark_base = output_dir / "_flat_DARK"
         light_base = output_dir / "_flat_LIGHT"
-        if not (dark_base.with_suffix(".hdr").is_file() and light_base.with_suffix(".hdr").is_file()):
-            raise FileNotFoundError("Missing R Analyze outputs _flat_DARK.hdr and _flat_LIGHT.hdr.")
+        if not all(light_base.with_suffix(suffix).is_file() for suffix in (".hdr", ".img")):
+            raise FileNotFoundError("Missing R Analyze output pair _flat_LIGHT.hdr/_flat_LIGHT.img.")
 
-        flattened_dark = _load_analyze_volume_r_layout(dark_base)
         flattened_light = _load_analyze_volume_r_layout(light_base)
-        final_grand_mean = np.nanmean(np.concatenate((flattened_dark, flattened_light), axis=2), axis=2)
+        has_dark = all(dark_base.with_suffix(suffix).is_file() for suffix in (".hdr", ".img"))
+        flattened_dark = _load_analyze_volume_r_layout(dark_base) if has_dark else flattened_light
+        final_grand_mean = (
+            np.nanmean(np.concatenate((flattened_dark, flattened_light), axis=2), axis=2)
+            if has_dark else np.nanmean(flattened_light, axis=2)
+        )
         grand_profile, vertex = _grand_profile_and_vertex(final_grand_mean)
         dark_indices = np.arange(1, flattened_dark.shape[2] + 1, dtype=np.float64)
         light_indices = np.arange(1, flattened_light.shape[2] + 1, dtype=np.float64)
@@ -3566,7 +3591,6 @@ class Step3Frame(SidebarStepFrame):
         self._load_original_light_for_preview(folder)
         self.progress_text_var.set("Loaded R results")
         self.info_var.set(
-            f"flattened_dark: {results['flattened_dark'].shape}\n"
             f"flattened_light: {results['flattened_light'].shape}\n"
             f"final_grand_mean: {results['final_grand_mean'].shape}\n"
             f"vertex: {results['vertex']}\n"
@@ -3586,9 +3610,13 @@ class Step3Frame(SidebarStepFrame):
         files = {path.name.casefold() for path in folder.iterdir() if path.is_file()}
         if any(filename.casefold() in files for _title, filename in cls.RESULT_IMAGE_ROWS):
             return True
+        if "dark_marked_find_vertex.png" in files:
+            return True
         if any(name.startswith("_tissueborders__") and name.endswith(".png") for name in files):
             return True
-        if all(name.casefold() in files for name in cls.R_WORKSPACE_FILES):
+        if any(all(name.casefold() in files for name in names) for names in (
+            cls.R_WORKSPACE_FILES, cls.R_LEGACY_WORKSPACE_FILES,
+        )):
             return True
         if {"_flat_light.hdr", "_flat_light.img"}.issubset(files):
             return True
@@ -3596,7 +3624,6 @@ class Step3Frame(SidebarStepFrame):
         return all(
             (export_dir / f"{name}.{suffix}").is_file()
             for name in (
-                "FLATTENED_DARK_RETINA_RRC",
                 "FLATTENED_LIGHT_RETINA_RRC",
                 "FLATTENED_MARKERS_RRC",
             )
@@ -3654,8 +3681,16 @@ class Step3Frame(SidebarStepFrame):
 
     def _load_result_png_from_folder(self, folder, filename):
         png_path = Path(folder) / filename
-        if not png_path.is_file() and filename.startswith("_tissueBorders__"):
-            matches = sorted(Path(folder).glob("_tissueBorders__*.png"))
+        if not png_path.is_file():
+            pattern = (
+                "_tissueBorders__*.png" if filename.startswith("_tissueBorders__")
+                else "*find_vertex.png" if filename.endswith("_find_vertex.png")
+                else None
+            )
+            matches = sorted(
+                Path(folder).glob(pattern) if pattern is not None else (),
+                key=lambda path: ("dark" in path.name.casefold(), path.name.casefold()),
+            )
             if matches:
                 png_path = matches[0]
         if not png_path.is_file():
@@ -4326,6 +4361,7 @@ class Step3Frame(SidebarStepFrame):
             {
                 "AIDAS_STEP3_INPUT_DIR": r_config["input_dir"],
                 "AIDAS_STEP3_OUTPUT_DIR": r_config["output_dir"],
+                "AIDAS_LIGHT_ONLY": "1",
                 "AIDAS_REFERENCE_DARK": r_config["reference_dark"],
                 "AIDAS_REFERENCE_LIGHT": r_config["reference_light"],
                 "AIDAS_TO_PROCESS_DARK": r_config["to_process_dark"],
@@ -4471,7 +4507,11 @@ class Step3Frame(SidebarStepFrame):
                 }
 
         output_dir = Path(r_config["output_dir"])
-        workspace_path = output_dir / self.R_WORKSPACE_FILES[1]
+        done_names = (self.R_WORKSPACE_FILES[1], self.R_LEGACY_WORKSPACE_FILES[1])
+        workspace_path = next(
+            (output_dir / name for name in done_names if (output_dir / name).is_file()),
+            output_dir / done_names[0],
+        )
         output_expression = (
             f"setwd({self._r_string(output_dir.resolve())}); "
             f"load({self._r_string(workspace_path.resolve())}); "
@@ -4519,7 +4559,6 @@ class Step3Frame(SidebarStepFrame):
         if returncode == 0 and validate_exports:
             output_dir = Path(r_config["output_dir"])
             required_exports = (
-                output_dir / f"_thickness_vs_distance_from_fovea_{r_config['to_process_dark']}.txt",
                 output_dir / f"_thickness_vs_distance_from_fovea_{r_config['to_process_light']}.txt",
             )
             missing_exports = [path.name for path in required_exports if not path.is_file()]
@@ -4531,6 +4570,16 @@ class Step3Frame(SidebarStepFrame):
                     + ", ".join(missing_exports)
                     + "\n"
                 )
+            else:
+                try:
+                    from aidas.services.step4_compiler import clean_light_thickness_file
+
+                    for path in required_exports:
+                        clean_light_thickness_file(path)
+                except Exception as exc:
+                    returncode = 1
+                    outcome = "failed"
+                    stdout += f"ERROR: Could not save cleaned LIGHT thickness export: {exc}\n"
 
         log_path = self._write_r_run_log(
             r_config["output_dir"],
@@ -5372,7 +5421,6 @@ class Step3Frame(SidebarStepFrame):
         if self.results is None:
             return ""
         return (
-            f"flattened_dark: {self.results['flattened_dark'].shape}\n"
             f"flattened_light: {self.results['flattened_light'].shape}\n"
             f"final_grand_mean: {self.results['final_grand_mean'].shape}\n"
             f"vertex: {self.results['vertex']}"

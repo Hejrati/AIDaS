@@ -2,6 +2,9 @@
 ## (like, in the same RGui window)
 ## or after opening the file saved by "RAW_OCT_PROCESSING".R (which should have the prefix "_done_"
 
+# App runs export the acquired LIGHT channel without duplicate DARK files.
+# Standalone use keeps the legacy two-channel exports.
+.LIGHT.ONLY <- identical(Sys.getenv("AIDAS_LIGHT_ONLY", unset=""), "1")
 
 ### LIGHT is the app's acquisition channel. Recreate the legacy DARK slots when
 ### loading a LIGHT-only workspace so the original output formulas still run.
@@ -37,7 +40,7 @@ save.tissue.border.output <- function(filename, flattened, rpe, olm, onl.opl, in
   invisible(target)
 }
 
-save.tissue.border.output(
+if (!.LIGHT.ONLY) save.tissue.border.output(
   paste("_tissueBorders__",TO.PROCESS.DARK,".png",sep=""),
   FLATTENED.DARK.RETINA.RRC,
   R.RPE.POSITION.DARK,
@@ -84,32 +87,34 @@ THICKNESS.EXPORT[,1]=c("Distance_from_Fundus_um",
 		       "Summed_layers")
 THICKNESS.EXPORT.LIGHT=THICKNESS.EXPORT
 
-THICKNESS.EXPORT[,]<-NA
-THICKNESS.EXPORT[1,]=c(NA,seq(-100,2750,1))
-THICKNESS.EXPORT[2,]=c(NA,(R.RPE.POSITION.DARK[1:2851,1]-R.VITREOUS.RETINA.POSITION.DARK[1:2851,1]))
-THICKNESS.EXPORT[3,]=c(NA,(R.RPE.POSITION.DARK[1:2851,1]-R.OLM.POSITION.DARK[1:2851,1]))
-THICKNESS.EXPORT[4,]=c(NA,(R.OLM.POSITION.DARK[1:2851,1]-R.ONL.OPL.POSITION.DARK[1:2851,1]))
-THICKNESS.EXPORT[5,]=c(NA,(R.ONL.OPL.POSITION.DARK[1:2851,1]-R.INL.IPL.POSITION.DARK[1:2851,1]))
-THICKNESS.EXPORT[6,]=c(NA,(R.INL.IPL.POSITION.DARK[1:2851,1]-R.RNFL.GCL.POSITION.DARK[1:2851,1]))
-THICKNESS.EXPORT[7,]=c(NA,(R.RNFL.GCL.POSITION.DARK[1:2851,1]-R.VITREOUS.RETINA.POSITION.DARK[1:2851,1]))
-# Add summed layers for the legacy DARK-compatible output, EA
-summed_dark = as.numeric(THICKNESS.EXPORT[4, 2:2852]) +
-               as.numeric(THICKNESS.EXPORT[5, 2:2852]) +
-               as.numeric(THICKNESS.EXPORT[6, 2:2852])
-THICKNESS.EXPORT[8, ] = c(NA, summed_dark)
-THICKNESS.EXPORT[,1]=c("Distance_from_Fundus_um",
-                       "WholeRetina_um",
-                       "RPE_to_OLM_um",
-                       "OLM_to_ONL_OPLborder_um",
-                       "ONL_OPLborder_to_INL_IPLborder_um",
-                       "INL_IPLborder_to_RNFL_GCLborder_um",
-                       "RNFL_GCLborder_to_vitreous_um",
-		       "Summed_layers")
-THICKNESS.EXPORT.DARK=THICKNESS.EXPORT
+if (!.LIGHT.ONLY) {
+  THICKNESS.EXPORT[,]<-NA
+  THICKNESS.EXPORT[1,]=c(NA,seq(-100,2750,1))
+  THICKNESS.EXPORT[2,]=c(NA,(R.RPE.POSITION.DARK[1:2851,1]-R.VITREOUS.RETINA.POSITION.DARK[1:2851,1]))
+  THICKNESS.EXPORT[3,]=c(NA,(R.RPE.POSITION.DARK[1:2851,1]-R.OLM.POSITION.DARK[1:2851,1]))
+  THICKNESS.EXPORT[4,]=c(NA,(R.OLM.POSITION.DARK[1:2851,1]-R.ONL.OPL.POSITION.DARK[1:2851,1]))
+  THICKNESS.EXPORT[5,]=c(NA,(R.ONL.OPL.POSITION.DARK[1:2851,1]-R.INL.IPL.POSITION.DARK[1:2851,1]))
+  THICKNESS.EXPORT[6,]=c(NA,(R.INL.IPL.POSITION.DARK[1:2851,1]-R.RNFL.GCL.POSITION.DARK[1:2851,1]))
+  THICKNESS.EXPORT[7,]=c(NA,(R.RNFL.GCL.POSITION.DARK[1:2851,1]-R.VITREOUS.RETINA.POSITION.DARK[1:2851,1]))
+  # Add summed layers for the legacy DARK-compatible output, EA
+  summed_dark = as.numeric(THICKNESS.EXPORT[4, 2:2852]) +
+                 as.numeric(THICKNESS.EXPORT[5, 2:2852]) +
+                 as.numeric(THICKNESS.EXPORT[6, 2:2852])
+  THICKNESS.EXPORT[8, ] = c(NA, summed_dark)
+  THICKNESS.EXPORT[,1]=c("Distance_from_Fundus_um",
+                         "WholeRetina_um",
+                         "RPE_to_OLM_um",
+                         "OLM_to_ONL_OPLborder_um",
+                         "ONL_OPLborder_to_INL_IPLborder_um",
+                         "INL_IPLborder_to_RNFL_GCLborder_um",
+                         "RNFL_GCLborder_to_vitreous_um",
+                         "Summed_layers")
+  THICKNESS.EXPORT.DARK=THICKNESS.EXPORT
+}
 
 rm(THICKNESS.EXPORT)
 
-write(t(t(THICKNESS.EXPORT.DARK)),ncol=nrow(THICKNESS.EXPORT.DARK),file=paste("_thickness_vs_distance_from_fovea_",TO.PROCESS.DARK,".txt",sep=""),sep="\t")
+if (!.LIGHT.ONLY) write(t(t(THICKNESS.EXPORT.DARK)),ncol=nrow(THICKNESS.EXPORT.DARK),file=paste("_thickness_vs_distance_from_fovea_",TO.PROCESS.DARK,".txt",sep=""),sep="\t")
 write(t(t(THICKNESS.EXPORT.LIGHT)),ncol=nrow(THICKNESS.EXPORT.LIGHT),file=paste("_thickness_vs_distance_from_fovea_",TO.PROCESS.LIGHT,".txt",sep=""),sep="\t")
 
 

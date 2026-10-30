@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Callable
 
+from aidas.utils.filesystem import walk_unique_directories
+
 
 @dataclass(frozen=True)
 class DirectoryNode:
@@ -76,7 +78,7 @@ def scan_measurement_directory(
     def on_error(error):
         errors.append(str(error))
 
-    for directory, subdirectories, files in os.walk(root, onerror=on_error):
+    for directory, subdirectories, files in walk_unique_directories(root, onerror=on_error):
         if cancelled():
             raise InventoryCancelled()
         subdirectories.sort(key=str.casefold)

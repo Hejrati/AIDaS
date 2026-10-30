@@ -109,7 +109,6 @@ class TutorialContentTests(unittest.TestCase):
             "Sequential",
             "_flat_LIGHT.hdr",
             "_flat_LIGHT.img",
-            "_thickness_vs_distance_from_fovea_DARK.txt",
             "_thickness_vs_distance_from_fovea_LIGHT.txt",
             "Go to Step 4",
         ):
