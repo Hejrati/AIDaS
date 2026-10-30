@@ -61,10 +61,15 @@ class ResultGridPerformanceTests(unittest.TestCase):
             time.sleep(0.005)
 
     def open_grid(self, count=12, sided=False, *, on_load=None, wait=True):
+        images_by_filename = {
+            filename: self.images[index]
+            for index, (_title, filename) in enumerate(module.Step3Frame.RESULT_IMAGE_ROWS)
+        }
+
         def load(folder, filename):
             if on_load is not None:
                 on_load(folder, filename)
-            image = self.images[0 if filename.startswith("DARK") else 1].copy()
+            image = images_by_filename[filename].copy()
             self.reads.append((folder, filename, image))
             self.read_threads.append(threading.get_ident())
             return image
