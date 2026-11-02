@@ -18,6 +18,110 @@ from aidas.steps.step4_analyze_isez import Step4Frame
 
 
 class ImagePathStatusTests(unittest.TestCase):
+    def _status_app(self, index=4):
+        app = AIDaSApp.__new__(AIDaSApp)
+        selection = [index]
+        app.notebook = SimpleNamespace(select=lambda: selection[0], index=int)
+        app.status = mock.Mock()
+        app.status.cget.return_value = "previous status"
+        app.status.configure.side_effect = lambda **kwargs: setattr(
+            app.status.cget, "return_value", kwargs["text"],
+        )
+        return app, selection
+
+    def test_step5_footer_mirrors_each_local_status_without_changing_its_text(self):
+        app, _selection = self._status_app()
+        variable = mock.Mock()
+        app.step5 = SimpleNamespace(status_var=variable)
+        saved_path = r"\\server\OCT data\sdb - Copy (14)\rrMCPAR_ELMRPE_ONL.xlsx"
+        for text in (
+            "Ready to create an Excel file from measurements in C:\\OCT data.",
+            "Creating the Excel file…",
+            f"Excel file saved: {saved_path}",
+            "Could not create the Excel file: permission denied",
+            "  User-visible status keeps its whitespace.  ",
+            "",
+        ):
+            with self.subTest(text=text):
+                variable.get.return_value = text
+
+                app._refresh_image_path_status("step5_status", "", "write")
+
+                self.assertEqual(app.status.cget("text"), text)
+                app.status.configure.assert_called_with(text=text)
+                self.assertEqual(variable.get.return_value, text)
+
+    def test_unchanged_step5_status_does_not_reconfigure_the_footer(self):
+        app, _selection = self._status_app()
+        text = "Excel file saved: C:\\OCT data\\measurements.xlsx"
+        app.status.cget.return_value = text
+        app.step5 = SimpleNamespace(status_var=mock.Mock(get=mock.Mock(return_value=text)))
+
+        app._refresh_image_path_status("step5_status", "", "write")
+        app._refresh_image_path_status()
+
+        app.status.configure.assert_not_called()
+
+    def test_step5_updates_and_background_completion_preserve_other_steps_status(self):
+        app, selection = self._status_app()
+        app.step2 = SimpleNamespace(current_file="annotations/Light.img")
+        app.step3 = SimpleNamespace(elapsed_time_var=mock.Mock(
+            get=mock.Mock(return_value="Elapsed: 00:00:12"),
+        ))
+        app.step4 = SimpleNamespace(current_path=Path("roi/_flat_LIGHT.hdr"))
+        variable = mock.Mock()
+        variable.get.return_value = "Excel file saved: C:\\OCT data\\measurements.xlsx"
+        app.step5 = SimpleNamespace(status_var=variable)
+        app._advance_workflow_progress = mock.Mock()
+        expected_statuses = {
+            0: "",
+            1: os.path.abspath("annotations/Light.img"),
+            2: "Elapsed: 00:00:12",
+            3: os.path.abspath("roi/_flat_LIGHT.hdr"),
+        }
+        for index, expected in expected_statuses.items():
+            with self.subTest(step=index + 1):
+                selection[0] = index
+                app._refresh_image_path_status("step5_status", "", "write")
+                app._on_step5_compilation_complete(Path("measurements.xlsx"))
+
+                self.assertEqual(app.status.cget("text"), expected)
+                variable.get.assert_not_called()
+
+        selection[0] = 4
+        app._refresh_image_path_status()
+        self.assertEqual(app.status.cget("text"), variable.get.return_value)
+
+    def test_missing_step5_or_status_variable_clears_the_previous_steps_text(self):
+        for step in (None, SimpleNamespace(), SimpleNamespace(status_var=None)):
+            with self.subTest(step=step):
+                app, _selection = self._status_app()
+                if step is not None:
+                    app.step5 = step
+
+                app._refresh_image_path_status()
+
+                app.status.configure.assert_called_once_with(text="")
+
+    def test_step5_trace_skips_a_missing_or_destroyed_footer_and_a_closing_app(self):
+        for condition in ("missing", "destroyed", "closing"):
+            with self.subTest(condition=condition):
+                app, _selection = self._status_app()
+                status = app.status
+                variable = mock.Mock()
+                app.step5 = SimpleNamespace(status_var=variable)
+                if condition == "missing":
+                    del app.status
+                elif condition == "destroyed":
+                    app.status.winfo_exists.return_value = False
+                else:
+                    app._aidas_destroying = True
+
+                app._refresh_image_path_status("step5_status", "", "write")
+
+                variable.get.assert_not_called()
+                status.configure.assert_not_called()
+
     def test_step3_elapsed_time_only_appears_while_step3_is_selected(self):
         app = AIDaSApp.__new__(AIDaSApp)
         selection = [2]
@@ -120,6 +224,35 @@ class ImagePathStatusTests(unittest.TestCase):
                         frame.batch_results_notebook.select(tabs[index])
                         app.update()
                         self.assertEqual(app.status.cget("text"), str(paths[index]))
+
+                    step5_status = app.step5.status_var
+                    step5_trace = app._step5_status_trace_id
+                    self.assertEqual(
+                        [name for _modes, name in step5_status.trace_info()].count(step5_trace), 1,
+                    )
+                    app.notebook.select(app.step5)
+                    app.update()
+                    step5_status.set("Creating the Excel file…")
+                    self.assertEqual(app.status.cget("text"), step5_status.get())
+                    saved = Path(directory) / "first measurements.xlsx"
+                    app.step5._compilation_succeeded(SimpleNamespace(output_path=saved))
+                    self.assertEqual(app.status.cget("text"), f"Excel file saved: {saved}")
+                    self.assertEqual(step5_status.get(), f"Excel file saved: {saved}")
+
+                    app.notebook.select(frame)
+                    app.update()
+                    step5_status.set("Creating the Excel file…")
+                    self.assertEqual(app.status.cget("text"), str(paths[0]))
+                    saved = Path(directory) / "background measurements.xlsx"
+                    app.step5._compilation_succeeded(SimpleNamespace(output_path=saved))
+                    self.assertEqual(app.status.cget("text"), str(paths[0]))
+                    app.notebook.select(app.step5)
+                    app.update()
+                    self.assertEqual(app.status.cget("text"), f"Excel file saved: {saved}")
+                    app.notebook.select(frame)
+                    app.update()
+                    self.assertEqual(app.status.cget("text"), str(paths[0]))
+
                     # Closing another tab leaves the active address intact.
                     with mock.patch.object(frame, "_confirm_close_batch_result_tab", return_value=True):
                         frame._close_batch_result_tab(frame.batch_results_notebook, tabs[1])
@@ -145,8 +278,12 @@ class ImagePathStatusTests(unittest.TestCase):
                         app.step3.elapsed_time_var.set("Elapsed: 00:00:09")
                         app.update()
                         self.assertEqual(app.status.cget("text"), "Elapsed: 00:00:09")
+                        step5_status.set("Could not create the Excel file: permission denied")
+                        self.assertEqual(app.status.cget("text"), "Elapsed: 00:00:09")
                         app.notebook.select(roi)
                         app.update()
+                        self.assertEqual(app.status.cget("text"), str(roi_paths[0]))
+                        step5_status.set("Ready to create an Excel file.")
                         self.assertEqual(app.status.cget("text"), str(roi_paths[0]))
                         app.step3.elapsed_time_var.set("Elapsed: 00:00:10")
                         app.update()
@@ -166,7 +303,10 @@ class ImagePathStatusTests(unittest.TestCase):
                     app.destroy()
                     app.report_callback_exception.assert_not_called()
                     self.assertNotIn(trace_id, [name for _modes, name in elapsed.trace_info()])
+                    self.assertNotIn(step5_trace, [name for _modes, name in step5_status.trace_info()])
                     self.assertEqual(elapsed.get(), "")
+                    step5_status.set(f"Excel file saved: {saved}")
+                    app.report_callback_exception.assert_not_called()
                 finally:
                     if app is not None:
                         app.destroy()

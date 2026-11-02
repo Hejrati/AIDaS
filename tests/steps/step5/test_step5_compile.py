@@ -60,8 +60,14 @@ class Step5CompileTests(unittest.TestCase):
     def test_final_success_updates_status_without_a_completion_popup(self):
         app = AIDaSApp.__new__(AIDaSApp)
         app._set_status_message = mock.Mock()
+        app._advance_workflow_progress = mock.Mock()
+        app._refresh_image_path_status = mock.Mock()
+
         app._on_step5_compilation_complete(Path("compiled.xlsx"))
-        app._set_status_message.assert_called_once_with("Excel file created successfully.")
+
+        app._advance_workflow_progress.assert_called_once_with(5)
+        app._refresh_image_path_status.assert_called_once_with()
+        app._set_status_message.assert_not_called()
         self.assertNotIn("_workflow_completion_popup", app.__dict__)
 
     def test_handoff_folder_prefills_input_and_default_workbook(self):
@@ -117,7 +123,7 @@ class Step5CompileTests(unittest.TestCase):
         )
         self.assertEqual(frame._events.get_nowait(), ("success", result))
 
-    def test_app_handoff_selects_step5_and_starts_compilation(self):
+    def test_app_handoff_selects_step5_and_passes_its_input(self):
         app = AIDaSApp.__new__(AIDaSApp)
         step5 = mock.Mock()
         app.__dict__["step5"] = step5
@@ -176,7 +182,7 @@ class Step5CompileTests(unittest.TestCase):
         app.step5.on_show.assert_called_once_with()
         app.step5.start_from_step4.assert_not_called()
 
-    def test_explicit_handoff_and_queued_tab_event_start_only_once(self):
+    def test_explicit_handoff_and_queued_tab_event_transfer_input_only_once(self):
         app = AIDaSApp.__new__(AIDaSApp)
         app.step5 = mock.Mock()
         app.notebook = mock.Mock()
@@ -195,6 +201,7 @@ class Step5CompileTests(unittest.TestCase):
     def _handoff_frame(self, root):
         frame = object.__new__(Step5Frame)
         frame._running = False
+        frame._worker = None
         frame._output_user_selected = False
         frame.after = mock.Mock(return_value="compile-poll")
         frame.input_var = _Var("old-input")
@@ -202,20 +209,34 @@ class Step5CompileTests(unittest.TestCase):
         frame.status_var = _Var()
         frame.include_fovea_var = _Var(True)
         frame._start_compiler = mock.Mock()
+        frame._refresh_directory_view = mock.Mock()
         frame.source_step = SimpleNamespace(batch_roi_root=root)
         return frame
 
-    def test_handoff_automatically_runs_with_the_new_input_and_default_output(self):
+    def test_handoff_prefills_input_output_and_tree_without_starting_work(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
             frame = self._handoff_frame(root)
-            frame.start_from_step4(root)
+
+            with mock.patch.object(frame, "_run_clicked") as run_clicked:
+                frame.start_from_step4(root)
+
+            self.assertEqual(Path(frame.input_var.get()), root)
+            self.assertEqual(Path(frame.output_var.get()), root / DEFAULT_OUTPUT_FILENAME)
+            self.assertIn("Ready to create an Excel file", frame.status_var.get())
+            frame._refresh_directory_view.assert_called_once_with()
+            frame._start_compiler.assert_not_called()
+            run_clicked.assert_not_called()
+            frame.after.assert_not_called()
+
+            frame._run_clicked()
+
             frame._start_compiler.assert_called_once_with(
                 root, root / DEFAULT_OUTPUT_FILENAME, True,
                 thread_name="aidas-step5-compiler",
             )
 
-    def test_handoff_promotes_side_and_subject_folders_to_the_group(self):
+    def test_handoff_keeps_subject_and_resolves_side_or_export_child_to_subject(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             group = Path(temp_dir).resolve() / "Control"
             subject = group / "Subject_A"
@@ -226,10 +247,95 @@ class Step5CompileTests(unittest.TestCase):
                 with self.subTest(selected=selected):
                     frame = self._handoff_frame(None)
                     frame.start_from_step4(selected)
-                    frame._start_compiler.assert_called_once_with(
-                        group, group / DEFAULT_OUTPUT_FILENAME, True,
-                        thread_name="aidas-step5-compiler",
-                    )
+                    self.assertEqual(Path(frame.input_var.get()), subject)
+                    self.assertEqual(Path(frame.output_var.get()), subject / DEFAULT_OUTPUT_FILENAME)
+                    frame._start_compiler.assert_not_called()
+
+    def test_explicit_non_side_export_root_is_kept_exactly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subject = Path(temp_dir).resolve() / "OCT" / "sdb - Copy (14)"
+            (subject / "nasal").mkdir(parents=True)
+            selected = subject / "exports" / "final"
+            selected.mkdir(parents=True)
+            frame = self._handoff_frame(subject)
+
+            frame.start_from_step4(selected)
+
+            self.assertEqual(Path(frame.input_var.get()), selected)
+            self.assertEqual(Path(frame.output_var.get()), selected / DEFAULT_OUTPUT_FILENAME)
+            frame._start_compiler.assert_not_called()
+
+    def test_handoff_keeps_selected_sdb_root_instead_of_its_oct_parent(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            oct_folder = Path(temp_dir).resolve() / "OCT"
+            selected = oct_folder / "sdb - Copy (14)"
+            for subject in (selected, oct_folder / "sdb - Copy (13)"):
+                (subject / "nasal").mkdir(parents=True)
+                (subject / "temporal").mkdir()
+            frame = self._handoff_frame(selected)
+
+            frame.start_from_step4(selected)
+
+            self.assertEqual(Path(frame.input_var.get()), selected)
+            self.assertEqual(Path(frame.output_var.get()), selected / DEFAULT_OUTPUT_FILENAME)
+            frame._start_compiler.assert_not_called()
+
+    def test_handoff_infers_one_subject_from_its_selected_nasal_and_temporal_tabs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subject = Path(temp_dir).resolve() / "OCT" / "sdb - Copy (14)"
+            paths = [subject / side / "_flat_LIGHT.hdr" for side in ("nasal", "temporal")]
+            for path in paths:
+                path.parent.mkdir(parents=True)
+            frame = self._handoff_frame(None)
+            frame.source_step.batch_roi_paths = paths
+
+            frame.start_from_step4()
+
+            self.assertEqual(Path(frame.input_var.get()), subject)
+            self.assertEqual(Path(frame.output_var.get()), subject / DEFAULT_OUTPUT_FILENAME)
+            frame._start_compiler.assert_not_called()
+
+    def test_manual_compile_after_sdb_handoff_saves_only_that_selected_subject(self):
+        from aidas.services.step4_compiler import compile_step4_results
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            oct_folder = Path(temp_dir).resolve() / "OCT"
+            selected = oct_folder / "sdb - Copy (14)"
+            for number in (13, 14):
+                side = oct_folder / f"sdb - Copy ({number})" / "nasal"
+                side.mkdir(parents=True)
+                workbook = Workbook()
+                workbook.active.cell(1, 7, "Round")
+                workbook.active.cell(2, 7, number)
+                workbook.save(side / "Results.xlsx")
+                workbook.close()
+            frame = self._handoff_frame(selected)
+            results = []
+
+            def compile_selected(root, output, include_fovea, **_kwargs):
+                results.append(compile_step4_results(root, output, include_fovea=include_fovea))
+
+            frame._start_compiler.side_effect = compile_selected
+            frame.start_from_step4(selected)
+
+            output = selected / DEFAULT_OUTPUT_FILENAME
+            self.assertEqual(results, [])
+            self.assertFalse(output.exists())
+            frame._start_compiler.assert_not_called()
+
+            frame._run_clicked()
+
+            self.assertEqual(results[0].group_ids, {"OCT": ("sdb - Copy (14)",)})
+            self.assertTrue(output.is_file())
+            self.assertFalse((oct_folder / DEFAULT_OUTPUT_FILENAME).exists())
+            workbook = load_workbook(output, data_only=True)
+            try:
+                self.assertEqual(workbook["rrMCP-AR"]["A1"].value, "OCT")
+                self.assertEqual(workbook["rrMCP-AR"]["A3"].value, selected.name)
+                self.assertEqual(workbook["rrMCP-AR"]["B3"].value, 14)
+                self.assertEqual(workbook["rrMCP-AR"]["E1"].value, None)
+            finally:
+                workbook.close()
 
     def test_handoff_infers_common_root_of_all_step4_tabs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -243,10 +349,9 @@ class Step5CompileTests(unittest.TestCase):
             frame = self._handoff_frame(None)
             frame.source_step.batch_roi_paths = paths
             frame.start_from_step4()
-            frame._start_compiler.assert_called_once_with(
-                root, root / DEFAULT_OUTPUT_FILENAME, True,
-                thread_name="aidas-step5-compiler",
-            )
+            self.assertEqual(Path(frame.input_var.get()), root)
+            self.assertEqual(Path(frame.output_var.get()), root / DEFAULT_OUTPUT_FILENAME)
+            frame._start_compiler.assert_not_called()
 
     def test_handoff_preserves_custom_output_and_fovea_choice(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -257,19 +362,32 @@ class Step5CompileTests(unittest.TestCase):
             frame._output_user_selected = True
             frame.include_fovea_var.set(False)
             frame.start_from_step4()
+
+            self.assertEqual(Path(frame.input_var.get()), root)
+            self.assertEqual(Path(frame.output_var.get()), output)
+            self.assertFalse(frame.include_fovea_var.get())
+            frame._start_compiler.assert_not_called()
+
+            frame._run_clicked()
+
             frame._start_compiler.assert_called_once_with(
                 root, output, False, thread_name="aidas-step5-compiler",
             )
 
     def test_handoff_does_not_start_a_second_worker_while_running(self):
-        frame = self._handoff_frame(None)
-        frame._running = True
-        frame.set_input_folder = mock.Mock()
-        frame.start_from_step4("new-root")
-        frame.set_input_folder.assert_not_called()
-        frame._start_compiler.assert_not_called()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            frame = self._handoff_frame(None)
+            frame._running = True
+            frame.set_input_folder = mock.Mock()
 
-    def test_completed_step4_runs_are_queued_without_overlapping_workers(self):
+            frame.start_from_step4(root)
+
+            frame.set_input_folder.assert_not_called()
+            frame._start_compiler.assert_not_called()
+            self.assertEqual(frame._pending_step4_handoffs, [(root, 0)])
+
+    def test_busy_handoffs_keep_only_latest_folder_and_prefill_when_idle(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
             first = root / "first"
@@ -281,45 +399,42 @@ class Step5CompileTests(unittest.TestCase):
             frame._drain_compile_events = mock.Mock()
             frame.winfo_exists = mock.Mock(return_value=True)
             frame.after = mock.Mock()
-            frame._start_compiler.side_effect = lambda *_args, **_kwargs: setattr(frame, "_running", True)
 
             frame.start_from_step4(first)
             frame.start_from_step4(latest)
             frame.start_from_step4(latest)
             frame._poll_events()
             frame._start_compiler.assert_not_called()
+            self.assertEqual(frame.input_var.get(), "old-input")
+            self.assertEqual(frame._pending_step4_handoffs, [(latest, 0)])
 
             frame._running = False
             frame._poll_events()
             frame._poll_events()
-            frame._start_compiler.assert_called_once_with(
-                first, first / DEFAULT_OUTPUT_FILENAME, True,
-                thread_name="aidas-step5-compiler",
-            )
+            frame._start_compiler.assert_not_called()
+            self.assertEqual(Path(frame.input_var.get()), latest)
+            self.assertEqual(Path(frame.output_var.get()), latest / DEFAULT_OUTPUT_FILENAME)
+            self.assertEqual(frame._pending_step4_handoffs, [])
+            frame._refresh_directory_view.assert_called_once_with()
+
+    def test_a_queued_handoff_does_not_change_inputs_after_step5_is_destroyed(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            frame = self._handoff_frame(None)
+            frame._running = True
+            frame.start_from_step4(Path(temp_dir).resolve())
+            self.assertEqual(len(frame._pending_step4_handoffs), 1)
             frame._running = False
+            frame._drain_compile_events = mock.Mock()
+            frame.winfo_exists = mock.Mock(return_value=False)
+            frame.after = mock.Mock()
+
             frame._poll_events()
-            frame._running = False
-            frame._poll_events()
-            self.assertEqual(frame._start_compiler.call_args_list, [mock.call(
-                first, first / DEFAULT_OUTPUT_FILENAME, True,
-                thread_name="aidas-step5-compiler",
-            ), mock.call(
-                latest, latest / DEFAULT_OUTPUT_FILENAME, True,
-                thread_name="aidas-step5-compiler",
-            )])
 
-    def test_a_queued_export_does_not_start_after_step5_is_destroyed(self):
-        frame = self._handoff_frame(None)
-        frame._running = True
-        frame.start_from_step4("latest-input")
-        frame._running = False
-        frame._drain_compile_events = mock.Mock()
-        frame.winfo_exists = mock.Mock(return_value=False)
-        frame.after = mock.Mock()
-
-        frame._poll_events()
-
-        frame._start_compiler.assert_not_called()
+            frame._start_compiler.assert_not_called()
+            frame._refresh_directory_view.assert_not_called()
+            self.assertEqual(frame.input_var.get(), "old-input")
+            self.assertEqual(frame._pending_step4_handoffs, [])
+            frame.after.assert_not_called()
 
     def test_visiting_step5_before_any_step4_file_is_loaded_does_not_compile_defaults(self):
         frame = self._handoff_frame(None)
@@ -347,7 +462,7 @@ class Step5CompileTests(unittest.TestCase):
             frame._start_compiler.assert_not_called()
             self.assertIn("unavailable", frame.status_var.get())
 
-    def test_automatic_handoff_worker_creates_a_real_grouped_workbook(self):
+    def test_handoff_waits_for_manual_click_before_creating_a_real_grouped_workbook(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
             for group, value in (("Control", 10), ("Treatment", 20)):
@@ -371,6 +486,14 @@ class Step5CompileTests(unittest.TestCase):
                 "aidas.steps.step5_compile.filedialog",
             ) as file_dialogs:
                 frame.start_from_step4()
+                self.assertIsNone(frame._worker)
+                self.assertFalse(frame._running)
+                self.assertFalse((root / DEFAULT_OUTPUT_FILENAME).exists())
+                frame.after.assert_not_called()
+                frame.on_compilation_complete.assert_not_called()
+
+                frame._run_clicked()
+
                 frame._worker.join(timeout=10)
                 self.assertFalse(frame._worker.is_alive())
                 frame._drain_compile_events()

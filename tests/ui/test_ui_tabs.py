@@ -192,6 +192,79 @@ class UITabStyleTests(unittest.TestCase):
             widgets.frame._get_widget_scaling.return_value = 1.0
         self.first_id, self.second_id = self.view._model.order
 
+    def test_repeated_unchanged_titles_and_tooltips_do_not_repaint_or_measure(self):
+        widgets = self.view._tab_widgets[self.first_id]
+        self.view._queue_sync_header_geometry = mock.Mock()
+        self.view._update_tab_tooltips = mock.Mock()
+        for _ in range(100):
+            self.assertIsNone(self.view.tab(self.first_id, text="One", tooltip=None))
+        widgets.title.configure.assert_not_called()
+        widgets.frame.configure.assert_not_called()
+        widgets.close.configure.assert_not_called()
+        self.view._selected_tab_font.measure.assert_not_called()
+        self.view._queue_sync_header_geometry.assert_not_called()
+        self.view._update_tab_tooltips.assert_not_called()
+        self.assertEqual(self.view.select(), self.first_id)
+        self.assertEqual(self.view.tab(self.first_id), {"text": "One", "tooltip": "One"})
+
+    def test_explicit_tooltip_equal_to_title_still_changes_close_tooltip_semantics(self):
+        widgets = self.view._tab_widgets[self.first_id]
+        widgets.title_tooltip = SimpleNamespace(text="One")
+        widgets.body_tooltip = SimpleNamespace(text="One")
+        widgets.close_tooltip = SimpleNamespace(text="Close tab")
+        self.view._queue_sync_header_geometry = mock.Mock()
+
+        self.view.tab(self.first_id, text="One", tooltip="One")
+        self.assertEqual(widgets.close_tooltip.text, "One")
+        self.view.tab(self.first_id, tooltip=None)
+        self.assertEqual(widgets.title_tooltip.text, "One")
+        self.assertEqual(widgets.body_tooltip.text, "One")
+        self.assertEqual(widgets.close_tooltip.text, "Close tab")
+        widgets.title.configure.assert_not_called()
+        widgets.frame.configure.assert_not_called()
+        self.view._selected_tab_font.measure.assert_not_called()
+        self.view._queue_sync_header_geometry.assert_not_called()
+
+    def test_changed_title_updates_label_tooltips_and_header_without_changing_selection(self):
+        widgets = self.view._tab_widgets[self.second_id]
+        widgets.title_tooltip = SimpleNamespace(text="Two")
+        widgets.body_tooltip = SimpleNamespace(text="Two")
+        widgets.close_tooltip = SimpleNamespace(text="Close tab")
+        self.view._selected_tab_font.measure.return_value = 120
+        self.view._queue_sync_header_geometry = mock.Mock()
+
+        self.view.tab(self.second_id, text="Renamed result")
+
+        self.assertEqual(self.view.tab(self.second_id, "text"), "Renamed result")
+        self.assertEqual(self.view.select(), self.first_id)
+        self.assertEqual(widgets.title_tooltip.text, "Renamed result")
+        self.assertEqual(widgets.body_tooltip.text, "Renamed result")
+        self.assertEqual(widgets.close_tooltip.text, "Close tab")
+        widgets.title.configure.assert_any_call(text="Renamed result")
+        self.view._selected_tab_font.measure.assert_called_once_with("Renamed result")
+        self.view._queue_sync_header_geometry.assert_called_once_with()
+
+    def test_renaming_capped_title_does_not_resize_or_resynchronize_header(self):
+        widgets = self.view._tab_widgets[self.first_id]
+        self.view._model.labels[self.first_id] = "Previous long result title " * 50
+        self.view._model.tooltips[self.first_id] = r"C:\OCT samples\unchanged full path.sdb"
+        self.view._selected_tab_font.measure.return_value = 10000
+        widgets.title.cget.return_value = self.view._MAX_TITLE_WIDTH
+        widgets.frame.cget.return_value = (
+            self.view._MAX_TITLE_WIDTH + self.view._TITLE_PADDING + self.view._CLOSE_WIDTH
+            + self.view._CLOSE_PADDING + 1
+        )
+        self.view._update_tab_border_geometry = mock.Mock()
+        self.view._queue_sync_header_geometry = mock.Mock()
+        updated = "Different long result title " * 50
+
+        self.view.tab(self.first_id, text=updated)
+
+        widgets.title.configure.assert_called_once_with(text=updated)
+        widgets.frame.configure.assert_not_called()
+        self.view._queue_sync_header_geometry.assert_not_called()
+        self.assertEqual(self.view.tab(self.first_id, "tooltip"), r"C:\OCT samples\unchanged full path.sdb")
+
     def test_selected_and_inactive_tabs_use_distinct_readable_states(self):
         for active, fill, foreground, hover in (
             (True, "tab_selected", "tab_selected_text", "tab_selected_hover"),

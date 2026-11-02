@@ -1,5 +1,6 @@
 # Exercise the real bundled main-script export paths with the app's LIGHT-only
-# environment. Numerical processing is covered by the existing R regressions.
+# policy. Original scripts retain their standalone defaults; optimized variants
+# always export LIGHT. Paired-array regressions cover numerical processing.
 main <- function() {
   paths <- c(
     "RAW_OCT_PROCESSING_2023_09SEP-05_WSU.R",
@@ -45,7 +46,10 @@ main <- function() {
     assert(length(mode)==1L, paste(paths[index], "LIGHT-only startup setting missing"))
     Sys.unsetenv("AIDAS_LIGHT_ONLY")
     eval(mode[[1L]], environment)
-    assert(identical(environment$.LIGHT.ONLY, FALSE), "Standalone default changed")
+    assert(identical(environment$.LIGHT.ONLY, index!=1L), "Standalone export policy changed")
+    Sys.setenv(AIDAS_LIGHT_ONLY="0")
+    eval(mode[[1L]], environment)
+    assert(identical(environment$.LIGHT.ONLY, index!=1L), "Explicit standalone export policy changed")
     Sys.setenv(AIDAS_LIGHT_ONLY="1")
     eval(mode[[1L]], environment)
     assert(identical(environment$.LIGHT.ONLY, TRUE), "App LIGHT-only mode was ignored")

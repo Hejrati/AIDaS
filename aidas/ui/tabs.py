@@ -458,18 +458,27 @@ class ClosableTabView(ctk.CTkFrame):
         if unknown:
             name = sorted(unknown)[0]
             raise tk.TclError(f"Unsupported tab option: {name!r}")
+        changed = False
         if "text" in options:
             text = str(options["text"])
-            self._model.labels[page_id] = text
-            widgets = self._tab_widgets[page_id]
-            widgets.title.configure(text=text)
-            self._size_tab(page_id)
-            self._queue_sync_header_geometry()
+            # Batch status refreshes can repeat the same title for every open
+            # result. Avoid redrawing and measuring labels that did not change.
+            if text != self._model.labels[page_id]:
+                self._model.labels[page_id] = text
+                widgets = self._tab_widgets[page_id]
+                widgets.title.configure(text=text)
+                if self._size_tab(page_id):
+                    self._queue_sync_header_geometry()
+                changed = True
         if "tooltip" in options:
             tooltip = options["tooltip"]
-            self._model.tooltips[page_id] = None if tooltip is None else str(tooltip)
+            tooltip = None if tooltip is None else str(tooltip)
+            if tooltip != self._model.tooltips[page_id]:
+                self._model.tooltips[page_id] = tooltip
+                changed = True
         if options:
-            self._update_tab_tooltips(page_id)
+            if changed:
+                self._update_tab_tooltips(page_id)
             return None
         return {"text": self._model.labels[page_id], "tooltip": self._model.tooltip_text(page_id)}
 
@@ -731,7 +740,9 @@ class ClosableTabView(ctk.CTkFrame):
         else:
             widgets.close._on_leave()
 
-    def _size_tab(self, page_id: str) -> None:
+    def _size_tab(self, page_id: str) -> bool:
+        """Size a changed title, returning whether header geometry changed."""
+
         widgets = self._tab_widgets[page_id]
         text = self._model.labels[page_id]
         try:
@@ -742,10 +753,16 @@ class ClosableTabView(ctk.CTkFrame):
             self._MAX_TITLE_WIDTH,
             max(48, measured + CONTROLS.gap),
         )
-        widgets.title.configure(width=title_width)
         frame_width = title_width + self._TITLE_PADDING + self._CLOSE_WIDTH + self._CLOSE_PADDING + SHAPES.border_width
-        widgets.frame.configure(width=frame_width)
+        resized = False
+        if widgets.title.cget("width") != title_width:
+            widgets.title.configure(width=title_width)
+            resized = True
+        if widgets.frame.cget("width") != frame_width:
+            widgets.frame.configure(width=frame_width)
+            resized = True
         self._update_tab_border_geometry(page_id)
+        return resized
 
     def _draw_content_join(self, _event=None) -> None:
         """Open the panel's top border directly beneath the selected tab."""

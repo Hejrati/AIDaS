@@ -1,10 +1,12 @@
 from pathlib import Path
+import hashlib
 import tempfile
+import threading
 import time
 import tkinter as tk
 import unittest
 from unittest import mock
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 import zipfile
 from types import SimpleNamespace
 
@@ -97,25 +99,132 @@ class FeedbackDialogTests(unittest.TestCase):
     def test_saved_report_requires_approval_then_opens_only_a_draft(self):
         self.assertEqual(self.dialog.email_button.cget("state"), "disabled")
         self.fill()
-        target = self.directory / "report.zip"
+        target = self.directory / "report.txt"
         with mock.patch("aidas.ui.feedback.messagebox.showwarning") as warning:
             self.dialog._save()
         warning.assert_called_once()
         self.assertFalse(target.exists())
         self.dialog.approved.set(True)
-        with mock.patch("aidas.ui.feedback.filedialog.asksaveasfilename", return_value=str(target)):
+        with mock.patch("aidas.ui.feedback.filedialog.asksaveasfilename", return_value=str(target)) as choose:
             self.dialog._save()
+        self.assertEqual(choose.call_args.kwargs["defaultextension"], ".txt")
+        self.assertEqual(choose.call_args.kwargs["filetypes"], [
+            ("Text report for email", "*.txt"), ("Full data ZIP for secure sharing", "*.zip"),
+        ])
+        self.assertTrue(choose.call_args.kwargs["initialfile"].endswith(".txt"))
         self.wait(lambda: self.dialog._report_path is not None)
-        with zipfile.ZipFile(target) as archive:
-            self.assertIn("diagnostics.json", archive.namelist())
-            self.assertIn("logs/log_01.txt", archive.namelist())
+        self.assertFalse(zipfile.is_zipfile(target))
+        content = target.read_text(encoding="utf-8")
+        self.assertIn("Step 3 failed", content)
+        self.assertIn("test123", content)
+        self.assertIn("A failure happened", content)
         with mock.patch("aidas.ui.feedback.webbrowser.open", return_value=True) as open_draft:
             self.dialog._email()
         self.assertEqual(unquote(urlsplit(open_draft.call_args.args[0]).path), FEEDBACK_EMAIL)
-        self.assertIn("Attach report.zip", self.dialog.status.get())
+        self.assertIn("Attach report.txt", self.dialog.status.get())
         self.dialog._invalidate_report()
         self.assertEqual(self.dialog.email_button.cget("state"), "disabled")
         self.assertFalse(self.dialog.approved.get())
+
+    def _save_report(self, name, *, sharing_link=""):
+        self.fill()
+        if sharing_link:
+            self.dialog.sharing_link.insert(0, sharing_link)
+        self.dialog.approved.set(True)
+        target = self.directory / name
+        with mock.patch("aidas.ui.feedback.filedialog.asksaveasfilename", return_value=str(target)):
+            self.dialog._save()
+        self.wait(lambda: self.dialog._report_path is not None)
+        return target
+
+    def test_text_report_records_sample_checksum_without_embedding_the_sample(self):
+        sample = self.directory / "private-patient.img"
+        sample_content = b"UNIQUE-RAW-SAMPLE-CONTENT\x00\xff\xfe"
+        sample.write_bytes(sample_content)
+        with mock.patch("aidas.ui.feedback.filedialog.askopenfilenames", return_value=(str(sample),)):
+            self.dialog._add_files()
+        target = self._save_report("email-report.txt")
+
+        content = target.read_text(encoding="utf-8")
+        self.assertIn(hashlib.sha256(sample_content).hexdigest(), content)
+        self.assertNotIn("private-patient", content)
+        self.assertNotIn("UNIQUE-RAW-SAMPLE-CONTENT", content)
+        self.assertNotIn("\x00", content)
+        self.assertEqual(sample.read_bytes(), sample_content)
+
+    def test_zip_includes_selected_files_but_requires_a_sharing_link_for_email(self):
+        sample = self.directory / "sample.img"
+        sample.write_bytes(b"original sample bytes")
+        self.dialog._attachments = [sample]
+        target = self._save_report("full-data.zip")
+        with zipfile.ZipFile(target) as archive:
+            self.assertEqual(archive.read("data/sample_001.img"), sample.read_bytes())
+        with (
+            mock.patch("aidas.ui.feedback.messagebox.showwarning") as warning,
+            mock.patch("aidas.ui.feedback.webbrowser.open") as open_draft,
+        ):
+            self.dialog._email()
+        open_draft.assert_not_called()
+        guidance = warning.call_args.args[1]
+        self.assertIn("text report", guidance)
+        self.assertIn("HTTPS link", guidance)
+        self.assertIn("Do not attach the ZIP", guidance)
+
+    def test_zip_with_sharing_link_opens_a_link_draft_without_zip_attachment_instructions(self):
+        link = "https://approved.example.org/shared/sample?key=123&view=1"
+        self._save_report("full-data.zip", sharing_link=link)
+        with mock.patch("aidas.ui.feedback.webbrowser.open", return_value=True) as open_draft:
+            self.dialog._email()
+        draft_body = parse_qs(urlsplit(open_draft.call_args.args[0]).query)["body"][0]
+        self.assertIn(link, draft_body)
+        self.assertNotIn("Please attach the diagnostic ZIP", draft_body)
+        self.assertIn("secure sample-data link", self.dialog.status.get())
+        self.assertNotIn("Attach full-data.zip", self.dialog.status.get())
+
+    def test_text_report_can_include_a_sharing_link_without_embedding_shared_data(self):
+        link = "https://approved.example.org/shared/sample"
+        target = self._save_report("email-report.txt", sharing_link=link)
+        self.assertIn(link, target.read_text(encoding="utf-8"))
+        with mock.patch("aidas.ui.feedback.webbrowser.open", return_value=True) as open_draft:
+            self.dialog._email()
+        draft_body = parse_qs(urlsplit(open_draft.call_args.args[0]).query)["body"][0]
+        self.assertIn(link, draft_body)
+        self.assertIn("email-report.txt", draft_body)
+        self.assertIn("Attach email-report.txt", self.dialog.status.get())
+
+    def test_changing_or_clearing_the_link_requires_fresh_review_and_report(self):
+        self._save_report("email-report.txt")
+        self.assertEqual(self.dialog.email_button.cget("state"), "normal")
+        self.dialog.sharing_link.insert(0, "https://approved.example.org/shared/sample")
+        self.assertFalse(self.dialog.approved.get())
+        self.assertIsNone(self.dialog._report_path)
+        self.assertEqual(self.dialog.email_button.cget("state"), "disabled")
+        self.dialog.approved.set(True)
+        self.dialog.sharing_link.delete(0, "end")
+        self.assertFalse(self.dialog.approved.get())
+
+    def test_long_form_remains_scrollable_and_footer_actions_visible_at_small_size(self):
+        self.dialog.geometry("560x450")
+        # Windows delivers the native resize after idle geometry work. Settle
+        # it before using the scroll range of the newly sized viewport.
+        self.root.update()
+        body = self.dialog.sharing_link.master
+        canvas = body._parent_canvas
+        canvas.yview_moveto(1.0)
+        self.root.update()
+        self.assertLess(canvas.yview()[0], canvas.yview()[1])
+        self.assertGreater(canvas.yview()[0], 0)
+        self.assertGreaterEqual(self.dialog.sharing_link.winfo_rooty(), canvas.winfo_rooty())
+        self.assertLessEqual(
+            self.dialog.sharing_link.winfo_rooty() + self.dialog.sharing_link.winfo_height(),
+            canvas.winfo_rooty() + canvas.winfo_height(),
+        )
+        for button in (self.dialog.save_button, self.dialog.email_button):
+            self.assertTrue(button.winfo_viewable())
+            self.assertLessEqual(
+                button.winfo_rooty() + button.winfo_height(),
+                self.dialog.winfo_rooty() + self.dialog.winfo_height(),
+            )
 
     def test_attachments_are_optional_and_reset_approval(self):
         sample = self.directory / "sample.img"
@@ -147,6 +256,122 @@ class FeedbackDialogTests(unittest.TestCase):
         header.feedback_button.invoke()
         callback.assert_called_once_with()
         self.assertEqual(header.feedback_image.cget("size"), (24, 24))
+
+
+class FeedbackDialogLogicTests(unittest.TestCase):
+    """Exercise thread snapshots and email fallbacks without creating Tk."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.dialog = FeedbackDialog.__new__(FeedbackDialog)
+        self.dialog._snapshot = {"diagnostics": {"report_id": "headless123"}, "logs": []}
+        self.dialog._working = False
+        self.dialog.summary = SimpleNamespace(get=mock.Mock(return_value="Problem summary"))
+        self.dialog.description = SimpleNamespace(get=mock.Mock(return_value="How to reproduce"))
+        self.dialog.sharing_link = SimpleNamespace(get=mock.Mock(return_value=""))
+        self.dialog.approved = SimpleNamespace(get=mock.Mock(return_value=True), set=mock.Mock())
+        self.dialog.include_logs = SimpleNamespace(get=mock.Mock(return_value=True))
+        self.dialog.status = SimpleNamespace(set=mock.Mock())
+        self.dialog.email_button = SimpleNamespace(configure=mock.Mock())
+        self.dialog._attachments = []
+        self.dialog._cancel = threading.Event()
+        self.dialog._set_editing = mock.Mock()
+        self.dialog._start_worker = mock.Mock()
+        self.dialog._saved_title = "Problem summary"
+        self.dialog._saved_sharing_link = ""
+        self.dialog._report_path = None
+
+    def test_save_worker_receives_plain_values_and_never_reads_tk(self):
+        link = "https://approved.example.org/shared/sample"
+        self.dialog.sharing_link.get.return_value = link
+        target = self.directory / "report.txt"
+        with mock.patch("aidas.ui.feedback.filedialog.asksaveasfilename", return_value=str(target)):
+            self.dialog._save()
+        kind, work = self.dialog._start_worker.call_args.args
+        self.assertEqual(kind, "report")
+        for widget in (self.dialog.summary, self.dialog.description, self.dialog.sharing_link,
+                       self.dialog.approved, self.dialog.include_logs):
+            widget.get.side_effect = AssertionError("Worker must not read a Tk control")
+        with mock.patch("aidas.ui.feedback.save_report", return_value=target) as save:
+            self.assertEqual(work(), target)
+        save.assert_called_once_with(
+            str(target), self.dialog._snapshot, title="Problem summary", description="How to reproduce",
+            attachments=(), include_logs=True, cancel_event=self.dialog._cancel, sharing_link=link,
+        )
+
+    def test_invalid_link_stops_before_file_dialog_or_worker(self):
+        for link in ("http://example.org/sample", "https://name:secret@example.org/sample", "https://example.org/\ninvalid"):
+            with self.subTest(link=link):
+                self.dialog.sharing_link.get.return_value = link
+                with (
+                    mock.patch("aidas.ui.feedback.filedialog.asksaveasfilename") as choose,
+                    mock.patch("aidas.ui.feedback.messagebox.showwarning") as warning,
+                ):
+                    self.dialog._save()
+                warning.assert_called_once()
+                choose.assert_not_called()
+                self.dialog._start_worker.assert_not_called()
+
+    def test_zip_without_link_never_formats_or_opens_a_draft(self):
+        target = self.directory / "report.zip"
+        target.write_bytes(b"placeholder")
+        self.dialog._report_path = target
+        with (
+            mock.patch("aidas.ui.feedback.messagebox.showwarning") as warning,
+            mock.patch("aidas.ui.feedback.feedback_mailto") as mailto,
+            mock.patch("aidas.ui.feedback.webbrowser.open") as open_draft,
+        ):
+            self.dialog._email()
+        warning.assert_called_once()
+        mailto.assert_not_called()
+        open_draft.assert_not_called()
+
+    def test_invalid_saved_link_is_rejected_before_formatting_a_draft(self):
+        target = self.directory / "report.txt"
+        target.write_text("report", encoding="utf-8")
+        self.dialog._report_path = target
+        self.dialog._saved_sharing_link = "https://name:secret@example.org/sample"
+        with (
+            mock.patch("aidas.ui.feedback.messagebox.showwarning") as warning,
+            mock.patch("aidas.ui.feedback.feedback_mailto") as mailto,
+        ):
+            self.dialog._email()
+        warning.assert_called_once()
+        mailto.assert_not_called()
+
+    def test_email_app_failure_preserves_txt_attachment_and_zip_link_instructions(self):
+        link = "https://approved.example.org/shared/sample"
+        self.dialog._saved_sharing_link = link
+        for suffix in (".txt", ".zip"):
+            target = self.directory / ("report" + suffix)
+            target.write_bytes(b"placeholder")
+            self.dialog._report_path = target
+            with (
+                self.subTest(suffix=suffix),
+                mock.patch("aidas.ui.feedback.webbrowser.open", return_value=False),
+                mock.patch("aidas.ui.feedback.messagebox.showinfo") as info,
+            ):
+                self.dialog._email()
+                instructions = info.call_args.args[1]
+                self.assertIn(FEEDBACK_EMAIL, instructions)
+                self.assertIn(link, instructions)
+                if suffix == ".txt":
+                    self.assertIn("attach the text report", instructions)
+                    self.assertIn(str(target), instructions)
+                else:
+                    self.assertIn("secure sample-data link", instructions)
+                    self.assertNotIn("attach", instructions.lower())
+
+    def test_link_placeholder_does_not_invalidate_review_but_real_changes_do(self):
+        self.dialog._sharing_link_placeholder = "https://... (your approved sharing service)"
+        self.dialog._sharing_link_value = ""
+        self.dialog._invalidate_report = mock.Mock()
+        self.assertTrue(self.dialog._sharing_link_changed(self.dialog._sharing_link_placeholder))
+        self.dialog._invalidate_report.assert_not_called()
+        self.assertTrue(self.dialog._sharing_link_changed("https://approved.example.org/sample"))
+        self.dialog._invalidate_report.assert_called_once_with()
 
 
 if __name__ == "__main__":

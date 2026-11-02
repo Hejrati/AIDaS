@@ -311,12 +311,12 @@ class Step2BatchSegmentationTable(BatchSelectionMixin, ttk.Frame):
             command=self._toggle_all_ready,
         )
         self.tree.heading("folder", text="Folder")
-        self.tree.heading("status", text="Status")
+        self.tree.heading("status", text="Status", anchor="center")
         self.tree.heading("images", text="Images")
 
         self.tree.column("#0", width=40, minwidth=40, stretch=False, anchor="center")
         self.tree.column("folder", width=520, minwidth=220, stretch=False, anchor="w")
-        self.tree.column("status", width=360, minwidth=120, stretch=False, anchor="w")
+        self.tree.column("status", width=360, minwidth=120, stretch=False, anchor="center")
         self.tree.column("images", width=72, minwidth=60, stretch=False, anchor="center")
 
         self.tree.tag_configure("locked", foreground="#6b7280")
@@ -1634,12 +1634,12 @@ class Step2Frame(SidebarStepFrame):
         if len(segmented_sides) == 2:
             status = "Already segmented: nasal and temporal"
         elif segmented_sides:
-            prefix = "Already segmented" if locked else "Ready: Light; segmented"
+            prefix = "Already segmented" if locked else "Ready; segmented"
             status = f"{prefix}: {segmented_sides[0]} only"
         elif directly_segmented:
-            status = "Already segmented: Light"
+            status = "Already segmented"
         else:
-            status = "Ready: Light"
+            status = "Ready"
 
         return {
             "folder": folder,

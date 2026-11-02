@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import inspect
+import math
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
 
 from openpyxl import Workbook, load_workbook
+from PIL import Image
+
+from aidas.services.step4_results import encode_step4_measurements
 
 from aidas.services.step4_compiler import (
     DEFAULT_OUTPUT_FILENAME,
     MeasureCompilation,
     clean_light_thickness_file,
+    create_cleaned_light_thickness_workbook,
     compile_step4_results,
     extract_elmrpe_onl_from_subject,
     find_light_files,
@@ -19,7 +24,10 @@ from aidas.services.step4_compiler import (
     find_results_file,
     find_thickness_file,
     make_light2_from_light,
+    get_first20_col_g_values,
+    get_column_values,
     read_tsv_rows,
+    read_thickness_rows,
 )
 
 
@@ -62,6 +70,56 @@ def _build_subject(root: Path) -> Path:
 
 
 class Step4CompilerTests(unittest.TestCase):
+    def test_embedded_tiff_measurements_replace_side_workbooks_without_changing_values(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            subject = root / "Control" / "Subject_1"
+            expected = {}
+            for side_name, first in (("nasal", 1), ("temporal", 101)):
+                side = subject / side_name
+                side.mkdir(parents=True)
+                rows = [dict(zip(
+                    ("Major", "Minor", "Angle", "Circ.", "AR", "Round", "Solidity"),
+                    (10.1, 5.2, -4.3, 0.4, 2.5, first + index + 0.1234567890123, 0.7),
+                )) for index in range(25)]
+                source = side / "ROI_to_move_stck.tif"
+                image = Image.new("RGB", (2, 2))
+                image.save(source, tiffinfo={270: encode_step4_measurements(rows)})
+                image.close()
+                expected[side_name] = [row["Round"] for row in rows[:20]]
+                _write_thickness(side / "_thickness_vs_distance_from_fovea_LIGHT.txt", 30, 40)
+                self.assertEqual(Path(find_results_file(side)), source)
+                self.assertEqual(get_first20_col_g_values(source), expected[side_name])
+
+            output = root / "compiled.xlsx"
+            result = compile_step4_results(root, output, include_fovea=False)
+            self.assertEqual(result.group_ids, {"Control": ("Subject_1",)})
+            workbook = load_workbook(output, data_only=True)
+            try:
+                for column, side_name in ((2, "nasal"), (3, "temporal")):
+                    values = [workbook["rrMCP-AR"].cell(row, column).value for row in range(3, 23)]
+                    for actual, original in zip(values, expected[side_name]):
+                        self.assertAlmostEqual(actual, original, places=12)
+                self.assertTrue(workbook["Extraction_log"]["E2"].value.endswith("ROI_to_move_stck.tif"))
+            finally:
+                workbook.close()
+            self.assertEqual(list(root.rglob("rr_MCPAR.xlsx")), [])
+
+    def test_valid_embedded_tiff_precedes_legacy_workbook_but_ordinary_tiff_does_not(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            legacy = root / "rr_MCPAR.xlsx"
+            _write_results(legacy, 999)
+            image = Image.new("L", (2, 2))
+            source = root / "ROI_to_move_stck.tif"
+            image.save(source)
+            self.assertEqual(Path(find_results_file(root)), legacy)
+            rows = [{"Major": 10, "Minor": 5, "Angle": 0, "Circ.": 0.3, "AR": 2, "Round": 0.8, "Solidity": 0.9}]
+            image.save(source, tiffinfo={270: encode_step4_measurements(rows)})
+            image.close()
+            self.assertEqual(Path(find_results_file(root)), source)
+            self.assertEqual(get_first20_col_g_values(source), [0.8])
+
     def test_compiler_uses_public_sheet_reordering_api(self):
         source = inspect.getsource(compile_step4_results)
 
@@ -87,8 +145,10 @@ class Step4CompilerTests(unittest.TestCase):
             source = Path(temp_dir) / "LIGHT.txt"
             source.write_bytes(b"Distance\tWhole\tELM\tONL\r\n-1\t0\tNA\t9\r\n0\t0\t1\t2\r\n")
             original = source.read_bytes()
+            legacy = source.with_name("LIGHT2.txt")
+            legacy.write_bytes(b"keep until Excel is saved")
 
-            for operation in ("write_tsv_rows", "os.replace"):
+            for operation in ("Workbook.save", "os.replace"):
                 with self.subTest(operation=operation), mock.patch(
                     "aidas.services.step4_compiler." + operation,
                     side_effect=OSError("disk full"),
@@ -97,9 +157,91 @@ class Step4CompilerTests(unittest.TestCase):
                         clean_light_thickness_file(source)
 
                 self.assertEqual(source.read_bytes(), original)
-                self.assertEqual(list(Path(temp_dir).iterdir()), [source])
+                self.assertEqual(legacy.read_bytes(), b"keep until Excel is saved")
+                self.assertEqual(set(Path(temp_dir).iterdir()), {source, legacy})
 
-    def test_light_cleanup_uses_fixed_elm_column_and_is_idempotent(self):
+    def test_failed_cleaned_excel_replacement_preserves_raw_and_previous_workbook(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            source.write_bytes(b"Distance\tWhole\tELM\tONL\r\n0\t0\t1\t2\r\n")
+            destination = Path(create_cleaned_light_thickness_workbook(source))
+            previous = destination.read_bytes()
+            source.write_bytes(b"Distance\tWhole\tELM\tONL\r\n0\t0\t3\t4\r\n")
+            original = source.read_bytes()
+            legacy = source.with_name("_thickness_vs_distance_from_fovea_LIGHT2.txt")
+            legacy.write_bytes(b"obsolete cleaned table")
+            legacy_original = legacy.read_bytes()
+
+            with mock.patch("aidas.services.step4_compiler.os.replace", side_effect=PermissionError("locked")):
+                with self.assertRaisesRegex(PermissionError, "locked"):
+                    create_cleaned_light_thickness_workbook(source)
+
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(destination.read_bytes(), previous)
+            self.assertEqual(legacy.read_bytes(), legacy_original)
+            self.assertEqual(set(Path(temp_dir).iterdir()), {source, destination, legacy})
+
+    def test_successful_raw_to_excel_conversion_removes_only_obsolete_sibling_light2_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            original = b"Distance\tWhole\tELM\tONL\r\n0\t0\t1\t2\r\n"
+            source.write_bytes(original)
+            legacy = source.with_name("_thickness_vs_distance_from_fovea_LIGHT2.txt")
+            legacy.write_bytes(b"obsolete cleaned table")
+            unrelated = source.with_name("another_LIGHT2.txt")
+            unrelated.write_bytes(b"keep unrelated input")
+
+            destination = Path(create_cleaned_light_thickness_workbook(source))
+
+            self.assertTrue(destination.is_file())
+            self.assertFalse(legacy.exists())
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(unrelated.read_bytes(), b"keep unrelated input")
+            # The idempotent existing-workbook path also retires an old copy.
+            legacy.write_bytes(b"another obsolete copy")
+            workbook_bytes = destination.read_bytes()
+            self.assertEqual(create_cleaned_light_thickness_workbook(source), str(destination))
+            self.assertFalse(legacy.exists())
+            self.assertEqual(destination.read_bytes(), workbook_bytes)
+            self.assertEqual(source.read_bytes(), original)
+
+    def test_locked_obsolete_light2_text_does_not_drop_valid_compiled_measurements(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            side = root / "Control" / "Subject_1" / "nasal"
+            side.mkdir(parents=True)
+            _write_results(side / "rr_MCPAR.xlsx", 1)
+            source = side / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            original = b"Distance\tWhole\tELM\tONL\r\n0\t0\t12.5\t25.5\r\n"
+            source.write_bytes(original)
+            legacy = source.with_name("_thickness_vs_distance_from_fovea_LIGHT2.txt")
+            legacy.write_bytes(b"locked obsolete table")
+            real_unlink = Path.unlink
+
+            def unlink(path, *args, **kwargs):
+                if path == legacy:
+                    raise PermissionError("file is open")
+                return real_unlink(path, *args, **kwargs)
+
+            output = root / "compiled.xlsx"
+            with mock.patch.object(Path, "unlink", unlink), self.assertLogs(
+                "aidas.services.step4_compiler", level="WARNING",
+            ):
+                compile_step4_results(root, output, include_fovea=False)
+
+            workbook = load_workbook(output, data_only=True)
+            try:
+                self.assertEqual(workbook["ELM-RPE"]["B3"].value, 12.5)
+                self.assertEqual(workbook["ONL"]["B3"].value, 25.5)
+                self.assertEqual(workbook["Extraction_log"]["I3"].value, "OK")
+                self.assertEqual(workbook["Extraction_log"]["I4"].value, "OK")
+            finally:
+                workbook.close()
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(legacy.read_bytes(), b"locked obsolete table")
+            self.assertEqual(read_thickness_rows(legacy.with_suffix(".xlsx"))[1], [0, 0, 12.5, 25.5])
+
+    def test_light_cleanup_saves_numeric_excel_with_fixed_elm_column_and_keeps_raw(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "_thickness_vs_distance_from_fovea_LIGHT.txt"
             source.write_text(
@@ -115,22 +257,25 @@ class Step4CompilerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            self.assertEqual(make_light2_from_light(source, 4), str(source))
-            self.assertEqual(read_tsv_rows(source), [
-                ["Distance", "Whole", "ELM", "ONL"],
-                ["-2", "0", "20", "NA"],
-                ["-1", "0", "30", "300"],
-                ["0", "0", "NA", "400"],
-                ["2", "0", "40", "700"],
-            ])
-            cleaned = source.read_bytes()
+            original = source.read_bytes()
             modified = source.stat().st_mtime_ns
-            with mock.patch("aidas.services.step4_compiler.write_tsv_rows") as write:
-                self.assertEqual(clean_light_thickness_file(source), str(source))
+            destination = source.with_name("_thickness_vs_distance_from_fovea_LIGHT2.xlsx")
+            self.assertEqual(make_light2_from_light(source, 4), str(destination))
+            self.assertEqual(read_thickness_rows(destination), [
+                ["Distance", "Whole", "ELM", "ONL"],
+                [-2, 0, 20, None],
+                [-1, 0, 30, 300],
+                [0, 0, None, 400],
+                [2, 0, 40, 700],
+            ])
+            cleaned = destination.read_bytes()
+            with mock.patch("aidas.services.step4_compiler.Workbook.save") as write:
+                self.assertEqual(clean_light_thickness_file(source), str(destination))
             write.assert_not_called()
-            self.assertEqual(source.read_bytes(), cleaned)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(destination.read_bytes(), cleaned)
             self.assertEqual(source.stat().st_mtime_ns, modified)
-            self.assertEqual(list(Path(temp_dir).iterdir()), [source])
+            self.assertEqual(set(Path(temp_dir).iterdir()), {source, destination})
 
     def test_already_clean_light_retains_exact_bytes_without_a_rewrite(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -138,10 +283,27 @@ class Step4CompilerTests(unittest.TestCase):
             original = b"Distance\tWhole\tELM\tONL\r\n-1\t0\t1\t2\r\n0\t0\tNA\t3\r\n"
             source.write_bytes(original)
 
-            with mock.patch("aidas.services.step4_compiler.tempfile.mkstemp") as create:
-                self.assertEqual(clean_light_thickness_file(source), str(source))
+            destination = Path(clean_light_thickness_file(source))
+            self.assertEqual(destination.name, "LIGHT2.xlsx")
+            self.assertEqual(read_thickness_rows(destination)[2], [0, 0, None, 3])
+            self.assertEqual(source.read_bytes(), original)
 
-            create.assert_not_called()
+    def test_nonfinite_tokens_round_trip_as_text_without_changing_legacy_parser_meaning(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            original = b"Distance\tWhole\tELM\tONL\r\n-1\t0\tNaN\tInf\r\n0\t0\tNA\t-Inf\r\n1\t0\t10\tNA\r\n"
+            source.write_bytes(original)
+
+            destination = Path(create_cleaned_light_thickness_workbook(source))
+
+            self.assertEqual(read_thickness_rows(destination)[1:], [
+                [-1, 0, "NaN", "Inf"], [0, 0, None, "-Inf"], [1, 0, 10, None],
+            ])
+            elm_values = get_column_values(destination, 3)
+            onl_values = get_column_values(destination, 4)
+            self.assertTrue(math.isnan(elm_values[0]))
+            self.assertEqual(elm_values[1], 10)
+            self.assertEqual(onl_values, [math.inf, -math.inf])
             self.assertEqual(source.read_bytes(), original)
 
     def test_current_light_is_preferred_over_stale_light2_in_direct_and_recursive_paths(self):
@@ -165,6 +327,79 @@ class Step4CompilerTests(unittest.TestCase):
                 self.assertEqual(Path(find_thickness_file(subject)), current)
                 nasal, _temporal = find_light_files(subject)
                 self.assertEqual(Path(nasal), current)
+
+    def test_cleaned_excel_is_preferred_to_legacy_text_without_modifying_either(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subject = Path(temp_dir)
+            side = subject / "nasal"
+            side.mkdir()
+            legacy = side / "_thickness_vs_distance_from_fovea_LIGHT2.txt"
+            legacy.write_text("Distance\tWhole\tELM\tONL\n0\t0\t999\t999\n", encoding="utf-8")
+            excel = side / "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"
+            workbook = Workbook()
+            workbook.active.append(["Distance", "Whole", "ELM", "ONL"])
+            workbook.active.append([0, 0, 12.1234567890123, 34.1234567890123])
+            workbook.save(excel)
+            workbook.close()
+            original = {path: path.read_bytes() for path in (excel, legacy)}
+
+            self.assertEqual(Path(find_thickness_file(subject)), excel)
+            self.assertEqual(find_light_files(subject), (str(excel), None))
+            for measure, expected in (("ELM-RPE", 12.1234567890123), ("ONL", 34.1234567890123)):
+                values, _temporal, path, _other, count, _other_count = (
+                    extract_elmrpe_onl_from_subject(subject, measure, False)
+                )
+                self.assertAlmostEqual(values[0], expected, places=12)
+                self.assertEqual(path, str(excel))
+                self.assertEqual(count, 1)
+            self.assertEqual({path: path.read_bytes() for path in original}, original)
+
+    def test_new_raw_export_refreshes_cleaned_excel_and_ignores_stale_legacy_text(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            subject = Path(temp_dir)
+            side = subject / "nasal"
+            side.mkdir()
+            source = side / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            source.write_text("Distance\tWhole\tELM\tONL\n0\t0\t1\t2\n", encoding="utf-8")
+            destination = Path(create_cleaned_light_thickness_workbook(source))
+            (side / "_thickness_vs_distance_from_fovea_LIGHT2.txt").write_text("stale", encoding="utf-8")
+            source.write_bytes(b"Distance\tWhole\tELM\tONL\r\n0\t0\t9.1234567890123\t10.1234567890123\r\n")
+            original = source.read_bytes()
+
+            values, _temporal, filename, _other, count, _other_count = (
+                extract_elmrpe_onl_from_subject(subject, "ONL", False)
+            )
+
+            self.assertAlmostEqual(values[0], 10.1234567890123, places=12)
+            self.assertEqual(Path(filename), destination)
+            self.assertEqual(count, 1)
+            self.assertEqual(source.read_bytes(), original)
+            self.assertAlmostEqual(read_thickness_rows(destination)[1][2], 9.1234567890123, places=12)
+            self.assertFalse((side / "_thickness_vs_distance_from_fovea_LIGHT2.txt").exists())
+
+    def test_cleaned_thickness_excel_never_creates_a_step4_subject(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            side = root / "Control" / "Subject" / "nasal"
+            side.mkdir(parents=True)
+            source = side / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+            _write_thickness(source, 10, 20)
+            create_cleaned_light_thickness_workbook(source)
+
+            self.assertIsNone(find_results_file(side))
+            self.assertEqual(find_subject_folders(root), {})
+
+    def test_explicit_conversion_of_legacy_light2_retains_all_already_cleaned_rows(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "_thickness_vs_distance_from_fovea_LIGHT2.txt"
+            original = b"Distance\tWhole\tELM\tONL\r\n-1\t0\tNA\t100\r\n0\t0\t20\t200\r\n"
+            source.write_bytes(original)
+
+            destination = Path(create_cleaned_light_thickness_workbook(source))
+
+            self.assertEqual(destination.name, "_thickness_vs_distance_from_fovea_LIGHT2.xlsx")
+            self.assertEqual(read_thickness_rows(destination)[1:], [[-1, 0, None, 100], [0, 0, 20, 200]])
+            self.assertEqual(source.read_bytes(), original)
 
     def test_current_temporal_light_is_preferred_over_direct_legacy_light2(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -249,7 +484,7 @@ class Step4CompilerTests(unittest.TestCase):
                 self.assertEqual(profile.read_bytes(), original)
                 self.assertEqual(list(side.iterdir()), [profile])
 
-    def test_mixed_missing_elm_and_onl_rows_keep_former_compilation_values_without_light2(self):
+    def test_mixed_missing_elm_and_onl_rows_keep_former_values_and_save_cleaned_excel(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             side = root / "Control" / "Subject_1" / "nasal"
@@ -268,6 +503,7 @@ class Step4CompilerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             output = root / "compiled.xlsx"
+            original = source.read_bytes()
 
             compile_step4_results(root, output, include_fovea=False)
 
@@ -282,8 +518,9 @@ class Step4CompilerTests(unittest.TestCase):
                 workbook.close()
             self.assertEqual(
                 sorted(path.name for path in side.iterdir()),
-                ["_thickness_vs_distance_from_fovea_LIGHT.txt", "rr_MCPAR.xlsx"],
+                ["_thickness_vs_distance_from_fovea_LIGHT.txt", "_thickness_vs_distance_from_fovea_LIGHT2.xlsx", "rr_MCPAR.xlsx"],
             )
+            self.assertEqual(source.read_bytes(), original)
 
     def test_compile_matches_legacy_layout_and_reads_current_step4_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -626,6 +863,29 @@ class Step4CompilerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "different from the input"):
                 compile_step4_results(root, source)
             self.assertEqual(source.read_bytes(), original)
+
+    def test_output_cannot_replace_existing_or_planned_cleaned_thickness_excel(self):
+        for source_type in ("raw", "raw_and_excel", "excel", "legacy_text"):
+            with self.subTest(source_type=source_type), tempfile.TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                side = root / "Control" / "Subject_1" / "nasal"
+                side.mkdir(parents=True)
+                _write_results(side / "rr_MCPAR.xlsx", 1)
+                source = side / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+                source.write_bytes(b"Distance\tWhole\tELM\tONL\r\n0\t0\t3\t4\r\n")
+                output = side / "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"
+                if source_type in ("raw_and_excel", "excel"):
+                    create_cleaned_light_thickness_workbook(source)
+                if source_type == "excel":
+                    source.unlink()
+                elif source_type == "legacy_text":
+                    source.rename(output.with_suffix(".txt"))
+                before = {path.name: path.read_bytes() for path in side.iterdir()}
+
+                with self.assertRaisesRegex(ValueError, "different from the input thickness"):
+                    compile_step4_results(root, output)
+
+                self.assertEqual({path.name: path.read_bytes() for path in side.iterdir()}, before)
 
 
 if __name__ == "__main__":

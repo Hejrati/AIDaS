@@ -1,4 +1,4 @@
-"""User-reviewed diagnostic ZIPs and email drafts, without server credentials."""
+"""Reviewed text reports, optional shared sample data, and user-sent email drafts."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,7 +12,7 @@ import customtkinter as ctk
 
 from aidas.services.feedback import (
     FEEDBACK_EMAIL, collect_diagnostics, feedback_mailto, report_preview,
-    save_report, validate_attachments,
+    save_report, validate_attachments, validate_sharing_link,
 )
 from aidas.ui.components import AppButton
 from aidas.core.display import work_area_bounds
@@ -68,6 +68,8 @@ class FeedbackDialog(_FeedbackWindow):
         self._attachments = []
         self._report_path = None
         self._saved_title = ""
+        self._saved_sharing_link = ""
+        self._sharing_link_value = ""
         self._working = False
         self._wrapped_labels = []
         self._wrap_width = None
@@ -89,7 +91,7 @@ class FeedbackDialog(_FeedbackWindow):
             row += 1
             return widget
 
-        label(f"To: {FEEDBACK_EMAIL}\nThe app prepares a ZIP and opens your email app. You attach the ZIP and send it.")
+        label(f"To: {FEEDBACK_EMAIL}\nSave a text report for email, then open your email app to attach it and send it.")
         label("Problem summary *")
         self.summary = ctk.CTkEntry(body, placeholder_text="For example: Step 3 fails while flattening an image")
         self.summary.grid(row=row, column=0, sticky="ew", padx=8); row += 1
@@ -105,7 +107,8 @@ class FeedbackDialog(_FeedbackWindow):
         label("Includes app and system information, processing settings, and recent errors.\n"
               "Automatic removal of private details is not guaranteed. Review before sharing.")
         label("Optional: screenshots, sample inputs, annotations, or R workspaces (10 MB total).\n"
-              "Selected files are included unchanged. Remove patient details and other private information first.")
+              "Text reports include anonymous file details and checksums; they do not embed sample contents. "
+              "Full data ZIPs include the selected files unchanged. Remove patient details and other private information first.")
         actions = ctk.CTkFrame(body, fg_color="transparent")
         actions.grid(row=row, column=0, sticky="ew", padx=8); row += 1
         self.add_button = AppButton(actions, text="Add files...", command=self._add_files)
@@ -113,17 +116,23 @@ class FeedbackDialog(_FeedbackWindow):
         self.clear_button = AppButton(actions, text="Clear files", command=self._clear_files)
         self.clear_button.pack(side="left")
         self.files_label = label("No data files selected.")
+        label("Secure sample-data link (optional)")
+        self._sharing_link_placeholder = "https://... (your approved sharing service)"
+        self.sharing_link = ctk.CTkEntry(body, placeholder_text=self._sharing_link_placeholder)
+        self.sharing_link.grid(row=row, column=0, sticky="ew", padx=8); row += 1
+        label("To share sample data, upload the ZIP yourself to a service approved by your organization "
+              "and paste its HTTPS sharing link. The app does not upload files.")
         self.approved = tk.BooleanVar(self, value=False)
         footer = ctk.CTkFrame(self, fg_color=COLOR_PAIRS["surface"])
         footer.grid(row=2, column=0, sticky="ew", padx=12, pady=12)
         footer.grid_columnconfigure(0, weight=1)
-        self.approval_check = ctk.CTkCheckBox(footer, text="I reviewed this report and have permission to share\nall selected files with AIDaS support.",
+        self.approval_check = ctk.CTkCheckBox(footer, text="I reviewed and have permission to share this report,\nselected files, and linked data with AIDaS support.",
                                             variable=self.approved)
         self.approval_check.grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(10, 4))
         self.status = tk.StringVar(self, value="Collecting diagnostics locally...")
         self.status_label = ctk.CTkLabel(footer, textvariable=self.status, anchor="w", justify="left", wraplength=440)
         self.status_label.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=6)
-        self.save_button = AppButton(footer, text="Save report ZIP...", variant="primary", command=self._save, state="disabled")
+        self.save_button = AppButton(footer, text="Save report...", variant="primary", command=self._save, state="disabled")
         self.save_button.grid(row=2, column=0, sticky="w", padx=8, pady=8)
         self.email_button = AppButton(footer, text="Open email draft", command=self._email, state="disabled")
         self.email_button.grid(row=2, column=1, padx=4, pady=8)
@@ -132,6 +141,9 @@ class FeedbackDialog(_FeedbackWindow):
         self.bind("<Escape>", lambda _event: self.destroy())
         self.summary.bind("<KeyRelease>", self._invalidate_report, add="+")
         self.description.bind("<KeyRelease>", self._invalidate_report, add="+")
+        self.sharing_link.configure(
+            validate="key", validatecommand=(self.register(self._sharing_link_changed), "%P"),
+        )
         def resize_labels(event):
             width = max(240, int(body._reverse_widget_scaling(event.width))-24)
             if width != self._wrap_width:
@@ -167,10 +179,14 @@ class FeedbackDialog(_FeedbackWindow):
         self._working = False
         if kind == "diagnostics":
             self._snapshot = result
-            self.status.set("Review the diagnostics, describe the problem, then save the ZIP." if not error else f"Could not collect diagnostics: {error}")
+            self.status.set("Review the diagnostics, describe the problem, then save a text report." if not error else f"Could not collect diagnostics: {error}")
         elif not error:
             self._report_path = result
-            self.status.set(f"Saved {result.name}. Attach this ZIP to the email draft; no email has been sent.")
+            if result.suffix.lower() == ".zip":
+                self.status.set(f"Saved {result.name}. Share this ZIP through your approved file-sharing service, "
+                                "or save a text report for email. No email has been sent.")
+            else:
+                self.status.set(f"Saved {result.name}. Attach this text report to the email draft; no email has been sent.")
         else:
             self.status.set(f"Could not save report: {error}")
         self._set_editing(True)
@@ -182,7 +198,7 @@ class FeedbackDialog(_FeedbackWindow):
 
     def _set_editing(self, enabled):
         state = "normal" if enabled else "disabled"
-        for widget in (self.summary, self.description, self.logs_check, self.approval_check,
+        for widget in (self.summary, self.description, self.sharing_link, self.logs_check, self.approval_check,
                        self.add_button, self.clear_button, self.save_button, self.preview_button, self.email_button):
             widget.configure(state=state)
         if enabled:
@@ -191,7 +207,17 @@ class FeedbackDialog(_FeedbackWindow):
     def _invalidate_report(self, _event=None):
         self.approved.set(False)
         self._report_path = None
+        self._saved_sharing_link = ""
         self.email_button.configure(state="disabled")
+
+    def _sharing_link_changed(self, value):
+        # Validation observes typing, paste, and programmatic edits while keeping
+        # CTk's placeholder available (it does not support a textvariable).
+        value = "" if value == self._sharing_link_placeholder else value
+        if value != self._sharing_link_value:
+            self._sharing_link_value = value
+            self._invalidate_report()
+        return True
 
     def _preview(self):
         if self._snapshot is None:
@@ -235,37 +261,70 @@ class FeedbackDialog(_FeedbackWindow):
         if not title or not description:
             messagebox.showwarning("Feedback", "Add a summary and describe how to reproduce the problem.", parent=self)
             return
+        try:
+            sharing_link = validate_sharing_link(self.sharing_link.get())
+        except ValueError as exc:
+            messagebox.showwarning("Secure sample-data link", str(exc), parent=self)
+            return
         if not self.approved.get():
             messagebox.showwarning("Review report", "Review the diagnostics and selected files, then check the approval box.", parent=self)
             return
         report_id = self._snapshot["diagnostics"]["report_id"]
-        target = filedialog.asksaveasfilename(parent=self, title="Save diagnostic report", defaultextension=".zip",
-                    filetypes=[("ZIP report", "*.zip")], initialfile=f"AIDaS-feedback-{report_id}.zip",
+        target = filedialog.asksaveasfilename(parent=self, title="Save diagnostic report", defaultextension=".txt",
+                    filetypes=[("Text report for email", "*.txt"), ("Full data ZIP for secure sharing", "*.zip")],
+                    initialfile=f"AIDaS-feedback-{report_id}.txt",
                     initialdir=str(Path.home() / "Downloads" if (Path.home() / "Downloads").is_dir() else Path.home()))
         if not target:
             return
         self._saved_title = title
+        self._saved_sharing_link = sharing_link
         self._report_path = None
         self._set_editing(False)
-        self.status.set("Creating diagnostic ZIP locally...")
+        self.status.set("Creating full data ZIP locally..." if Path(target).suffix.lower() == ".zip"
+                        else "Creating text report locally...")
         snapshot, files, logs, cancel = self._snapshot, tuple(self._attachments), self.include_logs.get(), self._cancel
-        self._start_worker("zip", lambda: save_report(target, snapshot, title=title, description=description,
-                                                     attachments=files, include_logs=logs, cancel_event=cancel))
+        self._start_worker("report", lambda: save_report(target, snapshot, title=title, description=description,
+                                                        attachments=files, include_logs=logs, cancel_event=cancel,
+                                                        sharing_link=sharing_link))
 
     def _email(self):
         if self._report_path is None or not self._report_path.is_file():
-            messagebox.showwarning("Feedback", "Save a report ZIP before opening an email draft.", parent=self)
+            messagebox.showwarning("Feedback", "Save a report before opening an email draft.", parent=self)
             return
-        url = feedback_mailto(self._snapshot["diagnostics"]["report_id"], self._saved_title, self._report_path.name)
+        try:
+            sharing_link = validate_sharing_link(self._saved_sharing_link)
+        except ValueError as exc:
+            messagebox.showwarning("Secure sample-data link", str(exc), parent=self)
+            return
+        is_zip = self._report_path.suffix.lower() == ".zip"
+        if is_zip and not sharing_link:
+            messagebox.showwarning(
+                "Share sample data securely",
+                "Save a text report to attach to email, or upload the ZIP through an approved secure "
+                "file-sharing service, paste its HTTPS link, and save the report again. "
+                "Do not attach the ZIP to email.",
+                parent=self,
+            )
+            return
+        url = feedback_mailto(self._snapshot["diagnostics"]["report_id"], self._saved_title, self._report_path.name,
+                              sharing_link=sharing_link)
         try:
             opened = webbrowser.open(url)
             if not opened:
                 raise OSError("No default email application accepted the draft.")
         except Exception as exc:
-            messagebox.showinfo("Email draft", f"Could not open your email app: {exc}\n\n"
-                                f"Email {FEEDBACK_EMAIL} and attach:\n{self._report_path}", parent=self)
+            instructions = (
+                f"Email {FEEDBACK_EMAIL} with your secure sample-data link:\n{sharing_link}"
+                if is_zip else f"Email {FEEDBACK_EMAIL} and attach the text report:\n{self._report_path}"
+            )
+            if sharing_link and not is_zip:
+                instructions += f"\n\nSecure sample-data link:\n{sharing_link}"
+            messagebox.showinfo("Email draft", f"Could not open your email app: {exc}\n\n{instructions}", parent=self)
             return
-        self.status.set(f"Draft opened. Attach {self._report_path.name} from {self._report_path.parent}, then click Send in your email app.")
+        if is_zip:
+            self.status.set("Draft opened with your secure sample-data link. Click Send in your email app.")
+        else:
+            self.status.set(f"Draft opened. Attach {self._report_path.name} from {self._report_path.parent}, then click Send in your email app.")
 
     def destroy(self):
         self._cancel.set()

@@ -55,7 +55,7 @@ class Step2SegmentationStatusTests(unittest.TestCase):
 
                 self.assertFalse(row["locked"])
                 self.assertTrue(row["include"])
-                self.assertEqual(row["status"], f"Ready: Light; segmented: {side} only")
+                self.assertEqual(row["status"], f"Ready; segmented: {side} only")
                 self.assertEqual(row["segmented_sides"], [side])
                 self.assertEqual(row["pending"], ["Light"])
                 self.assertEqual(row["image_paths"], [str(folder / "Light.img")])
@@ -71,7 +71,7 @@ class Step2SegmentationStatusTests(unittest.TestCase):
         row = self.frame._step2_batch_segmentation_row(folder)
 
         self.assertFalse(row["locked"])
-        self.assertEqual(row["status"], "Ready: Light")
+        self.assertEqual(row["status"], "Ready")
         self.assertEqual(row["segmented_sides"], [])
 
     def test_saved_sides_are_detected_with_mixed_case_names(self):
@@ -93,7 +93,7 @@ class Step2SegmentationStatusTests(unittest.TestCase):
         row = self.frame._step2_batch_segmentation_row(folder)
 
         self.assertTrue(row["locked"])
-        self.assertEqual(row["status"], "Already segmented: Light")
+        self.assertEqual(row["status"], "Already segmented")
 
     def test_step1_handoff_uses_same_side_detection_for_explicit_folders(self):
         both = self._source("both")
@@ -113,7 +113,7 @@ class Step2SegmentationStatusTests(unittest.TestCase):
         self.assertTrue(rows[0]["locked"])
         self.assertFalse(rows[1]["locked"])
         self.assertEqual(rows[0]["status"], "Already segmented: nasal and temporal")
-        self.assertEqual(rows[1]["status"], "Ready: Light; segmented: nasal only")
+        self.assertEqual(rows[1]["status"], "Ready; segmented: nasal only")
 
 
 if __name__ == "__main__":

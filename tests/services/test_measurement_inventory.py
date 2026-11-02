@@ -2,8 +2,10 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+from PIL import Image
 
 from aidas.services.measurement_inventory import InventoryCancelled, scan_measurement_directory
+from aidas.services.step4_results import encode_step4_measurements
 
 
 def _nodes(root):
@@ -15,6 +17,38 @@ def _nodes(root):
 
 
 class MeasurementInventoryTests(unittest.TestCase):
+    def test_tiff_with_embedded_measurements_is_a_recorded_step4_result(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            side = root / "Control" / "Subject_1" / "nasal"
+            side.mkdir(parents=True)
+            image = Image.new("L", (2, 2))
+            rows = [{"Major": 10, "Minor": 5, "Angle": 0, "Circ.": 0.3, "AR": 2, "Round": 0.8, "Solidity": 0.9}]
+            source = side / "ROI_to_move_stck.tif"
+            image.save(source, tiffinfo={270: encode_step4_measurements(rows)})
+            image.close()
+
+            result = scan_measurement_directory(root)
+
+            self.assertEqual((result.workbooks, result.unassigned_workbooks), (1, 0))
+            by_name = {node.name: node for node in _nodes(result.root)}
+            self.assertEqual(by_name[source.name].kind, "measurements")
+            self.assertEqual(by_name["Control"].detail, "Group")
+            self.assertEqual(by_name["Subject_1"].detail, "Subject ID")
+
+    def test_cleaned_light2_excel_is_a_thickness_table_not_step4_measurements(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cleaned = root / "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"
+            cleaned.write_bytes(b"inventory does not open thickness workbooks")
+            result = scan_measurement_directory(root)
+
+            self.assertEqual((result.workbooks, result.thickness_files), (0, 1))
+            self.assertEqual(result.unassigned_workbooks, 0)
+            node = result.root.children[0]
+            self.assertEqual(node.kind, "thickness")
+            self.assertIn("cleaned Excel", node.detail)
+
     def test_flat_step4_folder_shows_actual_workbook_and_measurement_files(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "R_TEST" / "flip human - Copy - Copy (12)"
@@ -41,7 +75,7 @@ class MeasurementInventoryTests(unittest.TestCase):
             self.assertEqual(result.root.name, root.name)
             hidden = next(node for node in result.root.children if node.name == "step3_r_arrays")
             self.assertFalse(hidden.children)
-            self.assertEqual(hidden.detail, "No recorded Excel results")
+            self.assertEqual(hidden.detail, "No recorded Step 4 measurements")
             self.assertEqual(result.root.total_files, 11)
 
     def test_nested_files_preserve_real_group_subject_and_side_relationships(self):
@@ -77,7 +111,7 @@ class MeasurementInventoryTests(unittest.TestCase):
             root = Path(temporary)
             result = scan_measurement_directory(root)
             self.assertFalse(result.root.children)
-            self.assertEqual(result.root.detail, "No recorded Excel results")
+            self.assertEqual(result.root.detail, "No recorded Step 4 measurements")
             result = scan_measurement_directory(root / "missing")
             self.assertEqual(result.root.detail, "Folder unavailable")
             self.assertTrue(result.errors)

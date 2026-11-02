@@ -3,7 +3,7 @@
 This module is the non-UI implementation of the legacy
 ``rrMCPAR_ELMRPE_ONL_Compiler`` utility.  It preserves the workbook layout,
 row grouping, extraction order, and legacy thickness cleanup while retaining
-the original ``LIGHT`` filename and recognizing AIDaS Step 4 workbooks.
+the original ``LIGHT`` text file and saving cleaned ``LIGHT2`` Excel tables.
 """
 
 from __future__ import annotations
@@ -11,17 +11,21 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 import fnmatch
+import logging
+import math
 import os
 from pathlib import Path
 import re
 import tempfile
 from typing import Callable
+from zipfile import BadZipFile
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
 from aidas.utils.filesystem import walk_unique_directories
+from aidas.services.step4_results import STEP4_STACK_FILENAMES, read_step4_measurements
 
 
 ID_ROW_START = 3
@@ -38,6 +42,7 @@ PathLike = str | os.PathLike[str]
 LogCallback = Callable[[str], None]
 ProgressCallback = Callable[[int, int, str], None]
 SubjectProcessedCallback = Callable[[str, str, str], None]
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -127,11 +132,16 @@ def find_results_file(folder_path: PathLike | None) -> str | None:
         subdirectories.sort(key=_natural_key)
         for filename in filenames:
             lower = filename.lower()
-            if not lower.endswith(".xlsx") or filename.startswith("~$"):
-                continue
             path = Path(directory) / filename
             relative = path.relative_to(folder)
-            rank = 0 if lower == "rr_mcpar.xlsx" else 1 if lower.startswith("results") else 2
+            if lower in {name.lower() for name in STEP4_STACK_FILENAMES}:
+                if read_step4_measurements(path) is not None:
+                    candidates.append((0, len(relative.parts), _natural_key(str(relative)), str(path)))
+                continue
+            if (not lower.endswith(".xlsx") or filename.startswith("~$")
+                    or _is_thickness_filename(filename) or _is_light_profile_file(filename)):
+                continue
+            rank = 1 if lower == "rr_mcpar.xlsx" else 2 if lower.startswith("results") else 3
             candidates.append((rank, len(relative.parts), _natural_key(str(relative)), str(path)))
     return min(candidates)[-1] if candidates else None
 
@@ -143,6 +153,9 @@ def find_nasal_temporal_results(subject_path: PathLike) -> tuple[str | None, str
 
 
 def get_first20_col_g_values(filepath: PathLike) -> list:
+    if Path(filepath).suffix.lower() in (".tif", ".tiff"):
+        rows = read_step4_measurements(filepath)
+        return [row[6] for row in (rows or ())][:RRMCPAR_BLOCK_SIZE]
     workbook = load_workbook(os.fspath(filepath), data_only=True)
     try:
         worksheet = workbook.active
@@ -209,6 +222,19 @@ def _is_light_profile_file(path: PathLike) -> bool:
     return "profiles" in name or ("fovea" in name and "thickness" not in name)
 
 
+def _is_thickness_filename(path: PathLike) -> bool:
+    name = os.path.basename(path).lower()
+    return all(part in name for part in ("thickness", "distance", "fovea", "light"))
+
+
+def _light_file_priority(path: PathLike) -> int:
+    """Use original text to refresh Excel; retain old cleaned text as fallback."""
+    name = os.path.basename(path).lower()
+    if "light2" not in name:
+        return 0
+    return 1 if name.endswith(".xlsx") else 2
+
+
 def find_thickness_file(search_root: PathLike | None) -> str | None:
     if not search_root:
         return None
@@ -217,7 +243,8 @@ def find_thickness_file(search_root: PathLike | None) -> str | None:
         return None
     pattern_groups = (
         ("*_thickness_vs_distance_from_fovea_LIGHT*.txt",
-         "*thickness*distance*fovea*LIGHT*.txt"),
+         "*thickness*distance*fovea*LIGHT*.txt",
+         "*thickness*distance*fovea*LIGHT2.xlsx"),
         ("*LIGHT*.txt", "*light*.txt"),
     )
     candidates = []
@@ -229,34 +256,30 @@ def find_thickness_file(search_root: PathLike | None) -> str | None:
             os.path.join(directory, filename)
             for filename in filenames
             if not filename.startswith(".")
-            and filename.lower().endswith(".txt")
+            and (filename.lower().endswith(".txt") or (
+                filename.lower().endswith(".xlsx") and _is_thickness_filename(filename)
+            ))
             and "light" in filename.lower()
             and not _is_light_profile_file(filename)
             and os.path.isfile(os.path.join(directory, filename))
         )
     candidates.sort()
     for patterns in pattern_groups:
-        legacy_match = None
+        matches = []
         for pattern in patterns:
-            matches = [path for path in candidates if fnmatch.fnmatch(os.path.basename(path), pattern)]
-            for match in matches:
-                if "light2" not in os.path.basename(match).lower():
-                    return match
-            if matches and legacy_match is None:
-                legacy_match = matches[0]
+            matches.extend(path for path in candidates if fnmatch.fnmatch(
+                os.path.basename(path).lower(), pattern.lower(),
+            ))
         # A known thickness table takes precedence over a generic LIGHT profile.
-        if legacy_match is not None:
-            return legacy_match
+        if matches:
+            return min(matches, key=lambda path: (_light_file_priority(path), path))
     return None
 
 
 def _prefer_current_light_file(paths) -> str | None:
-    """Keep candidate order, using a historical LIGHT2 file only as fallback."""
+    """Keep candidate order within original / cleaned Excel / legacy text."""
     existing = [path for path in paths if path]
-    return next(
-        (path for path in existing if "light2" not in os.path.basename(path).lower()),
-        existing[0] if existing else None,
-    )
+    return min(existing, key=_light_file_priority) if existing else None
 
 
 def _is_legacy_light_file(path: str | None) -> bool:
@@ -267,16 +290,21 @@ def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
     subject = os.fspath(subject_path)
     nasal_candidates = (
         existing_file(subject, "nasal", "_thickness_vs_distance_from_fovea_LIGHT2.txt"),
+        existing_file(subject, "nasal", "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"),
         existing_file(subject, "nasal", "_thickness_vs_distance_from_fovea_LIGHT.txt"),
         existing_file(subject, "rrMCPAR", "_thickness_vs_distance_from_fovea_LIGHT2.txt"),
+        existing_file(subject, "rrMCPAR", "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"),
         existing_file(subject, "rrMCPAR", "_thickness_vs_distance_from_fovea_LIGHT.txt"),
         existing_file(subject, "_thickness_vs_distance_from_fovea_LIGHT2.txt"),
+        existing_file(subject, "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"),
         existing_file(subject, "_thickness_vs_distance_from_fovea_LIGHT.txt"),
     )
     temporal_candidates = (
         existing_file(subject, "temporal", "_thickness_vs_distance_from_fovea_LIGHT2.txt"),
+        existing_file(subject, "temporal", "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"),
         existing_file(subject, "temporal", "_thickness_vs_distance_from_fovea_LIGHT.txt"),
         existing_file(subject, "temporal", "rrMCPAR", "_thickness_vs_distance_from_fovea_LIGHT2.txt"),
+        existing_file(subject, "temporal", "rrMCPAR", "_thickness_vs_distance_from_fovea_LIGHT2.xlsx"),
         existing_file(subject, "temporal", "rrMCPAR", "_thickness_vs_distance_from_fovea_LIGHT.txt"),
     )
 
@@ -306,7 +334,7 @@ def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
             for filename in filenames:
                 lower = filename.lower()
                 if (
-                    lower.endswith(".txt")
+                    lower.endswith((".txt", ".xlsx"))
                     and "thickness" in lower
                     and "distance" in lower
                     and "fovea" in lower
@@ -314,7 +342,7 @@ def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
                     and not _is_light_profile_file(filename)
                 ):
                     all_text_files.append(os.path.join(root, filename))
-        all_text_files.sort(key=lambda path: (_is_legacy_light_file(path), path.lower()))
+        all_text_files.sort(key=lambda path: (_light_file_priority(path), path.lower()))
         for filepath in all_text_files:
             relative_parts = Path(os.path.relpath(filepath, subject)).parts[:-1]
             is_temporal = any(part.lower() in ("temporal", "temp") for part in relative_parts)
@@ -326,23 +354,10 @@ def find_light_files(subject_path: PathLike) -> tuple[str | None, str | None]:
     return nasal_file, temporal_file
 
 
-def clean_light_thickness_file(light_path: PathLike | None) -> str | None:
-    """Apply legacy ELM-RPE row cleanup atomically to the original LIGHT file.
-
-    Historical LIGHT2 inputs are already cleaned and remain read-only. ONL uses
-    the same retained rows as ELM-RPE, preserving the former compilation order.
-    """
-
-    if not light_path:
-        return None
-    path = os.fspath(light_path)
-    if "light2" in os.path.basename(path).lower():
-        return path
-
-    rows = read_tsv_rows(path)
+def _clean_light_rows(rows: list[list]) -> list[list]:
+    """Retain the legacy ELM column-3 filter and the first distance-zero row."""
     if not rows:
-        return path
-
+        return []
     cleaned = [rows[0]]
     kept_zero = False
     for row in rows[1:]:
@@ -357,27 +372,133 @@ def clean_light_thickness_file(light_path: PathLike | None) -> str | None:
         if value is not None:
             cleaned.append(row)
 
-    if rows == cleaned:
-        return path
+    return cleaned
 
-    source = Path(path)
+
+def read_thickness_rows(filepath: PathLike) -> list[list]:
+    """Read raw/legacy text and cleaned Excel without changing either source."""
+    if Path(filepath).suffix.lower() != ".xlsx":
+        return read_tsv_rows(filepath)
+    workbook = load_workbook(filepath, read_only=True, data_only=True)
+    try:
+        return [list(row) for row in workbook.active.iter_rows(values_only=True)]
+    finally:
+        workbook.close()
+
+
+def _excel_thickness_value(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() == "NA":
+        return None
+    number = parse_float_or_none(value)
+    if number is not None:
+        # Excel has no numeric NaN/Inf representation. Retain these tokens as
+        # text so the compiler preserves its legacy parsing/mean semantics.
+        return number if math.isfinite(number) else str(value)
+    return str(value)
+
+
+def _remove_replaced_light2_text(source: Path, destination: Path) -> None:
+    """Remove only the obsolete sibling after raw LIGHT has a cleaned workbook."""
+    if source.suffix.lower() != ".txt" or "light2" in source.name.lower():
+        return
+    obsolete = destination.with_suffix(".txt")
+    if obsolete.is_file() and obsolete.resolve() != source.resolve():
+        try:
+            obsolete.unlink()
+        except OSError as error:
+            _LOGGER.warning("Could not remove obsolete cleaned thickness text %s: %s", obsolete, error)
+
+
+def _cleaned_light_workbook_path(source: Path) -> Path:
+    if source.suffix.lower() == ".xlsx":
+        return source
+    name = source.stem
+    if "light2" not in name.lower():
+        name = re.sub(r"LIGHT$", "LIGHT2", name, flags=re.IGNORECASE)
+        if not name.lower().endswith("light2"):
+            name += "2"
+    return source.with_name(name + ".xlsx")
+
+
+def create_cleaned_light_thickness_workbook(light_path: PathLike | None) -> str | None:
+    """Save cleaned LIGHT2.xlsx atomically while preserving the raw LIGHT.txt.
+
+    ONL uses the same retained rows as ELM-RPE, matching the former cleanup.
+    Numeric cells retain measurement precision and missing values become blank.
+    A supplied historical LIGHT2 text table is already cleaned and is converted
+    without filtering it again.
+    """
+    if not light_path:
+        return None
+    source = Path(light_path)
+    if source.suffix.lower() == ".xlsx":
+        return str(source)
+
+    rows = read_tsv_rows(source)
+    cleaned = rows if "light2" in source.name.lower() else _clean_light_rows(rows)
+    excel_rows = ([list(cleaned[0])] if cleaned else []) + [
+        [_excel_thickness_value(value) for value in row] for row in cleaned[1:]
+    ]
+    destination = _cleaned_light_workbook_path(source)
+
+    # Repeated measure extraction must not rewrite a current Excel workbook.
+    if destination.is_file():
+        try:
+            existing = read_thickness_rows(destination)
+        except (OSError, ValueError, KeyError, BadZipFile):
+            existing = None
+        if existing is not None:
+            width = max((len(row) for row in excel_rows), default=0)
+            expected = [row + [None] * (width - len(row)) for row in excel_rows]
+            if existing == expected:
+                _remove_replaced_light2_text(source, destination)
+                return str(destination)
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "LIGHT2"
+    for row in excel_rows:
+        worksheet.append(row)
+    for row in worksheet:
+        for cell in row:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+    worksheet.freeze_panes = "A2"
+    if excel_rows:
+        worksheet.auto_filter.ref = worksheet.dimensions
+        for cell in worksheet[1]:
+            cell.font = Font(bold=True)
     temporary_path = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f".{source.name}.", suffix=".tmp", dir=source.parent,
+            prefix=f".{destination.stem}.", suffix=".xlsx", dir=source.parent,
         )
         temporary_path = Path(temporary_name)
         os.close(descriptor)
-        write_tsv_rows(temporary_path, cleaned)
-        os.replace(temporary_path, source)
+        workbook.save(temporary_path)
+        os.replace(temporary_path, destination)
     finally:
+        workbook.close()
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
-    return path
+    _remove_replaced_light2_text(source, destination)
+    return str(destination)
+
+
+def clean_light_thickness_file(light_path: PathLike | None) -> str | None:
+    """Use cleaned Excel, retaining historical LIGHT2.txt as read-only fallback."""
+    if not light_path:
+        return None
+    if "light2" in os.path.basename(light_path).lower() and Path(light_path).suffix.lower() == ".txt":
+        return os.fspath(light_path)
+    return create_cleaned_light_thickness_workbook(light_path)
 
 
 def make_light2_from_light(light_path: PathLike | None, required_col: int) -> str | None:
-    """Compatibility entry point; clean LIGHT in place using ELM-RPE column 3."""
+    """Compatibility entry point; save Excel using ELM-RPE column 3 cleanup."""
     return clean_light_thickness_file(light_path)
 
 
@@ -388,7 +509,7 @@ def get_column_values(light_path: PathLike | None, column_index: int) -> list[fl
     if not os.path.isfile(path):
         return []
     values = []
-    for row in read_tsv_rows(path)[1:]:
+    for row in read_thickness_rows(path)[1:]:
         if len(row) < column_index:
             continue
         value = parse_float_or_none(row[column_index - 1])
@@ -487,18 +608,18 @@ def extract_elmrpe_onl_from_subject(
     return (
         nasal_blocks,
         temporal_blocks,
-        nasal_file,
-        temporal_file,
+        nasal_light,
+        temporal_light,
         len(nasal_values),
         len(temporal_values),
     )
 
 
 def find_subject_folders(root_folder: PathLike) -> dict[str, dict[str, str]]:
-    """Find side workbooks, then use their subject and group folder names.
+    """Find side measurement records, then use their subject and group names.
 
     Other subject subfolders never become subjects themselves. A subject with
-    only thickness text files is ignored; one side's workbook is sufficient.
+    only thickness tables is ignored; one side's Step 4 measurements suffice.
     """
     subject_folders: dict[str, dict[str, str]] = {}
     for directory, subdirectories, _filenames in walk_unique_directories(
@@ -694,7 +815,7 @@ def compile_step4_results(
 
     emit(f"Root folder: {root}")
     emit(f"Include fovea in ELM-RPE: {bool(include_fovea)}\n")
-    emit("Searching recursively for nasal and temporal Excel results...")
+    emit("Searching recursively for nasal and temporal Step 4 measurements...")
     report_progress(0, 1, "Scanning input folders...")
     subject_folders = find_subject_folders(root)
     group_ids = {
@@ -705,17 +826,29 @@ def compile_step4_results(
         emit(f"{group_name} subject(s) found: {', '.join(ids)}")
     if not group_ids:
         raise ValueError(
-            "No subject folders with nasal or temporal Excel results were found. "
-            "Expected: group / subject / nasal or temporal / Excel workbook (.xlsx). "
-            "Folders without Excel results are ignored."
+            "No subject folders with nasal or temporal Step 4 measurements were found. "
+            "Expected: group / subject / nasal or temporal / ROI_to_move_stck.tif "
+            "with saved measurements, or a compatible legacy Excel workbook (.xlsx). "
+            "Folders without Step 4 measurements are ignored."
         )
 
-    # A custom destination must never replace one of the source workbooks.
+    # A custom destination must never replace a source measurement record.
     for subjects in subject_folders.values():
         for subject in subjects.values():
             for source_file in find_nasal_temporal_results(subject):
                 if source_file and Path(source_file).resolve() == output.resolve():
-                    raise ValueError("Choose an output path different from the input Excel result files.")
+                    raise ValueError("Choose an output path different from the input measurement result files.")
+            # Thickness is now also an Excel input. Protect both an existing
+            # selected table and the destination about to be created from raw
+            # LIGHT text, before any extraction or save can change these files.
+            for thickness_file in find_light_files(subject):
+                if not thickness_file:
+                    continue
+                cleaned_output = _cleaned_light_workbook_path(Path(thickness_file))
+                if cleaned_output.resolve() == output.resolve():
+                    raise ValueError(
+                        "Choose an output path different from the input thickness Excel files."
+                    )
 
     total_subjects = sum(len(ids) for ids in group_ids.values())
     total_steps = 2 + (len(SHEET_NAMES) * total_subjects)
@@ -799,6 +932,7 @@ __all__ = [
     "block_means",
     "classify_eye_from_path",
     "compile_step4_results",
+    "create_cleaned_light_thickness_workbook",
     "extract_fovea_value",
     "find_results_file",
     "find_subject_folders",

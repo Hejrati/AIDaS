@@ -184,7 +184,7 @@ class Step5ScanCycleTests(unittest.TestCase):
                 compiled.close()
             self.assertEqual(find_light_files(subject), (str(thickness), None))
             inventory = scan_measurement_directory(root, output_path=output)
-            self.assertEqual((inventory.workbooks, inventory.thickness_files), (1, 1))
+            self.assertEqual((inventory.workbooks, inventory.thickness_files), (1, 2))
 
     def test_thickness_search_preserves_priorities_and_ignores_hidden_profiles(self):
         with tempfile.TemporaryDirectory() as temporary:

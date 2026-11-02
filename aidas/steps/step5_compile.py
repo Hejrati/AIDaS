@@ -30,7 +30,6 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
     """Dedicated final-step UI for compiling Step 3 and Step 4 results."""
 
     EVENT_POLL_MS = 75
-    MAX_AUTOMATIC_COMPILE_ATTEMPTS = 5
     MAX_MISSING_COMPLETION_POLLS = 5
     COMPILER_PROGRESS_MESSAGE = "Creating the Excel file…"
 
@@ -50,8 +49,6 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._running = False
         self._output_user_selected = False
         self._pending_step4_handoffs = []
-        self._automatic_compile_attempts = {}
-        self._active_step4_handoff = None
         self._poll_after_id = None
         self._polling_compile_events = False
         self._handling_completion = False
@@ -114,22 +111,17 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
 
     @classmethod
     def _measurement_root(cls, folder: str | os.PathLike) -> Path:
-        """Promote a Step 4 side/subject folder to include its group."""
+        """Keep a selected subject; resolve side/export children to that subject."""
         path = cls._expanded_path(folder)
         for ancestor in (path, *path.parents):
             if ancestor.name.strip().lower() in ("nasal", "temporal"):
-                return ancestor.parent.parent
-        if path.is_dir() and any(
-            child.is_dir() and child.name.strip().lower() in ("nasal", "temporal")
-            for child in path.iterdir()
-        ):
-            return path.parent
+                return ancestor.parent
         return path
 
     def start_from_step4(
         self, folder: str | os.PathLike | None = None, *, _generation=None,
     ) -> None:
-        """Accept the workflow handoff and start one background compilation."""
+        """Prepare the Step 4 folders; only the Create Excel File button runs work."""
         if self.__dict__.get("_closing", False):
             return
         source = self.source_step
@@ -156,34 +148,15 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             getattr(source, "_step5_handoff_generation", 0)
             if _generation is None else _generation
         )
-        key = (os.path.normcase(str(root)), generation)
-        if key == self.__dict__.get("_active_step4_handoff"):
-            return
-        attempts = self.__dict__.setdefault("_automatic_compile_attempts", {})
-        if attempts.get(key, 0) >= self.MAX_AUTOMATIC_COMPILE_ATTEMPTS:
-            self.status_var.set(
-                "Automatic Excel creation stopped after 5 attempts for this input. "
-                "Use Create Excel File to run again."
-            )
-            return
         if self._running or self.__dict__.get("_handling_completion", False):
             pending = self.__dict__.setdefault("_pending_step4_handoffs", [])
-            request = (root, generation)
-            if request not in pending:
-                pending.append(request)
+            # Keep the latest requested folder without changing the inputs of
+            # the user's active run. Applying it later only updates the view.
+            pending[:] = [(root, generation)]
             self._ensure_event_poll()
             return
-        if not self.set_input_folder(root):
-            return
-        attempts[key] = attempts.get(key, 0) + 1
-        self._active_step4_handoff = key
-        self._automatic_compile_start = True
-        try:
-            self._run_clicked()
-        finally:
-            self._automatic_compile_start = False
-            if not self._running:
-                self._active_step4_handoff = None
+        self.__dict__.get("_pending_step4_handoffs", []).clear()
+        self.set_input_folder(root)
 
     def _build_ui(self) -> None:
         self.build_standard_layout(
@@ -195,15 +168,30 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             pady=(0, LAYOUT.space_xs),
         )
         input_group = input_section.body
-        ttk.Label(
+        self.input_description_label = ttk.Label(
             input_group,
             text=(
-                "Choose a folder to search recursively for nasal and temporal Excel results. "
+                "Choose a folder to search recursively for nasal and temporal measurement results. "
                 "Their parent folder supplies the subject ID; its parent supplies the group name."
             ),
             justify="left",
+            anchor="w",
+            padding=0,
             wraplength=self.SIDEBAR_TEXT_WRAP,
-        ).pack(fill="x", pady=(0, LAYOUT.space_xs))
+        )
+        self.input_description_label.pack(fill="x", pady=(0, LAYOUT.space_sm))
+
+        def wrap_input_description(event):
+            # The card's insets and scrollbar rail reduce the usable width,
+            # especially with display scaling or a narrow application window.
+            # Native labels keep their configured wrap even when packed smaller.
+            if event.width <= 1:
+                return
+            wraplength = max(1, event.width - 2 * LAYOUT.space_xs)
+            if int(self.input_description_label.cget("wraplength")) != wraplength:
+                self.input_description_label.configure(wraplength=wraplength)
+
+        self.input_description_label.bind("<Configure>", wrap_input_description, add="+")
         input_row = ttk.Frame(input_group)
         input_row.pack(fill="x")
         self.input_entry = ttk.Entry(input_row, textvariable=self.input_var)
@@ -435,9 +423,6 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         paths = self._validated_paths()
         if paths is None:
             return
-        if not self.__dict__.get("_automatic_compile_start", False):
-            self.__dict__.setdefault("_automatic_compile_attempts", {}).clear()
-            self._active_step4_handoff = None
         self._start_compiler(
             *paths, bool(self.include_fovea_var.get()),
             thread_name="aidas-step5-compiler",
@@ -559,7 +544,6 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             if callable(callback):
                 callback(result_path)
         finally:
-            self._active_step4_handoff = None
             self._handling_completion = False
 
     def _compilation_failed(self, error: object) -> None:
@@ -569,7 +553,6 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self.status_var.set(f"Could not create the Excel file: {error}")
             messagebox.showerror("Excel file creation failed", str(error), parent=self)
         finally:
-            self._active_step4_handoff = None
             self._handling_completion = False
 
     def destroy(self):

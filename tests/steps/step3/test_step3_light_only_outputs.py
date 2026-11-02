@@ -82,7 +82,9 @@ class Step3LightOnlyOutputsTests(unittest.TestCase):
         self.assertNotEqual(result["returncode"], 0)
         self.assertIn("_thickness_vs_distance_from_fovea_LIGHT.txt", result["stdout"])
 
-    def test_success_publishes_the_cleaned_table_under_the_original_light_filename(self):
+    def test_success_keeps_raw_light_text_and_saves_the_cleaned_table_as_excel(self):
+        from openpyxl import load_workbook
+
         path = self.folder / "_thickness_vs_distance_from_fovea_LIGHT.txt"
         path.write_text(
             "Distance\tWhole\tELM\tONL\n"
@@ -92,6 +94,7 @@ class Step3LightOnlyOutputsTests(unittest.TestCase):
             "1\tNA\t20.500\t40.750\n",
             encoding="utf-8",
         )
+        original = path.read_bytes()
 
         result = self.frame._finalize_r_script_result(
             self.config, {"returncode": 0, "outcome": "completed"},
@@ -99,20 +102,28 @@ class Step3LightOnlyOutputsTests(unittest.TestCase):
         )
 
         self.assertEqual(result["returncode"], 0, result.get("stdout"))
-        self.assertEqual(path.read_text(encoding="utf-8").splitlines(), [
-            "Distance\tWhole\tELM\tONL",
-            "-1\tNA\t10.250\tNA",
-            "0\tNA\tNA\tNA",
-            "1\tNA\t20.500\t40.750",
-        ])
-        self.assertEqual([saved.name for saved in self.folder.iterdir()], [path.name])
+        self.assertEqual(path.read_bytes(), original)
+        cleaned = path.with_name("_thickness_vs_distance_from_fovea_LIGHT2.xlsx")
+        workbook = load_workbook(cleaned, data_only=True)
+        try:
+            self.assertEqual(list(workbook.active.values), [
+                ("Distance", "Whole", "ELM", "ONL"),
+                (-1, None, 10.25, None),
+                (0, None, None, None),
+                (1, None, 20.5, 40.75),
+            ])
+        finally:
+            workbook.close()
+        self.assertEqual({saved.name for saved in self.folder.iterdir()}, {path.name, cleaned.name})
 
-    def test_cleanup_failure_does_not_report_a_successful_r_run(self):
+    def test_excel_save_failure_preserves_raw_and_obsolete_outputs(self):
         path = self.folder / "_thickness_vs_distance_from_fovea_LIGHT.txt"
         original = b"Distance\tWhole\tELM\n1\tNA\tNA\n"
         path.write_bytes(original)
+        obsolete = self.folder / "_flat_DARK.img"
+        obsolete.write_bytes(b"prior completed output")
         with mock.patch(
-            "aidas.services.step4_compiler.clean_light_thickness_file",
+            "aidas.services.step4_compiler.create_cleaned_light_thickness_workbook",
             side_effect=OSError("cannot replace thickness file"),
         ):
             result = self.frame._finalize_r_script_result(
@@ -122,8 +133,37 @@ class Step3LightOnlyOutputsTests(unittest.TestCase):
 
         self.assertNotEqual(result["returncode"], 0)
         self.assertEqual(result["outcome"], "failed")
-        self.assertIn("Could not save cleaned LIGHT thickness export", result["stdout"])
+        self.assertIn("Could not save cleaned LIGHT2 Excel thickness export", result["stdout"])
         self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(obsolete.read_bytes(), b"prior completed output")
+
+    def test_success_removes_obsolete_dark_exports_and_preserves_original_input(self):
+        raw = self.folder / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+        raw.write_text("Distance\tWhole\tELM\n1\tNA\t12.5\n", encoding="utf-8")
+        obsolete = self.folder / "_flat_DARK.img"
+        obsolete.write_bytes(b"old generated image")
+        dark_input = self.folder / "DARK.img"
+        dark_input.write_bytes(b"original input")
+
+        result = self.frame._finalize_r_script_result(
+            self.config, {"returncode": 0, "outcome": "completed"},
+            validate_exports=True,
+        )
+
+        self.assertEqual(result["returncode"], 0, result.get("stdout"))
+        self.assertFalse(obsolete.exists())
+        self.assertEqual(dark_input.read_bytes(), b"original input")
+        self.assertIn("Removed 1 obsolete generated DARK output", result["stdout"])
+
+    def test_failed_r_run_keeps_previous_dark_exports(self):
+        obsolete = self.folder / "_flat_DARK.img"
+        obsolete.write_bytes(b"prior completed output")
+        result = self.frame._finalize_r_script_result(
+            self.config, {"returncode": 1, "outcome": "failed"},
+            validate_exports=True,
+        )
+        self.assertEqual(result["returncode"], 1)
+        self.assertEqual(obsolete.read_bytes(), b"prior completed output")
 
     def test_current_result_previews_and_workspaces_use_light_names(self):
         names = [filename for _title, filename in Step3Frame.RESULT_IMAGE_ROWS]

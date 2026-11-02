@@ -1184,7 +1184,7 @@ class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
             command=self._toggle_all_ready,
         )
         self.tree.heading("folder", text="Folder")
-        self.tree.heading("status", text="Status")
+        self.tree.heading("status", text="Status", anchor="center")
         self.tree.heading("inputs", text="Inputs")
 
         self.tree.column("#0", width=40, minwidth=40, stretch=False, anchor="center")
@@ -1195,7 +1195,7 @@ class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
             stretch=False,
             anchor="w",
         )
-        self.tree.column("status", width=360, minwidth=120, stretch=False, anchor="w")
+        self.tree.column("status", width=360, minwidth=120, stretch=False, anchor="center")
         self.tree.column("inputs", width=72, minwidth=60, stretch=False, anchor="center")
 
         self.tree.tag_configure("locked", foreground="#6b7280")
@@ -2102,6 +2102,14 @@ class RBatchRunPanel(ttk.Frame):
             height=visible_step_rows,
             wrap="word",
             state="disabled",
+            # Native Text widgets need their palette at construction. The
+            # shared appearance refresh keeps these same tokens live later.
+            background=COLORS.surface_subtle,
+            foreground=COLORS.text,
+            insertbackground=COLORS.text,
+            selectbackground=COLORS.primary,
+            selectforeground=COLORS.on_primary,
+            highlightbackground=COLORS.border_strong,
         )
         step_scroll = ttk.Scrollbar(step_frame, orient="vertical", command=self.step_text.yview)
         self.step_text.configure(yscrollcommand=step_scroll.set)
@@ -2448,7 +2456,7 @@ class Step3Frame(SidebarStepFrame):
     R_DEEP_LAYERS_SCRIPT_NAME = DEEP_LAYERS_R_SCRIPT_NAME
     R_DEEP_LAYERS_OUTPUT_SCRIPT_NAME = DEEP_LAYERS_R_OUTPUT_SCRIPT_NAME
     R_OPTIMIZED_ENABLED = OPTIMIZED_R_SCRIPTS_ENABLED
-    R_SCRIPT_DEFAULTS_VERSION = 1
+    R_SCRIPT_DEFAULTS_VERSION = 2
     R_OUTPUT_SCRIPT_NAME = "more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited.R"
     R_OUTPUT_MODE_PARALLEL = "parallel"
     R_OUTPUT_MODE_SEQUENTIAL = "sequential"
@@ -2870,25 +2878,29 @@ class Step3Frame(SidebarStepFrame):
         return self._import_user_r_script(source_path, role)
 
     def _migrate_r_script_defaults(self):
-        """Upgrade saved bundled defaults once, preserving later user choices."""
+        """Upgrade earlier bundled defaults to deeper layers once per role."""
 
         if self.preferences is None or not self.R_OPTIMIZED_ENABLED:
             return
         for role in ("main", "output"):
             version_key = f"r_{role}_script_defaults_version"
-            if self.preferences.get(version_key, 0) not in (None, 0):
+            saved_version = self.preferences.get(version_key, 0)
+            if saved_version not in (None, 0, 1):
                 continue
             default = self._script_path(role)
             if not default.is_file():
-                # Retry after an optimized bundle becomes available.
+                # Retry after the deeper-layer bundle becomes available.
                 continue
             preference_key = f"r_{role}_script_path"
             configured = self.preferences.get(preference_key)
-            original_name = self.R_SCRIPT_NAME if role == "main" else self.R_OUTPUT_SCRIPT_NAME
-            original = default.with_name(original_name)
-            old_defaults = {original.resolve()}
-            if role == "main":
-                old_defaults.add(original.with_name(original.stem + "_original.R").resolve())
+            optimized_name = self.R_OPTIMIZED_SCRIPT_NAME if role == "main" else self.R_OPTIMIZED_OUTPUT_SCRIPT_NAME
+            old_defaults = {default.with_name(optimized_name).resolve()}
+            if saved_version in (None, 0):
+                original_name = self.R_SCRIPT_NAME if role == "main" else self.R_OUTPUT_SCRIPT_NAME
+                original = default.with_name(original_name)
+                old_defaults.add(original.resolve())
+                if role == "main":
+                    old_defaults.add(original.with_name(original.stem + "_original.R").resolve())
             if configured and Path(configured).resolve() in old_defaults:
                 self.preferences.set(preference_key, str(default.resolve()))
             self.preferences.set(version_key, self.R_SCRIPT_DEFAULTS_VERSION)
@@ -4572,14 +4584,20 @@ class Step3Frame(SidebarStepFrame):
                 )
             else:
                 try:
-                    from aidas.services.step4_compiler import clean_light_thickness_file
+                    from aidas.services.step4_compiler import create_cleaned_light_thickness_workbook
 
                     for path in required_exports:
-                        clean_light_thickness_file(path)
+                        create_cleaned_light_thickness_workbook(path)
                 except Exception as exc:
                     returncode = 1
                     outcome = "failed"
-                    stdout += f"ERROR: Could not save cleaned LIGHT thickness export: {exc}\n"
+                    stdout += f"ERROR: Could not save cleaned LIGHT2 Excel thickness export: {exc}\n"
+                else:
+                    from aidas.services.output_cleanup import remove_legacy_dark_outputs
+
+                    removed = remove_legacy_dark_outputs(output_dir)
+                    if removed:
+                        stdout += f"Removed {len(removed)} obsolete generated DARK output file(s).\n"
 
         log_path = self._write_r_run_log(
             r_config["output_dir"],

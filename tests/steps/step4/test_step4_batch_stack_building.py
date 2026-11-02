@@ -224,9 +224,11 @@ class BatchStackBuildingTests(unittest.TestCase):
                     assert frame.build_stacks_button.cget('text') == 'Build Stack (0/2 ready to build)'
                     assert frame.continue_to_step5_button.cget('text') == 'Go to Step 5 (1/2 completed)'
                     assert 'disabled' in frame.build_stacks_button.state()
-                    for filename in ('MAX_Stack.tif', 'ROI_to_move_stck.tif', module.STEP4_RESULTS_FILENAME):
+                    for filename in ('MAX_Stack.tif', module.STEP4_RESULTS_FILENAME):
                         assert (paths[1].parent/filename).is_file(), filename
                         assert not (paths[0].parent/filename).exists()
+                    assert not (paths[1].parent/'rr_MCPAR.xlsx').exists()
+                    assert module.has_step4_measurements(paths[1].parent/module.STEP4_RESULTS_FILENAME)
                     error.assert_not_called()
                     assert not errors, errors
             finally:

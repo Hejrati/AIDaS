@@ -87,12 +87,12 @@ rm(list=ls())
 args <- commandArgs(trailingOnly=TRUE)
 setwd(args[[1]])
 load(file.path(args[[1]],"_done_DARK__and__LIGHT.RData"))
+# The app passes this policy to the unchanged original companion.
+Sys.setenv(AIDAS_LIGHT_ONLY="1")
 source(args[[2]], chdir=FALSE, echo=FALSE)
 '''
         expected_files = (
-            "_tissueBorders__DARK.png",
             "_tissueBorders__LIGHT.png",
-            "_thickness_vs_distance_from_fovea_DARK.txt",
             "_thickness_vs_distance_from_fovea_LIGHT.txt",
         )
 
@@ -114,12 +114,9 @@ source(args[[2]], chdir=FALSE, echo=FALSE)
                 output_path = workspace / filename
                 self.assertTrue(output_path.is_file(), f"Missing {filename}\n{result.stdout}")
                 self.assertGreater(output_path.stat().st_size, 0, filename)
-            for filename in ("_tissueBorders__DARK.png", "_tissueBorders__LIGHT.png"):
-                self.assertEqual((workspace / filename).read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
-            self.assertEqual(
-                (workspace / "_thickness_vs_distance_from_fovea_DARK.txt").read_text(),
-                (workspace / "_thickness_vs_distance_from_fovea_LIGHT.txt").read_text(),
-            )
+            self.assertEqual((workspace / "_tissueBorders__LIGHT.png").read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+            for filename in ("_tissueBorders__DARK.png", "_thickness_vs_distance_from_fovea_DARK.txt"):
+                self.assertFalse((workspace / filename).exists(), filename)
             self.assertFalse((workspace / "Rplots.pdf").exists(), result.stdout)
 
     def test_analyzefmri_writer_uses_the_supported_r331_file_argument(self):

@@ -42,9 +42,7 @@ from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
-import zipfile
 from io import BytesIO
-from xml.sax.saxutils import escape
 
 import customtkinter as ctk
 import numpy as np
@@ -57,6 +55,13 @@ from aidas.core.config import (
     validate_step4_auto_detection_preferences,
 )
 from aidas.core.display import centered_position, work_area_bounds
+from aidas.services.step4_results import (
+    STEP4_RESULTS_FILENAME,
+    STEP4_RESULTS_HEADERS,
+    STEP4_STACK_FILENAMES,
+    encode_step4_measurements,
+    has_step4_measurements,
+)
 from aidas.ui.batch_selection import BatchSelectionMixin
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
@@ -157,12 +162,11 @@ IMAGEJ_PLOT_BOX_ASPECT = (IMAGEJ_PLOT_BOX[3] - IMAGEJ_PLOT_BOX[1]) / (IMAGEJ_PLO
 
 # Column order and text match the ImageJ Results table produced by the macro's
 # "fit shape" measurement options and 3-decimal precision.
-RESULTS_HEADERS = [" ", "Major", "Minor", "Angle", "Circ.", "AR", "Round", "Solidity"]
-STEP4_RESULTS_FILENAME = "rr_MCPAR.xlsx"
+RESULTS_HEADERS = list(STEP4_RESULTS_HEADERS)
+STEP4_LEGACY_RESULTS_FILENAMES = ("rr_MCPAR.xlsx", "Results.xlsx", "Results_org.xlsx")
 STEP4_OUTPUT_GROUPS = (
     ("MAX_Stack.tif",),
-    ("ROI_to_move_stck.tif", "ROI_to_move_stck.tiff"),
-    (STEP4_RESULTS_FILENAME, "Results.xlsx", "Results_org.xlsx"),
+    STEP4_STACK_FILENAMES,
 )
 
 
@@ -396,14 +400,20 @@ def _nearest_local_minimum(
     x_value: float | int,
     *,
     search_radius: int = PROFILE_LOCAL_MINIMUM_RADIUS,
+    boundary: str | None = None,
 ) -> tuple[int, float]:
     """Return the deterministic minimum near a clicked 1-based sample.
 
     The search window is fixed so the same profile and click always produce the
     same boundary. If equal minima exist, the sample closest to the click wins;
-    a remaining tie is resolved toward the lower sample index.
+    a remaining tie is resolved toward the lower sample index. A selected
+    minimum plateau uses its right edge for Start and its left edge for End.
+    Only consecutive samples with exactly the same value form that plateau;
+    separate equal minima retain the click-distance rule.
     """
 
+    if boundary not in (None, "start", "end"):
+        raise ValueError(f"Unknown profile boundary: {boundary}")
     values = np.asarray(profile, dtype=np.float64).reshape(-1)
     if values.size < 1:
         raise ValueError("A profile must contain at least one value.")
@@ -431,6 +441,12 @@ def _nearest_local_minimum(
         if float(window[offset]) == minimum
     ]
     sample = min(candidates, key=lambda candidate: (abs(candidate - clicked), candidate))
+    if boundary == "start":
+        while sample < values.size and values[sample] == minimum:
+            sample += 1
+    elif boundary == "end":
+        while sample > 1 and values[sample - 2] == minimum:
+            sample -= 1
     return sample, float(values[sample - 1])
 
 
@@ -1076,8 +1092,8 @@ def analyze_and_save_roi(
 ) -> ISezResult:
     """Run the MATLAB ISez analysis for one ROI without writing files.
 
-    Confirming a ROI stores the data in memory. The ImageJ-style workbook and
-    TIFF stacks are generated only by ``_build_stack_outputs``.
+    Confirming a ROI stores the data in memory. The TIFF stacks and their
+    embedded measurements are generated only by ``_build_stack_outputs``.
     Automatic detection may pass the same ROI's already-computed profile.
     """
 
@@ -1102,103 +1118,6 @@ def analyze_and_save_roi(
         baseline_y=np.asarray(rescaled["baseline_y"], dtype=np.float64),
         manual_bounds=not adjust_bounds,
     )
-
-
-def _worksheet_cell_ref(row: int, col: int) -> str:
-    letters = ""
-    while col:
-        col, rem = divmod(col - 1, 26)
-        letters = chr(65 + rem) + letters
-    return f"{letters}{row}"
-
-
-def _xlsx_cell_xml(row: int, col: int, value) -> str:
-    ref = _worksheet_cell_ref(row, col)
-    if isinstance(value, str):
-        return f'<c r="{ref}" t="inlineStr"><is><t>{escape(value)}</t></is></c>'
-    if value is None:
-        return f'<c r="{ref}"/>'
-    return f'<c r="{ref}"><v>{float(value):.15g}</v></c>'
-
-
-def write_imagej_results_xlsx(rows: list[dict[str, float]], path: str | os.PathLike) -> None:
-    """Write the ImageJ-style Step 4 results workbook.
-
-    ImageJ's Results table is tabular text internally; the old workflow saved
-    it as an Excel workbook. This keeps the small measurement workbook writer
-    deterministic and independent from the separate multi-folder compiler.
-    The worksheet name is ``in`` and the column order follows the GT workbook
-    from ``Examples/step4``.
-    """
-
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    sheet_rows = [RESULTS_HEADERS]
-    for idx, row in enumerate(rows, start=1):
-        sheet_rows.append(
-            [
-                idx,
-                row["Major"],
-                row["Minor"],
-                row["Angle"],
-                row["Circ."],
-                row["AR"],
-                row["Round"],
-                row["Solidity"],
-            ]
-        )
-
-    last_ref = _worksheet_cell_ref(len(sheet_rows), len(RESULTS_HEADERS))
-    row_xml = []
-    for r_idx, values in enumerate(sheet_rows, start=1):
-        cells = "".join(_xlsx_cell_xml(r_idx, c_idx, value) for c_idx, value in enumerate(values, start=1))
-        row_xml.append(f'<row r="{r_idx}">{cells}</row>')
-
-    worksheet = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        f'<dimension ref="A1:{last_ref}"/>'
-        '<sheetViews><sheetView workbookViewId="0"/></sheetViews>'
-        '<sheetFormatPr defaultRowHeight="15"/>'
-        '<cols><col min="1" max="8" width="12" customWidth="1"/></cols>'
-        f'<sheetData>{"".join(row_xml)}</sheetData>'
-        '</worksheet>'
-    )
-    workbook = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
-        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
-        '<sheets><sheet name="in" sheetId="1" r:id="rId1"/></sheets>'
-        '</workbook>'
-    )
-    rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>'
-        '</Relationships>'
-    )
-    workbook_rels = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
-        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>'
-        '</Relationships>'
-    )
-    content_types = (
-        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
-        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
-        '<Default Extension="xml" ContentType="application/xml"/>'
-        '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
-        '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
-        '</Types>'
-    )
-    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("[Content_Types].xml", content_types)
-        zf.writestr("_rels/.rels", rels)
-        zf.writestr("xl/workbook.xml", workbook)
-        zf.writestr("xl/_rels/workbook.xml.rels", workbook_rels)
-        zf.writestr("xl/worksheets/sheet1.xml", worksheet)
 
 
 def _imagej_wand_mask(image: Image.Image, point: tuple[int, int] = IMAGEJ_WAND_POINT) -> np.ndarray:
@@ -3011,7 +2930,7 @@ class Step4Frame(SidebarStepFrame):
         )
 
     def _auto_continue_to_step5(self) -> None:
-        """Compile Excel once after every stack in the current run is saved."""
+        """Prepare Step 5 once after every stack in the current run is saved."""
         if (
             self.__dict__.get("_stack_building", False)
             or self.__dict__.get("_automatic_step5_handoff", False)
@@ -3339,7 +3258,6 @@ class Step4Frame(SidebarStepFrame):
             self._render_current_roi()
         self._sync_active_batch_roi_state()
         self._update_confirm_button_state()
-        self._update_active_batch_roi_tab_progress()
         self._update_build_stack_button_state()
         self._update_continue_to_step5_button_state()
         filename = self.current_path.name if self.current_path is not None else "file"
@@ -3354,8 +3272,7 @@ class Step4Frame(SidebarStepFrame):
 
     @staticmethod
     def _step4_outputs_complete(folder: str | os.PathLike) -> bool:
-        folder = Path(folder)
-        return all(any((folder / name).is_file() for name in names) for names in STEP4_OUTPUT_GROUPS)
+        return Step4Frame._step4_output_count(folder) == len(STEP4_OUTPUT_GROUPS)
 
     @staticmethod
     def _flat_light_path_for_folder(folder: Path) -> Path | None:
@@ -3370,7 +3287,17 @@ class Step4Frame(SidebarStepFrame):
     @staticmethod
     def _step4_output_count(folder: str | os.PathLike) -> int:
         folder = Path(folder)
-        return sum(any((folder / name).is_file() for name in names) for names in STEP4_OUTPUT_GROUPS)
+        count = int((folder / "MAX_Stack.tif").is_file())
+        # A plain TIFF alone cannot supply the saved measurements to Step 5.
+        # Older folders retain their original workbook as a read-only source.
+        legacy_results = any((folder / name).is_file() for name in STEP4_LEGACY_RESULTS_FILENAMES)
+        if any(
+            (folder / name).is_file()
+            and (legacy_results or has_step4_measurements(folder / name))
+            for name in STEP4_STACK_FILENAMES
+        ):
+            count += 1
+        return count
 
     def _scan_batch_roi_folders(self, root_dir: str | os.PathLike) -> tuple[list[dict], int, int, list]:
         root = Path(root_dir)
@@ -3403,7 +3330,7 @@ class Step4Frame(SidebarStepFrame):
                         "include": False,
                         "locked": True,
                         "status": "Already complete",
-                        "outputs": "3/3",
+                        "outputs": f"{len(STEP4_OUTPUT_GROUPS)}/{len(STEP4_OUTPUT_GROUPS)}",
                     }
                 )
                 continue
@@ -3414,7 +3341,7 @@ class Step4Frame(SidebarStepFrame):
                     "include": True,
                     "locked": False,
                     "status": "Ready",
-                    "outputs": f"{output_count}/3",
+                    "outputs": f"{output_count}/{len(STEP4_OUTPUT_GROUPS)}",
                 }
             )
         return rows, scanned, skipped_without_flat_light, access_errors
@@ -3567,11 +3494,6 @@ class Step4Frame(SidebarStepFrame):
             close_command=self._close_batch_roi_tab,
         )
         notebook.pack(fill="both", expand=True)
-        notebook.bind(
-            "<Configure>",
-            lambda _event: self._refresh_batch_roi_tab_labels(),
-            add="+",
-        )
         self.batch_roi_notebook = notebook
 
         def create_tabs():
@@ -3789,7 +3711,6 @@ class Step4Frame(SidebarStepFrame):
                 # ROI 21 is always manual, so only count other review flags.
                 if any(suffix != manual_only_suffix for suffix in reviews):
                     flagged += 1
-            self._refresh_batch_roi_tab_labels()
             return len(auto_results), flagged
 
         def prepare_first_file(path):
@@ -3939,76 +3860,10 @@ class Step4Frame(SidebarStepFrame):
         self._warm_batch_roi_tools()
         self._batch_roi_open_after_id = self.after(10, open_next_tab)
 
-    def _batch_roi_tab_name_limit(self) -> int:
-        notebook = self.batch_roi_notebook
-        if notebook is None:
-            return 18
-        try:
-            tab_count = max(1, len(notebook.tabs()))
-            width = max(260, notebook.winfo_width())
-        except tk.TclError:
-            return 18
-        per_tab = max(70, width // tab_count)
-        return max(6, min(18, (per_tab - 54) // 7))
-
-    @staticmethod
-    def _compact_batch_roi_name(name: str, limit: int) -> str:
-        name = str(name or "Folder")
-        if len(name) <= limit:
-            return name
-        if limit <= 3:
-            return name[:limit]
-        return f"{name[: limit - 3]}..."
-
-    def _batch_roi_tab_text(
-        self,
-        state: dict,
-        done: int | None = None,
-        *,
-        active: bool = False,
-        name_limit: int | None = None,
-    ) -> str:
-        total = len(self.rois)
-        if done is None:
-            done = len(state.get("completed") or {})
+    def _batch_roi_tab_text(self, state: dict) -> str:
+        """Keep folder titles fixed; ROI progress is shown in the controls."""
         folder = state.get("folder")
-        raw_label = state.get("base_label") or (folder.name if folder else "Folder")
-        if name_limit is None:
-            name_limit = self._batch_roi_tab_name_limit()
-        if ". " in raw_label:
-            prefix, name = raw_label.split(". ", 1)
-            tab_name = name if active else self._compact_batch_roi_name(name, name_limit)
-            label = f"{prefix}. {tab_name}"
-        else:
-            label = raw_label if active else self._compact_batch_roi_name(raw_label, name_limit)
-        done_prefix = "[Done] " if state.get("complete") or done >= total else ""
-        return f"{done_prefix}{label} ({done}/{total})"
-
-    def _refresh_batch_roi_tab_labels(self, tab_ids=None) -> None:
-        notebook = self.batch_roi_notebook
-        if notebook is None:
-            return
-        if tab_ids is None:
-            tab_ids = notebook.tabs()
-        name_limit = self._batch_roi_tab_name_limit()
-        for tab_id in tab_ids:
-            tab_key = str(tab_id)
-            state = self.batch_roi_tab_states.get(tab_key)
-            if state is None:
-                continue
-            done = len(state.get("completed") or {})
-            active = tab_key == self._active_batch_roi_tab
-            try:
-                next_text = self._batch_roi_tab_text(
-                    state,
-                    done,
-                    active=active,
-                    name_limit=name_limit,
-                )
-                if notebook.tab(tab_id, "text") != next_text:
-                    notebook.tab(tab_id, text=next_text)
-            except tk.TclError:
-                pass
+        return str(state.get("base_label") or (folder.name if folder else "Folder"))
 
     @staticmethod
     def _plot_theme_signature() -> tuple[str, ...]:
@@ -4047,6 +3902,18 @@ class Step4Frame(SidebarStepFrame):
         state = self.batch_roi_tab_states.get(tab_key)
         if state is None:
             return
+        if (
+            tab_key == self._active_batch_roi_tab
+            and state.get("loaded")
+            and state.get("canvas") is not None
+            and state.get("canvas") is getattr(self, "canvas", None)
+            and state.get("plot_theme_signature") == self._plot_theme_signature()
+        ):
+            try:
+                if self.canvas.get_tk_widget().winfo_exists():
+                    return
+            except tk.TclError:
+                pass
         if tab_key != self._active_batch_roi_tab:
             if getattr(self, "_auto_detecting", False) or getattr(self, "_stack_building", False):
                 self._hide_grid_notice()
@@ -4056,18 +3923,12 @@ class Step4Frame(SidebarStepFrame):
         self._hide_roi_grid_hint()
         self._cancel_roi_update_animations(redraw=True)
         self._sync_active_batch_roi_state()
-        previous_tab_key = self._active_batch_roi_tab
         self._active_batch_roi_tab = tab_key
         self._stack_build_complete = bool(state.get("complete"))
-        self._refresh_batch_roi_tab_labels(
-            tab_id
-            for tab_id in (previous_tab_key, tab_key)
-            if tab_id is not None
-        )
         self.plot_holder = tab
-        self._set_batch_folder_label(state.get("folder"))
         if state.get("loaded") and self._restore_batch_roi_tab_from_cache(state):
             return
+        self._set_batch_folder_label(state.get("folder"))
         self.canvas = None
         self.figure = None
         self.ax_profile = None
@@ -4115,7 +3976,6 @@ class Step4Frame(SidebarStepFrame):
         self._set_batch_folder_label(state.get("folder"))
         self._sync_entry_vars_from_clicks()
         self._refresh_roi_list()
-        self._select_roi_in_list()
         if state.get("plot_theme_signature") != self._plot_theme_signature():
             # Hidden tabs retain their Matplotlib artists. Redraw only if the
             # application appearance changed while this tab was inactive.
@@ -4129,6 +3989,7 @@ class Step4Frame(SidebarStepFrame):
             f"Loaded {self.current_path}. {self._line_positioning_hint()}"
         )
         self._refresh_completion_notice_progress()
+        self._update_continue_to_step5_button_state()
         return True
 
     def _close_batch_roi_tab(self, notebook, tab) -> None:
@@ -4160,20 +4021,6 @@ class Step4Frame(SidebarStepFrame):
 
         self._update_build_stack_button_state()
 
-    def _update_active_batch_roi_tab_progress(self) -> None:
-        tab_key = self._active_batch_roi_tab
-        notebook = self.batch_roi_notebook
-        if not tab_key or notebook is None:
-            return
-        state = self.batch_roi_tab_states.get(tab_key)
-        if state is None:
-            return
-        done = len(state.get("completed") or self.completed)
-        try:
-            notebook.tab(tab_key, text=self._batch_roi_tab_text(state, done, active=True))
-        except tk.TclError:
-            pass
-
     def _mark_active_batch_roi_complete(self) -> None:
         tab_key = self._active_batch_roi_tab
         if not tab_key:
@@ -4183,7 +4030,6 @@ class Step4Frame(SidebarStepFrame):
             return
         state["complete"] = True
         self._sync_active_batch_roi_state()
-        self._update_active_batch_roi_tab_progress()
 
     def _select_next_incomplete_batch_roi_tab(self) -> bool:
         notebook = self.batch_roi_notebook
@@ -4295,7 +4141,6 @@ class Step4Frame(SidebarStepFrame):
             self._render_current_roi()
             restore_state["loaded"] = True
             self._sync_active_batch_roi_state()
-            self._update_active_batch_roi_tab_progress()
 
         if restore_state is not None or self.batch_roi_paths:
             self._set_batch_folder_label(self.current_path.parent)
@@ -4407,8 +4252,10 @@ class Step4Frame(SidebarStepFrame):
         self.roi_table.see(iid)
         self.after_idle(lambda: setattr(self, "_updating_roi_selection", False))
 
-    def _roi_metric_values(self, roi: ISezROI) -> tuple[str, ...]:
-        result = self.completed.get(roi.suffix)
+    @staticmethod
+    def _result_metric_values(result: ISezResult | None) -> tuple[str, ...]:
+        """Measure a result using only worker-safe image and numeric operations."""
+
         if result is None:
             return tuple("" for _name in RESULTS_HEADERS[1:])
         try:
@@ -4425,12 +4272,16 @@ class Step4Frame(SidebarStepFrame):
             cached = getattr(result, "_aidas_metric_values", None)
             if cached is not None and cached[0] == signature:
                 return cached[1]
-            measurements = imagej_shape_measurements_from_frame(make_isez_plot_image(result))
+            with make_isez_plot_image(result) as image:
+                measurements = imagej_shape_measurements_from_frame(image)
             values = tuple(f"{float(measurements.get(name, 0.0)):.3f}" for name in RESULTS_HEADERS[1:])
             result._aidas_metric_values = (signature, values)
         except Exception:
             return tuple("" for _name in RESULTS_HEADERS[1:])
         return values
+
+    def _roi_metric_values(self, roi: ISezROI) -> tuple[str, ...]:
+        return self._result_metric_values(self.completed.get(roi.suffix))
 
     def _refresh_roi_list(self) -> None:
         if self.roi_table is None:
@@ -4517,6 +4368,7 @@ class Step4Frame(SidebarStepFrame):
             widget._aidas_line_positioning_checkbox,
             "Checked: keep Start and End where you place them. "
             "Unchecked: position them at nearby minima. "
+            "On a flat minimum, Start uses the right edge and End the left edge. "
             "Applies to new placements and corrections on this plot.",
         )
 
@@ -4907,6 +4759,47 @@ class Step4Frame(SidebarStepFrame):
 
         flash()
 
+    def _preserve_main_profile_plateau_edges(self) -> None:
+        """Keep snapped flat minima after the MATLAB endpoint adjustment.
+
+        Apply the existing adjustment once, retaining its result for any
+        non-plateau endpoint. Store the resulting pair as exact bounds so later
+        previews and saves cannot move a selected plateau edge again.
+        """
+        values = self._current_profile
+        if values.size < 4:
+            return
+        start, end = (int(sample) for sample in self.profile_clicks[:2])
+        plateau_edges = []
+        for sample, boundary in ((start, "start"), (end, "end")):
+            value = values[sample - 1]
+            on_plateau = np.isfinite(value) and (
+                (sample > 1 and values[sample - 2] == value)
+                or (sample < values.size and values[sample] == value)
+            )
+            edge = None
+            if on_plateau:
+                left = _nearest_local_minimum(values, sample, search_radius=0, boundary="end")[0]
+                right = _nearest_local_minimum(values, sample, search_radius=0, boundary="start")[0]
+                is_minimum = (
+                    (left == 1 or values[left - 2] >= value)
+                    and (right == values.size or values[right] >= value)
+                )
+                if is_minimum:
+                    edge = right if boundary == "start" else left
+            plateau_edges.append(edge)
+        if all(edge is None for edge in plateau_edges):
+            return
+        adjusted_start, adjusted_end, _slope = adjust_isez_bounds(values, start, end)
+        final_start = adjusted_start if plateau_edges[0] is None else plateau_edges[0]
+        final_end = adjusted_end if plateau_edges[1] is None else plateau_edges[1]
+        # A shared plateau cannot supply two inward-facing, ordered edges.
+        # Preserve the valid selection rather than crossing its boundaries.
+        if final_start >= final_end:
+            return
+        self.profile_clicks = [float(final_start), float(final_end)]
+        self._set_roi_adjustment(self._current_roi_suffix(), False)
+
     def _on_profile_click(self, event) -> None:
         if event.inaxes is self.ax_roi_grid:
             self._select_roi_from_grid_click(event)
@@ -4922,11 +4815,8 @@ class Step4Frame(SidebarStepFrame):
 
         self._close_profile_zoom()
         manual_positioning = self._line_positioning_disabled()
-        if manual_positioning:
-            click, intensity = _nearest_profile_sample(self._current_profile, event.xdata)
-        else:
-            click, intensity = _nearest_local_minimum(self._current_profile, event.xdata)
-        self._set_roi_adjustment(self._current_roi_suffix(), not manual_positioning)
+        previous_bounds = tuple(self.profile_clicks[:2])
+        previous_adjustment = self._should_adjust_roi_bounds(self._current_roi_suffix())
         if len(self.profile_clicks) >= 2:
             start, end = sorted(self.profile_clicks[:2])
             boundary = (
@@ -4934,6 +4824,16 @@ class Step4Frame(SidebarStepFrame):
                 if abs(float(event.xdata) - start) <= abs(float(event.xdata) - end)
                 else "end"
             )
+        else:
+            boundary = "start" if not self.profile_clicks else "end"
+        if manual_positioning:
+            click, intensity = _nearest_profile_sample(self._current_profile, event.xdata)
+        else:
+            click, intensity = _nearest_local_minimum(
+                self._current_profile, event.xdata, boundary=boundary,
+            )
+        self._set_roi_adjustment(self._current_roi_suffix(), not manual_positioning)
+        if len(self.profile_clicks) >= 2:
             start, end = _updated_profile_bounds(
                 start,
                 end,
@@ -4944,11 +4844,30 @@ class Step4Frame(SidebarStepFrame):
             self.profile_clicks = [float(start), float(end)]
             selection_action = f"{boundary.title()} corrected"
         else:
+            reversed_selection = bool(self.profile_clicks and click < self.profile_clicks[0])
             self.profile_clicks.append(float(click))
             if len(self.profile_clicks) == 2:
                 self.profile_clicks.sort()
+                if reversed_selection and not manual_positioning:
+                    # The main plot also accepts End before Start. Reassign
+                    # plateau edges to the final roles without another search.
+                    directed = [
+                        float(_nearest_local_minimum(
+                            self._current_profile, sample, search_radius=0, boundary=role,
+                        )[0])
+                        for sample, role in zip(self.profile_clicks, ("start", "end"))
+                    ]
+                    if directed[0] < directed[1]:
+                        self.profile_clicks = directed
             selection_action = "Start selected" if len(self.profile_clicks) == 1 else "End selected"
 
+        if not manual_positioning and len(self.profile_clicks) == 2:
+            if tuple(self.profile_clicks) == previous_bounds and not previous_adjustment:
+                # Repeating the same placement must not adjust an already
+                # finalized opposite endpoint by another sample on each click.
+                self._set_roi_adjustment(self._current_roi_suffix(), False)
+            else:
+                self._preserve_main_profile_plateau_edges()
         self._sync_entry_vars_from_clicks()
         self._remember_current_roi_clicks()
         if len(self.profile_clicks) == 1:
@@ -5213,7 +5132,6 @@ class Step4Frame(SidebarStepFrame):
         self._refresh_roi_list()
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._sync_active_batch_roi_state()
-            self._update_active_batch_roi_tab_progress()
         self._render_current_roi()
 
     def _update_confirm_button_state(self) -> None:
@@ -5260,9 +5178,17 @@ class Step4Frame(SidebarStepFrame):
     def _update_roi_action_emphasis(self, build_ready: bool) -> None:
         """Highlight the next useful ROI action without changing availability."""
 
+        states = getattr(self, "batch_roi_tab_states", {})
+        active = states.get(getattr(self, "_active_batch_roi_tab", None), {})
+        continue_ready = not getattr(self, "_stack_building", False) and (
+            (bool(states) and (active.get("complete", False) or all(
+                state.get("complete", False) for state in states.values()
+            )))
+            or (not states and getattr(self, "_stack_build_complete", False))
+        )
         auto_detect_button = getattr(self, "auto_detect_button", None)
         if auto_detect_button is not None:
-            auto_detect_button.set_variant("secondary" if build_ready else "primary")
+            auto_detect_button.set_variant("secondary" if build_ready or continue_ready else "primary")
 
         build_button = getattr(self, "build_stacks_button", None)
         if build_button is not None:
@@ -5318,35 +5244,40 @@ class Step4Frame(SidebarStepFrame):
             )
 
         if not has_open_work:
-            button.configure(text="Go to Step 5")
+            button.configure(text="Go to Step 5", command=self._continue_to_step5)
+            button.set_variant("success")
             button.state(["disabled"])
             return
 
         completed, total = self._completion_progress_counts()
-        button.configure(text=f"Go to Step 5 ({completed}/{total} completed)")
-        if force_enable:
-            button.state(["!disabled"])
-            return
-
-        # In batch mode, wait until all tabs are marked complete.
-        if self.batch_roi_notebook is not None:
-            all_complete = bool(self.batch_roi_tab_states) and all(
-                state.get("complete", False) for state in self.batch_roi_tab_states.values()
+        active = states.get(getattr(self, "_active_batch_roi_tab", None), {})
+        next_tab = (
+            self.batch_roi_notebook is not None
+            and active.get("complete", False)
+            and completed < total
+        )
+        if next_tab:
+            button.configure(
+                text=f"Go to next tab ({completed}/{total} completed)",
+                command=self._go_to_next_batch_roi_tab,
             )
-            if all_complete:
-                button.state(["!disabled"])
-            else:
-                button.state(["disabled"])
-            return
-
-        # In single folder mode, we dynamically check for outputs.
-        outdir = Path(self.output_dir_var.get() or ".")
-        results_file = outdir / STEP4_RESULTS_FILENAME
-        stack_file = outdir / "MAX_Stack.tif"
-        if getattr(self, "_stack_build_complete", False) and results_file.exists() and stack_file.exists():
-            button.state(["!disabled"])
         else:
-            button.state(["disabled"])
+            button.configure(
+                text=f"Go to Step 5 ({completed}/{total} completed)",
+                command=self._continue_to_step5,
+            )
+
+        enabled = False
+        if not getattr(self, "_stack_building", False):
+            if next_tab or force_enable:
+                enabled = True
+            elif self.batch_roi_notebook is not None:
+                enabled = bool(states) and completed == total
+            elif getattr(self, "_stack_build_complete", False):
+                outdir = Path(self.output_dir_var.get() or ".")
+                enabled = self._step4_outputs_complete(outdir)
+        button.set_variant("primary" if enabled else "success")
+        button.state(["!disabled"] if enabled else ["disabled"])
 
     def _auto_detection_parameters(self) -> dict[str, int | float]:
         """Return one validated snapshot of the saved auto-detection settings."""
@@ -5534,6 +5465,14 @@ class Step4Frame(SidebarStepFrame):
                     continue
                 completed[roi.suffix] = result
                 roi_clicks[roi.suffix] = [float(result.start), float(result.end)]
+                try:
+                    # The first visit to this tab can reuse its sidebar values
+                    # instead of measuring every plot on Tk's event thread.
+                    Step4Frame._result_metric_values(result)
+                except Exception:
+                    # Optional preparation must not alter accepted boundaries
+                    # or turn an otherwise valid ROI into a review/error.
+                    pass
             finally:
                 work_done += 1
                 report_progress(work_done)
@@ -5569,7 +5508,6 @@ class Step4Frame(SidebarStepFrame):
         self._render_current_roi()
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._sync_active_batch_roi_state()
-            self._update_active_batch_roi_tab_progress()
 
         completed_count = len(self.completed)
         if result.review_count:
@@ -5813,7 +5751,6 @@ class Step4Frame(SidebarStepFrame):
         self._start_roi_update_animation(roi.suffix)
         if self.batch_roi_notebook is not None and self._active_batch_roi_tab:
             self._sync_active_batch_roi_state()
-            self._update_active_batch_roi_tab_progress()
 
         if build_after:
             self._select_roi_in_list()
@@ -5850,11 +5787,15 @@ class Step4Frame(SidebarStepFrame):
         # We render the plot frames in memory because this workflow does not
         # save the intermediate MATLAB PNG files.
         isez_images = [make_isez_plot_image(result) for result in ordered]
+        # Keep the exact ImageJ-style values alongside the plot frames, so
+        # compilation needs neither a separate workbook nor remeasurement.
+        measurements = [imagej_shape_measurements_from_frame(item) for item in isez_images]
         if isez_images:
             isez_images[0].save(
-                outdir / "ROI_to_move_stck.tif",
+                outdir / STEP4_RESULTS_FILENAME,
                 save_all=True,
                 append_images=isez_images[1:],
+                description=encode_step4_measurements(measurements),
             )
 
         # MATLAB produced one ROI-overlay JPG per ROI, then the ImageJ macro
@@ -5865,12 +5806,14 @@ class Step4Frame(SidebarStepFrame):
         )
         Image.fromarray(max_projection).save(outdir / "MAX_Stack.tif")
 
-        # ImageJ macro equivalent:
-        # setTool("wand"); doWand(512, 179); run("Measure") per slice.
-        write_imagej_results_xlsx(
-            [imagej_shape_measurements_from_frame(item) for item in isez_images],
-            outdir / STEP4_RESULTS_FILENAME,
-        )
+        if isez_images:
+            if not has_step4_measurements(outdir / STEP4_RESULTS_FILENAME):
+                raise ValueError("The TIFF stack did not retain its Step 4 measurements.")
+            # A successful rebuild replaces the former generated workbook.
+            # Historical folders remain readable without being changed.
+            legacy_workbook = outdir / "rr_MCPAR.xlsx"
+            if legacy_workbook.is_file():
+                legacy_workbook.unlink()
 
     def _poll_stack_build_events(self, events, outdir: Path) -> None:
         """Finish file creation on Tk's thread while animation stays active."""
@@ -5894,6 +5837,7 @@ class Step4Frame(SidebarStepFrame):
         self._stack_building = False
         self._update_build_stack_button_state()
         self._update_auto_detect_button_state()
+        self._update_continue_to_step5_button_state()
         if kind == "error":
             self._hide_grid_notice()
             self.status_var.set("Could not build stack outputs.")
@@ -5929,6 +5873,7 @@ class Step4Frame(SidebarStepFrame):
         self._stack_build_complete = False
         self._update_build_stack_button_state()
         self._update_auto_detect_button_state()
+        self._update_continue_to_step5_button_state()
         self.status_var.set("Building stack and saving final result files. Please wait...")
         self._show_stack_building_notice(outdir)
 
@@ -6010,6 +5955,7 @@ class Step4Frame(SidebarStepFrame):
         self._stack_building = True
         self._update_build_stack_button_state()
         self._update_auto_detect_button_state()
+        self._update_continue_to_step5_button_state()
         self.status_var.set(f"Building stacks for {len(jobs)} ready tab(s). Please wait...")
         self._show_stack_building_notice(jobs[0][-1])
         failures = []
@@ -6066,7 +6012,6 @@ class Step4Frame(SidebarStepFrame):
                 if key == self._active_batch_roi_tab:
                     self._stack_build_complete = True
                     self._last_results_dir = outdir
-                self._refresh_batch_roi_tab_labels([key])
                 self._update_build_stack_button_state()
                 self._update_continue_to_step5_button_state()
             self._stack_build_after_id = self.after(self.BACKGROUND_POLL_MS, poll)
@@ -6117,8 +6062,8 @@ class Step4Frame(SidebarStepFrame):
             return
 
         self._show_processing_complete(
-            f"Created MAX_Stack.tif, {STEP4_RESULTS_FILENAME}, and "
-            f"ROI_to_move_stck.tif in:\n{outdir}",
+            f"Created MAX_Stack.tif and {STEP4_RESULTS_FILENAME} "
+            f"with saved ROI measurements in:\n{outdir}",
             output_dir=self._last_results_dir,
         )
         self._update_continue_to_step5_button_state()

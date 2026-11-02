@@ -45,6 +45,10 @@ class BatchSelectionTests(unittest.TestCase):
                         ]
                         table.set_rows(rows)
                         root.update()
+                        if table_type in (Step2BatchSegmentationTable, RBatchSelectionTable):
+                            self.assertEqual(str(table.tree.column("status", "anchor")), "center")
+                            self.assertEqual(str(table.tree.heading("status", "anchor")), "center")
+                            self.assertEqual(str(table.tree.column("folder", "anchor")), "w")
                         self.assertEqual(counts[-1], 1)
                         self.assertEqual(table.selected_rows(), [rows[1]])
 

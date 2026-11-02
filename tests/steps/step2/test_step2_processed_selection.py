@@ -32,7 +32,7 @@ class Step2ProcessedSelectionTests(unittest.TestCase):
             "locked": locked,
             "values": {
                 "folder": name,
-                "status": status or ("Already segmented: Light" if locked else "Ready: Light"),
+                "status": status or ("Already segmented" if locked else "Ready"),
                 "images": "0" if locked else "1",
             },
         }
@@ -84,7 +84,7 @@ class Step2ProcessedSelectionTests(unittest.TestCase):
             self._row(
                 f"source-{side}",
                 include=True,
-                status=f"Ready: Light; segmented: {side} only",
+                status=f"Ready; segmented: {side} only",
             )
             for side in ("nasal", "temporal")
         ]
@@ -108,8 +108,8 @@ class Step2ProcessedSelectionTests(unittest.TestCase):
 
     def test_select_all_only_changes_ready_rows(self):
         processed = self._row("source-both", locked=True, status="Already segmented: nasal and temporal")
-        ready_a = self._row("source-nasal", include=True, status="Ready: Light; segmented: nasal only")
-        ready_b = self._row("source-temporal", status="Ready: Light; segmented: temporal only")
+        ready_a = self._row("source-nasal", include=True, status="Ready; segmented: nasal only")
+        ready_b = self._row("source-temporal", status="Ready; segmented: temporal only")
         self.table.set_rows([processed, ready_a, ready_b])
         self.root.update()
 
@@ -132,7 +132,7 @@ class Step2ProcessedSelectionTests(unittest.TestCase):
     def test_hiding_and_restoring_processed_rows_preserves_their_disabled_checks(self):
         processed = self._row("source-both", locked=True, status="Already segmented: nasal and temporal")
         ready = [
-            self._row(f"source-{side}", include=True, status=f"Ready: Light; segmented: {side} only")
+            self._row(f"source-{side}", include=True, status=f"Ready; segmented: {side} only")
             for side in ("nasal", "temporal")
         ]
         self.table.set_rows([processed, *ready])

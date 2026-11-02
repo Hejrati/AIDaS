@@ -101,9 +101,9 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
         files = [node for node, _, _, _ in tree._rows if node.kind != "folder"]
         self.assertEqual({node.name for node in files}, {"rr_MCPAR.xlsx", "rrMCPAR_ELMRPE_ONL.xlsx"})
         self.assertIn("Subject_A", self._texts(tree))
-        self.assertIn("No recorded Excel results", self._texts(tree))
+        self.assertIn("No recorded Step 4 measurements", self._texts(tree))
         self.assertNotIn("other files", " ".join(self._texts(tree)))
-        self.assertIn("1 recorded Excel result", tree.summary_var.get())
+        self.assertIn("1 recorded Step 4 result", tree.summary_var.get())
         tree.hide_other_files_checkbox.invoke()
         self.root.update()
         self.assertIn("ELM-RPE / ONL thickness", self._texts(tree))
@@ -115,8 +115,8 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
         self.root.update()
         self.assertTrue(all(node.kind in ("folder", "excel", "output") for node, _, _, _ in tree._rows))
 
-    def test_successful_step5_export_stops_polling_and_ignores_completion_reentry(self):
-        from openpyxl import Workbook
+    def test_manual_step5_export_stops_polling_and_completion_reentry_only_prefills(self):
+        from openpyxl import Workbook, load_workbook
         from aidas.services.step4_compiler import compile_step4_results
 
         side = self.directory / "Control" / "Subject_A" / "nasal"
@@ -135,15 +135,66 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
             "aidas.services.step4_compiler.compile_step4_results", wraps=compile_step4_results,
         ) as compile_workbook, mock.patch("aidas.steps.step5_compile.messagebox.showerror") as error:
             frame.start_from_step4(self.directory)
-            self._wait(lambda: not frame._running and frame.directory_view._inventory is not None)
+            self.assertIsNone(frame._worker)
+            self.assertFalse(frame._running)
+            self.assertFalse((self.directory / "rrMCPAR_ELMRPE_ONL.xlsx").exists())
+            compile_workbook.assert_not_called()
+
+            frame._run_clicked()
+            self._wait(lambda: (
+                not frame._running and frame.directory_view._inventory is not None
+                and not frame._pending_step4_handoffs and frame._poll_after_id is None
+                and frame.directory_view._poll_id is None
+            ))
 
         compile_workbook.assert_called_once()
         error.assert_not_called()
-        self.assertTrue((self.directory / "rrMCPAR_ELMRPE_ONL.xlsx").is_file())
+        output = self.directory / "rrMCPAR_ELMRPE_ONL.xlsx"
+        self.assertTrue(output.is_file())
+        workbook = load_workbook(output, data_only=True)
+        try:
+            self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "ONL", "Extraction_log"])
+            self.assertEqual(workbook["rrMCP-AR"]["A3"].value, "Subject_A")
+            self.assertEqual(workbook["rrMCP-AR"]["B3"].value, 0.75)
+        finally:
+            workbook.close()
         self.assertEqual(frame._pending_step4_handoffs, [])
         self.assertIsNone(frame._poll_after_id)
         self.assertIsNone(frame.directory_view._poll_id)
-        self.assertIn("Excel file saved", frame.status_var.get())
+        self.assertIn("Ready to create an Excel file", frame.status_var.get())
+
+    def test_roi_measurements_remain_visible_and_cleaned_excel_is_a_thickness_table(self):
+        from PIL import Image
+        from aidas.services.step4_results import encode_step4_measurements
+        from aidas.services.step4_compiler import create_cleaned_light_thickness_workbook
+
+        side = self.directory / "Control" / "Subject_A" / "nasal"
+        side.mkdir(parents=True)
+        rows = [dict(Major=10.0, Minor=5.0, Angle=0.0, **{
+            "Circ.": 0.5, "AR": 2.0, "Round": 0.5, "Solidity": 0.9,
+        })]
+        Image.new("L", (8, 8)).save(
+            side / "ROI_to_move_stck.tif", description=encode_step4_measurements(rows),
+        )
+        raw = side / "_thickness_vs_distance_from_fovea_LIGHT.txt"
+        raw.write_text("Distance\tWhole\tELM\tONL\n0\t0\t10\t20\n", encoding="utf-8")
+        create_cleaned_light_thickness_workbook(raw)
+        tree = self._tree()
+        tree.set_directory(self.directory)
+        self._wait(lambda: tree._inventory is not None)
+
+        self.assertEqual(tree._inventory.workbooks, 1)
+        self.assertEqual(tree._inventory.thickness_files, 2)
+        self.assertIn("ROI_to_move_stck.tif", self._texts(tree))
+        self.assertNotIn("_thickness_vs_distance_from_fovea_LIGHT2.xlsx", self._texts(tree))
+        tree.hide_other_files_checkbox.invoke()
+        self.root.update()
+        self.assertIn("_thickness_vs_distance_from_fovea_LIGHT2.xlsx", self._texts(tree))
+        self.assertEqual(
+            [node.kind for node, *_rest in tree._rows if node.name.endswith("LIGHT2.xlsx")],
+            ["thickness"],
+        )
+        self.assertIn("1 recorded Step 4 result", tree.summary_var.get())
 
     def test_folders_expand_collapse_and_new_output_appears_after_refresh(self):
         side = self.directory / "Control" / "Subject_A" / "nasal"

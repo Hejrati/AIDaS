@@ -4,9 +4,9 @@
 ## Default graphics preserve legacy rendering. Set AIDAS_STEP3_RASTER=1 only
 ## when faster raster rendering is preferred over byte-identical PNGs.
 
-# App runs export the acquired LIGHT channel without duplicate DARK files.
-# Standalone use keeps the legacy two-channel exports.
-.LIGHT.ONLY <- identical(Sys.getenv("AIDAS_LIGHT_ONLY", unset=""), "1")
+# Export the acquired LIGHT channel in both the app and standalone runs.
+# Retain paired arrays only for compatibility with existing workspaces.
+.LIGHT.ONLY <- TRUE
 
 # New workspaces retain their processing mode; older ones use full outputs.
 if (!exists("deep_layers_only", inherits = FALSE)) {
@@ -77,6 +77,7 @@ make_thickness_export <- function(rpe, olm, onl_opl, inl_ipl, rnfl_gcl, vitreous
 }
 
 write_thickness_export <- function(thickness, channel_name, output_dir=getwd()) {
+  if(grepl("dark", basename(channel_name), ignore.case=TRUE)) return(invisible(NULL))
   target <- file.path(output_dir, paste0("_thickness_vs_distance_from_fovea_",
                                         channel_name, ".txt"))
   # The legacy mixed data-frame conversion preserves per-column formatting.
@@ -93,6 +94,7 @@ same_export_borders <- function(light, dark) {
 }
 
 save.tissue.border.output <- function(filename, flattened, rpe, olm, onl.opl, inl.ipl, rnfl.gcl, vitreous.retina) {
+  if(grepl("dark", basename(filename), ignore.case=TRUE)) return(invisible(NULL))
   x.axis=seq(-100,2750,1)
   y.axis=seq(-30,430,1)
   target=file.path(getwd(),filename)

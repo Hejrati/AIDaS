@@ -264,6 +264,9 @@ main <- function() {
     environments$candidate.output$deep_layers_only <- mode
     companion <- do.call(environments$candidate.output$make_thickness_export,borders)
     same(unname(as.matrix(expected)),unname(as.matrix(companion)),paste(case,channel,mode,"companion table"))
+    # Retain both channels' numerical comparisons above. File exports are
+    # exclusively LIGHT; DARK is an internal compatibility array.
+    if(channel=="DARK") next
     expected.path <- file.path(sandbox,"expected-thickness.txt")
     write(as.matrix(expected),file=expected.path,ncolumns=8L,sep="\t")
     for(kind in c("candidate","candidate.output")) {

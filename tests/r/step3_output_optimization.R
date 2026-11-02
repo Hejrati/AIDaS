@@ -93,8 +93,7 @@ main <- function() {
   execute <- function(expressions,input,directory) {
     dir.create(directory,recursive=TRUE)
     setwd(directory)
-    output.names <- c("_tissueBorders__DARK.png","_tissueBorders__LIGHT.png",
-                     "_thickness_vs_distance_from_fovea_DARK.txt",
+    output.names <- c("_tissueBorders__LIGHT.png",
                      "_thickness_vs_distance_from_fovea_LIGHT.txt")
     for(name in output.names) writeBin(charToRaw("stale output"),name)
     environment <- list2env(input,parent=globalenv())
@@ -110,6 +109,11 @@ main <- function() {
         as.character(expr[[1]]) %in% c("<-","=") &&
         identical(expr[[2]],as.name("save.tissue.border.output"))
       eval(expr,environment)
+      # Exercise both historical formula branches in this numerical harness.
+      # Real entrypoints always reset this flag to TRUE; their LIGHT-only file
+      # policy is checked independently by the real-R export inventory tests.
+      if(is.call(expr) && length(expr)==3L && identical(expr[[2L]],as.name(".LIGHT.ONLY")))
+        environment$.LIGHT.ONLY <- FALSE
       if(plot.definition) {
         real.plotter <- environment$save.tissue.border.output
         environment$save.tissue.border.output <- stub.plotter

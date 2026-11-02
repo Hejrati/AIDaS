@@ -227,7 +227,7 @@ class Step4BatchLoadingTests(unittest.TestCase):
                             rows = [dict(
                                 folder=Path(directory) / f'study-{index}',
                                 flat_light=Path(directory) / f'study-{index}/_flat_LIGHT.hdr',
-                                include=True, locked=False, status='Ready', outputs='0/3',
+                                include=True, locked=False, status='Ready', outputs='0/2',
                             ) for index in range(total)]
                             frame._open_batch_roi_panel(Path(directory))
                             panel = frame.batch_roi_panel

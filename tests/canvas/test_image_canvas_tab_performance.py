@@ -63,6 +63,36 @@ class CanvasTabPerformanceTests(unittest.TestCase):
             self.widget.clear_active_line()
             redraw.assert_called_once()
 
+    def test_high_zoom_draws_visible_handles_and_pan_reuses_their_items(self):
+        points = [(float(x), 100.0) for x in range(1500)]
+        self.widget.set_line_overlays([dict(points=points, color="yellow", label="Boundary")])
+        self.widget.set_editable_line("Boundary")
+        self.widget.set_zoom(10)
+        self.root.update()
+        original = self.widget.get_line_overlays()
+        handles = self.widget._line_handle_indices(self.widget._line_overlays[0]["points"])
+
+        def visible_handles():
+            return [item for item in self.widget.canvas.find_withtag("line-handle")
+                    if self.widget.canvas.itemcget(item, "state") != "hidden"]
+
+        visible = visible_handles()
+        self.assertTrue(visible)
+        self.assertLess(len(visible), len(handles) // 4)
+        first_bounds = self.widget.canvas.coords(visible[0])
+        self.widget.canvas.xview_moveto(.7)
+        self.widget._render_visible_image()
+        self.root.update()
+
+        panned = visible_handles()
+        self.assertTrue(panned)
+        self.assertNotEqual(self.widget.canvas.coords(panned[0]), first_bounds)
+        self.assertEqual(self.widget.get_line_overlays(), original)
+        self.assertEqual(self.widget._line_handle_indices(self.widget._line_overlays[0]["points"]), handles)
+        for item in panned:
+            x1, y1, x2, y2 = self.widget.canvas.coords(item)
+            self.assertIsNotNone(self.widget._hit_line_vertex(points, (x1 + x2) / 2, (y1 + y2) / 2))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 from scipy.interpolate import BSpline, LSQUnivariateSpline, UnivariateSpline
 
+from aidas.services.output_cleanup import remove_legacy_dark_outputs
 from aidas.utils.io_utils import read_analyze, write_analyze
 
 
@@ -122,12 +123,17 @@ def load_analyze_volume_r_layout(path: Path) -> np.ndarray:
 
 
 def load_input_volumes(input_dir: Path) -> dict[str, np.ndarray]:
-    """Load the four Analyze volumes used by the R script."""
+    """Load LIGHT acquisitions, retaining optional legacy paired inputs."""
+    reference_light = load_analyze_volume_r_layout(input_dir / f"{REFERENCE_LIGHT}.hdr")
+    light = load_analyze_volume_r_layout(input_dir / f"{TO_PROCESS_LIGHT}.hdr")
+    reference_dark_path = input_dir / f"{REFERENCE_DARK}.hdr"
+    dark_path = input_dir / f"{TO_PROCESS_DARK}.hdr"
     return {
-        "REF_DARK": load_analyze_volume_r_layout(input_dir / f"{REFERENCE_DARK}.hdr"),
-        "REF_LIGHT": load_analyze_volume_r_layout(input_dir / f"{REFERENCE_LIGHT}.hdr"),
-        "DARK": load_analyze_volume_r_layout(input_dir / f"{TO_PROCESS_DARK}.hdr"),
-        "LIGHT": load_analyze_volume_r_layout(input_dir / f"{TO_PROCESS_LIGHT}.hdr"),
+        "REF_DARK": (load_analyze_volume_r_layout(reference_dark_path)
+                     if reference_dark_path.is_file() else reference_light),
+        "REF_LIGHT": reference_light,
+        "DARK": load_analyze_volume_r_layout(dark_path) if dark_path.is_file() else light,
+        "LIGHT": light,
     }
 
 
@@ -883,38 +889,17 @@ def run_more_outputs_from_step3_npz(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with np.load(flat_npz_path) as flat_data, np.load(done_npz_path) as done_data:
-        flattened_dark = _load_npz_array(flat_data, "FLATTENED_DARK_RETINA_RRC", "flattened_dark_retina_rrc")
         flattened_light = _load_npz_array(flat_data, "FLATTENED_LIGHT_RETINA_RRC", "flattened_light_retina_rrc")
 
-        rpe_dark = _load_npz_array(done_data, "R_RPE_POSITION_DARK")
         rpe_light = _load_npz_array(done_data, "R_RPE_POSITION_LIGHT")
-        olm_dark = _load_npz_array(done_data, "R_OLM_POSITION_DARK")
         olm_light = _load_npz_array(done_data, "R_OLM_POSITION_LIGHT")
-        onl_opl_dark = _load_npz_array(done_data, "R_ONL_OPL_POSITION_DARK")
         onl_opl_light = _load_npz_array(done_data, "R_ONL_OPL_POSITION_LIGHT")
-        inl_ipl_dark = _load_npz_array(done_data, "R_INL_IPL_POSITION_DARK")
         inl_ipl_light = _load_npz_array(done_data, "R_INL_IPL_POSITION_LIGHT")
-        rnfl_gcl_dark = _load_npz_array(done_data, "R_RNFL_GCL_POSITION_DARK")
         rnfl_gcl_light = _load_npz_array(done_data, "R_RNFL_GCL_POSITION_LIGHT")
-        vitreous_dark = _load_npz_array(done_data, "R_VITREOUS_RETINA_POSITION_DARK")
         vitreous_light = _load_npz_array(done_data, "R_VITREOUS_RETINA_POSITION_LIGHT")
 
-    dark_plot_path = output_dir / f"_tissueBorders__{TO_PROCESS_DARK}.png"
     light_plot_path = output_dir / f"_tissueBorders__{TO_PROCESS_LIGHT}.png"
 
-    save_tissue_border_plot(
-        flattened_dark,
-        [
-            (rpe_dark, "red"),
-            (olm_dark, "blue"),
-            (onl_opl_dark, "red"),
-            (inl_ipl_dark, "blue"),
-            (rnfl_gcl_dark, "red"),
-            (vitreous_dark, "blue"),
-        ],
-        dark_plot_path,
-        f"Tissue Borders {TO_PROCESS_DARK}",
-    )
     save_tissue_border_plot(
         flattened_light,
         [
@@ -929,14 +914,6 @@ def run_more_outputs_from_step3_npz(
         f"Tissue Borders {TO_PROCESS_LIGHT}",
     )
 
-    dark_thickness = build_thickness_export(
-        rpe_dark,
-        olm_dark,
-        onl_opl_dark,
-        inl_ipl_dark,
-        rnfl_gcl_dark,
-        vitreous_dark,
-    )
     light_thickness = build_thickness_export(
         rpe_light,
         olm_light,
@@ -945,27 +922,24 @@ def run_more_outputs_from_step3_npz(
         rnfl_gcl_light,
         vitreous_light,
     )
-    dark_thickness_path = output_dir / f"_thickness_vs_distance_from_fovea_{TO_PROCESS_DARK}.txt"
     light_thickness_path = output_dir / f"_thickness_vs_distance_from_fovea_{TO_PROCESS_LIGHT}.txt"
-    write_tab_object_table(dark_thickness, dark_thickness_path)
     write_tab_object_table(light_thickness, light_thickness_path)
+    remove_legacy_dark_outputs(output_dir)
 
     return {
-        "dark_plot": dark_plot_path,
         "light_plot": light_plot_path,
-        "dark_thickness": dark_thickness_path,
         "light_thickness": light_thickness_path,
     }
 
 
 def main() -> dict[str, np.ndarray]:
     parser = argparse.ArgumentParser(
-        description="Step 1: load the four OCT Analyze volumes used by the R script."
+        description="Load OCT Analyze volumes and export LIGHT processing results."
     )
     parser.add_argument(
         "--input-dir",
         default=str(DEFAULT_INPUT_DIR),
-        help="Folder containing DARK/LIGHT and *_MARKED Analyze files.",
+        help="Folder containing LIGHT and LIGHT_MARKED Analyze files (legacy paired inputs are supported).",
     )
     parser.add_argument(
         "--output-dir",
@@ -980,12 +954,12 @@ def main() -> dict[str, np.ndarray]:
     parser.add_argument(
         "--flat-npz",
         default=None,
-        help="Path to DARK__and__LIGHT__flat.npz for --more-outputs.",
+        help="Path to _flat_LIGHT.npz for --more-outputs.",
     )
     parser.add_argument(
         "--done-npz",
         default=None,
-        help="Path to _done_DARK__and__LIGHT.npz for --more-outputs.",
+        help="Path to _done_LIGHT.npz for --more-outputs.",
     )
     args = parser.parse_args()
 
@@ -994,8 +968,12 @@ def main() -> dict[str, np.ndarray]:
     outdir.mkdir(parents=True, exist_ok=True)
 
     if args.more_outputs:
-        flat_npz = Path(args.flat_npz) if args.flat_npz else input_dir / "DARK__and__LIGHT__flat.npz"
-        done_npz = Path(args.done_npz) if args.done_npz else input_dir / f"_done_{TO_PROCESS_DARK}__and__{TO_PROCESS_LIGHT}.npz"
+        flat_npz = Path(args.flat_npz) if args.flat_npz else input_dir / "_flat_LIGHT.npz"
+        done_npz = Path(args.done_npz) if args.done_npz else input_dir / "_done_LIGHT.npz"
+        if not args.flat_npz and not flat_npz.is_file():
+            flat_npz = input_dir / "DARK__and__LIGHT__flat.npz"
+        if not args.done_npz and not done_npz.is_file():
+            done_npz = input_dir / "_done_DARK__and__LIGHT.npz"
         outputs = run_more_outputs_from_step3_npz(flat_npz, done_npz, outdir)
         dbg("more-outputs", "Generated translated follow-on outputs")
         for name, path in outputs.items():
@@ -1664,7 +1642,7 @@ def main() -> dict[str, np.ndarray]:
             np.nanmean(final_grand_mean, axis=0),
         )
     )
-    find_vertex_plot_path = plots_dir / f"{REFERENCE_DARK}_find_vertex.png"
+    find_vertex_plot_path = plots_dir / f"{REFERENCE_LIGHT}_find_vertex.png"
     save_profile_plot(
         grand_profile,
         find_vertex_plot_path,
@@ -1689,7 +1667,7 @@ def main() -> dict[str, np.ndarray]:
             raise RuntimeError("Could not identify vertex in check.spline.")
         vertex = float(check_spline[nonnegative[-1], 0] + 1.0)
 
-    vertex_plot_path = plots_dir / f"{REFERENCE_DARK}_vertex.png"
+    vertex_plot_path = plots_dir / f"{REFERENCE_LIGHT}_vertex.png"
     save_profile_plot(
         grand_profile,
         vertex_plot_path,
@@ -1704,14 +1682,11 @@ def main() -> dict[str, np.ndarray]:
     flattened_dark_retina_rrc = flattened_dark_retina_rrc[:, vertex_start:vertex_stop, :]
     flattened_light_retina_rrc = flattened_light_retina_rrc[:, vertex_start:vertex_stop, :]
 
-    dark_export = np.transpose(np.nan_to_num(flattened_dark_retina_rrc[:, ::-1, :], nan=0.0), (2, 1, 0)).astype(np.float32)
     light_export = np.transpose(np.nan_to_num(flattened_light_retina_rrc[:, ::-1, :], nan=0.0), (2, 1, 0)).astype(np.float32)
-    dark_export_base = outdir / f"_flat_{TO_PROCESS_DARK}"
     light_export_base = outdir / f"_flat_{TO_PROCESS_LIGHT}"
-    write_analyze(str(dark_export_base), dark_export)
     write_analyze(str(light_export_base), light_export)
 
-    session_save_path = outdir / f"{TO_PROCESS_DARK}__and__{TO_PROCESS_LIGHT}__flat.npz"
+    session_save_path = outdir / "_flat_LIGHT.npz"
     np.savez_compressed(
         session_save_path,
         flattened_dark_retina_rrc=flattened_dark_retina_rrc,
@@ -1753,7 +1728,6 @@ def main() -> dict[str, np.ndarray]:
     show_scalar_stats("PLOT.SHIFT.POSITION.LIGHT", ",".join(str(path) for path in light_shift_plot_paths))
     show_scalar_stats("PLOT.FIND.VERTEX", find_vertex_plot_path)
     show_scalar_stats("PLOT.VERTEX", vertex_plot_path)
-    show_scalar_stats("EXPORT.DARK", dark_export_base)
     show_scalar_stats("EXPORT.LIGHT", light_export_base)
     show_scalar_stats("SAVE.IMAGE", session_save_path)
 
@@ -2485,11 +2459,8 @@ def main() -> dict[str, np.ndarray]:
         verticals=(0.0, 10.0, 37.5, 57.5, 77.5, 100.0),
     )
 
-    dark_norm_export = np.transpose(np.nan_to_num(flattened_dark_retina_rrc_n[:, ::-1, :], nan=0.0), (2, 1, 0)).astype(np.float32)
     light_norm_export = np.transpose(np.nan_to_num(flattened_light_retina_rrc_n[:, ::-1, :], nan=0.0), (2, 1, 0)).astype(np.float32)
-    dark_norm_export_base = outdir / f"_flat-normed_{TO_PROCESS_DARK}"
     light_norm_export_base = outdir / f"_flat-normed_{TO_PROCESS_LIGHT}"
-    write_analyze(str(dark_norm_export_base), dark_norm_export)
     write_analyze(str(light_norm_export_base), light_norm_export)
 
     r_rpe_position_dark_fovea = true_borders_dark[20:181, 5, :].copy()
@@ -2583,9 +2554,7 @@ def main() -> dict[str, np.ndarray]:
     flattened_light_retina_rrc_n_fovea_profiles = flattened_light_retina_rrc_n_fovea_profiles[56:90, :]
     flattened_light_retina_rrc_n[49:152, :, :] = flattened_light_retina_rrc_n_fovea[49:152, :, :]
 
-    dark_norm_export = np.transpose(np.nan_to_num(flattened_dark_retina_rrc_n[:, ::-1, :], nan=0.0), (2, 1, 0)).astype(np.float32)
     light_norm_export = np.transpose(np.nan_to_num(flattened_light_retina_rrc_n[:, ::-1, :], nan=0.0), (2, 1, 0)).astype(np.float32)
-    write_analyze(str(dark_norm_export_base), dark_norm_export)
     write_analyze(str(light_norm_export_base), light_norm_export)
 
     main_dark_outputs = np.column_stack(
@@ -2626,8 +2595,6 @@ def main() -> dict[str, np.ndarray]:
         [TO_PROCESS_DARK, "angle", "whole", "RPEtoOLM", "RNFL", *np.arange(-3.75, 107.5 + 1.25, 1.25)],
         dtype=object,
     )
-    dark_profiles_txt_path = outdir / f"_dark_profiles_{TO_PROCESS_DARK}.txt"
-    write_object_table(dark_profiles_export, dark_profiles_txt_path)
 
     light_profiles_table = np.round(
         np.column_stack((main_light_outputs, flattened_light_retina_rrc_n_profiles[:, 1:].T)),
@@ -2659,8 +2626,6 @@ def main() -> dict[str, np.ndarray]:
         [f"fovea{TO_PROCESS_DARK}", "angle", "whole", "RPEtoOLM", "RNFL", *np.arange(-3.75, 107.5 + 1.25, 1.25)],
         dtype=object,
     )
-    dark_fovea_txt_path = outdir / f"_fovea_dark_profiles_{TO_PROCESS_DARK}.txt"
-    write_object_table(dark_fovea_export, dark_fovea_txt_path)
 
     light_fovea_export_left = np.column_stack(
         (
@@ -2683,7 +2648,7 @@ def main() -> dict[str, np.ndarray]:
     light_fovea_txt_path = outdir / f"_fovea_light_profiles_{TO_PROCESS_LIGHT}.txt"
     write_object_table(light_fovea_export, light_fovea_txt_path)
 
-    final_save_path = outdir / f"_done_{TO_PROCESS_DARK}__and__{TO_PROCESS_LIGHT}.npz"
+    final_save_path = outdir / "_done_LIGHT.npz"
     np.savez_compressed(
         final_save_path,
         MAIN_DARK_OUTPUTS=main_dark_outputs,
@@ -2742,14 +2707,12 @@ def main() -> dict[str, np.ndarray]:
     show_scalar_stats("PLOT.FOVEA.OLM.LIGHT", ",".join(str(path) for path in light_fovea_olm_plot_paths))
     show_scalar_stats("PLOT.FOVEA.DARK.PROFILE", dark_fovea_profile_plot_path)
     show_scalar_stats("PLOT.FOVEA.LIGHT.PROFILE", light_fovea_profile_plot_path)
-    show_scalar_stats("EXPORT.NORM.DARK", dark_norm_export_base)
     show_scalar_stats("EXPORT.NORM.LIGHT", light_norm_export_base)
-    show_scalar_stats("TXT.DARK.PROFILES", dark_profiles_txt_path)
     show_scalar_stats("TXT.LIGHT.PROFILES", light_profiles_txt_path)
-    show_scalar_stats("TXT.FOVEA.DARK.PROFILES", dark_fovea_txt_path)
     show_scalar_stats("TXT.FOVEA.LIGHT.PROFILES", light_fovea_txt_path)
     show_scalar_stats("SAVE.FINAL", final_save_path)
 
+    remove_legacy_dark_outputs(outdir)
     return volumes
 
 

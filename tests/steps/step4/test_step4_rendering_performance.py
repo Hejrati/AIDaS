@@ -1,4 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -7,6 +9,7 @@ from matplotlib.backend_bases import MouseEvent
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 
+from aidas.core.config import STEP4_AUTO_DETECTION_DEFAULTS
 from aidas.steps import step4_analyze_isez as module
 
 
@@ -46,6 +49,80 @@ def plot_frame():
 
 
 class Step4RenderingPerformanceTests(unittest.TestCase):
+    def test_auto_detection_prepares_exact_metrics_on_worker_before_tab_visit(self):
+        frame = plot_frame()
+        roi = frame.rois[0]
+        detection = module.ProfileBoundaryDetection(
+            start=76, peak=88, end=100, confidence=.95, accepted=True,
+            prominence=10, quadratic_r2=.99, reason="accepted",
+        )
+        main_thread = threading.get_ident()
+        measurement_threads = []
+        measure = module.imagej_shape_measurements_from_frame
+
+        def record_measurement(image):
+            measurement_threads.append(threading.get_ident())
+            return measure(image)
+
+        with (
+            patch.object(module, "detect_profile_boundaries", return_value=detection),
+            patch.object(module, "apply_profile_detection_consistency", side_effect=lambda values, **_: values),
+            patch.object(module, "imagej_shape_measurements_from_frame", side_effect=record_measurement),
+            ThreadPoolExecutor(max_workers=1) as worker,
+        ):
+            run = worker.submit(
+                module.Step4Frame._compute_auto_detection_run,
+                frame.image, [roi], set(), dict(STEP4_AUTO_DETECTION_DEFAULTS),
+            ).result(timeout=20)
+
+        self.assertEqual(len(measurement_threads), 1)
+        self.assertNotEqual(measurement_threads[0], main_thread)
+        result = run.completed[roi.suffix]
+        with module.make_isez_plot_image(result) as image:
+            measurements = measure(image)
+        expected = tuple(f"{measurements[name]:.3f}" for name in module.RESULTS_HEADERS[1:])
+        frame.completed = run.completed
+        with patch.object(module, "imagej_shape_measurements_from_frame", side_effect=AssertionError("Remeasured on tab visit")):
+            self.assertEqual(frame._roi_metric_values(roi), expected)
+
+        # Editing arrays in place and replacing the result must both invalidate
+        # values prepared by the worker, just as for a previously visited tab.
+        with patch.object(module, "imagej_shape_measurements_from_frame", wraps=measure) as remeasure:
+            result.normalized_y[0] += 1
+            frame._roi_metric_values(roi)
+            self.assertEqual(remeasure.call_count, 1)
+            frame.completed[roi.suffix] = module.analyze_and_save_roi(
+                frame.image, roi, start_click=77, end_click=100,
+            )
+            frame._roi_metric_values(roi)
+            self.assertEqual(remeasure.call_count, 2)
+
+    def test_optional_metric_preparation_failure_keeps_accepted_roi_and_progress(self):
+        frame = plot_frame()
+        roi = frame.rois[0]
+        detection = module.ProfileBoundaryDetection(
+            start=76, peak=88, end=100, confidence=.95, accepted=True,
+            prominence=10, quadratic_r2=.99, reason="accepted",
+        )
+        progress = []
+        with (
+            patch.object(module, "detect_profile_boundaries", return_value=detection),
+            patch.object(module, "apply_profile_detection_consistency", side_effect=lambda values, **_: values),
+            patch.object(module.Step4Frame, "_result_metric_values", side_effect=RuntimeError("Optional preview unavailable")),
+        ):
+            run = module.Step4Frame._compute_auto_detection_run(
+                frame.image, [roi], set(), dict(STEP4_AUTO_DETECTION_DEFAULTS),
+                lambda done, total: progress.append((done, total)),
+            )
+
+        self.assertEqual(run.reviews, {})
+        self.assertEqual(run.review_count, 0)
+        self.assertEqual(run.removed_clicks, set())
+        result = run.completed[roi.suffix]
+        self.assertEqual(run.roi_clicks[roi.suffix], [float(result.start), float(result.end)])
+        np.testing.assert_array_equal(result.normalized_y, frame.completed[roi.suffix].normalized_y)
+        self.assertEqual(progress, [(0, 2), (1, 2), (2, 2)])
+
     def test_metrics_follow_the_result_across_tabs_and_refresh_after_edits(self):
         frame = plot_frame()
         roi = frame.rois[0]

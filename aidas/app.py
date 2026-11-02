@@ -1375,6 +1375,9 @@ class AIDaSApp(ctk.CTk):
             source_step=self.step4,
             on_compilation_complete=self._on_step5_compilation_complete,
         )
+        self._step5_status_trace_id = self.step5.status_var.trace_add(
+            "write", self._refresh_image_path_status,
+        )
         self.notebook.add(self.step5, text="  Step 5 — Create Excel File  ")
 
         self._set_splash_progress(98, "Finalizing the main window...")
@@ -1396,15 +1399,19 @@ class AIDaSApp(ctk.CTk):
         if self.__dict__.get("_aidas_destroying", False):
             return
         self._aidas_destroying = True
-        trace_id = self.__dict__.pop("_step3_elapsed_trace_id", None)
-        step3 = self.__dict__.get("step3")
-        variable = getattr(step3, "elapsed_time_var", None)
-        if trace_id is not None and variable is not None:
-            try:
-                variable.trace_remove("write", trace_id)
-            except tk.TclError:
-                # The step or interpreter may already have been torn down.
-                pass
+        for trace_name, step_name, variable_name in (
+            ("_step3_elapsed_trace_id", "step3", "elapsed_time_var"),
+            ("_step5_status_trace_id", "step5", "status_var"),
+        ):
+            trace_id = self.__dict__.pop(trace_name, None)
+            step = self.__dict__.get(step_name)
+            variable = getattr(step, variable_name, None)
+            if trace_id is not None and variable is not None:
+                try:
+                    variable.trace_remove("write", trace_id)
+                except tk.TclError:
+                    # The step or interpreter may already have been torn down.
+                    pass
         super().destroy()
 
     def _finish_startup(self) -> None:
@@ -1987,7 +1994,7 @@ class AIDaSApp(ctk.CTk):
             self._refresh_image_path_status()
 
     def _refresh_image_path_status(self, *_args) -> None:
-        """Show the active step's image path or Step 3 elapsed duration."""
+        """Show the active step's image path, elapsed duration, or Excel status."""
         if self.__dict__.get("_aidas_destroying", False):
             return
         notebook = self.__dict__.get("notebook")
@@ -2021,6 +2028,11 @@ class AIDaSApp(ctk.CTk):
                     getattr(step, "_active_batch_roi_tab", None), {},
                 )
                 path = state.get("path") or getattr(step, "current_path", None)
+        elif index == 4:
+            step = self.__dict__.get("step5")
+            variable = getattr(step, "status_var", None)
+            if variable is not None:
+                text = variable.get()
         if path and path != "Step 1 output":
             text = os.path.abspath(os.fspath(path))
         if status.cget("text") != text:
@@ -2464,7 +2476,7 @@ class AIDaSApp(ctk.CTk):
         step4.open_batch_folders(folders)
 
     def _on_step4_continue_to_step5(self, folder=None) -> None:
-        """Open Step 5 and automatically compile the Step 4 measurement tree."""
+        """Open Step 5 with measurement folders prepared for an explicit run."""
 
         step5 = self.__dict__.get("step5")
         if step5 is None:
@@ -2475,10 +2487,10 @@ class AIDaSApp(ctk.CTk):
         step5.start_from_step4(folder)
 
     def _on_step5_compilation_complete(self, _output_path=None) -> None:
-        """Report final success in the existing status surface."""
+        """Mark completion and refresh the status owned by the visible step."""
 
         self._advance_workflow_progress(5)
-        self._set_status_message("Excel file created successfully.")
+        self._refresh_image_path_status()
 
 
     def report_callback_exception(self, exc_type, value, tb):

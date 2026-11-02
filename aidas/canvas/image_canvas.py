@@ -105,6 +105,9 @@ class ImageCanvas(ttk.Frame):
         self._label_background = "#111827"
         self._annotation_label_items = {}
         self._annotation_label_sources = []
+        self._annotation_anchor_cache = {}
+        self._dense_polyline_geometry = []
+        self._overlays_need_redraw = False
 
         # Vertical line marker state
         self._vertical_line_on = False
@@ -173,6 +176,12 @@ class ImageCanvas(ttk.Frame):
         self.canvas.yview(*args)
         self._render_visible_image()
 
+    def destroy(self):
+        """Cancel scheduled canvas work before Tk deletes its commands."""
+        self._cancel_pending_zoom()
+        self._cancel_resize_redraw()
+        super().destroy()
+
     # ---------------------------------------------------------- public API
     def set_image(self, data: np.ndarray | None):
         """Set an image (H, W) numpy array (any dtype)."""
@@ -194,6 +203,8 @@ class ImageCanvas(ttk.Frame):
             self._display_pil = Image.fromarray(self._display_data, "L")
         self._active_line.clear()
         self._line_overlays.clear()
+        self._annotation_anchor_cache = {}
+        self._dense_polyline_geometry = []
         self._line_preview = None
         self._editable_line_label = None
         self._line_edit_drag = None
@@ -587,8 +598,7 @@ class ImageCanvas(ttk.Frame):
         focus_y = max(0.0, min(float(image_height), focus_y))
 
         self._zoom = max(0.02, min(30.0, float(zoom)))
-        self._redraw()
-        self._center_view_on_image_point(focus_x, focus_y)
+        self._redraw(focus=(focus_x, focus_y))
         self._emit_zoom_change()
 
     def _queue_zoom(self, zoom):
@@ -622,8 +632,7 @@ class ImageCanvas(ttk.Frame):
         focus_x = max(0.0, min(float(image_width), focus[0]))
         focus_y = max(0.0, min(float(image_height), focus[1]))
         self._zoom = zoom
-        self._redraw()
-        self._center_view_on_image_point(focus_x, focus_y)
+        self._redraw(focus=(focus_x, focus_y))
         self._emit_zoom_change()
 
     def _emit_zoom_change(self):
@@ -642,7 +651,7 @@ class ImageCanvas(ttk.Frame):
         self._pending_zoom = None
         self._pending_zoom_focus = None
 
-    def _center_view_on_image_point(self, image_x, image_y):
+    def _center_view_on_image_point(self, image_x, image_y, *, render=True):
         """Scroll so one image-space point is centered whenever possible."""
         if self._draw_region is None:
             return
@@ -657,7 +666,8 @@ class ImageCanvas(ttk.Frame):
         desired_top = max(0.0, min(max_top, canvas_y - viewport_height / 2))
         self.canvas.xview_moveto(desired_left / max(1.0, draw_width))
         self.canvas.yview_moveto(desired_top / max(1.0, draw_height))
-        self._render_visible_image()
+        if render:
+            self._render_visible_image()
 
     # ---------------------------------------------------------- internals
     def _auto_zoom(self):
@@ -705,13 +715,18 @@ class ImageCanvas(ttk.Frame):
         d[~finite] = 0.0
         return d.astype(np.uint8)
 
-    def _redraw(self):
+    def _redraw(self, *, focus=None):
         self._cancel_resize_redraw()
         self.canvas.delete("all")
         self._annotation_label_items = {}
         self._annotation_label_sources = []
         self._fovea_label_base_bounds = None
         self._fovea_label_drawn_offset = 0.0
+        self._line_handle_geometry = []
+        self._line_handle_positions = None
+        self._line_handle_items = []
+        self._line_handle_view_signature = None
+        self._dense_polyline_geometry = []
         self._roi_items.clear()
         self._img_id = None
         if self._data is None:
@@ -728,10 +743,14 @@ class ImageCanvas(ttk.Frame):
         self.canvas.configure(scrollregion=(0, 0, draw_w, draw_h))
         self._draw_region = (0, 0, draw_w, draw_h)
         self._base_size = (id(self._data), self._zoom, self.canvas.winfo_width(), self.canvas.winfo_height())
-        self._render_visible_image()
+        # Establish the final view before uploading pixels. A zoom used to
+        # paint the old view, rebuild annotations, then paint and label again.
+        if focus is not None:
+            self._center_view_on_image_point(*focus, render=False)
+        self._render_visible_image(update_annotations=False)
         self._redraw_overlays()
 
-    def _render_visible_image(self):
+    def _render_visible_image(self, *, update_annotations=True):
         """Render only source pixels intersecting the current canvas viewport."""
         if self._data is None or self._display_pil is None:
             return
@@ -758,6 +777,8 @@ class ImageCanvas(ttk.Frame):
                 self.canvas.delete(self._img_id)
                 self._img_id = None
             self._photo = None
+            self._refresh_visible_polyline_geometry()
+            self._refresh_visible_line_handles()
             self._draw_fovea_guidance()
             self._hide_annotation_labels()
             return
@@ -802,9 +823,15 @@ class ImageCanvas(ttk.Frame):
             self.canvas.coords(self._img_id, tile_x, tile_y)
             self.canvas.itemconfigure(self._img_id, image=self._photo)
         self.canvas.tag_lower(self._img_id)
-        if self._vertical_line_on:
-            self._position_fovea_label()
-        self._update_annotation_labels()
+        if update_annotations:
+            if self.__dict__.get("_overlays_need_redraw", False):
+                self._redraw_overlays()
+                return
+            self._refresh_visible_polyline_geometry()
+            self._refresh_visible_line_handles()
+            if self._vertical_line_on:
+                self._position_fovea_label()
+            self._update_annotation_labels()
 
     def _display_geometry(self, disp=None):
         if disp is None:
@@ -843,10 +870,19 @@ class ImageCanvas(ttk.Frame):
             self._redraw_overlays()
 
     def _redraw_overlays(self):
+        self._line_handle_geometry = []
+        self._line_handle_positions = None
+        self._line_handle_view_signature = None
         if self._data is None or self._img_id is None:
+            self._overlays_need_redraw = self._data is not None
+            self._annotation_anchor_cache = {}
+            self._refresh_visible_line_handles()
             self._hide_annotation_labels()
             return
+        self._overlays_need_redraw = False
         self.canvas.delete("overlay")
+        self._dense_polyline_geometry = []
+        self._line_handle_items = []
         self._annotation_label_items = {}
         self._annotation_label_sources = []
         self._clear_vertical_line_overlay()
@@ -855,16 +891,38 @@ class ImageCanvas(ttk.Frame):
         self._draw_line_overlays()
         self._draw_active_line()
         self._draw_vertical_line()
+        anchor_cache = {}
         self._annotation_label_sources = [
-            (f"saved-{index}", str(item["label"]), item["color"], PolylineAnchorIndex(item["points"]))
+            (f"saved-{index}", str(item["label"]), item["color"],
+             self._annotation_anchor_index(f"saved-{index}", item["points"], anchor_cache))
             for index, item in enumerate(self._line_overlays)
             if item.get("label") and item.get("points")
         ]
         if self._active_line:
             self._annotation_label_sources.append(
-                ("active", "active", self._line_color, PolylineAnchorIndex(self._active_line))
+                ("active", "active", self._line_color,
+                 self._annotation_anchor_index("active", self._active_line, anchor_cache))
             )
+        # Keep only current labels; closing or replacing traces must not retain
+        # old geometries. Zoom and pan can reuse their image-space indexes.
+        self._annotation_anchor_cache = anchor_cache
+        if self._line_handle_geometry:
+            self._line_handle_positions = np.asarray(
+                [point[:2] for point in self._line_handle_geometry], dtype=np.float64,
+            )
+        self._refresh_visible_line_handles()
         self._update_annotation_labels()
+
+    def _annotation_anchor_index(self, key, points, updated_cache):
+        """Reuse immutable trace geometry while detecting in-place edits."""
+        snapshot = tuple(points)
+        previous = self.__dict__.get("_annotation_anchor_cache", {}).get(key)
+        if previous is not None and previous[0] == snapshot:
+            geometry = previous[1]
+        else:
+            geometry = PolylineAnchorIndex(snapshot)
+        updated_cache[key] = (snapshot, geometry)
+        return geometry
 
     def _clear_vertical_line_overlay(self):
         for item_id in self._vertical_line_items:
@@ -1281,14 +1339,87 @@ class ImageCanvas(ttk.Frame):
         self.canvas.tag_lower(rect_id, text_id)
         return [rect_id, text_id]
 
-    def _draw_polyline(self, points, color, preview=None, show_vertices=True, handle_indices=None):
-        if not points:
-            return
-
+    def _polyline_canvas_coordinates(self, points):
+        """Project every source vertex without resampling or modifying it."""
+        if len(points) >= 128:
+            # Separate multiplication and addition retain _i2c's floating-point
+            # order. Short hand-drawn traces avoid NumPy setup overhead.
+            coordinates = np.asarray(points, dtype=np.float64) * self._zoom
+            coordinates[:, 0] += self._img_offset_x
+            coordinates[:, 1] += self._img_offset_y
+            return coordinates.ravel().tolist()
         coords = []
         for ix, iy in points:
             cx, cy = self._i2c(ix, iy)
             coords.extend([cx, cy])
+        return coords
+
+    @staticmethod
+    def _dense_polyline_record(coordinates):
+        """Index a full projected trace only when x is monotonic and finite."""
+        if len(coordinates) < 256:
+            return None
+        points = np.asarray(coordinates, dtype=np.float64).reshape(-1, 2)
+        if not np.isfinite(points).all():
+            return None
+        xs = points[:, 0]
+        if np.all(xs[1:] >= xs[:-1]):
+            descending = False
+        elif np.all(xs[1:] <= xs[:-1]):
+            descending = True
+        else:
+            return None
+        return {
+            "coordinates": points,
+            "xs": xs[::-1] if descending else xs,
+            "descending": descending,
+            "span": None,
+        }
+
+    @staticmethod
+    def _visible_polyline_span(record, left, right):
+        """Keep all vertices around the viewport, including crossing segments."""
+        # Round strokes are at most 24 px wide. This margin and the neighboring
+        # vertices keep clipped end caps/joins safely outside the visible area.
+        left, right = left - 32.0, right + 32.0
+        xs = record["xs"]
+        if xs[-1] < left or xs[0] > right:
+            return None
+        start = max(0, int(np.searchsorted(xs, left, side="left")) - 1)
+        stop = min(len(xs), int(np.searchsorted(xs, right, side="right")) + 1)
+        if record["descending"]:
+            start, stop = len(xs) - stop, len(xs) - start
+        return start, stop
+
+    def _refresh_visible_polyline_geometry(self):
+        """Expose original trace vertices newly revealed by horizontal panning."""
+        records = self.__dict__.get("_dense_polyline_geometry", ())
+        if not records:
+            return
+        visible = self._data is not None and self._img_id is not None
+        if visible:
+            left = self.canvas.canvasx(0)
+            right = left + self.canvas.winfo_width()
+        for record in records:
+            span = self._visible_polyline_span(record, left, right) if visible else None
+            previous = record["span"]
+            if span == previous:
+                continue
+            item_id = record["item_id"]
+            if span is None:
+                self.canvas.itemconfigure(item_id, state="hidden")
+            else:
+                coordinates = record["coordinates"][span[0]:span[1]].ravel().tolist()
+                self.canvas.coords(item_id, *coordinates)
+                if previous is None:
+                    self.canvas.itemconfigure(item_id, state="normal")
+            record["span"] = span
+
+    def _draw_polyline(self, points, color, preview=None, show_vertices=True, handle_indices=None):
+        if not points:
+            return
+
+        coords = self._polyline_canvas_coordinates(points)
 
         if len(coords) == 2:
             x, y = coords
@@ -1303,28 +1434,31 @@ class ImageCanvas(ttk.Frame):
                 tags=("overlay",),
             )
         else:
-            self.canvas.create_line(
-                *coords,
-                fill=color,
-                width=self._scaled_line_width(),
-                capstyle="round",
-                joinstyle="round",
-                tags=("overlay",),
-            )
+            options = {
+                "fill": color, "width": self._scaled_line_width(),
+                "capstyle": "round", "joinstyle": "round", "tags": ("overlay",),
+            }
+            record = self._dense_polyline_record(coords)
+            line_coords = coords
+            if record is not None:
+                left = self.canvas.canvasx(0)
+                span = self._visible_polyline_span(record, left, left + self.canvas.winfo_width())
+                record["span"] = span
+                # A hidden two-vertex placeholder avoids handing Tk a large
+                # off-screen trace. Full coordinates stay available for pan.
+                line_coords = (record["coordinates"][span[0]:span[1]].ravel().tolist()
+                               if span is not None else coords[:4])
+                options["state"] = "normal" if span is not None else "hidden"
+            item_id = self.canvas.create_line(*line_coords, **options)
+            if record is not None:
+                record["item_id"] = item_id
+                self.__dict__.setdefault("_dense_polyline_geometry", []).append(record)
 
         if show_vertices:
-            radius = 3
+            handles = self.__dict__.setdefault("_line_handle_geometry", [])
             for index in self._line_handle_indices(points, handle_indices):
-                cx, cy = self._i2c(*points[index])
-                self.canvas.create_rectangle(
-                    cx - radius,
-                    cy - radius,
-                    cx + radius,
-                    cy + radius,
-                    fill=color if index == 0 else "white",
-                    outline="black",
-                    tags=("overlay",),
-                )
+                cx, cy = coords[2 * index:2 * index + 2]
+                handles.append((cx, cy, color if index == 0 else "white"))
 
         if preview is not None and len(points) >= 1:
             last_x, last_y = self._i2c(*points[-1])
@@ -1337,6 +1471,55 @@ class ImageCanvas(ttk.Frame):
                 width=self._scaled_line_width(),
                 tags=("overlay",),
             )
+
+    def _refresh_visible_line_handles(self):
+        """Reuse a viewport-sized handle pool without changing editing geometry."""
+
+        items = self.__dict__.setdefault("_line_handle_items", [])
+        positions = self.__dict__.get("_line_handle_positions")
+        visible = np.empty(0, dtype=np.intp)
+        if self._data is not None and self._img_id is not None and positions is not None:
+            left, top = self.canvas.canvasx(0), self.canvas.canvasy(0)
+            width, height = self.canvas.winfo_width(), self.canvas.winfo_height()
+            signature = (id(positions), left, top, width, height)
+            if signature == self.__dict__.get("_line_handle_view_signature"):
+                return
+            self._line_handle_view_signature = signature
+            radius = 3
+            visible = np.flatnonzero(
+                (positions[:, 0] >= left - radius)
+                & (positions[:, 0] <= left + width + radius)
+                & (positions[:, 1] >= top - radius)
+                & (positions[:, 1] <= top + height + radius)
+            )
+        else:
+            self._line_handle_view_signature = None
+
+        created = False
+        while len(items) < len(visible):
+            items.append(self.canvas.create_rectangle(
+                0, 0, 0, 0, fill="white", outline="black", state="hidden",
+                tags=("overlay", "line-handle"),
+            ))
+            created = True
+        geometry = self.__dict__.get("_line_handle_geometry", ())
+        for item, index in zip(items, visible):
+            cx, cy, color = geometry[index]
+            self.canvas.coords(item, cx - 3, cy - 3, cx + 3, cy + 3)
+            self.canvas.itemconfigure(item, fill=color, state="normal")
+        for item in items[len(visible):]:
+            self.canvas.itemconfigure(item, state="hidden")
+        if created:
+            # New handles appear above traces, while marker and annotation
+            # labels retain their original stacking order above the handles.
+            protected = set()
+            for tag in ("vertical_overlay", "annotation-label-link", "annotation-label"):
+                protected.update(self.canvas.find_withtag(tag))
+            if protected:
+                for item in self.canvas.find_all():
+                    if item in protected:
+                        self.canvas.tag_lower("line-handle", item)
+                        break
 
     def _clamp_roi(self, x, y, w, h):
         if self._data is None:

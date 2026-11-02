@@ -1,4 +1,4 @@
-"""Real R output variants retain LIGHT results while omitting DARK files."""
+"""Real R exports preserve original standalone and optimized LIGHT policies."""
 
 from __future__ import annotations
 
@@ -16,6 +16,10 @@ from tests.support.r_runtime import find_r331, r331_environment
 _OUTPUT_FIXTURE = r'''
 args <- commandArgs(trailingOnly=TRUE)
 setwd(args[[1L]])
+# Actual PNG devices and overlay code run here. Rasterizing the synthetic
+# full-sized image keeps the environment-policy matrix inexpensive; the
+# independent output-optimization regression checks default-renderer bytes.
+image <- function(..., useRaster=TRUE) graphics::image(..., useRaster=useRaster)
 TO.PROCESS.LIGHT <- "LIGHT"
 deep_layers_only <- identical(args[[3L]], "1")
 FLATTENED.LIGHT.RETINA.RRC <- array(0, dim=c(2851,461,1))
@@ -26,11 +30,17 @@ R.INL.IPL.POSITION.LIGHT <- matrix(250, nrow=2851)
 R.RNFL.GCL.POSITION.LIGHT <- matrix(200, nrow=2851)
 R.VITREOUS.RETINA.POSITION.LIGHT <- matrix(100, nrow=2851)
 source(args[[2L]], chdir=FALSE, echo=FALSE)
+# Optimized helpers also reject direct DARK requests before touching array
+# arguments. Original scripts retain their untouched standalone behavior.
+if(identical(args[[4L]], "1")) {
+  save.tissue.border.output("_tissueBorders__DARK.png")
+  if(exists("write_thickness_export")) write_thickness_export(NULL, "DARK")
+}
 '''
 
 
 class Step3LightOnlyR331Tests(unittest.TestCase):
-    def test_bundled_output_variants_preserve_light_files_without_generating_dark_files(self):
+    def test_output_variants_preserve_light_values_and_their_export_policies(self):
         rscript = find_r331()
         if rscript is None:
             message = "R 3.3.1 is required for the LIGHT-only output regression."
@@ -50,15 +60,19 @@ class Step3LightOnlyR331Tests(unittest.TestCase):
             for index, (filename, deep) in enumerate(variants):
                 with self.subTest(script=filename):
                     folders = []
-                    for light_only in (False, True):
-                        folder = root / f"variant-{index}-mode-{int(light_only)}"
+                    for setting in (None, "0", "1"):
+                        folder = root / f"variant-{index}-mode-{setting or 'unset'}"
                         folder.mkdir()
                         folders.append(folder)
                         environment = r331_environment()
-                        environment["AIDAS_LIGHT_ONLY"] = "1" if light_only else "0"
+                        if setting is None:
+                            environment.pop("AIDAS_LIGHT_ONLY", None)
+                        else:
+                            environment["AIDAS_LIGHT_ONLY"] = setting
                         result = subprocess.run(
                             [str(rscript), "--vanilla", fixture.as_posix(), folder.as_posix(),
-                             (PROJECT_ROOT / filename).as_posix(), "1" if deep else "0"],
+                             (PROJECT_ROOT / filename).as_posix(), "1" if deep else "0",
+                             "1" if index else "0"],
                             stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT,
                             text=True,
@@ -70,15 +84,19 @@ class Step3LightOnlyR331Tests(unittest.TestCase):
                         )
                         self.assertEqual(result.returncode, 0, result.stdout)
 
-                    paired, light = folders
-                    for name in ("_tissueBorders__LIGHT.png",
-                                 "_thickness_vs_distance_from_fovea_LIGHT.txt"):
-                        self.assertTrue((light / name).is_file(), name)
-                        self.assertEqual((light / name).read_bytes(), (paired / name).read_bytes(), name)
-                    self.assertTrue((paired / "_tissueBorders__DARK.png").is_file())
-                    self.assertTrue((paired / "_thickness_vs_distance_from_fovea_DARK.txt").is_file())
-                    self.assertFalse(any("dark" in path.name.casefold() for path in light.rglob("*")))
-                    self.assertFalse((light / "Rplots.pdf").exists())
+                    light_names = {"_tissueBorders__LIGHT.png",
+                                   "_thickness_vs_distance_from_fovea_LIGHT.txt"}
+                    reference = folders[0]
+                    for setting, folder in zip((None, "0", "1"), folders):
+                        expected_names = set(light_names)
+                        if index == 0 and setting != "1":
+                            expected_names.update({"_tissueBorders__DARK.png",
+                                                   "_thickness_vs_distance_from_fovea_DARK.txt"})
+                        self.assertEqual({path.name for path in folder.iterdir()}, expected_names)
+                        for name in expected_names:
+                            self.assertGreater((folder / name).stat().st_size, 0, name)
+                        for name in light_names:
+                            self.assertEqual((folder / name).read_bytes(), (reference / name).read_bytes(), name)
 
 
 if __name__ == "__main__":

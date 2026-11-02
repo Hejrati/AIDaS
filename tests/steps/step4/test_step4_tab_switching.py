@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -71,6 +72,7 @@ class Step4TabSwitchingTests(unittest.TestCase):
         frame._plot_theme_signature = lambda: ("dark",)
         frame._update_profile_status = lambda _profile: None
         frame._update_confirm_button_state = lambda: None
+        frame._update_continue_to_step5_button_state = mock.Mock()
         frame.status_var = _VariableStub()
         frame._render_current_roi = lambda: self.fail(
             "an unchanged cached canvas must not be redrawn"
@@ -98,8 +100,9 @@ class Step4TabSwitchingTests(unittest.TestCase):
         self.assertIs(frame.image, image)
         self.assertEqual(frame.current_roi_idx, 0)
         self.assertEqual(frame.output_dir_var.value, state["output_dir"])
+        frame._update_continue_to_step5_button_state.assert_called_once_with()
 
-    def test_tab_label_refresh_skips_labels_that_are_already_current(self):
+    def test_completion_keeps_tab_names_fixed_without_updating_the_header(self):
         frame = Step4Frame.__new__(Step4Frame)
         frame.rois = ("A", "B", "C")
         frame._active_batch_roi_tab = "tab-a"
@@ -109,15 +112,41 @@ class Step4TabSwitchingTests(unittest.TestCase):
         }
         notebook = _NotebookStub(
             {
-                "tab-a": "1. Alpha (0/3)",
-                "tab-b": "stale",
+                "tab-a": "1. Alpha",
+                "tab-b": "2. Beta",
             }
         )
         frame.batch_roi_notebook = notebook
 
-        frame._refresh_batch_roi_tab_labels()
+        frame._sync_active_batch_roi_state = mock.Mock()
+        frame._mark_active_batch_roi_complete()
 
-        self.assertEqual(notebook.updates, [("tab-b", "2. Beta (0/3)")])
+        self.assertTrue(frame.batch_roi_tab_states["tab-a"]["complete"])
+        frame._sync_active_batch_roi_state.assert_called_once_with()
+        self.assertEqual(notebook.updates, [])
+
+    def test_selecting_the_current_loaded_tab_preserves_live_edits_without_reloading(self):
+        frame = Step4Frame.__new__(Step4Frame)
+        frame._active_batch_roi_tab = "tab-a"
+        frame.canvas = _CanvasStub()
+        frame._plot_theme_signature = lambda: ("dark",)
+        frame.batch_roi_tab_states = {"tab-a": {
+            "loaded": True, "canvas": frame.canvas,
+            "plot_theme_signature": ("dark",),
+        }}
+        frame.profile_clicks = [72.25, 98.5]
+        frame._sync_active_batch_roi_state = mock.Mock()
+        frame._restore_batch_roi_tab_from_cache = mock.Mock()
+        frame._cancel_roi_update_animations = mock.Mock()
+        frame._load_path = mock.Mock()
+
+        frame._activate_batch_roi_tab("tab-a")
+
+        self.assertEqual(frame.profile_clicks, [72.25, 98.5])
+        frame._sync_active_batch_roi_state.assert_not_called()
+        frame._restore_batch_roi_tab_from_cache.assert_not_called()
+        frame._cancel_roi_update_animations.assert_not_called()
+        frame._load_path.assert_not_called()
 
     def test_showing_page_styles_only_the_selected_tab(self):
         selected = _PageStub()

@@ -344,7 +344,7 @@ class Step4CompletionTests(unittest.TestCase):
         frame._update_continue_to_step5_button_state()
 
         frame.continue_to_step5_button.configure.assert_called_once_with(
-            text="Go to Step 5 (1/2 completed)"
+            text="Go to Step 5 (1/2 completed)", command=frame._continue_to_step5,
         )
         frame.continue_to_step5_button.state.assert_called_once_with(["disabled"])
 
@@ -353,7 +353,7 @@ class Step4CompletionTests(unittest.TestCase):
         frame._update_continue_to_step5_button_state()
 
         frame.continue_to_step5_button.configure.assert_called_once_with(
-            text="Go to Step 5 (2/2 completed)"
+            text="Go to Step 5 (2/2 completed)", command=frame._continue_to_step5,
         )
         frame.continue_to_step5_button.state.assert_called_once_with(["!disabled"])
 
@@ -370,7 +370,22 @@ class Step4CompletionTests(unittest.TestCase):
         frame._update_continue_to_step5_button_state()
 
         frame.continue_to_step5_button.configure.assert_called_once_with(
-            text="Go to Step 5"
+            text="Go to Step 5", command=frame._continue_to_step5,
+        )
+        frame.continue_to_step5_button.state.assert_called_once_with(["disabled"])
+
+    def test_main_continuation_stays_disabled_while_stack_files_are_being_written(self):
+        frame = object.__new__(Step4Frame)
+        frame.continue_to_step5_button = mock.Mock()
+        frame.batch_roi_notebook = object()
+        frame.batch_roi_tab_states = {"first": {"complete": True}, "last": {"complete": True}}
+        frame._active_batch_roi_tab = "last"
+        frame._stack_building = True
+
+        frame._update_continue_to_step5_button_state(force_enable=True)
+
+        frame.continue_to_step5_button.configure.assert_called_once_with(
+            text="Go to Step 5 (2/2 completed)", command=frame._continue_to_step5,
         )
         frame.continue_to_step5_button.state.assert_called_once_with(["disabled"])
 

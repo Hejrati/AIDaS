@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from collections import deque
 from concurrent.futures import CancelledError
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import hashlib
 from importlib import metadata
@@ -20,7 +21,7 @@ import tempfile
 import threading
 import traceback
 from tkinter import messagebox
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 import uuid
 import zipfile
 
@@ -248,71 +249,140 @@ def validate_attachments(paths):
     return paths
 
 
-def save_report(target, snapshot, *, title, description, attachments=(), include_logs=True,
-                cancel_event=None):
-    """Write an atomic ZIP; never modify originals or embed their full paths."""
-    paths = validate_attachments(attachments)
-    target = Path(target)
-    if target.suffix.lower() != ".zip":
-        raise ValueError("Save the diagnostic report with a .zip extension.")
-    if target.resolve() in paths:
-        raise ValueError("The report cannot overwrite one of its attachments.")
-    descriptor, temporary = tempfile.mkstemp(prefix=".aidas-feedback-", suffix=".zip", dir=target.parent)
-    os.close(descriptor)
+def validate_sharing_link(value):
+    """Accept an optional HTTPS sharing link without opening or uploading it."""
+    value = str(value or "")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError("The sharing link cannot contain control characters or line breaks.")
+    link = value.strip()
+    if not link:
+        return ""
+    try:
+        parts = urlsplit(link)
+        valid = (
+            parts.scheme.lower() == "https" and bool(parts.hostname)
+            and parts.username is None and parts.password is None
+            and not any(character.isspace() for character in link)
+        )
+        # Reading port also validates malformed or out-of-range port numbers.
+        parts.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ValueError("Enter an HTTPS sharing link with a host and no embedded username or password.")
+    return link
+
+
+def _attachment_manifest(paths, *, archive=None, cancel_event=None):
+    """Hash approved samples; copy their bytes only for a full ZIP export."""
     total = 0
     manifest = []
     groups = {}
+    for path in paths:
+        if cancel_event is not None and cancel_event.is_set():
+            raise CancelledError()
+        group = str(path.with_suffix(""))
+        groups.setdefault(group, len(groups)+1)
+        suffix = path.suffix.lower()
+        suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,12}", suffix) else ".dat"
+        name = f"data/sample_{groups[group]:03d}{suffix}"
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as source, (
+            archive.open(name, "w") if archive is not None else nullcontext()
+        ) as output:
+            before = os.fstat(source.fileno())
+            while chunk := source.read(1024*1024):
+                if cancel_event is not None and cancel_event.is_set():
+                    raise CancelledError()
+                total += len(chunk)
+                size += len(chunk)
+                if total > MAX_ATTACHMENT_BYTES:
+                    raise ValueError("Attachments grew beyond the 10 MB limit while collecting them.")
+                digest.update(chunk)
+                if output is not None:
+                    output.write(chunk)
+            after = os.fstat(source.fileno())
+            if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+                raise ValueError("An attachment changed while collecting it. Wait until processing finishes and try again.")
+        manifest.append({"file": name, "bytes": size, "sha256": digest.hexdigest(),
+                         "role_hint": "marked input" if "marked" in path.stem.lower() else "user-selected file"})
+    return manifest
+
+
+def save_report(target, snapshot, *, title, description, attachments=(), include_logs=True,
+                cancel_event=None, sharing_link=""):
+    """Save real text for email, or a full ZIP for approved file sharing.
+
+    Text reports contain sample metadata, never sample bytes or encoded files.
+    Both formats publish atomically and leave the selected originals unchanged.
+    """
+    paths = validate_attachments(attachments)
+    target = Path(target)
+    suffix = target.suffix.lower()
+    if suffix not in {".txt", ".zip"}:
+        raise ValueError("Save the diagnostic report as .txt for email or .zip for secure file sharing.")
+    if target.resolve() in paths:
+        raise ValueError("The report cannot overwrite one of its attachments.")
+    link = validate_sharing_link(sharing_link)
+    if cancel_event is not None and cancel_event.is_set():
+        raise CancelledError()
+    feedback = f"Title: {redact(title)}\n\n{redact(description)}\n"
+    if link:
+        feedback += f"\nSecure sample-data link (access managed by the sender):\n{link}\n"
+    descriptor, temporary = tempfile.mkstemp(prefix=".aidas-feedback-", suffix=suffix, dir=target.parent)
+    os.close(descriptor)
     try:
-        with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
-            archive.writestr("diagnostics.json", json.dumps(snapshot["diagnostics"], indent=2, ensure_ascii=False))
-            archive.writestr("feedback.txt", f"Title: {redact(title)}\n\n{redact(description)}\n")
-            archive.writestr("README.txt", "AIDaS diagnostic report. Generated text is scrubbed on a best-effort basis.\n"
-                             "User-selected files are included unchanged and require manual review.\n"
-                             "Attachment names are anonymized; matching .hdr/.img stems are preserved.\n")
-            if include_logs:
-                for log in snapshot["logs"]:
-                    archive.writestr("logs/" + log["name"], log["text"])
-            for path in paths:
-                group = str(path.with_suffix(""))
-                groups.setdefault(group, len(groups)+1)
-                suffix = path.suffix.lower()
-                # Only a short extension enters an archive member name.
-                suffix = suffix if re.fullmatch(r"\.[a-z0-9]{1,12}", suffix) else ".dat"
-                name = f"data/sample_{groups[group]:03d}{suffix}"
-                digest = hashlib.sha256()
-                size = 0
-                with path.open("rb") as source, archive.open(name, "w") as output:
-                    before = os.fstat(source.fileno())
-                    while chunk := source.read(1024*1024):
-                        if cancel_event is not None and cancel_event.is_set():
-                            raise CancelledError()
-                        total += len(chunk)
-                        size += len(chunk)
-                        if total > MAX_ATTACHMENT_BYTES:
-                            raise ValueError("Attachments grew beyond the 10 MB limit while collecting them.")
-                        digest.update(chunk)
-                        output.write(chunk)
-                    after = os.fstat(source.fileno())
-                    if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
-                        raise ValueError("An attachment changed while collecting it. Wait until processing finishes and try again.")
-                manifest.append({"file": name, "bytes": size, "sha256": digest.hexdigest(),
-                                 "role_hint": "marked input" if "marked" in path.stem.lower() else "user-selected file"})
-            archive.writestr("attachments.json", json.dumps(manifest, indent=2))
+        if suffix == ".txt":
+            manifest = _attachment_manifest(paths, cancel_event=cancel_event)
+            text = (
+                "AIDaS feedback report\nFormat: Plain text (UTF-8)\n"
+                f"Report ID: {snapshot['diagnostics']['report_id']}\nApp version: {__version__}\n\n"
+                f"{feedback}\nDIAGNOSTICS AND OPTIONAL LOGS\n"
+                f"{report_preview(snapshot, include_logs)}\n\n"
+                "SELECTED SAMPLE FILES - METADATA ONLY\n"
+                "Sample file contents are not included in this text report.\n"
+                "Share samples separately through an approved file-sharing service.\n"
+                f"{json.dumps(manifest, indent=2, ensure_ascii=False)}\n\n"
+                "Generated text is scrubbed on a best-effort basis. Review before sharing.\n"
+            )
+            Path(temporary).write_text(text, encoding="utf-8")
+        else:
+            with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+                archive.writestr("diagnostics.json", json.dumps(snapshot["diagnostics"], indent=2, ensure_ascii=False))
+                archive.writestr("feedback.txt", feedback)
+                archive.writestr("README.txt", "AIDaS diagnostic/data ZIP for approved file sharing.\n"
+                                 "Email the text report and share this ZIP using a secure sharing link.\n"
+                                 "Generated text is scrubbed on a best-effort basis.\n"
+                                 "User-selected files are included unchanged and require manual review.\n"
+                                 "Attachment names are anonymized; matching .hdr/.img stems are preserved.\n")
+                if include_logs:
+                    for log in snapshot["logs"]:
+                        archive.writestr("logs/" + log["name"], log["text"])
+                manifest = _attachment_manifest(paths, archive=archive, cancel_event=cancel_event)
+                archive.writestr("attachments.json", json.dumps(manifest, indent=2))
         if cancel_event is not None and cancel_event.is_set():
             raise CancelledError()
         if Path(temporary).stat().st_size > MAX_REPORT_BYTES:
-            raise ValueError("The ZIP exceeds the 15 MB report limit.")
+            raise ValueError("The report exceeds the 15 MB limit.")
         os.replace(temporary, target)
     finally:
         Path(temporary).unlink(missing_ok=True)
     return target
 
 
-def feedback_mailto(report_id, title, filename):
+def feedback_mailto(report_id, title, filename, *, sharing_link=""):
+    link = validate_sharing_link(sharing_link)
     body = (f"AIDaS feedback\nReport ID: {report_id}\nApp version: {__version__}\n\n"
-            "Please describe the problem and how to reproduce it:\n\n\n"
-            f"Please attach the diagnostic ZIP: {Path(filename).name}\n"
-            "The app does not attach or send files automatically.\n")
+            "Please describe the problem and how to reproduce it:\n\n\n")
+    if Path(filename).suffix.lower() == ".zip":
+        body += (f"Full diagnostic/data ZIP saved locally: {Path(filename).name}\n"
+                 "Share the ZIP through an approved file-sharing service and include its HTTPS link.\n")
+    else:
+        body += f"Please attach the diagnostic text report: {Path(filename).name}\n"
+    if link:
+        body += f"\nSecure sample-data link:\n{link}\n"
+    body += "The app does not upload, attach, or send files automatically.\n"
     clean_title = " ".join(redact(title).split())[:120]
     query = urlencode({"subject": f"[AIDaS Feedback] {clean_title} [{report_id}]", "body": body}, quote_via=quote)
     return f"mailto:{quote(FEEDBACK_EMAIL, safe='@+')}?{query}"

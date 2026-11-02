@@ -849,7 +849,22 @@ class ImageJLineEditingTests(unittest.TestCase):
                 self.assertEqual(indices[-1], len(points) - 1)
                 self.assertTrue(all((b-a)*zoom >= 16 for a, b in zip(indices, indices[1:])))
                 canvas.canvas.reset_mock()
+                canvas.canvas.canvasx.return_value = 0
+                canvas.canvas.canvasy.return_value = 0
+                canvas.canvas.winfo_width.return_value = int(len(points) * zoom) + 10
+                canvas.canvas.winfo_height.return_value = int(100 * zoom) + 10
+                canvas.canvas.find_withtag.return_value = ()
+                canvas._img_id = 1
+                canvas._line_handle_geometry = []
+                canvas._line_handle_items = []
+                canvas._line_handle_view_signature = None
                 canvas._draw_polyline(points, '#ffd500', show_vertices=True)
+                canvas.canvas.create_rectangle.assert_not_called()
+                self.assertEqual(len(canvas._line_handle_geometry), len(indices))
+                canvas._line_handle_positions = np.asarray(
+                    [point[:2] for point in canvas._line_handle_geometry], dtype=float,
+                )
+                canvas._refresh_visible_line_handles()
                 self.assertEqual(canvas.canvas.create_rectangle.call_count, len(indices))
                 self.assertEqual(canvas.canvas.create_line.call_count, 1)
                 self.assertEqual(canvas._line_overlays[0]['points'], points)

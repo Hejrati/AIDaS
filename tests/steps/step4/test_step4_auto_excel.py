@@ -1,4 +1,4 @@
-"""Automatic workbook creation follows successful stack completion only."""
+"""Completed stacks prepare Step 5; its button alone creates the workbook."""
 
 from pathlib import Path
 import queue
@@ -8,7 +8,10 @@ import unittest
 from unittest import mock
 
 import numpy as np
-from openpyxl import Workbook, load_workbook
+from openpyxl import load_workbook
+from PIL import Image
+
+from aidas.services.step4_results import STEP4_RESULTS_HEADERS, encode_step4_measurements
 
 from aidas.steps import step4_analyze_isez as module
 from aidas.steps.step5_compile import DEFAULT_OUTPUT_FILENAME, Step5Frame
@@ -26,7 +29,7 @@ class _Var:
         self.value = value
 
 
-class Step4AutomaticExcelTests(unittest.TestCase):
+class Step4ExcelHandoffTests(unittest.TestCase):
     def setUp(self):
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -81,7 +84,7 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         frame._workers.pop(0)()
         frame._callbacks.pop(0)()
 
-    def test_single_stack_starts_excel_after_output_worker_finishes_only_once(self):
+    def test_single_stack_hands_off_after_output_worker_finishes_only_once(self):
         frame = self._single_frame()
         frame._build_stack_outputs()
         frame.on_continue_to_step5.assert_not_called()
@@ -96,7 +99,7 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         frame.on_continue_to_step5.assert_called_once_with(str(self.root))
         self.info.assert_not_called()
 
-    def test_all_ready_batch_tabs_finish_before_one_excel_handoff(self):
+    def test_all_ready_batch_tabs_finish_before_one_step5_handoff(self):
         fixture = self._batch_fixture()
         fixture.frame._build_stack_outputs()
         fixture.frame.on_continue_to_step5.assert_not_called()
@@ -109,7 +112,71 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         self.assertEqual(fixture.frame._write_stack_output_files.call_count, 3)
         fixture.frame.on_continue_to_step5.assert_called_once_with(fixture.root)
 
-    def test_unfinished_batch_tab_prevents_excel_after_ready_tabs_finish(self):
+    @staticmethod
+    def _use_live_footer_state(frame):
+        frame.continue_to_step5_button = mock.Mock()
+        del frame._update_continue_to_step5_button_state
+
+    def test_finished_batch_enables_step5_footer_only_after_writes_and_keeps_handoff(self):
+        fixture = self._batch_fixture()
+        frame = fixture.frame
+        self._use_live_footer_state(frame)
+
+        frame._build_stack_outputs()
+
+        frame.continue_to_step5_button.state.assert_called_with(["disabled"])
+        frame.on_continue_to_step5.assert_not_called()
+        fixture.finish()
+        frame.continue_to_step5_button.configure.assert_called_with(
+            text="Go to Step 5 (4/4 completed)", command=frame._continue_to_step5,
+        )
+        frame.continue_to_step5_button.state.assert_called_with(["!disabled"])
+        frame.continue_to_step5_button.set_variant.assert_called_with("primary")
+        frame.on_continue_to_step5.assert_called_once_with(fixture.root)
+
+    def test_finished_active_stack_offers_next_tab_until_unfinished_file_is_processed(self):
+        fixture = self._batch_fixture(all_ready=False)
+        frame = fixture.frame
+        self._use_live_footer_state(frame)
+        frame._select_next_incomplete_batch_roi_tab = mock.Mock(return_value=True)
+
+        frame._build_stack_outputs()
+        fixture.finish()
+
+        frame.continue_to_step5_button.configure.assert_called_with(
+            text="Go to next tab (3/4 completed)", command=frame._go_to_next_batch_roi_tab,
+        )
+        frame.continue_to_step5_button.state.assert_called_with(["!disabled"])
+        frame.on_continue_to_step5.assert_not_called()
+        frame._select_next_incomplete_batch_roi_tab.assert_not_called()
+        frame.continue_to_step5_button.configure.call_args.kwargs["command"]()
+        frame._select_next_incomplete_batch_roi_tab.assert_called_once_with()
+        frame.on_continue_to_step5.assert_not_called()
+
+        frame._active_batch_roi_tab = "unfinished"
+        frame._update_continue_to_step5_button_state()
+        frame.continue_to_step5_button.configure.assert_called_with(
+            text="Go to Step 5 (3/4 completed)", command=frame._continue_to_step5,
+        )
+        frame.continue_to_step5_button.state.assert_called_with(["disabled"])
+
+    def test_failed_active_stack_keeps_step5_disabled_with_other_unfinished_tabs(self):
+        fixture = self._batch_fixture(all_ready=False)
+        frame = fixture.frame
+        self._use_live_footer_state(frame)
+        frame._write_stack_output_files.side_effect = [OSError("Disk full"), None]
+
+        frame._build_stack_outputs()
+        fixture.finish()
+
+        frame.continue_to_step5_button.configure.assert_called_with(
+            text="Go to Step 5 (2/4 completed)", command=frame._continue_to_step5,
+        )
+        frame.continue_to_step5_button.state.assert_called_with(["disabled"])
+        frame.on_continue_to_step5.assert_not_called()
+        fixture.error.assert_called_once()
+
+    def test_unfinished_batch_tab_prevents_step5_handoff_after_ready_tabs_finish(self):
         fixture = self._batch_fixture(all_ready=False)
         fixture.frame._build_stack_outputs()
         fixture.finish()
@@ -118,7 +185,7 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         self.assertFalse(fixture.states["unfinished"]["complete"])
         fixture.frame.on_continue_to_step5.assert_not_called()
 
-    def test_partially_failed_batch_does_not_generate_excel(self):
+    def test_partially_failed_batch_does_not_handoff(self):
         fixture = self._batch_fixture()
         fixture.frame._write_stack_output_files.side_effect = [OSError("Disk full"), None, None]
         fixture.frame._build_stack_outputs()
@@ -129,7 +196,7 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         fixture.error.assert_called_once()
         fixture.frame.on_continue_to_step5.assert_not_called()
 
-    def test_cancelled_batch_does_not_write_or_generate_excel(self):
+    def test_cancelled_batch_does_not_write_or_handoff(self):
         fixture = self._batch_fixture()
         fixture.frame._build_stack_outputs()
         fixture.frame._cancel_batch_stack_build()
@@ -148,7 +215,7 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         self.assertFalse(fixture.states["active"]["complete"])
         fixture.frame.on_continue_to_step5.assert_not_called()
 
-    def test_detached_single_worker_cannot_trigger_excel(self):
+    def test_detached_single_worker_cannot_handoff(self):
         frame = self._single_frame()
         frame._build_stack_outputs()
         frame._stack_build_events = None
@@ -157,7 +224,7 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         frame.on_continue_to_step5.assert_not_called()
         self.assertFalse(frame._stack_build_complete)
 
-    def test_failed_single_stack_does_not_trigger_excel(self):
+    def test_failed_single_stack_does_not_handoff(self):
         frame = self._single_frame()
         frame._write_stack_output_files.side_effect = OSError("Read-only output")
         frame._build_stack_outputs()
@@ -183,7 +250,7 @@ class Step4AutomaticExcelTests(unittest.TestCase):
 
         frame.on_continue_to_step5.assert_called_once_with(self.root)
 
-    def test_next_single_build_can_generate_a_fresh_workbook(self):
+    def test_next_single_build_can_prepare_a_fresh_handoff(self):
         frame = self._single_frame()
         for generation in range(1, 3):
             frame._build_stack_outputs()
@@ -214,20 +281,20 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         frame._show_processing_complete.assert_called_once()
         self.info.assert_not_called()
 
-    def test_stack_completion_creates_real_excel_without_confirmation_or_save_dialog(self):
+    def test_stack_handoff_prepares_paths_and_only_explicit_run_creates_real_excel(self):
         frame = self._single_frame()
         side = self.root / "Control" / "Subject_A" / "nasal"
         side.mkdir(parents=True)
         frame.output_dir_var.set(str(side))
 
         def write_measurements(_image, _ordered, outdir):
-            workbook = Workbook()
-            try:
-                workbook.active.cell(1, 7, "Round")
-                workbook.active.cell(2, 7, 10)
-                workbook.save(outdir / "rr_MCPAR.xlsx")
-            finally:
-                workbook.close()
+            measurements = {name: 1.0 for name in STEP4_RESULTS_HEADERS[1:]}
+            measurements["Round"] = 10
+            image = Image.new("L", (8, 12))
+            image.save(
+                outdir / module.STEP4_RESULTS_FILENAME,
+                description=encode_step4_measurements([measurements]),
+            )
 
         frame._write_stack_output_files.side_effect = write_measurements
         step5 = object.__new__(Step5Frame)
@@ -250,17 +317,27 @@ class Step4AutomaticExcelTests(unittest.TestCase):
         ) as confirmation:
             frame._build_stack_outputs()
             self._finish_single(frame)
+            output = side.parent / DEFAULT_OUTPUT_FILENAME
+            self.assertEqual(Path(step5.input_var.get()), side.parent)
+            self.assertEqual(Path(step5.output_var.get()), output)
+            self.assertFalse(output.exists())
+            self.assertFalse(step5._running)
+            self.assertNotIn("_worker", step5.__dict__)
+            step5.on_compilation_complete.assert_not_called()
+
+            step5._run_clicked()
             step5._worker.join(timeout=10)
             self.assertFalse(step5._worker.is_alive())
             step5._drain_compile_events()
 
-        output = side.parent.parent / DEFAULT_OUTPUT_FILENAME
+        output = side.parent / DEFAULT_OUTPUT_FILENAME
         save_as.assert_not_called()
         confirmation.assert_not_called()
         self.info.assert_not_called()
         self.error.assert_not_called()
         step5.on_compilation_complete.assert_called_once_with(output)
         self.assertIn("Excel file saved", step5.status_var.get())
+        self.assertFalse((side / "rr_MCPAR.xlsx").exists())
         workbook = load_workbook(output, data_only=True)
         try:
             self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "ONL", "Extraction_log"])

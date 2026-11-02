@@ -119,6 +119,12 @@ saved pixel value stays exactly the same, and the source SDB is untouched.
 Optional sidecar files (if available):
 - `.hdr` files with matching names
 
+The main AIDaS workflow (Steps 1–4) saves LIGHT outputs only; it does not
+generate DARK images or files. Step 3 preserves the original R thickness export
+as `_thickness_vs_distance_from_fovea_LIGHT.txt` and saves its cleaned table as
+`_thickness_vs_distance_from_fovea_LIGHT2.xlsx`, without a separate `LIGHT2.txt`.
+Step 5 uses the cleaned Excel table for ELM-RPE and ONL compilation.
+
 ## Step 4 MCP/AR Automatic ROI Detection
 
 Step 4 can automatically process the first 20 intensity profiles with
@@ -164,12 +170,24 @@ review unless it was already confirmed before automatic detection. Click an ambe
 zoomed profile, click the exact sample or drag either boundary line, and apply the correction. Manual
 zoom edits do not snap to a nearby minimum. **Build
 stack** remains disabled until every amber result has been reviewed. The final
-TIFF stacks and `rr_MCPAR.xlsx` are still written only when **Build stack** is
-pressed.
+`ROI_to_move_stck.tif` and `MAX_Stack.tif` stacks are written only when **Build
+stack** is pressed. The ROI stack stores the same shape measurements in its TIFF
+metadata, preserving the plot pixels and measured values without creating
+`rr_MCPAR.xlsx`. A successful rebuild removes that former generated workbook
+from the rebuilt output folder only after the new measurement record is saved
+and validated.
+
+Folder tabs keep fixed names while you work. ROI progress remains visible in
+the grid and action controls. After a stack finishes saving, **Go to next tab**
+is enabled if another folder remains; **Go to Step 5** is enabled when all
+selected folders are complete. These actions stay disabled during file writes.
 
 The **Disable automatic line positioning** checkbox sits between the overview
 grid and the bottom profile. It starts unchecked, so plot clicks position Start
-and End at nearby minima within the existing six-sample window. Check it to keep
+and End at nearby minima within the existing six-sample window. For a flat
+minimum, Start uses the plateau's right edge and End uses its left edge, even
+when the plateau extends beyond that search window. These edges are preserved
+in the preview and saved ROI. Check it to keep
 each line at the selected sample, including in the preview and saved ROI,
 without later automatic boundary adjustments. Toggling the checkbox affects
 future placements and corrections; it does not move existing lines. The choice
@@ -178,66 +196,80 @@ ROIs 1-20** action remains available.
 
 ## Step 5 Excel Compilation
 
-Step 5 searches the selected input folder recursively for Excel results inside
-`nasal` and `temporal` folders, including nested export folders. It uses the
+Step 5 searches the selected input folder recursively for Step 4 measurements
+inside `nasal` and `temporal` folders, including nested export folders. It uses the
 side folders' parent name as the complete subject ID and the subject's parent
 name as the group. Group names can be `Control`, `Treatment`, `LE`, `RE`, or any
 other folder name; subject names do not need to be numeric.
 
 ```text
 Input folder
-├── Control                         → Group
-│   └── Subject_A                   → Subject ID
+├── Control                                 → Group
+│   └── Subject_A                           → Subject ID
 │       ├── nasal
-│       │   └── rr_MCPAR.xlsx        → Nasal results
+│       │   ├── ROI_to_move_stck.tif          → Nasal measurements and plots
+│       │   └── MAX_Stack.tif
 │       ├── temporal
 │       │   └── exports
-│       │       └── rr_MCPAR.xlsx    → Temporal results
-│       ├── Images                  → Ignored: no Excel results
-│       └── Notes                   → Ignored: no Excel results
-└── Treatment                       → Group
-    └── Subject_B                   → Subject ID
+│       │       ├── ROI_to_move_stck.tif      → Temporal measurements and plots
+│       │       └── MAX_Stack.tif
+│       ├── Images                          → Ignored: no Step 4 measurements
+│       └── Notes                           → Ignored: no Step 4 measurements
+└── Treatment                               → Group
+    └── Subject_B                           → Subject ID
         ├── nasal
-        │   └── rr_MCPAR.xlsx
+        │   ├── ROI_to_move_stck.tif
+        │   └── MAX_Stack.tif
         └── temporal
-            └── rr_MCPAR.xlsx
+            ├── ROI_to_move_stck.tif
+            └── MAX_Stack.tif
 ```
 
 Each measurement sheet has an `ID`, `Nasal`, and `Temporal` column block per
 discovered group. IDs retain their full spelling, including leading zeros and
 suffixes. Subjects with only one side are included with the other side blank.
-Folders without nasal/temporal Excel results are ignored. Step 3 thickness and
-optional fovea extraction continue for the discovered subjects.
+Folders without nasal/temporal Step 4 measurements are ignored. Step 3 thickness
+and optional fovea extraction continue for the discovered subjects.
 
-The scanner prefers `rr_MCPAR.xlsx`, then legacy `Results*.xlsx`, then other
-`.xlsx` files; it ignores Excel lock files (`~$*`). Other workbook names must use
-the same Step 4 layout (measurements in column G). Duplicate subject names within
-the same group label in separate branches cause a clear error rather than
+The scanner prefers valid measurement records embedded in `ROI_to_move_stck.tif`
+(or `.tiff`). Older folders remain readable: the fallback order is legacy
+`rr_MCPAR.xlsx`, `Results*.xlsx`, then other compatible `.xlsx` files. Excel lock
+files (`~$*`) and thickness workbooks are excluded from Step 4 result discovery.
+Legacy workbooks must use the same Step 4 layout (measurements in column G).
+Duplicate subject names within the same group label in separate branches cause
+a clear error rather than
 silently dropping data.
 
-Clicking **Go to Step 5** in Step 4 transfers the measurement root for all Step 4
-tabs and starts compilation automatically. Switching workspace tabs does not
-transfer folders or start compilation. A side or subject root is promoted to include its group. The default output
+After all selected Step 4 stacks finish saving, Step 5 opens with the measurement
+root, default output path, and folder tree prepared. **Go to Step 5** also
+transfers the measurement root for all Step 4 tabs. Review the input folder,
+output path, and fovea option, then press **Create Excel File** to generate the
+workbook. Opening Step 5, receiving folders, and refreshing the tree do not
+create an Excel file. Step 5 keeps the selected SDB or subject folder. A handoff from
+inside a nasal or temporal folder uses its containing subject. A batch keeps
+its shared input root.
+The default output
 is `rrMCPAR_ELMRPE_ONL.xlsx` in that root; an explicitly chosen output path and
-fovea option are preserved. **Create Excel File** remains available for manual
-runs. The workbook contains `rrMCP-AR`, `ELM-RPE`, `ONL`, and `Extraction_log`;
+fovea option are preserved. Each compilation starts only when **Create Excel
+File** is pressed. The workbook contains `rrMCP-AR`, `ELM-RPE`, `ONL`, and `Extraction_log`;
 the log records each source path and extraction status.
 
 The Step 5 workspace shows an expandable folder-tree canvas for the currently
-selected input directory. Excel workbooks, thickness tables, fovea measurements,
-flattened images, and Step 4 image stacks have distinct icons and descriptions.
-Other files are summarized when shown, and folders without recorded Excel results appear as
-compact rows. Use **Refresh**, **Expand all**, and **Collapse all** to explore the
+selected input directory. Step 4 measurement stacks, Excel workbooks, thickness
+tables, fovea measurements, and flattened images have distinct icons and
+descriptions. Other files are summarized when shown, and folders without recorded
+Step 4 results appear as compact rows. Use **Refresh**, **Expand all**, and
+**Collapse all** to explore the
 tree. Scanning runs in the background and only visible rows are drawn.
 
-**Hide other files** is checked by default, so the tree shows Excel files and
-their folders. Uncheck it to also see thickness tables, fovea files, images, and
-the summaries of other files. Folders without Excel workbooks are labeled
-**No recorded Excel results**. Toggling this option updates the existing view
-without scanning the directory again.
+**Hide other files** is checked by default, so the tree shows Step 4 measurement
+records, compiled workbooks, and their folders. Uncheck it to also see thickness
+tables, fovea files, other images, and summaries of other files. Folders without
+measurement records are labeled **No recorded Step 4 measurements**. Toggling
+this option updates the existing view without scanning the directory again.
 
-Flat result folders are also visualized: workbooks outside `nasal` or `temporal`
-folders are marked as lacking a side assignment. This preview does not change
+Flat result folders are also visualized: measurement results outside `nasal` or
+`temporal` folders are marked as lacking a side assignment. This preview does not change
 the compiler's folder requirements. The workspace uses a short status message
 instead of progress bars or on-screen logs; detailed extraction information
 remains in the saved workbook's `Extraction_log` sheet.
@@ -259,24 +291,40 @@ python run_aidas.py
 
 Use the blue speech-bubble button beside **?**, or **Help > Send feedback...**
 (available in both interface modes). Describe the problem, review the generated
-diagnostics, and optionally select screenshots, sample data, or R workspaces.
+diagnostics, and optionally select screenshots, sample data, or R workspaces
+whose metadata can help describe the problem.
 The report contains app/OS/Python/package versions, selected R script hashes,
 processing settings, workflow status, recent errors, and optional recent logs.
-Input file contents are included only when explicitly selected.
+The default **TXT report** is readable text containing these diagnostics and
+sample-file metadata such as file types and sizes. It does not include selected
+file contents. Optional **ZIP export** includes explicitly selected files for
+local review or an approved file-sharing service.
 
-After reviewing the contents, check the approval box and choose **Save report
-ZIP...**, then **Open email draft**. The draft is addressed to
+After reviewing the contents, check the approval box, choose **Save report...**,
+and save the default `.txt` report. Choose **Open email draft** to prepare a
+message addressed to
 `b.hejrati+AIDaSFeedBack@wayne.edu` with subject prefix `[AIDaS Feedback]` and a
-report ID. **Attach the saved ZIP manually and send it from your email app.**
-The app does not send email or attach files automatically; it stores no mailbox
-credentials. If no default email app is configured, the address and ZIP location
-remain available for manual submission.
+report ID. **Attach the saved TXT report manually and send it from your email
+app.** If raw samples are needed, save a ZIP, share it through your organization's
+approved service, and paste the optional HTTPS sharing link into the feedback
+dialog for inclusion in the draft. AIDaS does not upload files, send email, or
+attach files automatically; it stores no mailbox credentials. If no default
+email app is configured, the address and saved report location remain available
+for manual submission.
+
+Mail services can restrict diagnostic data archives: [Gmail's attachment
+policy](https://support.google.com/mail/answer/6590?hl=en-GB) lists `.img` files,
+including files inside archives. [Microsoft's Outlook attachment
+guidance](https://support.microsoft.com/en-us/outlook/blocked-attachments-in-outlook)
+describes sharing files through OneDrive or SharePoint links. Delivery remains
+subject to the recipient's mail and security policies.
 
 Generated text is scrubbed on a best-effort basis; review it before sharing.
-Selected files retain their original contents and may contain patient details.
-Archive filenames are anonymized while matching Analyze `.hdr`/`.img` pairs keep
-matching stems. Selected files are limited to 10 MB total and the final ZIP to
-15 MB; larger datasets require a separate transfer. Existing data are unchanged.
+Files selected for ZIP export retain their original contents and may contain
+patient details. Archive filenames are anonymized while matching Analyze
+`.hdr`/`.img` pairs keep matching stems. ZIP samples are limited to 10 MB total;
+reports are limited to 15 MB. Larger datasets require a separate approved
+transfer. Existing data are unchanged.
 Uncaught errors and error dialogs are recorded locally in bounded logs under
 `~/.aidas/diagnostics` for inclusion in future reports.
 
@@ -572,16 +620,20 @@ Step 3 still requires the R interpreter and its required R packages. The app's
 **Setup R and Packages** wizard detects or installs those runtime dependencies;
 the workflow `.R` files are bundled with the application automatically.
 **Settings > Step 3: R Scripts** selects the main and output processing scripts.
-Both use their bundled **Optimized version** by default. Existing saved bundled
-original defaults upgrade once; later selections of Original or Custom remain
-saved. Custom scripts can be added through each selector and are copied to the
+Both use their bundled **Optimized deeper layers** pair by default. Original,
+Optimized, and Custom remain available for explicit selection. Custom scripts
+can be added through each selector and are copied to the
 user's persistent AIDaS script library for reuse in later sessions.
 
-The optional **Optimized deeper layers** choice uses separate main and output
+The bundled Original scripts retain their legacy standalone behavior, including
+DARK exports when run directly with their legacy defaults. AIDaS launches its
+Step 3 scripts with `AIDAS_LIGHT_ONLY=1` to request LIGHT-only app outputs.
+
+The default **Optimized deeper layers** choice uses separate main and output
 scripts named `RAW_OCT_PROCESSING_2023_09SEP-05_WSU_optimized_deep_layers.R` and
 `more_outputs_afterRAW_OCT_PROCESSING_2022_11NOV_27_WSU_noHypoDenseBand_EA edited_optimized_deep_layers.R`.
 Select that choice for both scripts. Original and Optimized retain their existing
-six-boundary behavior, and Optimized remains the default.
+six-boundary behavior.
 
 The deeper-layer variant preserves the RPE, OLM, ONL/OPL, and INL/IPL calculation
 paths and foveal analysis. It retains the vitreous/retina boundary internally for
@@ -594,8 +646,9 @@ Analyze images can zero-fill those depths for display; those zeros are not
 measured brightness.
 Use the saved numerical workspace as the precision reference. Masking omitted
 table values can change R's text formatting and rounding without changing the
-retained unrounded calculations. Step 5 reads those text tables, so its parsed
-values can reflect that rounding difference.
+retained unrounded calculations. The cleaned LIGHT2 Excel table retains values
+parsed from the original R text export, so Step 5 measurements can reflect that
+rounding difference.
 
 When the new main script is selected, AIDaS launches it with
 `AIDAS_STEP3_DEEP_ONLY=1` and requires its matching output script. Standalone R

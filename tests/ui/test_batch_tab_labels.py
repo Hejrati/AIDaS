@@ -22,21 +22,17 @@ class BatchTabLabelTests(unittest.TestCase):
         self.assertEqual(groups[0]["folders"]["temporal"].name, "temporal")
         self.assertEqual(groups[0]["folders"]["nasal"].name, "nasal")
 
-    def test_step4_progress_title_leaves_close_control_to_component(self):
+    def test_step4_folder_title_stays_fixed_as_roi_and_stack_work_finishes(self):
         step = object.__new__(Step4Frame)
         step.batch_roi_notebook = None
         step.rois = ("A", "B", "C")
 
-        self.assertEqual(
-            step._batch_roi_tab_text(
-                {
-                    "folder": None,
-                    "base_label": "1. test1",
-                    "completed": {},
-                }
-            ),
-            "1. test1 (0/3)",
-        )
+        state = {"folder": None, "base_label": "1. test1", "completed": {}}
+        self.assertEqual(step._batch_roi_tab_text(state), "1. test1")
+        state["completed"] = dict.fromkeys(step.rois)
+        self.assertEqual(step._batch_roi_tab_text(state), "1. test1")
+        state["complete"] = True
+        self.assertEqual(step._batch_roi_tab_text(state), "1. test1")
 
 
 if __name__ == "__main__":

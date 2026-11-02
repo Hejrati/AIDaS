@@ -38,9 +38,9 @@
 # Implicit diagnostic plots must never create Rplots.pdf; explicit PNGs still render.
 options(device=function(...) grDevices::pdf(file=NULL))
 
-# App runs publish only the acquired LIGHT channel; paired arrays remain in memory
+# All runs publish only the acquired LIGHT channel; paired arrays remain in memory
 # so the legacy numerical calculations and LIGHT measurements stay unchanged.
-.LIGHT.ONLY <- identical(Sys.getenv("AIDAS_LIGHT_ONLY", unset=""), "1")
+.LIGHT.ONLY <- TRUE
 .is.dark.output <- function(filename) {
   .LIGHT.ONLY && grepl("dark", basename(filename), ignore.case=TRUE)
 }

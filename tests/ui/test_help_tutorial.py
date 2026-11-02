@@ -131,7 +131,7 @@ class TutorialContentTests(unittest.TestCase):
             "Solidity",
             "ROI_to_move_stck.tif",
             "MAX_Stack.tif",
-            "rr_MCPAR.xlsx",
+            "measurement record",
             "slice 0",
             "Apply changes",
             "Auto-detect ROIs 1-20",
@@ -150,7 +150,7 @@ class TutorialContentTests(unittest.TestCase):
             "ONL",
             "Create Excel File",
             "rrMCPAR_ELMRPE_ONL.xlsx",
-            "automatically",
+            "only when this button is pressed",
             "group",
             "subject ID",
             "Folder contents",
@@ -158,6 +158,8 @@ class TutorialContentTests(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, text)
+
+        self.assertNotIn("start compilation automatically", text)
 
     @staticmethod
     def _page_text(key):

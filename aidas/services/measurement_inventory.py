@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Callable
 
 from aidas.utils.filesystem import walk_unique_directories
+from aidas.services.step4_results import STEP4_STACK_FILENAMES, has_step4_measurements
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,11 @@ def _file_kind(path: Path, output_path: Path | None) -> tuple[str, str] | None:
     name = path.name.lower()
     if name.startswith("~$"):
         return None
+    if name in {filename.lower() for filename in STEP4_STACK_FILENAMES} and has_step4_measurements(path):
+        return "measurements", "Step 4 measurements in image stack"
+    if (name.endswith(".xlsx") and "light2" in name
+            and all(part in name for part in ("thickness", "distance", "fovea"))):
+        return "thickness", "ELM-RPE / ONL thickness · cleaned Excel"
     if name.endswith(".xlsx") and (path == output_path or name in (
         "rrmcpar_elmrpe_onl.xlsx", "le_re_rrmcpar_elmrpe_onl.xlsx",
     )):
@@ -68,7 +74,8 @@ def scan_measurement_directory(
     """Inventory actual files, retaining empty branches as compact folder rows.
 
     Flat workbooks are displayed even though the compiler requires side folders.
-    No workbooks or measurement tables are opened or modified by this scan.
+    TIFF headers identify saved measurements without decoding image pixels.
+    Excel workbooks and text tables are not opened, and no files are modified.
     """
     root = Path(root).resolve()
     output_path = Path(output_path).resolve() if output_path is not None else None
@@ -111,7 +118,7 @@ def scan_measurement_directory(
                 other_files += 1
                 continue
             kind, detail = classification
-            if kind == "excel":
+            if kind in ("excel", "measurements"):
                 workbooks += 1
                 side_folder = next((parent for parent in path.parents if parent.name.strip().lower() in ("nasal", "temporal")), None)
                 if side_folder is None:
@@ -123,10 +130,10 @@ def scan_measurement_directory(
             thickness += kind == "thickness"
             fovea += kind == "fovea"
             important_count += 1
-            is_excel = kind in ("excel", "output")
+            is_excel = kind in ("excel", "output", "measurements")
             excel_count += is_excel
             important_children.append(DirectoryNode(path, name, kind, detail, important_files=1, total_files=1, excel_files=int(is_excel)))
-        priority = {"excel": 0, "output": 1, "thickness": 2, "fovea": 3, "image": 4}
+        priority = {"measurements": 0, "excel": 0, "output": 1, "thickness": 2, "fovea": 3, "image": 4}
         children.extend(sorted(important_children, key=lambda node: (priority[node.kind], node.name.casefold())))
         if other_files:
             children.append(DirectoryNode(directory, f"… {other_files} other files", "other", "Not shown individually"))
@@ -137,7 +144,7 @@ def scan_measurement_directory(
         elif directory in group_paths:
             detail = "Group"
         if not excel_count:
-            detail = "No recorded Excel results"
+            detail = "No recorded Step 4 measurements"
         nodes[directory] = DirectoryNode(
             directory, directory.name or str(directory), "folder", detail,
             tuple(children) if important_count or directory == root else (),

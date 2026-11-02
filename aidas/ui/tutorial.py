@@ -162,7 +162,8 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         function_summary="Run the main and output R scripts, monitor progress, and review diagnostics",
         output_summary="_flat_LIGHT.hdr/_flat_LIGHT.img, R workspaces, plots, profiles, and logs",
         completion_check=(
-            "A successful R batch result contains the cleaned _thickness_vs_distance_from_fovea_LIGHT.txt. "
+            "A successful R batch result preserves _thickness_vs_distance_from_fovea_LIGHT.txt "
+            "and saves its cleaned measurements in _thickness_vs_distance_from_fovea_LIGHT2.xlsx. "
             "The previews should show a plausible "
             "foveal vertex and tissue borders; every folder handed to Step 4 must also contain a "
             "complete _flat_LIGHT Analyze pair."
@@ -180,7 +181,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             ),
             (
                 "Each valid result contains a complete _flat_LIGHT.hdr and _flat_LIGHT.img Analyze pair.",
-                "The run also produces LIGHT R workspaces, diagnostic plots, profiles, logs, and _thickness_vs_distance_from_fovea_LIGHT.txt.",
+                "The run also produces LIGHT R workspaces, diagnostic plots, profiles, logs, the original _thickness_vs_distance_from_fovea_LIGHT.txt, and the cleaned _thickness_vs_distance_from_fovea_LIGHT2.xlsx.",
                 "Go to Step 4 becomes available for valid flattened folders and transfers them to ROI analysis.",
             ),
         ),
@@ -202,11 +203,11 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         ),
         input_summary="Completed Step 3 _flat_LIGHT Analyze pairs, using slice 0",
         function_summary="Automatically detect or manually revise profile bounds for 21 ROIs and calculate shape measurements",
-        output_summary="ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx",
+        output_summary="ROI_to_move_stck.tif with measurements, and MAX_Stack.tif",
         completion_check=(
-            "Every selected folder tab is marked Done and contains "
-            "ROI_to_move_stck.tif, MAX_Stack.tif, and a measurement workbook. "
-            "New builds write rr_MCPAR.xlsx."
+            "Every selected folder has finished saving and contains "
+            "ROI_to_move_stck.tif with its measurement record and MAX_Stack.tif. "
+            "A separate measurement workbook is not created."
         ),
         stage_points=(
             (
@@ -220,9 +221,9 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "Review the grid previews and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, click the exact sample or drag the Start or End line in the zoomed editor, and use Apply changes to confirm it. Zoomed manual edits do not snap to a nearby minimum.",
             ),
             (
-                "When all 21 ROIs are complete, Build stack becomes available and marks the folder tab Done after a successful build.",
-                "The build shows a wait message while writing ROI_to_move_stck.tif, MAX_Stack.tif, and rr_MCPAR.xlsx, then advances to the next incomplete folder. A completed plot tab provides Open results folder, Restart this file, and Go to Step 5 actions.",
-                "Go to Step 5 opens Create Excel File, carries forward the measurement root for all tabs, and starts compilation automatically.",
+                "When all 21 ROIs are complete, Build stack becomes available. Folder tab names stay fixed while you work.",
+                "The build shows a wait message while saving ROI_to_move_stck.tif with its measurements and MAX_Stack.tif. After saving, Go to next tab becomes available while folders remain; Go to Step 5 becomes available when all are complete. Saved tabs also provide Open results folder and Restart this file.",
+                "After all stacks finish saving, Step 5 opens with the measurement root, output path, and folder tree prepared. Go to Step 5 also transfers the measurement folders. Press Create Excel File when ready to generate the workbook.",
             ),
         ),
         tips=(
@@ -241,7 +242,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             "Step 5 combines measurements produced throughout the workflow into "
             "one Excel file for downstream review and analysis."
         ),
-        input_summary="A group / subject / nasal or temporal folder tree containing Step 3 text exports and Step 4 workbooks",
+        input_summary="A group / subject / nasal or temporal folder tree containing Step 3 thickness tables and Step 4 ROI stacks",
         function_summary="Combine rrMCP/AR, ELM-RPE, and ONL measurements into an Excel file",
         output_summary="rrMCPAR_ELMRPE_ONL.xlsx",
         completion_check=(
@@ -250,14 +251,14 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         ),
         stage_points=(
             (
-                "Choose Go to Step 5 in Step 4 to transfer its measurement folders and start compilation automatically. Switching workspace tabs only opens the workspace. For manual compilation, browse to a folder containing group and subject folders at any depth.",
+                "Use the Step 4 handoff or Go to Step 5 to prepare the measurement folders, output path, and folder tree. Opening this workspace or receiving folders does not create an Excel file. You can also browse to a folder containing group and subject folders at any depth.",
                 "Review the Excel file path and choose a different .xlsx destination if needed.",
                 "Choose whether to include the fovea RPEtoOLM row in the ELM-RPE sheet.",
-                "Select Create Excel File to run a manual compilation or compile again after changing options.",
+                "Press Create Excel File to start compilation. A workbook is generated only when this button is pressed; review the paths and options before each run.",
             ),
             (
-                "AIDaS discovers current rr_MCPAR.xlsx and compatible legacy workbooks, then reads the Step 3 ELM-RPE and ONL exports. The nasal/temporal parent folder supplies the full subject ID. Its parent folder supplies the group name, including custom names or LE and RE. Folders without Excel results are ignored.",
-                "Explore the Folder contents canvas to see recorded Excel results. Hide other files is checked by default; uncheck it to also see thickness tables, fovea measurements, and image stacks. Expand or collapse folders and use Refresh to read changes. Files outside nasal/temporal folders are visible with an explanation. Inputs stay locked while the Excel file is being created.",
+                "AIDaS reads current measurements from ROI_to_move_stck.tif and accepts compatible legacy workbooks, then reads the Step 3 ELM-RPE and ONL exports from cleaned LIGHT2 Excel tables. Original LIGHT text exports stay unchanged. The nasal/temporal parent folder supplies the full subject ID. Its parent folder supplies the group name, including custom names or LE and RE. Folders without Step 4 measurements are ignored.",
+                "Explore the Folder contents canvas to see recorded Step 4 results. Hide other files is checked by default; uncheck it to also see thickness tables, fovea measurements, and other image stacks. Expand or collapse folders and use Refresh to read changes. Files outside nasal/temporal folders are visible with an explanation. Inputs stay locked while the Excel file is being created.",
             ),
             (
                 "AIDaS creates the rrMCP-AR, ELM-RPE, and ONL worksheets.",
@@ -267,7 +268,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         ),
         tips=(
             "Select a common parent to include every group. Each group gets ID, Nasal, and Temporal columns on each measurement sheet.",
-            "AIDaS accepts both current rr_MCPAR.xlsx outputs and recognized legacy result names.",
+            "AIDaS reads measurements stored with current ROI stacks and continues to accept recognized legacy workbooks.",
         ),
         step_index=4,
     ),

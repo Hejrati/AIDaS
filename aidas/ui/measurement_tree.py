@@ -39,7 +39,7 @@ class MeasurementDirectoryTree(ttk.Frame):
         self._indent = 26
         self._detail_x = 450
         self._content_width = 800
-        self._empty_message = "Choose an input folder to explore its recorded Excel results."
+        self._empty_message = "Choose an input folder to explore its recorded measurements."
         self.path_var = tk.StringVar(master=self, value="Choose an input folder to view its contents.")
         self.summary_var = tk.StringVar(master=self, value="")
         self.notice_var = tk.StringVar(master=self, value="")
@@ -146,7 +146,7 @@ class MeasurementDirectoryTree(ttk.Frame):
                 continue
             notices = []
             if inventory.unassigned_workbooks:
-                notices.append("Excel results outside nasal/temporal folders are shown below, but the compiler cannot assign them to a side.")
+                notices.append("Measurement results outside nasal/temporal folders are shown below, but the compiler cannot assign them to a side.")
             if inventory.errors:
                 notices.append("Some folders could not be read. Check their access permissions.")
             self._show_notice(" ".join(notices))
@@ -185,7 +185,7 @@ class MeasurementDirectoryTree(ttk.Frame):
             return ()
         if node.path not in self._filtered_children:
             self._filtered_children[node.path] = tuple(
-                child for child in node.children if child.kind in ("folder", "excel", "output")
+                child for child in node.children if child.kind in ("folder", "measurements", "excel", "output")
             )
         return self._filtered_children[node.path]
 
@@ -194,7 +194,7 @@ class MeasurementDirectoryTree(ttk.Frame):
         self._rows_revision += 1
         if self._inventory is not None:
             inventory = self._inventory
-            counts = [(inventory.workbooks, "recorded Excel result")]
+            counts = [(inventory.workbooks, "recorded Step 4 result")]
             outputs = inventory.root.excel_files - inventory.workbooks
             if outputs:
                 counts.append((outputs, "compiled workbook"))
@@ -313,7 +313,7 @@ class MeasurementDirectoryTree(ttk.Frame):
                 line_x = x - 13
                 canvas.create_line(line_x, top, line_x, mid if last else top + height, fill=COLORS.border_strong)
                 canvas.create_line(line_x, mid, x - 4, mid, fill=COLORS.border_strong)
-            color = COLORS.warning if node.kind == "folder" else COLORS.success if node.kind in ("excel", "output") else COLORS.primary
+            color = COLORS.warning if node.kind == "folder" else COLORS.success if node.kind in ("measurements", "excel", "output") else COLORS.primary
             if node.kind == "other":
                 color = COLORS.muted_text
                 canvas.create_text(x + 6, mid, text="·", fill=color, font=self._name_font)
@@ -333,7 +333,12 @@ class MeasurementDirectoryTree(ttk.Frame):
         self.canvas.create_rectangle(x + 1, mid - 9, x + 17, mid + 9, outline=color, width=1.5, tags=(tag, "file-icon-box"))
         cx = x + 9
         segments = []
-        if kind in ("excel", "output"):
+        if kind == "measurements":
+            segments = [(cx - 3, mid + 4, cx - 3, mid - 4),
+                        (cx - 3, mid - 4, cx, mid),
+                        (cx, mid, cx + 3, mid - 4),
+                        (cx + 3, mid - 4, cx + 3, mid + 4)]
+        elif kind in ("excel", "output"):
             segments = [(cx - 3, mid - 4, cx + 3, mid + 4), (cx - 3, mid + 4, cx + 3, mid - 4)]
         else:
             segments = [(cx - 3, mid - 4, cx + 3, mid - 4), (cx, mid - 4, cx, mid + 4)]
