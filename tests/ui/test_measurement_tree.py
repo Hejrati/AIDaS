@@ -140,6 +140,7 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
             self.assertFalse((self.directory / "rrMCPAR_ELMRPE_ONL.xlsx").exists())
             compile_workbook.assert_not_called()
 
+            self._wait(lambda: frame._input_scan_state == "ready")
             frame._run_clicked()
             self._wait(lambda: (
                 not frame._running and frame.directory_view._inventory is not None

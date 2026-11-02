@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Callable
 
-from aidas.utils.filesystem import walk_unique_directories
+from aidas.services.measurement_scan import walk_measurement_directories
 from aidas.services.step4_results import STEP4_STACK_FILENAMES, has_step4_measurements
 
 
@@ -85,9 +85,13 @@ def scan_measurement_directory(
     def on_error(error):
         errors.append(str(error))
 
-    for directory, subdirectories, files in walk_unique_directories(root, onerror=on_error):
+    def check_cancelled():
         if cancelled():
             raise InventoryCancelled()
+
+    for directory, subdirectories, files in walk_measurement_directories(
+        root, onerror=on_error, check_cancelled=check_cancelled,
+    ):
         subdirectories.sort(key=str.casefold)
         directories.append((Path(directory), tuple(subdirectories), tuple(files)))
 

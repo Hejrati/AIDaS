@@ -156,6 +156,7 @@ class Step3RScriptVariantSelectionTests(unittest.TestCase):
         self.frame = Step3Frame.__new__(Step3Frame)
         self.frame.preferences = _Preferences()
         self.frame._busy = False
+        self.frame.r_batch_run_panel = None
         self.frame._script_path = lambda role="main": self.defaults[role]
         self.frame._user_r_script_dir = lambda role="main": self.root / "user" / role
 

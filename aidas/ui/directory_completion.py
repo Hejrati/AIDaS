@@ -10,12 +10,14 @@ from aidas.core.display import monitor_work_area_for_window
 from aidas.ui.scrolling import DeferredScrollbar
 from aidas.ui.theme import COLORS
 from aidas.utils.path_completion import directory_completions
+from aidas.utils.worker_polling import WorkerCompletionGuard
 
 
 class DirectoryCompletion:
     DEBOUNCE_MS = 120
     POLL_MS = 25
     VISIBLE_ROWS = 9
+    MAX_RESULTS_PER_POLL = 64
 
     def __init__(self, entry):
         self.entry = entry
@@ -148,14 +150,20 @@ class DirectoryCompletion:
                 matches = []
             results.put((generation, text, matches))
 
-        threading.Thread(target=lookup, daemon=True, name="aidas-folder-completion").start()
+        try:
+            worker = threading.Thread(target=lookup, daemon=True, name="aidas-folder-completion")
+            self._lookup_guard = WorkerCompletionGuard(worker)
+            worker.start()
+        except Exception:
+            self.hide()
+            return
         self._poll_id = self.owner.after(self.POLL_MS, self._poll_results)
 
     def _poll_results(self):
         self._poll_id = None
         if self._disposed:
             return
-        while True:
+        for _ in range(min(self._results.qsize(), self.MAX_RESULTS_PER_POLL)):
             try:
                 generation, text, matches = self._results.get_nowait()
             except queue.Empty:
@@ -180,6 +188,10 @@ class DirectoryCompletion:
             elif action is not None and action[0] == "complete":
                 self._move_focus(action[1])
         if self._pending is not None:
+            guard = getattr(self, "_lookup_guard", None)
+            if self._results.empty() and guard is not None and guard.missing_result():
+                self.hide()
+                return
             self._poll_id = self.owner.after(self.POLL_MS, self._poll_results)
 
     def _ensure_popup(self):
@@ -416,6 +428,7 @@ class DirectoryCompletion:
     def hide(self):
         self._generation += 1
         self._pending = None
+        self._lookup_guard = None
         self._pending_action = None
         self._cancel("_delay_id")
         self._cancel("_poll_id")

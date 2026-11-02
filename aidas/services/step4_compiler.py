@@ -25,6 +25,7 @@ from openpyxl.styles import Alignment, Font
 from openpyxl.utils import get_column_letter
 
 from aidas.utils.filesystem import walk_unique_directories
+from aidas.services.measurement_scan import validate_measurement_subfolder_limit
 from aidas.services.step4_results import STEP4_STACK_FILENAMES, read_step4_measurements
 
 
@@ -817,6 +818,9 @@ def compile_step4_results(
     emit(f"Include fovea in ELM-RPE: {bool(include_fovea)}\n")
     emit("Searching recursively for nasal and temporal Step 4 measurements...")
     report_progress(0, 1, "Scanning input folders...")
+    # Recheck every descendant immediately before compilation. Subject
+    # discovery prunes side branches and thickness extraction writes LIGHT2.
+    validate_measurement_subfolder_limit(root, onerror=_raise_walk_error)
     subject_folders = find_subject_folders(root)
     group_ids = {
         group: tuple(sorted(subject_folders[group], key=_natural_key))

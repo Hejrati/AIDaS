@@ -9,6 +9,18 @@ from typing import Callable
 
 
 DirectoryScanError = tuple[Path, str]
+MAX_SCAN_SUBFOLDERS = 500
+
+
+class DirectoryScanLimitExceeded(ValueError):
+    """A complete batch scan exceeded its accepted subfolder budget."""
+
+    def __init__(self, limit: int | None = None):
+        self.limit = MAX_SCAN_SUBFOLDERS if limit is None else limit
+        super().__init__(
+            "The selected folder contains too many subfolders and exceeds the "
+            f"limit of {self.limit}. Please select another folder."
+        )
 
 
 def walk_unique_directories(
@@ -16,6 +28,7 @@ def walk_unique_directories(
     *,
     onerror: Callable[[OSError], None] | None = None,
     followlinks: bool = False,
+    cancel_event=None,
 ):
     """Walk each physical directory once, including across Windows junctions.
 
@@ -27,6 +40,9 @@ def walk_unique_directories(
     seen_paths = set()
     seen_ids = set()
     identities = {}
+
+    def cancelled():
+        return cancel_event is not None and cancel_event.is_set()
 
     def identity(path):
         key = os.fspath(path)
@@ -50,8 +66,22 @@ def walk_unique_directories(
         canonical, file_id = identity(path)
         return canonical in seen_paths or (file_id is not None and file_id in seen_ids)
 
+    def prune_visited(directory, subdirectories):
+        remaining = []
+        for name in subdirectories:
+            if cancelled():
+                return False
+            if not visited(os.path.join(directory, name)):
+                remaining.append(name)
+        subdirectories[:] = remaining
+        return True
+
+    if cancelled():
+        return
     options = {"followlinks": True} if followlinks else {}
-    for directory, subdirectories, filenames in os.walk(root, onerror=onerror, **options):
+    for directory, subdirectories, filenames in os.walk(root, topdown=True, onerror=onerror, **options):
+        if cancelled():
+            return
         canonical, file_id = identity(directory)
         if canonical in seen_paths or (file_id is not None and file_id in seen_ids):
             subdirectories.clear()
@@ -59,14 +89,39 @@ def walk_unique_directories(
         seen_paths.add(canonical)
         if file_id is not None:
             seen_ids.add(file_id)
-        subdirectories[:] = [
-            name for name in subdirectories if not visited(os.path.join(directory, name))
-        ]
+        if not prune_visited(directory, subdirectories):
+            return
         yield directory, subdirectories, filenames
         # A caller may have changed the branch list while consuming this row.
-        subdirectories[:] = [
-            name for name in subdirectories if not visited(os.path.join(directory, name))
-        ]
+        if cancelled() or not prune_visited(directory, subdirectories):
+            return
+
+
+def walk_bounded_directories(
+    root: str | os.PathLike,
+    *,
+    onerror: Callable[[OSError], None] | None = None,
+    followlinks: bool = False,
+    cancel_event=None,
+    max_subfolders: int | None = None,
+):
+    """Walk a complete batch tree, rejecting more than 500 unique subfolders.
+
+    The selected root is free. Physical aliases and cycles count once; nested
+    descendants have no separate depth cap. Cancellation stops without raising.
+    Consumers must finish this walk before accepting its collected batch rows.
+    """
+    limit = MAX_SCAN_SUBFOLDERS if max_subfolders is None else max_subfolders
+    if not isinstance(limit, int) or limit < 0:
+        raise ValueError("The subfolder limit must be a nonnegative integer.")
+    for subfolders, row in enumerate(walk_unique_directories(
+        root, onerror=onerror, followlinks=followlinks, cancel_event=cancel_event,
+    )):
+        if cancel_event is not None and cancel_event.is_set():
+            return
+        if subfolders > limit:
+            raise DirectoryScanLimitExceeded(limit)
+        yield row
 
 
 def normalize_path_input(value: str | os.PathLike) -> str:
@@ -95,12 +150,14 @@ def existing_directory(value: str | os.PathLike | None) -> Path | None:
 def find_candidate_directories(
     root: str | os.PathLike,
     required_name_groups: Iterable[Iterable[str]],
+    *,
+    cancel_event=None,
 ) -> tuple[list[Path], int, list[DirectoryScanError]]:
     """Prefilter batch inputs using filenames already returned by os.walk.
 
     Each group contains alternative filenames; every group must match. Callers
     retain their existing file/type, pair, and freshness checks. No results are
-    cached between scans.
+    cached between scans. Oversized trees are rejected before rows are returned.
     """
     root = Path(root)
     groups = tuple({name.lower() for name in group} for group in required_name_groups)
@@ -111,13 +168,15 @@ def find_candidate_directories(
     def record_error(exc):
         errors.append((Path(exc.filename) if exc.filename else root, str(exc)))
 
-    for folder, dirnames, filenames in os.walk(root, topdown=True, onerror=record_error):
+    for folder, dirnames, filenames in walk_bounded_directories(
+        root, onerror=record_error, cancel_event=cancel_event,
+    ):
         dirnames.sort(key=str.lower)
         scanned += 1
         names = {name.lower() for name in filenames}
         if all(names.intersection(group) for group in groups):
             candidates.append(Path(folder))
-    return candidates, scanned, errors
+    return ([] if cancel_event is not None and cancel_event.is_set() else candidates), scanned, errors
 
 
 def find_sdb_directories(
@@ -140,9 +199,9 @@ def find_sdb_directories(
         path = Path(exc.filename) if exc.filename else root
         errors.append((path, str(exc)))
 
-    for folder, dirnames, filenames in os.walk(root, topdown=True, onerror=record_error):
-        if cancel_event is not None and cancel_event.is_set():
-            break
+    for folder, dirnames, filenames in walk_bounded_directories(
+        root, onerror=record_error, cancel_event=cancel_event,
+    ):
         dirnames.sort(key=str.lower)
         sdb_names = sorted(
             (name for name in filenames if name.lower().endswith(".sdb")),
@@ -152,10 +211,14 @@ def find_sdb_directories(
             directory = Path(folder)
             matches[directory] = [directory / name for name in sdb_names]
 
-    return matches, errors
+    return ({} if cancel_event is not None and cancel_event.is_set() else matches), errors
 
 
-def walk_accessible_directories(root: str | os.PathLike) -> tuple[list[Path], list[DirectoryScanError]]:
+def walk_accessible_directories(
+    root: str | os.PathLike,
+    *,
+    cancel_event=None,
+) -> tuple[list[Path], list[DirectoryScanError]]:
     """Return readable directories below *root* while recording skipped branches.
 
     ``os.walk`` continues with sibling directories after its ``onerror``
@@ -171,11 +234,13 @@ def walk_accessible_directories(root: str | os.PathLike) -> tuple[list[Path], li
         path = Path(exc.filename) if exc.filename else root
         errors.append((path, str(exc)))
 
-    for folder, dirnames, _filenames in os.walk(root, topdown=True, onerror=record_error):
+    for folder, dirnames, _filenames in walk_bounded_directories(
+        root, onerror=record_error, cancel_event=cancel_event,
+    ):
         dirnames.sort(key=str.lower)
         directories.append(Path(folder))
 
-    return directories, errors
+    return ([] if cancel_event is not None and cancel_event.is_set() else directories), errors
 
 
 def skipped_directories_warning(errors: list[DirectoryScanError], *, limit: int = 5) -> str:

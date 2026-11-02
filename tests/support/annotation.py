@@ -20,6 +20,8 @@ class StubVariable:
 
 def make_annotation_frame():
     frame = Step2Frame.__new__(Step2Frame)
+    frame.after = mock.Mock(return_value="annotation-poll")
+    frame.after_cancel = mock.Mock()
     frame._manual_segmentation_enabled = True
     frame.image_data = np.arange(80, dtype=np.int16).reshape(8, 10)
     frame.image_canvas = mock.Mock()

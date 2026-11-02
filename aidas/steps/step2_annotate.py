@@ -53,7 +53,8 @@ from aidas.ui.scrolling_text import ScrollingText
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS, SHAPES, TYPOGRAPHY
 from aidas.utils.batch_summary import format_batch_summary
-from aidas.utils.filesystem import find_candidate_directories, skipped_directories_warning
+from aidas.utils.filesystem import DirectoryScanLimitExceeded, find_candidate_directories, skipped_directories_warning
+from aidas.utils.worker_polling import WorkerCompletionGuard
 from aidas.utils.io_utils import read_analyze, read_tiff, write_analyze, scale_image
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.ui_layout import LAYOUT
@@ -485,6 +486,11 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.table = None
         self.processed_notice = None
         self.empty_notice = None
+        self._scan_events = queue.Queue()
+        self._scan_cancel = threading.Event()
+        self._scan_poll_after_id = None
+        self._scan_closed = False
+        self._scan_ready = False
 
         self._build_ui()
         if initial_rows is None:
@@ -577,24 +583,92 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             self.summary_label.configure(wraplength=wraplength)
 
     def _start_scan(self):
+        self._stop_scan()
+        self._scan_closed = False
+        self._scan_ready = False
+        self._scan_cancel = threading.Event()
+        self._scan_events = queue.Queue()
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
-
-    def _scan_worker(self):
+        self.next_button.state(["disabled"])
+        worker = threading.Thread(
+            target=self._scan_worker,
+            args=(self.root_dir, self._scan_cancel, self._scan_events), daemon=True,
+        )
+        self._scan_completion = WorkerCompletionGuard(worker)
         try:
-            rows, scanned, skipped, access_errors = self.step_frame._scan_step2_batch_segmentation_folders(self.root_dir)
+            worker.start()
         except Exception as exc:
-            self.after(0, lambda exc=exc: self._scan_failed(exc))
+            self._scan_failed(exc)
             return
-        self.after(0, lambda: self._scan_done(rows, scanned, skipped, access_errors))
+        self._scan_poll_after_id = self.after(50, self._poll_scan_events)
+
+    def _scan_worker(self, root_dir=None, cancelled=None, events=None):
+        root_dir = self.root_dir if root_dir is None else root_dir
+        cancelled = self._scan_cancel if cancelled is None else cancelled
+        events = self._scan_events if events is None else events
+        try:
+            result = self.step_frame._scan_step2_batch_segmentation_folders(root_dir, cancel_event=cancelled)
+        except Exception as exc:
+            if not cancelled.is_set():
+                events.put(("error", exc))
+        else:
+            if not cancelled.is_set():
+                events.put(("done", result))
+
+    def _poll_scan_events(self):
+        self._scan_poll_after_id = None
+        if self.__dict__.get("_scan_closed", False):
+            return
+        try:
+            kind, payload = self._scan_events.get_nowait()
+        except queue.Empty:
+            guard = self.__dict__.get("_scan_completion")
+            if guard is not None and guard.missing_result():
+                self._scan_failed(RuntimeError("The folder scan stopped without reporting a result. Select another folder to try again."))
+                return
+            self._scan_poll_after_id = self.after(50, self._poll_scan_events)
+            return
+        if kind == "error":
+            self._scan_failed(payload)
+        else:
+            self._scan_done(*payload)
+
+    def _stop_scan(self):
+        cancelled = self.__dict__.get("_scan_cancel")
+        if cancelled is not None:
+            cancelled.set()
+        pending = self.__dict__.get("_scan_poll_after_id")
+        self._scan_poll_after_id = None
+        if pending is not None:
+            self.after_cancel(pending)
+
+    def destroy(self):
+        self._scan_closed = True
+        self._stop_scan()
+        super().destroy()
 
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set("Scan failed.")
+        self._scan_ready = False
+        self.rows = []
+        self.table = None
+        limited = isinstance(exc, DirectoryScanLimitExceeded)
+        title = "Folder limit exceeded." if limited else "Scan failed."
+        self.summary_var.set(title)
         self.more_label.configure(text="More")
         self.more_tooltip.text = f"Could not scan folders.\n{exc}"
-        self.step_frame.status_var.set("Batch segmentation scan failed.")
+        self.step_frame.status_var.set(str(exc) if limited else f"Batch segmentation scan failed: {exc}")
+        for child in self.table_host.winfo_children():
+            child.destroy()
+        notice = ttk.Frame(self.table_host, padding=16)
+        notice.pack(fill="both", expand=True)
+        ttk.Label(notice, text=title, font=("", 12, "bold")).pack(pady=(8, 12))
+        label = ttk.Label(notice, text=str(exc), wraplength=480, justify="center")
+        label.pack(fill="x")
+        notice.bind("<Configure>", lambda event: label.configure(wraplength=max(1, event.width-32)))
+        AppButton(notice, text="Select another folder", command=self._select_another_folder).pack(pady=16)
+        self.empty_notice = notice
         try:
             self.next_button.state(["disabled"])
         except tk.TclError:
@@ -738,6 +812,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         if not self.winfo_exists():
             return
         self.rows = rows
+        self._scan_ready = True
         for row in rows:
             try:
                 folder_text = os.path.relpath(row["folder"], self.root_dir)
@@ -772,6 +847,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             self.step_frame.status_var.set("No valid Step 2 files found. Select another folder.")
 
     def _run_selected(self):
+        if not self.__dict__.get("_scan_ready", True):
+            return
         if self.table is None:
             return
         rows = self.table.selected_rows()
@@ -944,7 +1021,7 @@ class Step2Frame(SidebarStepFrame):
 
         self._build_segmentation_progress()
         self._build_controls()
-        self.after(100, self._start_ai_device_probe)
+        self._ai_device_probe_after_id = self.after(100, self._start_ai_device_probe)
 
     # ═══════════════════════════════════════════════════════════════════════
     #  UI construction
@@ -1211,6 +1288,15 @@ class Step2Frame(SidebarStepFrame):
             self._queue_annotation_tutorial()
 
     def destroy(self):
+        self._closing = True
+        cancelled = self.__dict__.get("_ai_cancel_event")
+        if cancelled is not None:
+            cancelled.set()
+        self._stop_worker_dispatch()
+        probe_job = self.__dict__.get("_ai_device_probe_after_id")
+        self._ai_device_probe_after_id = None
+        if probe_job is not None:
+            self.after_cancel(probe_job)
         self._cancel_batch_result_fit()
         self._cancel_progress_animation()
         self._watch_annotation_tutorial_canvas(None)
@@ -1685,13 +1771,15 @@ class Step2Frame(SidebarStepFrame):
             prepared.append(updated)
         return prepared
 
-    def _scan_step2_batch_segmentation_folders(self, root_dir):
+    def _scan_step2_batch_segmentation_folders(self, root_dir, *, cancel_event=None):
         """Return folder rows showing ready and already-segmented Light inputs."""
         root_dir = os.path.abspath(root_dir)
         rows = []
-        folders, scanned, access_errors = find_candidate_directories(root_dir, (("light.img",),))
+        folders, scanned, access_errors = find_candidate_directories(root_dir, (("light.img",),), cancel_event=cancel_event)
         skipped = scanned - len(folders)
         for folder_path in folders:
+            if cancel_event is not None and cancel_event.is_set():
+                return [], scanned, skipped, access_errors
             try:
                 row = self._step2_batch_segmentation_row(folder_path)
             except OSError as exc:
@@ -4484,6 +4572,9 @@ class Step2Frame(SidebarStepFrame):
         raise RuntimeError("AI provider probe returned no compatibility record")
 
     def _start_ai_device_probe(self):
+        self._ai_device_probe_after_id = None
+        if self.__dict__.get("_closing", False):
+            return
         if getattr(self, "_ai_device_probe_started", False):
             return
         self._ai_device_probe_started = True
@@ -4496,27 +4587,36 @@ class Step2Frame(SidebarStepFrame):
                 result = {"compatible_gpu": None, "providers": ()}
             self._ai_device_probe_results.put(result)
 
-        threading.Thread(target=worker, daemon=True).start()
-        self.after(50, self._poll_ai_device_probe)
+        thread = threading.Thread(target=worker, daemon=True)
+        self._ai_probe_completion = WorkerCompletionGuard(thread)
+        try:
+            thread.start()
+        except Exception:
+            self._ai_device_probe_results.put({"compatible_gpu": None, "providers": ()})
+        self._ai_device_probe_after_id = self.after(50, self._poll_ai_device_probe)
 
     def _poll_ai_device_probe(self):
         """Apply a background probe result only from Tk's owner thread."""
 
+        self._ai_device_probe_after_id = None
+        if self.__dict__.get("_closing", False):
+            return
         results = getattr(self, "_ai_device_probe_results", None)
         if results is None:
             return
-        # This Tk callback is the only consumer; the worker only puts results.
-        # An empty queue means the probe is still running, not an exception.
-        # No other reader can drain a ready result between empty() and get().
-        if results.empty():
-            try:
-                if self.winfo_exists():
-                    self.after(50, self._poll_ai_device_probe)
-            except tk.TclError:
-                pass
-            return
-
-        result = results.get_nowait()
+        try:
+            result = results.get_nowait()
+        except queue.Empty:
+            guard = self.__dict__.get("_ai_probe_completion")
+            if guard is not None and guard.missing_result():
+                result = {"compatible_gpu": None, "providers": ()}
+            else:
+                try:
+                    if self.winfo_exists():
+                        self._ai_device_probe_after_id = self.after(50, self._poll_ai_device_probe)
+                except tk.TclError:
+                    pass
+                return
         compatible = result.get("compatible_gpu")
         self._ai_gpu_compatible = None if compatible is None else bool(compatible)
         if self._ai_gpu_compatible is True:
@@ -5073,12 +5173,83 @@ class Step2Frame(SidebarStepFrame):
             kwargs={"current_image_state": state},
             daemon=True,
         )
+        self._ai_cancel_event = threading.Event()
+        self._start_worker_dispatch(worker, lambda: self._on_current_image_segmentation_done(
+            {"results": [], "exception": "The AI worker stopped without reporting a result."}, state,
+        ))
         try:
             worker.start()
-        except RuntimeError as exc:
+        except Exception as exc:
+            self._stop_worker_dispatch()
             self._set_segmentation_running(False)
             self._restore_unfinished_ai_trace(state)
             messagebox.showerror("AI segmentation failed", str(exc))
+
+
+    def _start_worker_dispatch(self, worker, on_missing):
+        self._stop_worker_dispatch()
+        self._worker_ui_events = queue.Queue()
+        self._worker_ui_completion = WorkerCompletionGuard(worker)
+        self._worker_ui_missing = on_missing
+        self._worker_ui_completed = False
+        self._worker_ui_dispatch = (worker, self._worker_ui_events)
+        self._worker_ui_poll_after_id = self.after(50, self._poll_worker_dispatch)
+
+    def _post_worker_ui(self, callback, *, terminal=False):
+        if self.__dict__.get("_closing", False):
+            return
+        # Direct calls from the owning thread remain useful for synchronous
+        # handlers. Background workers only publish plain Python queue entries.
+        if threading.current_thread() is threading.main_thread():
+            callback()
+            return
+        dispatch = self.__dict__.get("_worker_ui_dispatch")
+        if dispatch is not None and dispatch[0] is threading.current_thread():
+            dispatch[1].put((callback, terminal))
+
+    def _poll_worker_dispatch(self):
+        self._worker_ui_poll_after_id = None
+        if self.__dict__.get("_closing", False):
+            return
+        generation = self.__dict__.get("_worker_ui_generation", 0)
+        events = self.__dict__.get("_worker_ui_events")
+        if events is None:
+            return
+        empty = False
+        try:
+            for _ in range(200):
+                try:
+                    callback, terminal = events.get_nowait()
+                except queue.Empty:
+                    empty = True
+                    break
+                if terminal:
+                    if self._worker_ui_completed:
+                        continue
+                    self._worker_ui_completed = True
+                callback()
+                if generation != self._worker_ui_generation:
+                    return
+        finally:
+            if (not self.__dict__.get("_closing", False)
+                    and generation == self._worker_ui_generation):
+                if (empty and not self._worker_ui_completed
+                        and self._worker_ui_completion.missing_result()):
+                    self._worker_ui_completed = True
+                    self._worker_ui_missing()
+                if (generation == self._worker_ui_generation
+                        and (not self._worker_ui_completed or not events.empty())):
+                    self._worker_ui_poll_after_id = self.after(50, self._poll_worker_dispatch)
+
+    def _stop_worker_dispatch(self):
+        self._worker_ui_generation = self.__dict__.get("_worker_ui_generation", 0) + 1
+        pending = self.__dict__.get("_worker_ui_poll_after_id")
+        self._worker_ui_poll_after_id = None
+        if pending is not None:
+            self.after_cancel(pending)
+        # Detach in constant time: a live producer must not prolong closing.
+        self._worker_ui_dispatch = None
+        self._worker_ui_events = None
 
     def _restore_unfinished_ai_trace(self, state):
         if not self.is_manual_segmentation_enabled():
@@ -5278,7 +5449,17 @@ class Step2Frame(SidebarStepFrame):
             ),
             daemon=True,
         )
-        worker.start()
+        self._ai_cancel_event = threading.Event()
+        self._start_worker_dispatch(worker, lambda: self._on_aidas_batch_segmenter_worker_done({
+            "results": [], "failures": [], "total": len(image_paths),
+            "exception": "The AI worker stopped without reporting a result.",
+        }))
+        try:
+            worker.start()
+        except Exception as exc:
+            self._stop_worker_dispatch()
+            self._set_segmentation_running(False)
+            self.status_var.set(f"Could not start AI segmentation: {exc}")
 
     def _run_aidas_batch_segmenter_worker(
         self,
@@ -5313,18 +5494,18 @@ class Step2Frame(SidebarStepFrame):
         def report_status(index, path):
             total = len(image_paths)
             name = os.path.basename(path)
-            self.after(0, lambda i=index, t=total: self._set_segmenter_progress_value(i - 1, t))
+            self._post_worker_ui(lambda i=index, t=total: self._set_segmenter_progress_value(i - 1, t))
             label = "AI segmentation" if current_image_state is not None else f"AI_ForAIDAS batch {index}/{total}"
-            self.after(0, lambda: self._set_segmentation_status(f"{label}: {name}"))
-            self.after(0, lambda: self._append_segmenter_log(f"Batch {index}/{total}: {path}"))
+            self._post_worker_ui(lambda: self._set_segmentation_status(f"{label}: {name}"))
+            self._post_worker_ui(lambda: self._append_segmenter_log(f"Batch {index}/{total}: {path}"))
 
         def report_model_progress(index, total, path, fraction, stage):
             progress_value = (index - 1) + max(0.0, min(float(fraction), 1.0))
             label = str(stage or "running").replace("_", " ")
             name = os.path.basename(path)
             prefix = "AI segmentation" if current_image_state is not None else f"AI_ForAIDAS batch {index}/{total}"
-            self.after(0, lambda v=progress_value, t=total: self._set_segmenter_progress_value(v, t))
-            self.after(0, lambda: self._set_segmentation_status(f"{prefix}: {name} - {label}"))
+            self._post_worker_ui(lambda v=progress_value, t=total: self._set_segmenter_progress_value(v, t))
+            self._post_worker_ui(lambda: self._set_segmentation_status(f"{prefix}: {name} - {label}"))
 
         try:
             worker_client = AIWorkerClient(
@@ -5333,6 +5514,7 @@ class Step2Frame(SidebarStepFrame):
                 provider_name=provider_name,
                 device_id=device_id,
                 core_limit=core_limit,
+                cancel_event=self.__dict__.get("_ai_cancel_event"),
                 env=self._aidas_worker_env(),
                 popen_kwargs=self._hidden_subprocess_kwargs(),
                 startup_progress_callback=lambda fraction, stage: report_model_progress(
@@ -5350,12 +5532,9 @@ class Step2Frame(SidebarStepFrame):
                     startup.get("execution_provider") or execution_provider
                 )
                 fallback_reason = startup.get("fallback_reason") or fallback_reason
-                self.after(
-                    0,
-                    lambda d=device, p=execution_provider, f=fallback_reason: (
+                self._post_worker_ui(lambda d=device, p=execution_provider, f=fallback_reason: (
                         self._set_runtime_ai_device_status(d, p, f)
-                    ),
-                )
+                    ))
                 log_lines.append(f"Worker: {worker_client.command_line}")
                 log_lines.append(
                     f"Execution provider: {startup.get('execution_provider') or 'unknown'}"
@@ -5367,6 +5546,9 @@ class Step2Frame(SidebarStepFrame):
                 log_lines.append("")
 
                 for index, path in enumerate(image_paths, start=1):
+                    cancelled = self.__dict__.get("_ai_cancel_event")
+                    if cancelled is not None and cancelled.is_set():
+                        break
                     report_status(index, path)
                     try:
                         if current_image_state is None:
@@ -5395,12 +5577,9 @@ class Step2Frame(SidebarStepFrame):
                                 "  Core-processing fallback: "
                                 f"{prediction['fallback_reason']}"
                             )
-                        self.after(
-                            0,
-                            lambda d=device, p=execution_provider, f=fallback_reason: (
+                        self._post_worker_ui(lambda d=device, p=execution_provider, f=fallback_reason: (
                                 self._set_runtime_ai_device_status(d, p, f)
-                            ),
-                        )
+                            ))
                         fovea_x = None
                         if manual_fovea_by_key is not None:
                             fovea_x = manual_fovea_by_key.get(self._image_pair_key(path))
@@ -5438,7 +5617,7 @@ class Step2Frame(SidebarStepFrame):
                         log_lines.append(f"FAILED: {path}")
                         log_lines.append(f"  Error: {exc}")
                     finally:
-                        self.after(0, lambda i=index, t=len(image_paths): self._set_segmenter_progress_value(i, t))
+                        self._post_worker_ui(lambda i=index, t=len(image_paths): self._set_segmenter_progress_value(i, t))
         except Exception as exc:
             batch_exception = str(exc)
             log_lines.append(f"FATAL: {batch_exception}")
@@ -5465,9 +5644,9 @@ class Step2Frame(SidebarStepFrame):
             "total": len(image_paths),
         }
         if current_image_state is None:
-            self.after(0, lambda: self._on_aidas_batch_segmenter_worker_done(result))
+            self._post_worker_ui(lambda: self._on_aidas_batch_segmenter_worker_done(result), terminal=True)
         else:
-            self.after(0, lambda: self._on_current_image_segmentation_done(result, current_image_state))
+            self._post_worker_ui(lambda: self._on_current_image_segmentation_done(result, current_image_state), terminal=True)
 
     def _on_aidas_batch_segmenter_worker_done(self, result):
         running_cleared = False

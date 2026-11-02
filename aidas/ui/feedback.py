@@ -6,6 +6,7 @@ import queue
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from types import SimpleNamespace
 import webbrowser
 
 import customtkinter as ctk
@@ -15,6 +16,7 @@ from aidas.services.feedback import (
     save_report, validate_attachments, validate_sharing_link,
 )
 from aidas.ui.components import AppButton
+from aidas.ui.scrolling import SettingsScrollableFrame
 from aidas.core.display import work_area_bounds
 from aidas.ui.theme import COLOR_PAIRS
 from aidas.ui.windowing import centered_logical_geometry, logical_window_size, physical_window_size, synchronize_window_chrome
@@ -52,6 +54,94 @@ class _FeedbackWindow(ctk.CTkToplevel):
         super().destroy()
 
 
+class _FeedbackScrollableFrame(SettingsScrollableFrame):
+    """Capture wheel input before child controls consume it, within one dialog."""
+
+    def install_window_scrolling(self, window):
+        self._wheel_tag = f"AIDaSFeedbackWheel{self._w}"
+        self._wheel_window = window
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            window.bind_class(self._wheel_tag, sequence, self._route_wheel)
+
+        def visit(widget):
+            if widget is not window and isinstance(widget, tk.Toplevel):
+                return
+            widget.bindtags((self._wheel_tag, *widget.bindtags()))
+            for child in widget.winfo_children():
+                visit(child)
+
+        visit(window)
+
+    def _route_wheel(self, event):
+        # Text's native class handler runs before toplevel/global bindings.
+        # This capture tag routes exactly once and leaves other windows alone.
+        self._mouse_wheel_all(SimpleNamespace(
+            widget=self._parent_canvas, delta=event.delta, num=event.num,
+        ))
+        return "break"
+
+    def destroy(self):
+        window = getattr(self, "_wheel_window", None)
+        if window is not None:
+            for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+                try:
+                    window.unbind_class(self._wheel_tag, sequence)
+                except tk.TclError:
+                    pass
+            self._wheel_window = None
+        super().destroy()
+
+
+class _FeedbackPreviewWindow(_FeedbackWindow):
+    """Keep long diagnostic logs from monopolizing Tk while they are inserted."""
+
+    TEXT_CHUNK_SIZE = 32 * 1024
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self._text_after_id = None
+        self._text_generation = 0
+        self._pending_text = ""
+        self._text_offset = 0
+        self.box = None
+
+    def set_text(self, text):
+        self._cancel_text_load()
+        self.box.configure(state="normal")
+        self.box.delete("1.0", "end")
+        self.box.configure(state="disabled")
+        self.box.yview_moveto(0)
+        self._pending_text = text
+        self._text_offset = 0
+        self._append_text(self._text_generation)
+
+    def _append_text(self, generation):
+        self._text_after_id = None
+        if generation != self._text_generation:
+            return
+        end = self._text_offset + self.TEXT_CHUNK_SIZE
+        self.box.configure(state="normal")
+        self.box.insert("end", self._pending_text[self._text_offset:end])
+        self.box.configure(state="disabled")
+        self._text_offset = end
+        if end < len(self._pending_text):
+            self._text_after_id = self.after(1, self._append_text, generation)
+        else:
+            self._pending_text = ""
+
+    def _cancel_text_load(self):
+        self._text_generation += 1
+        if self._text_after_id is not None:
+            self.after_cancel(self._text_after_id)
+            self._text_after_id = None
+        self._pending_text = ""
+
+    def destroy(self):
+        self._cancel_text_load()
+        super().destroy()
+        self.box = None
+
+
 class FeedbackDialog(_FeedbackWindow):
     def __init__(self, parent, *, context):
         super().__init__(parent)
@@ -71,39 +161,63 @@ class FeedbackDialog(_FeedbackWindow):
         self._saved_sharing_link = ""
         self._sharing_link_value = ""
         self._working = False
+        self._review_enabled = False
+        self._preview_window = None
+        self._preview_text = {}
+        self._preview_includes_logs = None
+        self.required_markers = []
         self._wrapped_labels = []
         self._wrap_width = None
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=1)
         ctk.CTkLabel(self, text="Send feedback", font=ctk.CTkFont(size=22, weight="bold"),
                      text_color=COLOR_PAIRS["text"]).grid(row=0, column=0, sticky="w", padx=20, pady=(16, 8))
-        body = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        body = _FeedbackScrollableFrame(self, fg_color="transparent")
+        self.body = body
         body.grid(row=1, column=0, sticky="nsew", padx=12)
         body.grid_columnconfigure(0, weight=1)
         row = 0
 
-        def label(text):
+        def label(text, *, required=False):
             nonlocal row
-            widget = ctk.CTkLabel(body, text=text, anchor="w", justify="left", wraplength=570,
+            holder = ctk.CTkFrame(body, fg_color="transparent") if required else body
+            if required:
+                holder.grid(row=row, column=0, sticky="w", padx=8, pady=(8, 4))
+            widget = ctk.CTkLabel(holder, text=text, anchor="w", justify="left", wraplength=550 if required else 570,
                                 text_color=COLOR_PAIRS["text"])
-            widget.grid(row=row, column=0, sticky="ew", padx=8, pady=(8, 4))
-            self._wrapped_labels.append(widget)
+            if required:
+                widget.grid(row=0, column=0, sticky="w")
+                marker = ctk.CTkLabel(holder, text="*", width=12, text_color=COLOR_PAIRS["danger"])
+                marker.grid(row=0, column=1, sticky="ne", padx=(3, 0))
+                self.required_markers.append(marker)
+            else:
+                widget.grid(row=row, column=0, sticky="ew", padx=8, pady=(8, 4))
+            self._wrapped_labels.append((widget, 18 if required else 0))
             row += 1
             return widget
 
         label(f"To: {FEEDBACK_EMAIL}\nSave a text report for email, then open your email app to attach it and send it.")
-        label("Problem summary *")
+        label("Problem summary", required=True)
         self.summary = ctk.CTkEntry(body, placeholder_text="For example: Step 3 fails while flattening an image")
         self.summary.grid(row=row, column=0, sticky="ew", padx=8); row += 1
-        label("What happened? Include steps to reproduce, expected results, and actual results. *")
+        label("What happened? Include steps to reproduce, expected results, and actual results.", required=True)
         self.description = ctk.CTkTextbox(body, height=110)
         self.description.grid(row=row, column=0, sticky="ew", padx=8); row += 1
         self.include_logs = tk.BooleanVar(self, value=True)
-        self.logs_check = ctk.CTkCheckBox(body, text="Include relevant recent logs (review before sharing)", variable=self.include_logs,
+        logs_row = ctk.CTkFrame(body, fg_color="transparent")
+        logs_row.grid(row=row, column=0, sticky="ew", padx=8, pady=(12, 6)); row += 1
+        self.logs_check = ctk.CTkCheckBox(logs_row, text="Include relevant recent logs", variable=self.include_logs,
                                          command=self._invalidate_report)
-        self.logs_check.grid(row=row, column=0, sticky="w", padx=8, pady=(12, 6)); row += 1
-        self.preview_button = AppButton(body, text="Review diagnostics and logs", command=self._preview, state="disabled")
-        self.preview_button.grid(row=row, column=0, sticky="w", padx=8, pady=4); row += 1
+        self.logs_check.pack(side="left")
+        self.review_link = ctk.CTkLabel(
+            logs_row, text="(review before sharing)", text_color=COLOR_PAIRS["disabled_text"],
+            font=ctk.CTkFont(underline=True), cursor="arrow",
+        )
+        self.review_link.pack(side="left", padx=(4, 0))
+        self.review_link.bind("<Button-1>", self._review_clicked)
+        self.review_link._label.configure(takefocus=False)
+        self.review_link.bind("<Return>", self._review_clicked)
+        self.review_link.bind("<space>", self._review_clicked)
         label("Includes app and system information, processing settings, and recent errors.\n"
               "Automatic removal of private details is not guaranteed. Review before sharing.")
         label("Optional: screenshots, sample inputs, annotations, or R workspaces (10 MB total).\n"
@@ -148,11 +262,18 @@ class FeedbackDialog(_FeedbackWindow):
             width = max(240, int(body._reverse_widget_scaling(event.width))-24)
             if width != self._wrap_width:
                 self._wrap_width = width
-                for widget in self._wrapped_labels:
-                    widget.configure(wraplength=width)
+                for widget, inset in self._wrapped_labels:
+                    widget.configure(wraplength=max(1, width-inset))
         body.bind("<Configure>", resize_labels, add="+")
-        self._start_worker("diagnostics", lambda: collect_diagnostics(context))
+        def collect():
+            snapshot = collect_diagnostics(context)
+            # Prepare both immutable views off Tk, including large log payloads.
+            previews = {logs: report_preview(snapshot, logs) for logs in (False, True)}
+            return snapshot, previews
+
+        self._start_worker("diagnostics", collect)
         synchronize_window_chrome(self, background=COLOR_PAIRS["window_chrome"], foreground=COLOR_PAIRS["text"])
+        body.install_window_scrolling(self)
         self.deiconify()
         self.summary.focus_set()
 
@@ -178,7 +299,8 @@ class FeedbackDialog(_FeedbackWindow):
             return
         self._working = False
         if kind == "diagnostics":
-            self._snapshot = result
+            if not error:
+                self._snapshot, self._preview_text = result
             self.status.set("Review the diagnostics, describe the problem, then save a text report." if not error else f"Could not collect diagnostics: {error}")
         elif not error:
             self._report_path = result
@@ -190,25 +312,39 @@ class FeedbackDialog(_FeedbackWindow):
         else:
             self.status.set(f"Could not save report: {error}")
         self._set_editing(True)
-        if self._snapshot is not None:
-            self.save_button.configure(state="normal")
-            self.preview_button.configure(state="normal")
-        if self._report_path is not None:
-            self.email_button.configure(state="normal")
 
     def _set_editing(self, enabled):
         state = "normal" if enabled else "disabled"
         for widget in (self.summary, self.description, self.sharing_link, self.logs_check, self.approval_check,
-                       self.add_button, self.clear_button, self.save_button, self.preview_button, self.email_button):
+                       self.add_button, self.clear_button):
             widget.configure(state=state)
-        if enabled:
-            self.email_button.configure(state="normal" if self._report_path is not None else "disabled")
+        self.save_button.configure(state="normal" if enabled and self._snapshot is not None else "disabled")
+        self._set_review_enabled(enabled and self._snapshot is not None)
+        self.email_button.configure(state="normal" if enabled and self._report_path is not None else "disabled")
 
     def _invalidate_report(self, _event=None):
+        if self._report_path is None and not self.approved.get() and not self._saved_sharing_link:
+            return
         self.approved.set(False)
         self._report_path = None
         self._saved_sharing_link = ""
         self.email_button.configure(state="disabled")
+
+    def _set_review_enabled(self, enabled):
+        enabled = bool(enabled)
+        if enabled == self._review_enabled:
+            return
+        self._review_enabled = enabled
+        self.review_link.configure(
+            text_color=COLOR_PAIRS["link"] if enabled else COLOR_PAIRS["disabled_text"],
+            cursor="hand2" if enabled else "arrow",
+        )
+        self.review_link._label.configure(takefocus=enabled)
+
+    def _review_clicked(self, _event=None):
+        if self._review_enabled:
+            self._preview()
+        return "break"
 
     def _sharing_link_changed(self, value):
         # Validation observes typing, paste, and programmatic edits while keeping
@@ -222,19 +358,25 @@ class FeedbackDialog(_FeedbackWindow):
     def _preview(self):
         if self._snapshot is None:
             return
-        window = _FeedbackWindow(self)
-        window.withdraw()
-        window.title("Review AIDaS diagnostics")
-        window.transient(self)
-        _fit_window(window, self, 740, 560)
-        apply_app_icon_to(window)
-        synchronize_window_chrome(window, background=COLOR_PAIRS["window_chrome"], foreground=COLOR_PAIRS["text"])
-        box = ctk.CTkTextbox(window, wrap="word")
-        box.pack(fill="both", expand=True, padx=12, pady=12)
-        box.insert("1.0", report_preview(self._snapshot, self.include_logs.get()))
-        box.configure(state="disabled")
-        AppButton(window, text="Close", command=window.destroy).pack(pady=(0, 12))
+        window = self._preview_window
+        new_window = window is None or not window.winfo_exists()
+        if new_window:
+            window = self._preview_window = _FeedbackPreviewWindow(self)
+            window.withdraw()
+            window.title("Review AIDaS diagnostics")
+            window.transient(self)
+            _fit_window(window, self, 740, 560)
+            apply_app_icon_to(window)
+            synchronize_window_chrome(window, background=COLOR_PAIRS["window_chrome"], foreground=COLOR_PAIRS["text"])
+            window.box = ctk.CTkTextbox(window, wrap="word")
+            window.box.pack(fill="both", expand=True, padx=12, pady=12)
+            AppButton(window, text="Close", command=window.destroy).pack(pady=(0, 12))
+        include_logs = bool(self.include_logs.get())
+        if new_window or self._preview_includes_logs != include_logs:
+            window.set_text(self._preview_text[include_logs])
+            self._preview_includes_logs = include_logs
         window.deiconify()
+        window.lift()
 
     def _add_files(self):
         selected = filedialog.askopenfilenames(parent=self, title="Select files to share with AIDaS support")

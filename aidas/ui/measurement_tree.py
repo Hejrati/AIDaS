@@ -9,14 +9,17 @@ import tkinter as tk
 from tkinter import font as tkfont, ttk
 
 from aidas.services.measurement_inventory import InventoryCancelled, scan_measurement_directory
+from aidas.services.measurement_scan import MeasurementScanLimitExceeded
 from aidas.ui.theme import COLORS, TYPOGRAPHY
 
 
 class MeasurementDirectoryTree(ttk.Frame):
     """Draw folder connectors and important files without blocking Tk on scans."""
 
-    def __init__(self, master):
+    def __init__(self, master, *, on_scan_state=None):
         super().__init__(master)
+        self._on_scan_state = on_scan_state
+        self.scan_state = "empty"
         self._generation = 0
         self._cancel_scan = threading.Event()
         self._events = queue.Queue()
@@ -114,6 +117,7 @@ class MeasurementDirectoryTree(ttk.Frame):
         self._empty_message = "Reading folder contents…"
         self._show_notice("")
         self._schedule_draw()
+        self._set_scan_state("scanning")
 
         def worker():
             try:
@@ -121,7 +125,7 @@ class MeasurementDirectoryTree(ttk.Frame):
             except InventoryCancelled:
                 return
             except Exception as exc:
-                events.put((generation, None, str(exc)))
+                events.put((generation, None, exc))
             else:
                 events.put((generation, inventory, ""))
 
@@ -139,9 +143,14 @@ class MeasurementDirectoryTree(ttk.Frame):
             finished = True
             self._inventory = inventory
             if error:
-                self.summary_var.set("Could not read this folder.")
-                self._show_notice(error)
-                self._empty_message = "This folder could not be read. Select another folder or try Refresh."
+                limited = isinstance(error, MeasurementScanLimitExceeded)
+                self.summary_var.set("Folder limit exceeded." if limited else "Could not read this folder.")
+                self._show_notice(str(error))
+                self._empty_message = (
+                    "Please select another folder with fewer subfolders."
+                    if limited else "This folder could not be read. Select another folder or try Refresh."
+                )
+                self._set_scan_state("limited" if limited else "error", error)
                 self._schedule_draw()
                 continue
             notices = []
@@ -151,8 +160,32 @@ class MeasurementDirectoryTree(ttk.Frame):
                 notices.append("Some folders could not be read. Check their access permissions.")
             self._show_notice(" ".join(notices))
             self._rebuild_rows()
-        if not finished:
+            self._set_scan_state("ready")
+        if not finished and self.scan_state == "scanning":
             self._poll_id = self.after(60, self._poll)
+
+    def _set_scan_state(self, state, error=None):
+        self.scan_state = state
+        if self._on_scan_state is not None:
+            self._on_scan_state(self._directory, state, error)
+
+    def show_scan_limit(self, error):
+        """Keep compiler-discovered folder growth inline with preview failures."""
+        self._cancel_scan.set()
+        self._generation += 1
+        if self._poll_id is not None:
+            self.after_cancel(self._poll_id)
+            self._poll_id = None
+        self._inventory = None
+        self._rows = []
+        self._selected = None
+        self.selection_var.set("")
+        self._rows_revision += 1
+        self.summary_var.set("Folder limit exceeded.")
+        self._show_notice(str(error))
+        self._empty_message = "Please select another folder with fewer subfolders."
+        self._set_scan_state("limited", error)
+        self._schedule_draw()
 
     def _show_notice(self, text):
         self.notice_var.set(text)

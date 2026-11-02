@@ -16,6 +16,7 @@ class CompilerWorkerLifecycleTests(unittest.TestCase):
         view = object.__new__(view_type)
         view._events = queue.Queue()
         view._running = False
+        view._poll_after_id = None
         view._worker = object()  # A previous run must not become a live watch.
         view._clear_log = mock.Mock()
         view._append_log = mock.Mock()
@@ -101,10 +102,7 @@ class CompilerWorkerLifecycleTests(unittest.TestCase):
                 worker.start.assert_called_once_with()
                 self.assertTrue(view._events.empty())
                 view._compilation_succeeded.assert_not_called()
-                if isinstance(view, Step5Frame):
-                    view.after.assert_called_once_with(view.EVENT_POLL_MS, view._poll_events)
-                else:
-                    view.after.assert_not_called()
+                view.after.assert_called_once_with(view.EVENT_POLL_MS, view._poll_events)
 
 
 if __name__ == "__main__":

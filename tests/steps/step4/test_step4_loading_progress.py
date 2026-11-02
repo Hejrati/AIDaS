@@ -19,6 +19,55 @@ class Step4LoadingProgressTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_dead_or_unstarted_opening_worker_releases_loading_surface(self):
+        self._run_ui(
+            """
+            from pathlib import Path
+            import time
+            from unittest import mock
+            import customtkinter as ctk
+            from aidas.steps import step4_analyze_isez as module
+
+            root = ctk.CTk()
+            root.attributes('-alpha', 0)
+            root.geometry('1000x700+10000+10000')
+            frame = module.Step4Frame(root)
+            frame.pack(fill='both', expand=True)
+            root.update()
+            errors = []
+            root.report_callback_exception = lambda *args: errors.append(args)
+            paths = [Path('subject/nasal/_flat_LIGHT.hdr')]
+            try:
+                with mock.patch.object(frame, '_warm_batch_roi_tools'), \\
+                     mock.patch.object(module.messagebox, 'showerror') as popup:
+                    for cannot_start in (False, True):
+                        worker = mock.Mock()
+                        worker.is_alive.return_value = False
+                        failure = RuntimeError('No thread available') if cannot_start else None
+                        with mock.patch.object(frame, '_start_background_worker',
+                                               return_value=worker, side_effect=failure):
+                            frame._open_batch_roi_tabs(paths, show_progress=True)
+                            deadline = time.monotonic() + 8
+                            while frame._batch_roi_open_after_id is not None:
+                                assert time.monotonic() < deadline, 'Opening worker left the UI busy.'
+                                root.update()
+                                time.sleep(.003)
+                            root.update()
+                        assert frame._batch_roi_loading_surface is None
+                        key = frame.batch_roi_notebook.tabs()[0]
+                        prepared = frame.batch_roi_tab_states[key]['_prepared_load']
+                        assert prepared[0] == 'error'
+                        expected = 'No thread available' if cannot_start else 'stopped without returning'
+                        assert expected in str(prepared[1]), prepared
+                        assert popup.called
+                        assert expected in popup.call_args.args[1], popup.call_args
+                        assert root.grab_current() is None
+                    assert not errors, errors
+            finally:
+                root.destroy()
+            """
+        )
+
     def test_roi_substeps_advance_progress_before_a_file_finishes_and_preview_reserves_completion(self):
         self._run_ui(
             """

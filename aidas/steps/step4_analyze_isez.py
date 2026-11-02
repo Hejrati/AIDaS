@@ -69,7 +69,12 @@ from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
 from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.io_utils import read_analyze, read_tiff
-from aidas.utils.filesystem import find_candidate_directories, skipped_directories_warning
+from aidas.utils.filesystem import (
+    DirectoryScanLimitExceeded,
+    find_candidate_directories,
+    skipped_directories_warning,
+)
+from aidas.utils.worker_polling import WorkerCompletionGuard
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
@@ -1547,6 +1552,9 @@ class Step4BatchROISelectionPanel(ttk.Frame):
         self.rows = []
         self._scan_summary_counts = None
         self._scan_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._scan_cancel = None
+        self._scan_after_id = None
+        self._scan_guard = None
         self._build_ui()
         self._start_scan()
 
@@ -1613,33 +1621,61 @@ class Step4BatchROISelectionPanel(ttk.Frame):
             self.table.set_hide_processed(self.hide_processed_var.get())
 
     def _start_scan(self):
+        self._stop_scan()
+        cancelled = self._scan_cancel = threading.Event()
+        events = self._scan_events = queue.Queue()
         self.step_frame.status_var.set(f"Scanning Step 4 ROI folders under {self.root_dir}...")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
-        self.after(self.SCAN_POLL_MS, self._poll_scan_events)
-
-    def _scan_worker(self):
         try:
-            rows, scanned, skipped, access_errors = self.step_frame._scan_batch_roi_folders(self.root_dir)
+            worker = threading.Thread(target=self._scan_worker, args=(cancelled, events), daemon=True)
+            worker.start()
         except Exception as exc:
-            self._scan_events.put(("error", exc))
-            return
-        self._scan_events.put(
-            ("done", (rows, scanned, skipped, access_errors))
+            events.put(("error", exc))
+        else:
+            self._scan_guard = WorkerCompletionGuard(worker)
+        self._scan_after_id = self.after(
+            self.SCAN_POLL_MS, lambda: self._poll_scan_events(cancelled, events),
         )
 
-    def _poll_scan_events(self):
+    def _scan_worker(self, cancelled=None, events=None):
+        cancelled = cancelled if cancelled is not None else self._scan_cancel
+        events = events if events is not None else self._scan_events
+        try:
+            rows, scanned, skipped, access_errors = self.step_frame._scan_batch_roi_folders(
+                self.root_dir, cancel_event=cancelled,
+            )
+        except Exception as exc:
+            if cancelled is None or not cancelled.is_set():
+                events.put(("error", exc))
+            return
+        if cancelled is None or not cancelled.is_set():
+            events.put(("done", (rows, scanned, skipped, access_errors)))
+
+    def _poll_scan_events(self, cancelled=None, events=None):
         """Deliver scan results on Tk's owning thread."""
 
-        try:
-            kind, payload = self._scan_events.get_nowait()
-        except queue.Empty:
-            try:
-                if self.winfo_exists():
-                    self.after(self.SCAN_POLL_MS, self._poll_scan_events)
-            except tk.TclError:
-                pass
+        cancelled = cancelled if cancelled is not None else self._scan_cancel
+        events = events if events is not None else self._scan_events
+        if cancelled is not self._scan_cancel:
             return
+        self._scan_after_id = None
+        if cancelled is not None and cancelled.is_set():
+            return
+        try:
+            kind, payload = events.get_nowait()
+        except queue.Empty:
+            if self._scan_guard is not None and self._scan_guard.missing_result():
+                kind, payload = "error", RuntimeError("The folder scan stopped without returning a result. Please select another folder.")
+            else:
+                try:
+                    if self.winfo_exists():
+                        self._scan_after_id = self.after(
+                            self.SCAN_POLL_MS, lambda: self._poll_scan_events(cancelled, events),
+                        )
+                except tk.TclError:
+                    pass
+                return
 
+        self._scan_guard = None
         if kind == "error":
             self._scan_failed(payload)
             return
@@ -1649,11 +1685,44 @@ class Step4BatchROISelectionPanel(ttk.Frame):
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set("Scan failed.")
-        self.more_label.configure(text="More")
-        self.more_tooltip.text = f"Could not scan folders.\n{exc}"
-        self.step_frame.status_var.set("Batch ROI scan failed.")
+        self.rows = []
+        self._scan_summary_counts = None
+        limited = isinstance(exc, DirectoryScanLimitExceeded)
+        message = str(exc) if limited else f"Could not scan folders. {exc}"
+        self.summary_var.set(message if limited else "Scan failed.")
+        if self.table is not None:
+            self.table.destroy()
+            self.table = None
+        try:
+            self.scan_label.configure(text=message, wraplength=520)
+        except tk.TclError:
+            self.scan_label = ttk.Label(
+                self.table_host, text=message, wraplength=520,
+                anchor="center", justify="center",
+            )
+            self.scan_label.pack(fill="both", expand=True)
+        self.more_label.configure(text="" if limited else "More")
+        self.more_tooltip.text = "" if limited else message
+        self.step_frame.status_var.set(message if limited else "Batch ROI scan failed.")
         self.process_button.state(["disabled"])
+
+    def _stop_scan(self):
+        cancelled = self.__dict__.get("_scan_cancel")
+        if cancelled is not None:
+            cancelled.set()
+        self._scan_cancel = None
+        job = self.__dict__.get("_scan_after_id")
+        self._scan_after_id = None
+        self._scan_guard = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+
+    def destroy(self):
+        self._stop_scan()
+        super().destroy()
 
     def _show_results_table(self, rows):
         for child in self.table_host.winfo_children():
@@ -2441,6 +2510,7 @@ class Step4Frame(SidebarStepFrame):
 
     ROI_TABLE_VISIBLE_ROWS = 3
     BACKGROUND_POLL_MS = 40
+    MAX_BACKGROUND_EVENTS_PER_POLL = 64
 
     def __init__(
         self,
@@ -3047,8 +3117,10 @@ class Step4Frame(SidebarStepFrame):
                 except tk.TclError:
                     pass
         self._auto_detection_events = None
+        self._auto_detection_guard = None
         if not batch_building:
             self._stack_build_events = None
+            self._stack_build_guard = None
         self._auto_detecting = False
         self._auto_saving_roi = False
         if not batch_building:
@@ -3285,29 +3357,37 @@ class Step4Frame(SidebarStepFrame):
         return None
 
     @staticmethod
-    def _step4_output_count(folder: str | os.PathLike) -> int:
+    def _step4_output_count(folder: str | os.PathLike, *, cancel_event=None) -> int:
         folder = Path(folder)
+        if cancel_event is not None and cancel_event.is_set():
+            return 0
         count = int((folder / "MAX_Stack.tif").is_file())
         # A plain TIFF alone cannot supply the saved measurements to Step 5.
         # Older folders retain their original workbook as a read-only source.
         legacy_results = any((folder / name).is_file() for name in STEP4_LEGACY_RESULTS_FILENAMES)
-        if any(
-            (folder / name).is_file()
-            and (legacy_results or has_step4_measurements(folder / name))
-            for name in STEP4_STACK_FILENAMES
-        ):
-            count += 1
+        for name in STEP4_STACK_FILENAMES:
+            if cancel_event is not None and cancel_event.is_set():
+                return count
+            if (folder / name).is_file() and (
+                legacy_results or has_step4_measurements(folder / name)
+            ):
+                count += 1
+                break
         return count
 
-    def _scan_batch_roi_folders(self, root_dir: str | os.PathLike) -> tuple[list[dict], int, int, list]:
+    def _scan_batch_roi_folders(
+        self, root_dir: str | os.PathLike, *, cancel_event=None,
+    ) -> tuple[list[dict], int, int, list]:
         root = Path(root_dir)
         candidate_dirs, scanned, access_errors = find_candidate_directories(
-            root, (("_flat_LIGHT.img", "_flat_LIGHT.hdr"),)
+            root, (("_flat_LIGHT.img", "_flat_LIGHT.hdr"),), cancel_event=cancel_event,
         )
 
         rows: list[dict] = []
         skipped_without_flat_light = scanned - len(candidate_dirs)
         for folder in sorted(candidate_dirs, key=lambda path: str(path).lower()):
+            if cancel_event is not None and cancel_event.is_set():
+                return [], scanned, skipped_without_flat_light, access_errors
             try:
                 flat_light = self._flat_light_path_for_folder(folder)
             except OSError as exc:
@@ -3317,7 +3397,7 @@ class Step4Frame(SidebarStepFrame):
                 skipped_without_flat_light += 1
                 continue
             try:
-                output_count = self._step4_output_count(folder)
+                output_count = self._step4_output_count(folder, cancel_event=cancel_event)
                 outputs_complete = output_count == len(STEP4_OUTPUT_GROUPS)
             except OSError as exc:
                 access_errors.append((folder, str(exc)))
@@ -3344,6 +3424,8 @@ class Step4Frame(SidebarStepFrame):
                     "outputs": f"{output_count}/{len(STEP4_OUTPUT_GROUPS)}",
                 }
             )
+        if cancel_event is not None and cancel_event.is_set():
+            rows = []
         return rows, scanned, skipped_without_flat_light, access_errors
 
     def _browse_batch_roi_root(self) -> None:
@@ -3533,6 +3615,7 @@ class Step4Frame(SidebarStepFrame):
         loading_started = time.monotonic()
         cancelled = self._batch_roi_open_cancel = threading.Event()
         prepared = queue.SimpleQueue()
+        opening_guard = None
         prepared_tab_key = None
         # Automatic ROI detection runs for every file while loading. The worker
         # fills these; the Tk thread merges them into tab states afterwards.
@@ -3746,9 +3829,12 @@ class Step4Frame(SidebarStepFrame):
             try:
                 result = prepared.get_nowait()
             except queue.Empty:
-                update_auto_progress()
-                self._batch_roi_open_after_id = self.after(16, show_first_file)
-                return
+                if opening_guard is not None and opening_guard.missing_result():
+                    result = ("error", RuntimeError("Opening the ROI files stopped without returning a result. Please reopen the folder."))
+                else:
+                    update_auto_progress()
+                    self._batch_roi_open_after_id = self.after(16, show_first_file)
+                    return
             first_tab = notebook.tabs()[0] if notebook.tabs() else None
             if first_tab is not None and str(first_tab) != prepared_tab_key:
                 start_first_file()
@@ -3790,7 +3876,7 @@ class Step4Frame(SidebarStepFrame):
             self._batch_roi_open_after_id = self.after_idle(finish_loading)
 
         def start_first_file():
-            nonlocal prepared_tab_key
+            nonlocal prepared_tab_key, opening_guard
             if cancelled.is_set() or self.batch_roi_notebook is not notebook:
                 return
             first_tab = notebook.tabs()[0] if notebook.tabs() else None
@@ -3819,7 +3905,14 @@ class Step4Frame(SidebarStepFrame):
             except tk.TclError:
                 pass
             update_auto_progress()
-            threading.Thread(target=prepare_first_file, args=(path,), daemon=True).start()
+            opening_guard = None
+            try:
+                worker = self._start_background_worker(lambda: prepare_first_file(path))
+            except Exception as exc:
+                prepared.put(("error", exc.with_traceback(None)))
+            else:
+                if worker is not None:
+                    opening_guard = WorkerCompletionGuard(worker)
             self._batch_roi_open_after_id = self.after(16, show_first_file)
 
         def open_next_tab():
@@ -5302,10 +5395,12 @@ class Step4Frame(SidebarStepFrame):
             )
 
     @staticmethod
-    def _start_background_worker(worker) -> None:
+    def _start_background_worker(worker) -> threading.Thread:
         """Run non-Tk work without blocking progress animation callbacks."""
 
-        threading.Thread(target=worker, daemon=True).start()
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        return thread
 
     def _warm_batch_roi_tools(self) -> None:
         """Prepare independent libraries while the folder chooser is visible."""
@@ -5327,7 +5422,10 @@ class Step4Frame(SidebarStepFrame):
                 # The loading worker checks imports again and reports failures.
                 pass
 
-        self._start_background_worker(load_plot_tools)
+        try:
+            self._start_background_worker(load_plot_tools)
+        except Exception:
+            self._batch_roi_plot_tools_preloading = False
 
     def _warm_auto_detection_tools(self) -> None:
         """Load the smoother while a valid OCT opens, keeping Tk responsive."""
@@ -5346,7 +5444,10 @@ class Step4Frame(SidebarStepFrame):
                 # still reports an import failure through its existing UI.
                 pass
 
-        self._start_background_worker(load_tools)
+        try:
+            self._start_background_worker(load_tools)
+        except Exception:
+            self._auto_detection_tools_preloading = False
 
     @staticmethod
     def _compute_auto_detection_run(
@@ -5530,16 +5631,21 @@ class Step4Frame(SidebarStepFrame):
         try:
             kind, payload = events.get_nowait()
         except queue.Empty:
-            try:
-                self._auto_detection_after_id = self.after(
-                    self.BACKGROUND_POLL_MS,
-                    lambda: self._poll_auto_detection_events(events),
-                )
-            except tk.TclError:
-                pass
-            return
+            guard = self.__dict__.get("_auto_detection_guard")
+            if guard is not None and guard.missing_result():
+                kind, payload = "error", RuntimeError("The ROI worker stopped without returning a result. Please try again.")
+            else:
+                try:
+                    self._auto_detection_after_id = self.after(
+                        self.BACKGROUND_POLL_MS,
+                        lambda: self._poll_auto_detection_events(events),
+                    )
+                except tk.TclError:
+                    pass
+                return
 
         self._auto_detection_events = None
+        self._auto_detection_guard = None
         try:
             if kind == "error":
                 raise payload
@@ -5592,7 +5698,14 @@ class Step4Frame(SidebarStepFrame):
             else:
                 events.put(("done", result))
 
-        self._start_background_worker(worker)
+        self._auto_detection_guard = None
+        try:
+            thread = self._start_background_worker(worker)
+        except Exception as exc:
+            events.put(("error", exc))
+        else:
+            if thread is not None:
+                self._auto_detection_guard = WorkerCompletionGuard(thread)
         try:
             self._auto_detection_after_id = self.after(
                 self.BACKGROUND_POLL_MS,
@@ -5824,16 +5937,21 @@ class Step4Frame(SidebarStepFrame):
         try:
             kind, payload = events.get_nowait()
         except queue.Empty:
-            try:
-                self._stack_build_after_id = self.after(
-                    self.BACKGROUND_POLL_MS,
-                    lambda: self._poll_stack_build_events(events, outdir),
-                )
-            except tk.TclError:
-                pass
-            return
+            guard = self.__dict__.get("_stack_build_guard")
+            if guard is not None and guard.missing_result():
+                kind, payload = "error", RuntimeError("Stack creation stopped without returning a result. Please try again.")
+            else:
+                try:
+                    self._stack_build_after_id = self.after(
+                        self.BACKGROUND_POLL_MS,
+                        lambda: self._poll_stack_build_events(events, outdir),
+                    )
+                except tk.TclError:
+                    pass
+                return
 
         self._stack_build_events = None
+        self._stack_build_guard = None
         self._stack_building = False
         self._update_build_stack_button_state()
         self._update_auto_detect_button_state()
@@ -5889,7 +6007,14 @@ class Step4Frame(SidebarStepFrame):
             else:
                 events.put(("done", None))
 
-        self._start_background_worker(worker)
+        self._stack_build_guard = None
+        try:
+            thread = self._start_background_worker(worker)
+        except Exception as exc:
+            events.put(("error", exc))
+        else:
+            if thread is not None:
+                self._stack_build_guard = WorkerCompletionGuard(thread)
         try:
             self._stack_build_after_id = self.after(
                 self.BACKGROUND_POLL_MS,
@@ -5910,6 +6035,7 @@ class Step4Frame(SidebarStepFrame):
             cancelled.set()
             self._batch_stack_cancel = None
             self._stack_build_events = None
+            self._stack_build_guard = None
             self._stack_building = False
             job = getattr(self, "_stack_build_after_id", None)
             self._stack_build_after_id = None
@@ -5974,28 +6100,37 @@ class Step4Frame(SidebarStepFrame):
                     events.put(("built", (key, state, ordered, outdir, None)))
             events.put(("done", None))
 
+        def finish():
+            self._batch_stack_cancel = None
+            self._stack_build_events = None
+            self._stack_build_guard = None
+            self._stack_building = False
+            self._hide_grid_notice()
+            self._update_build_stack_button_state()
+            self._update_auto_detect_button_state()
+            self._update_continue_to_step5_button_state()
+            if getattr(self, "_stack_build_complete", False):
+                self._show_processed_grid_notice(self._last_results_dir)
+            completed, total = self._completion_progress_counts()
+            self.status_var.set(f"Stack building finished. {completed}/{total} tabs completed.")
+            if failures:
+                messagebox.showerror("Step 4", "Some stacks could not be built:\n" + "\n".join(failures))
+            else:
+                self._auto_continue_to_step5()
+
         def poll():
             if cancelled.is_set() or events is not getattr(self, "_stack_build_events", None):
                 return
             self._stack_build_after_id = None
-            while not events.empty():
-                kind, payload = events.get_nowait()
+            queue_empty = False
+            for _ in range(min(events.qsize() + 1, self.MAX_BACKGROUND_EVENTS_PER_POLL)):
+                try:
+                    kind, payload = events.get_nowait()
+                except queue.Empty:
+                    queue_empty = True
+                    break
                 if kind == "done":
-                    self._batch_stack_cancel = None
-                    self._stack_build_events = None
-                    self._stack_building = False
-                    self._hide_grid_notice()
-                    self._update_build_stack_button_state()
-                    self._update_auto_detect_button_state()
-                    self._update_continue_to_step5_button_state()
-                    if getattr(self, "_stack_build_complete", False):
-                        self._show_processed_grid_notice(self._last_results_dir)
-                    completed, total = self._completion_progress_counts()
-                    self.status_var.set(f"Stack building finished. {completed}/{total} tabs completed.")
-                    if failures:
-                        messagebox.showerror("Step 4", "Some stacks could not be built:\n" + "\n".join(failures))
-                    else:
-                        self._auto_continue_to_step5()
+                    finish()
                     return
                 key, state, ordered, outdir, error = payload
                 if self.batch_roi_tab_states.get(key) is not state:
@@ -6014,9 +6149,22 @@ class Step4Frame(SidebarStepFrame):
                     self._last_results_dir = outdir
                 self._update_build_stack_button_state()
                 self._update_continue_to_step5_button_state()
+            guard = self.__dict__.get("_stack_build_guard")
+            if queue_empty and guard is not None and guard.missing_result():
+                failures.append("Stack creation stopped without returning a result. Please try again.")
+                finish()
+                return
             self._stack_build_after_id = self.after(self.BACKGROUND_POLL_MS, poll)
 
-        self._start_background_worker(worker)
+        self._stack_build_guard = None
+        try:
+            thread = self._start_background_worker(worker)
+        except Exception as exc:
+            failures.append(str(exc))
+            events.put(("done", None))
+        else:
+            if thread is not None:
+                self._stack_build_guard = WorkerCompletionGuard(thread)
         self._stack_build_after_id = self.after(self.BACKGROUND_POLL_MS, poll)
 
     def _show_processing_complete(

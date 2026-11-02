@@ -9,6 +9,7 @@ import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from aidas.services.measurement_scan import MeasurementScanLimitExceeded
 from aidas.ui.compiler import CompilerPresentationMixin
 from aidas.ui.components import AppButton
 from aidas.ui.measurement_tree import MeasurementDirectoryTree
@@ -54,6 +55,9 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._handling_completion = False
         self._closing = False
         self._missing_completion_polls = 0
+        self._input_scan_path = None
+        self._input_scan_state = "empty"
+        self._input_scan_error = None
 
         # Step 4 passes folders after stack completion or through Go to Step 5.
         initial_input = ""
@@ -280,7 +284,9 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             wraplength=760,
         ).pack(fill="x", pady=(4, 12))
 
-        self.directory_view = MeasurementDirectoryTree(self.content)
+        self.directory_view = MeasurementDirectoryTree(
+            self.content, on_scan_state=self._directory_scan_changed,
+        )
         self.directory_view.pack(fill="both", expand=True)
         ttk.Label(
             self.content,
@@ -298,6 +304,27 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             output_text = normalize_path_input(self.output_var.get())
             output = self._expanded_path(output_text) if output_text else None
             view.set_directory(folder, output_path=output)
+
+    def _directory_scan_changed(self, directory, state, error=None) -> None:
+        if self.__dict__.get("_closing", False):
+            return
+        self._input_scan_path = directory
+        self._input_scan_state = state
+        self._input_scan_error = error
+        if isinstance(error, MeasurementScanLimitExceeded):
+            self._scan_message_in_status = True
+            if not self._running:
+                self.status_var.set(str(error))
+        elif state == "error" and not self._running:
+            self._scan_message_in_status = True
+            self.status_var.set(f"Could not read this folder: {error}")
+        elif self.__dict__.get("_scan_message_in_status", False) and not self._running:
+            if state == "scanning":
+                self.status_var.set("Reading folder contents…")
+            elif state == "ready":
+                self._scan_message_in_status = False
+                self.status_var.set(f"Ready to create an Excel file from measurements in {directory}.")
+        self._update_run_button_state()
 
     def set_input_folder(self, folder: str | os.PathLike | None) -> bool:
         if getattr(self, "_running", False):
@@ -423,6 +450,17 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         paths = self._validated_paths()
         if paths is None:
             return
+        if self.__dict__.get("directory_view") is not None:
+            # Typed paths must pass the same background scan as Browse and
+            # Step 4 handoffs. Never compile a partial or rejected selection.
+            if self.__dict__.get("_input_scan_path") != paths[0]:
+                self._refresh_directory_view()
+                return
+            if self.__dict__.get("_input_scan_state") != "ready":
+                error = self.__dict__.get("_input_scan_error")
+                if isinstance(error, MeasurementScanLimitExceeded):
+                    self.status_var.set(str(error))
+                return
         self._start_compiler(
             *paths, bool(self.include_fovea_var.get()),
             thread_name="aidas-step5-compiler",
@@ -502,7 +540,14 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         has_input = bool(self.input_var.get().strip())
         has_output = bool(self.output_var.get().strip())
         
-        if has_input and has_output:
+        scan_ready = self.__dict__.get("_input_scan_state", "ready") == "ready"
+        scan_path = self.__dict__.get("_input_scan_path")
+        if scan_path is not None:
+            scan_ready = scan_ready and (
+                os.path.normcase(normalize_path_input(self.input_var.get()))
+                == os.path.normcase(str(scan_path))
+            )
+        if has_input and has_output and scan_ready:
             self.run_button.configure(image=self.run_button_icon)
             self.run_button.state(["!disabled"])
         else:
@@ -550,6 +595,12 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._handling_completion = True
         try:
             self._set_running(False)
+            if isinstance(error, MeasurementScanLimitExceeded):
+                self.status_var.set(str(error))
+                view = self.__dict__.get("directory_view")
+                if view is not None:
+                    view.show_scan_limit(error)
+                return
             self.status_var.set(f"Could not create the Excel file: {error}")
             messagebox.showerror("Excel file creation failed", str(error), parent=self)
         finally:

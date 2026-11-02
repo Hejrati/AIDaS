@@ -15,6 +15,8 @@ import customtkinter as ctk
 from aidas.services.feedback import FEEDBACK_EMAIL
 from aidas.ui.components import WorkflowHeader
 from aidas.ui.feedback import FeedbackDialog
+from aidas.ui.scrolling import DeferredScrollbar
+from aidas.ui.theme import COLOR_PAIRS
 from aidas.ui.menu_bar import ApplicationMenuBar
 from aidas.app import AIDaSApp
 from aidas.core.config import Config
@@ -225,6 +227,176 @@ class FeedbackDialogTests(unittest.TestCase):
                 button.winfo_rooty() + button.winfo_height(),
                 self.dialog.winfo_rooty() + self.dialog.winfo_height(),
             )
+
+    def test_wheel_scrolls_the_form_over_text_entry_checkbox_and_footer_once(self):
+        dialog = self.dialog
+        dialog.geometry("560x450")
+        dialog.description.insert("1.0", "\n".join(f"Description line {index}" for index in range(100)))
+        self.root.update()
+        canvas = dialog.body._parent_canvas
+        self.assertIsInstance(dialog.body._scrollbar, DeferredScrollbar)
+        for widget in (
+            dialog.description._textbox, dialog.summary._entry,
+            dialog.logs_check._text_label, dialog.review_link._label,
+            dialog.save_button._text_label,
+        ):
+            with self.subTest(widget=widget):
+                canvas.yview_moveto(0)
+                dialog.description.yview_moveto(0)
+                self.root.update()
+                before_text = dialog.description.yview()
+                with mock.patch.object(canvas, "yview_moveto", wraps=canvas.yview_moveto) as move:
+                    for _ in range(4):
+                        widget.event_generate("<MouseWheel>", delta=-120)
+                    self.assertEqual(move.call_count, 0)
+                    self.root.update()
+                    self.assertEqual(move.call_count, 1)
+                self.assertGreater(canvas.yview()[0], 0)
+                self.assertEqual(dialog.description.yview(), before_text)
+
+    def test_dialog_scrolling_does_not_capture_other_windows_or_preview_text(self):
+        other = tk.Text(self.root, height=4)
+        other.pack()
+        other.insert("1.0", "\n".join(str(index) for index in range(100)))
+        self.root.update()
+        canvas = self.dialog.body._parent_canvas
+        canvas.yview_moveto(0)
+        other.event_generate("<MouseWheel>", delta=-120)
+        self.root.update()
+        self.assertEqual(canvas.yview()[0], 0)
+        self.assertGreater(other.yview()[0], 0)
+        self.dialog._preview()
+        preview = self.dialog._preview_window
+        self.wait(lambda: preview._text_after_id is None)
+        self.assertNotIn(self.dialog.body._wheel_tag, preview.box._textbox.bindtags())
+        self.assertNotIn(self.dialog.body._wheel_tag, other.bindtags())
+
+    def test_review_link_replaces_button_and_reuses_preview_without_changing_approval(self):
+        dialog = self.dialog
+        self.assertNotIn("preview_button", dialog.__dict__)
+        self.assertEqual(dialog.logs_check.cget("text"), "Include relevant recent logs")
+        self.assertEqual(dialog.review_link.cget("text"), "(review before sharing)")
+        self.assertTrue(dialog.review_link.cget("font").cget("underline"))
+        self.assertEqual(dialog.review_link.cget("cursor"), "hand2")
+        dialog.approved.set(True)
+        dialog.review_link._label.event_generate("<Button-1>")
+        self.root.update()
+        preview = dialog._preview_window
+        self.assertIsNotNone(preview)
+        self.wait(lambda: preview._text_after_id is None)
+        self.assertIn("A failure happened", preview.box.get("1.0", "end-1c"))
+        before = preview.box.get("1.0", "end-1c")
+        with mock.patch.object(preview, "set_text", wraps=preview.set_text) as reset:
+            dialog.review_link._label.event_generate("<Button-1>")
+            self.root.update()
+            reset.assert_not_called()
+        self.assertIs(dialog._preview_window, preview)
+        self.assertEqual(preview.box.get("1.0", "end-1c"), before)
+        self.assertTrue(dialog.approved.get())
+        dialog.logs_check.toggle()
+        self.assertFalse(dialog.approved.get())
+        dialog._review_clicked()
+        self.wait(lambda: preview._text_after_id is None)
+        self.assertNotIn("A failure happened", preview.box.get("1.0", "end-1c"))
+
+    def test_review_link_respects_disabled_state_and_has_keyboard_bindings(self):
+        dialog = self.dialog
+        self.assertTrue(dialog.review_link._label.bind("<Return>"))
+        self.assertTrue(dialog.review_link._label.bind("<space>"))
+        with mock.patch.object(dialog, "_preview") as preview:
+            dialog._set_editing(False)
+            dialog.review_link._label.event_generate("<Button-1>")
+            self.root.update()
+            preview.assert_not_called()
+            dialog._set_editing(True)
+            dialog.review_link._label.focus_force()
+            self.root.update()
+            dialog.review_link._label.event_generate("<Return>")
+            self.root.update()
+            preview.assert_called_once_with()
+
+    def test_required_stars_use_danger_color_and_fit_narrow_form(self):
+        self.dialog.geometry("560x450")
+        self.root.update()
+        self.assertEqual(len(self.dialog.required_markers), 2)
+        body = self.dialog.body
+        for marker in self.dialog.required_markers:
+            self.assertEqual(marker.cget("text"), "*")
+            self.assertEqual(tuple(marker.cget("text_color")), tuple(COLOR_PAIRS["danger"]))
+            self.assertLessEqual(
+                marker.winfo_rootx()+marker.winfo_width(),
+                body._parent_canvas.winfo_rootx()+body._parent_canvas.winfo_width(),
+            )
+
+    def test_large_preview_is_complete_and_yields_between_insertions(self):
+        dialog = self.dialog
+        text = "Report line\n" * 20000
+        dialog._preview_text[True] = text
+        dialog._preview()
+        preview = dialog._preview_window
+        first = preview.box.get("1.0", "end-1c")
+        self.assertTrue(text.startswith(first))
+        self.assertLess(len(first), len(text))
+        self.assertIsNotNone(preview._text_after_id)
+        tick = mock.Mock()
+        self.root.after(0, tick)
+        self.wait(lambda: preview._text_after_id is None)
+        tick.assert_called_once_with()
+        self.assertEqual(preview.box.get("1.0", "end-1c"), text)
+        self.assertEqual(preview.box.cget("state"), "disabled")
+
+    def test_replacing_or_closing_a_partial_preview_cancels_previous_text_chunks(self):
+        dialog = self.dialog
+        dialog._preview_text[True] = "Large log\n" * 20000
+        dialog._preview()
+        preview = dialog._preview_window
+        old_timer = preview._text_after_id
+        self.assertIsNotNone(old_timer)
+        dialog.include_logs.set(False)
+        dialog._preview()
+        self.assertNotIn(old_timer, self.root.tk.call("after", "info"))
+        self.wait(lambda: preview._text_after_id is None)
+        self.assertEqual(preview.box.get("1.0", "end-1c"), dialog._preview_text[False])
+        dialog.include_logs.set(True)
+        dialog._preview()
+        timer = preview._text_after_id
+        self.assertIsNotNone(timer)
+        preview.destroy()
+        self.assertNotIn(timer, self.root.tk.call("after", "info"))
+        self.root.update()
+        dialog._preview()
+        self.assertIsNot(dialog._preview_window, preview)
+
+    def test_close_removes_scoped_wheel_bindings_and_pending_scroll(self):
+        dialog = self.dialog
+        tag = dialog.body._wheel_tag
+        global_wheel = self.root.bind_all("<MouseWheel>")
+        dialog.description._textbox.event_generate("<MouseWheel>", delta=-120)
+        timer = dialog.body._wheel_after_id
+        self.assertIsNotNone(timer)
+        dialog.destroy()
+        self.assertNotIn(timer, self.root.tk.call("after", "info"))
+        self.assertEqual(self.root.bind_class(tag, "<MouseWheel>"), "")
+        self.assertEqual(self.root.bind_all("<MouseWheel>"), global_wheel)
+        self.root.update()
+
+    def test_unapproved_unsaved_edits_do_not_redraw_the_email_button(self):
+        with mock.patch.object(self.dialog.email_button, "configure", wraps=self.dialog.email_button.configure) as configure:
+            for _ in range(20):
+                self.dialog._invalidate_report()
+            configure.assert_not_called()
+
+    def test_closing_dialog_cancels_a_partially_loaded_preview(self):
+        dialog = self.dialog
+        dialog._preview_text[True] = "Large log\n" * 20000
+        dialog._preview()
+        preview = dialog._preview_window
+        timer = preview._text_after_id
+        self.assertIsNotNone(timer)
+        dialog.destroy()
+        self.assertNotIn(timer, self.root.tk.call("after", "info"))
+        self.assertIsNone(preview.box)
+        self.root.update()
 
     def test_attachments_are_optional_and_reset_approval(self):
         sample = self.directory / "sample.img"

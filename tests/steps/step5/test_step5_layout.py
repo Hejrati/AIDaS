@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import tempfile
+import time
 import tkinter as tk
 from tkinter import ttk
 import unittest
@@ -117,7 +118,9 @@ class Step5LayoutTests(unittest.TestCase):
             output = folder / DEFAULT_OUTPUT_FILENAME
             with (
                 mock.patch.object(frame, "_start_compiler") as start,
-                mock.patch.object(MeasurementDirectoryTree, "set_directory") as set_directory,
+                mock.patch.object(
+                    frame.directory_view, "set_directory", wraps=frame.directory_view.set_directory,
+                ) as set_directory,
             ):
                 frame.start_from_step4(folder)
                 frame.on_show()
@@ -127,6 +130,11 @@ class Step5LayoutTests(unittest.TestCase):
                 self.assertEqual(Path(frame.input_var.get()), folder)
                 self.assertEqual(Path(frame.output_var.get()), output)
                 set_directory.assert_called_with(folder, output_path=output)
+                deadline = time.monotonic() + 5
+                while frame._input_scan_state != "ready":
+                    self.assertLess(time.monotonic(), deadline)
+                    self.root.update()
+                    time.sleep(.005)
 
                 frame.run_button.invoke()
 

@@ -12,7 +12,8 @@ from scipy.signal import find_peaks
 
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.utils.bright_pixels import _occupied_intensities, detect_bright_pixels_in_bands
-from aidas.utils.filesystem import find_sdb_directories
+from aidas.utils.filesystem import DirectoryScanLimitExceeded, find_sdb_directories
+from aidas.utils.worker_polling import WorkerCompletionGuard
 from aidas.utils.oct_crop import _transition_peaks
 
 
@@ -123,6 +124,84 @@ class SidebarScanTests(unittest.TestCase):
         frame._poll_sdb_scan(events, cancelled, "different-root", None, True)
         self.assertTrue(cancelled.is_set())
         self.assertEqual(frame._sdb_directory_files, {})
+
+    def test_oversized_scan_is_inline_and_never_previews_partial_results(self):
+        frame = self._frame()
+        frame.status_var = SimpleNamespace(set=Mock())
+        events = queue.Queue()
+        error = DirectoryScanLimitExceeded()
+        events.put(error)
+        cancelled = frame._sdb_scan_cancel = threading.Event()
+        frame._sdb_scan_pending = True
+        with patch("aidas.steps.step1_resize_raw.messagebox.showerror") as popup:
+            frame._poll_sdb_scan(events, cancelled, "root", None, True)
+        self.assertFalse(frame._sdb_scan_pending)
+        self.assertEqual(frame._sdb_directory_files, {})
+        self.assertEqual(frame._saved_output_directories, set())
+        frame.status_var.set.assert_called_once_with(str(error))
+        self.assertIn("select another folder", frame.sdb_scan_more_label.configure.call_args.kwargs["text"])
+        frame._preview_selected_sdb.assert_not_called()
+        frame.after.assert_not_called()
+        popup.assert_not_called()
+
+    def test_dead_scan_worker_without_result_stops_after_five_empty_polls(self):
+        frame = self._frame()
+        frame._sdb_scan_pending = True
+        frame._sdb_scan_guard = WorkerCompletionGuard(SimpleNamespace(is_alive=lambda: False))
+        cancelled = frame._sdb_scan_cancel = threading.Event()
+        events = queue.Queue()
+        for _ in range(5):
+            frame._poll_sdb_scan(events, cancelled, "root", None, True)
+        self.assertEqual(frame.after.call_count, 4)
+        self.assertFalse(frame._sdb_scan_pending)
+        self.assertIsNone(frame._sdb_scan_after_id)
+        self.assertIn("without returning a result", str(frame._sdb_scan_error))
+        frame._preview_selected_sdb.assert_not_called()
+
+    def test_live_scan_is_not_aborted_by_five_poll_rule(self):
+        frame = self._frame()
+        frame._sdb_scan_pending = True
+        frame._sdb_scan_guard = WorkerCompletionGuard(SimpleNamespace(is_alive=lambda: True))
+        cancelled = frame._sdb_scan_cancel = threading.Event()
+        events = queue.Queue()
+        for _ in range(25):
+            frame._poll_sdb_scan(events, cancelled, "root", None, True)
+        self.assertTrue(frame._sdb_scan_pending)
+        self.assertEqual(frame.after.call_count, 25)
+        self.assertNotIn("_sdb_scan_error", frame.__dict__)
+
+    def test_queued_completion_wins_over_dead_worker_guard(self):
+        frame = self._frame()
+        frame._sdb_scan_pending = True
+        frame._sdb_scan_guard = WorkerCompletionGuard(SimpleNamespace(is_alive=lambda: False))
+        cancelled = frame._sdb_scan_cancel = threading.Event()
+        events = queue.Queue()
+        for _ in range(4):
+            frame._poll_sdb_scan(events, cancelled, "root", None, True)
+        events.put(({"valid": ["valid/image.sdb"]}, set(), []))
+        frame._poll_sdb_scan(events, cancelled, "root", None, True)
+        self.assertEqual(frame._sdb_directory_files, {"valid": ["valid/image.sdb"]})
+        self.assertFalse(frame._sdb_scan_pending)
+        self.assertNotIn("_sdb_scan_error", frame.__dict__)
+        frame._preview_selected_sdb.assert_called_once()
+
+    def test_scan_thread_start_failure_restores_state_immediately(self):
+        frame = self._frame()
+        with patch("aidas.steps.step1_resize_raw.threading.Thread") as thread:
+            thread.return_value.start.side_effect = RuntimeError("Cannot create scan thread")
+            frame.refresh_sdb_list(preview_first=True)
+        self.assertFalse(frame._sdb_scan_pending)
+        self.assertIn("Cannot create scan thread", str(frame._sdb_scan_error))
+        frame.after.assert_not_called()
+        frame._preview_selected_sdb.assert_not_called()
+
+    def test_scan_thread_construction_failure_does_not_leave_a_pending_scan(self):
+        frame = self._frame()
+        with patch("aidas.steps.step1_resize_raw.threading.Thread", side_effect=RuntimeError("No thread resources")):
+            frame.refresh_sdb_list(preview_first=True)
+        self.assertFalse(frame._sdb_scan_pending)
+        self.assertIn("No thread resources", str(frame._sdb_scan_error))
+        frame.after.assert_not_called()
 
     def test_scan_keeps_order_saved_pairs_and_access_errors(self):
         with tempfile.TemporaryDirectory() as directory:

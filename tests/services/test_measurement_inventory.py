@@ -125,7 +125,7 @@ class MeasurementInventoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
 
-            def walk(path, *, onerror):
+            def walk(path, *, onerror, **_options):
                 onerror(PermissionError("A subfolder is unavailable"))
                 yield str(root), ["unavailable"], ["rr_MCPAR.xlsx"]
 

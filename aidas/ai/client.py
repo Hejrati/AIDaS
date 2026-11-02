@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import CancelledError
+import math
 import os
 import secrets
+import select
 import shutil
 import socket
 import subprocess
@@ -29,6 +32,8 @@ class AIWorkerClient:
         popen_kwargs=None,
         startup_progress_callback=None,
         startup_timeout=120,
+        prediction_timeout=1800,
+        cancel_event=None,
         temp_root=None,
     ):
         self.command = [os.fspath(part) for part in command]
@@ -44,7 +49,13 @@ class AIWorkerClient:
         self.env = env
         self.popen_kwargs = dict(popen_kwargs or {})
         self.startup_progress_callback = startup_progress_callback
-        self.startup_timeout = max(1.0, float(startup_timeout))
+        self.startup_timeout = float(startup_timeout)
+        self.prediction_timeout = float(prediction_timeout)
+        if not math.isfinite(self.startup_timeout) or not math.isfinite(self.prediction_timeout):
+            raise ValueError("AI worker timeouts must be finite.")
+        self.startup_timeout = max(1.0, self.startup_timeout)
+        self.prediction_timeout = max(1.0, self.prediction_timeout)
+        self.cancel_event = cancel_event
         self.temp_root = None if temp_root is None else os.path.abspath(temp_root)
         self.process = None
         self.temp_dir = None
@@ -57,6 +68,22 @@ class AIWorkerClient:
         self._writer = None
         self._connect_token = None
         self._worker_error_log = None
+        self._receive_buffer = b""
+
+    def _check_cancelled(self):
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise CancelledError("AI worker operation was cancelled.")
+
+    def _remaining_time(self, deadline, operation):
+        self._check_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"Timed out waiting for the ONNX worker {operation}.\n\n"
+                f"Command: {self.command_line}\n\n"
+                f"Worker diagnostics:\n{self._read_worker_diagnostics()}"
+            )
+        return remaining
 
     @property
     def worker_command(self):
@@ -113,6 +140,10 @@ class AIWorkerClient:
     def start(self):
         if self.process is not None:
             return self.startup_result
+        self._check_cancelled()
+        deadline = time.monotonic() + self.startup_timeout
+        self.startup_result = None
+        self._receive_buffer = b""
         self.temp_dir = tempfile.mkdtemp(prefix="aidas_onnx_worker_", dir=self.temp_root)
         self._worker_error_log = os.path.join(self.temp_dir, "startup_error.log")
         try:
@@ -136,8 +167,9 @@ class AIWorkerClient:
             raise
 
         try:
-            deadline = time.monotonic() + self.startup_timeout
             while True:
+                remaining = self._remaining_time(deadline, "to finish starting")
+                self._listener.settimeout(min(0.25, remaining))
                 try:
                     self._connection, _address = self._listener.accept()
                     break
@@ -157,11 +189,10 @@ class AIWorkerClient:
                             f"Timeout: {self.startup_timeout:.0f} seconds\n\n"
                             f"Worker diagnostics:\n{self._read_worker_diagnostics()}"
                         )
-            self._connection.settimeout(None)
-            self._reader = self._connection.makefile("r", encoding="utf-8", newline="\n")
+            self._connection.settimeout(0.25)
             self._writer = self._connection.makefile("w", encoding="utf-8", newline="\n")
 
-            hello = self._read_message()
+            hello = self._read_message(deadline=deadline, operation="to finish starting")
             if hello.get("type") != "hello" or not secrets.compare_digest(
                 str(hello.get("token") or ""),
                 self._connect_token,
@@ -169,13 +200,12 @@ class AIWorkerClient:
                 raise RuntimeError("Rejected an unauthenticated ONNX worker connection.")
 
             while True:
-                message = self._read_message()
+                message = self._read_message(deadline=deadline, operation="to finish starting")
                 message_type = message.get("type")
-                if message_type == "progress" and self.startup_progress_callback is not None:
-                    self.startup_progress_callback(
-                        float(message.get("fraction", 0.0)),
-                        str(message.get("stage") or ""),
-                    )
+                if message_type == "progress":
+                    progress = self._valid_progress(message)
+                    if progress is not None and self.startup_progress_callback is not None:
+                        self.startup_progress_callback(*progress)
                 elif message_type == "ready":
                     self.startup_result = message
                     return message
@@ -187,25 +217,43 @@ class AIWorkerClient:
             self.close()
             raise
 
-    def _read_message(self):
-        if self.process is None or self._reader is None:
+    def _read_message(self, *, deadline, operation):
+        if self.process is None or self._connection is None:
             raise RuntimeError("ONNX worker process is not running.")
         while True:
-            line = self._reader.readline()
-            if line == "":
-                return_code = self.process.poll()
+            remaining = self._remaining_time(deadline, operation)
+            if b"\n" not in self._receive_buffer:
+                connection = self._connection
+                readable, _writeable, _exceptional = select.select([connection], [], [], min(0.25, remaining))
+                if not readable:
+                    if self.process is not None and self.process.poll() is None:
+                        continue
+                    chunk = b""
+                else:
+                    try:
+                        chunk = connection.recv(65536)
+                    except socket.timeout:
+                        continue
+                if chunk:
+                    self._receive_buffer += chunk
+                    continue
+                return_code = self.process.poll() if self.process is not None else None
                 details = "\n".join(self._output_lines[-30:]) or "(worker produced no output)"
                 raise RuntimeError(
                     "ONNX worker exited unexpectedly.\n\n"
                     f"Command: {self.command_line}\n"
                     f"Return code: {return_code}\n\n{details}"
                 )
-            text = line.strip()
+            line, self._receive_buffer = self._receive_buffer.split(b"\n", 1)
+            text = line.decode("utf-8").strip()
             if not text:
                 continue
             try:
                 message = json.loads(text)
             except json.JSONDecodeError:
+                self._output_lines.append(text)
+                continue
+            if not isinstance(message, dict):
                 self._output_lines.append(text)
                 continue
             if message.get("type") == "hello" and "token" in message:
@@ -215,6 +263,17 @@ class AIWorkerClient:
             else:
                 self._output_lines.append(text)
             return message
+
+    @staticmethod
+    def _valid_progress(message):
+        try:
+            fraction = float(message.get("fraction"))
+        except (TypeError, ValueError):
+            return None
+        stage = message.get("stage")
+        if not math.isfinite(fraction) or not 0.0 <= fraction <= 1.0 or not isinstance(stage, str):
+            return None
+        return fraction, stage
 
     @staticmethod
     def _format_worker_error(message, heading):
@@ -235,6 +294,7 @@ class AIWorkerClient:
             return f"(could not read the worker diagnostic log: {exc})"
 
     def predict(self, image, *, progress_callback=None):
+        self._check_cancelled()
         if self.process is None:
             self.start()
         if self.process is None or self._writer is None or self.temp_dir is None:
@@ -256,16 +316,21 @@ class AIWorkerClient:
         self._writer.flush()
 
         try:
+            deadline = time.monotonic() + self.prediction_timeout
+            last_progress_fraction = -1.0
             while True:
-                message = self._read_message()
+                message = self._read_message(deadline=deadline, operation="prediction progress")
                 if str(message.get("request_id") or "") != request_id:
                     continue
                 message_type = message.get("type")
-                if message_type == "progress" and progress_callback is not None:
-                    progress_callback(
-                        float(message.get("fraction", 0.0)),
-                        str(message.get("stage") or ""),
-                    )
+                if message_type == "progress":
+                    progress = self._valid_progress(message)
+                    if progress is not None:
+                        if progress[0] > last_progress_fraction:
+                            last_progress_fraction = progress[0]
+                            deadline = time.monotonic() + self.prediction_timeout
+                        if progress_callback is not None:
+                            progress_callback(*progress)
                 elif message_type == "error":
                     raise RuntimeError(
                         self._format_worker_error(message, "AI_ForAIDAS ONNX prediction failed")
@@ -313,18 +378,22 @@ class AIWorkerClient:
         process = self.process
         self.process = None
         if process is not None:
-            if process.poll() is None and self._writer is not None:
+            cancelled = self.cancel_event is not None and self.cancel_event.is_set()
+            if (process.poll() is None and self._writer is not None
+                    and self.startup_result is not None and not cancelled):
                 try:
                     self._writer.write(json.dumps({"type": "shutdown"}) + "\n")
                     self._writer.flush()
                     process.wait(timeout=5)
-                except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-                    process.terminate()
-                    try:
-                        process.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        process.kill()
-                        process.wait(timeout=5)
+                except (BrokenPipeError, OSError, ValueError, subprocess.TimeoutExpired):
+                    pass
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
         for stream_name in ("_reader", "_writer"):
             stream = getattr(self, stream_name)
             setattr(self, stream_name, None)
@@ -342,6 +411,8 @@ class AIWorkerClient:
                 except OSError:
                     pass
         self._connect_token = None
+        self._receive_buffer = b""
+        self.startup_result = None
         if self.temp_dir is not None:
             shutil.rmtree(self.temp_dir, ignore_errors=True)
             self.temp_dir = None

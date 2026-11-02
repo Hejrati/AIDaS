@@ -26,10 +26,12 @@ from PIL import Image, ImageColor, ImageDraw, ImageOps, ImageTk
 from aidas.utils.io_utils import read_analyze
 from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.filesystem import (
+    DirectoryScanLimitExceeded,
     find_candidate_directories,
     skipped_directories_warning,
     walk_accessible_directories,
 )
+from aidas.utils.worker_polling import WorkerCompletionGuard
 from aidas.utils.step3_image_utils import (
     placeholder_image as _placeholder_image,
 )
@@ -346,7 +348,13 @@ class RSetupWizard(ttk.Frame):
             if not cancelled.is_set():
                 events.put((value, error))
 
-        threading.Thread(target=wrapped, daemon=True).start()
+        thread = threading.Thread(target=wrapped, daemon=True)
+        self._worker_completion = WorkerCompletionGuard(thread)
+        try:
+            thread.start()
+        except Exception as exc:
+            self._finish_worker(done, None, exc)
+            return
         self._worker_poll_after_id = self.after(25, self._poll_worker_result, done)
 
     def _poll_worker_result(self, done):
@@ -356,6 +364,10 @@ class RSetupWizard(ttk.Frame):
         try:
             value, error = self._worker_events.get_nowait()
         except queue.Empty:
+            guard = self.__dict__.get("_worker_completion")
+            if guard is not None and guard.missing_result():
+                self._finish_worker(done, None, RuntimeError("The setup worker stopped without reporting a result. Try the check again."))
+                return
             self._worker_poll_after_id = self.after(25, self._poll_worker_result, done)
             return
         self._finish_worker(done, value, error)
@@ -1544,6 +1556,10 @@ class RBatchSelectionPanel(ttk.Frame):
         self.empty_notice = None
         self._override_existing_results = False
         self._scan_events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._scan_cancel = threading.Event()
+        self._scan_poll_after_id = None
+        self._scan_closed = False
+        self._scan_ready = False
 
         self._build_ui()
         self._start_scan()
@@ -1806,27 +1822,49 @@ class RBatchSelectionPanel(ttk.Frame):
         return f"Max jobs: {max_workers}"
 
     def _start_scan(self):
+        self._stop_scan()
+        self._scan_closed = False
+        self._scan_ready = False
+        self._scan_cancel = threading.Event()
+        self._scan_events = queue.Queue()
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
-        threading.Thread(target=self._scan_worker, daemon=True).start()
-        self.after(self.SCAN_POLL_MS, self._poll_scan_events)
+        self.next_button.state(["disabled"])
+        worker = threading.Thread(
+            target=self._scan_worker,
+            args=(self.root_dir, self.input_folders, self._scan_cancel, self._scan_events), daemon=True,
+        )
+        self._scan_completion = WorkerCompletionGuard(worker)
+        try:
+            worker.start()
+        except Exception as exc:
+            self._scan_failed(exc)
+            return
+        self._scan_poll_after_id = self.after(self.SCAN_POLL_MS, self._poll_scan_events)
 
-    def _scan_worker(self):
+    def _scan_worker(self, root_dir=None, input_folders=None, cancelled=None, events=None):
+        if root_dir is None:
+            root_dir = self.root_dir
+            input_folders = self.input_folders
+        cancelled = self.__dict__.get("_scan_cancel") if cancelled is None else cancelled
+        events = self._scan_events if events is None else events
         rows = []
         scanned = 0
         missing = 0
         try:
-            if self.input_folders is None:
+            if input_folders is None:
                 groups = tuple(
                     tuple(name + suffix for name in names)
                     for _label, names, *_rest in self.step_frame.REQUIRED_INPUTS
                     for suffix in (".hdr", ".img")
                 )
-                folders, total, access_errors = find_candidate_directories(self.root_dir, groups)
+                folders, total, access_errors = find_candidate_directories(root_dir, groups, cancel_event=cancelled)
                 scanned = missing = total - len(folders)
             else:
-                folders = list(self.input_folders)
+                folders = list(input_folders)
                 access_errors = []
             for folder in folders:
+                if cancelled is not None and cancelled.is_set():
+                    return
                 try:
                     scanned += 1
                     input_paths = self.step_frame._find_input_paths(folder)
@@ -1839,9 +1877,9 @@ class RBatchSelectionPanel(ttk.Frame):
                     continue
                 status = "Skipped: RData exists" if has_rdata else "Ready"
                 try:
-                    folder_text = str(folder.relative_to(self.root_dir))
+                    folder_text = str(folder.relative_to(root_dir))
                     if folder_text == ".":
-                        folder_text = str(self.root_dir)
+                        folder_text = str(root_dir)
                 except ValueError:
                     folder_text = str(folder)
                 rows.append(
@@ -1858,21 +1896,27 @@ class RBatchSelectionPanel(ttk.Frame):
                     }
                 )
         except Exception as exc:
-            self._scan_events.put(("error", exc))
+            if cancelled is None or not cancelled.is_set():
+                events.put(("error", exc))
             return
-        self._scan_events.put(
-            ("done", (rows, scanned, missing, access_errors))
-        )
+        if cancelled is None or not cancelled.is_set():
+            events.put(("done", (rows, scanned, missing, access_errors)))
 
     def _poll_scan_events(self):
         """Deliver scan results on Tk's owning thread."""
-
+        self._scan_poll_after_id = None
+        if self.__dict__.get("_scan_closed", False):
+            return
         try:
             kind, payload = self._scan_events.get_nowait()
         except queue.Empty:
+            guard = self.__dict__.get("_scan_completion")
+            if guard is not None and guard.missing_result():
+                self._scan_failed(RuntimeError("The folder scan stopped without reporting a result. Select another folder to try again."))
+                return
             try:
                 if self.winfo_exists():
-                    self.after(self.SCAN_POLL_MS, self._poll_scan_events)
+                    self._scan_poll_after_id = self.after(self.SCAN_POLL_MS, self._poll_scan_events)
             except tk.TclError:
                 pass
             return
@@ -1883,13 +1927,42 @@ class RBatchSelectionPanel(ttk.Frame):
         rows, scanned, missing, access_errors = payload
         self._scan_done(rows, scanned, missing, access_errors)
 
+    def _stop_scan(self):
+        cancelled = self.__dict__.get("_scan_cancel")
+        if cancelled is not None:
+            cancelled.set()
+        pending = self.__dict__.get("_scan_poll_after_id")
+        self._scan_poll_after_id = None
+        if pending is not None:
+            self.after_cancel(pending)
+
+    def destroy(self):
+        self._scan_closed = True
+        self._stop_scan()
+        super().destroy()
+
     def _scan_failed(self, exc):
         if not self.winfo_exists():
             return
-        self.summary_var.set("Scan failed.")
+        self._scan_ready = False
+        self.rows = []
+        self.table = None
+        limited = isinstance(exc, DirectoryScanLimitExceeded)
+        title = "Folder limit exceeded." if limited else "Scan failed."
+        self.summary_var.set(title)
         self.more_label.configure(text="More")
         self.more_tooltip.text = f"Could not scan folders.\n{exc}"
-        self.step_frame.status_var.set("Batch scan failed.")
+        self.step_frame.status_var.set(str(exc) if limited else f"Batch scan failed: {exc}")
+        for child in self.table_host.winfo_children():
+            child.destroy()
+        notice = ttk.Frame(self.table_host, padding=16)
+        notice.pack(fill="both", expand=True)
+        ttk.Label(notice, text=title, font=("", 12, "bold")).pack(pady=(8, 12))
+        label = ttk.Label(notice, text=str(exc), wraplength=480, justify="center")
+        label.pack(fill="x")
+        notice.bind("<Configure>", lambda event: label.configure(wraplength=max(1, event.width-32)))
+        AppButton(notice, text="Select another folder", command=self._select_another_folder).pack(pady=16)
+        self.empty_notice = notice
         try:
             self.next_button.state(["disabled"])
             self.workers_spin.configure(state="disabled")
@@ -1922,6 +1995,7 @@ class RBatchSelectionPanel(ttk.Frame):
         if not self.winfo_exists():
             return
         self.rows = rows
+        self._scan_ready = True
         self._override_existing_results = False
         ready = sum(1 for row in rows if not row["locked"])
         processed = sum(1 for row in rows if row["locked"])
@@ -1956,6 +2030,8 @@ class RBatchSelectionPanel(ttk.Frame):
             self.step_frame.status_var.set("No valid Step 3 files found. Select another folder.")
 
     def _run_selected(self):
+        if not self.__dict__.get("_scan_ready", True):
+            return
         if self.table is None:
             return
         folders = [row["folder"] for row in self.table.selected_rows()]
@@ -2727,6 +2803,11 @@ class Step3Frame(SidebarStepFrame):
             variable.set("")
 
     def destroy(self):
+        self._closing = True
+        self._stop_worker_dispatch()
+        cancelled = self.__dict__.get("_r_cancel_event")
+        if cancelled is not None:
+            cancelled.set()
         self._reset_r_elapsed_timer()
         super().destroy()
 
@@ -3663,7 +3744,11 @@ class Step3Frame(SidebarStepFrame):
         return folders, access_errors
 
     def _load_r_results_from_tree(self, root, show_errors=True):
-        folders, access_errors = self._find_r_result_folders(root)
+        try:
+            folders, access_errors = self._find_r_result_folders(root)
+        except DirectoryScanLimitExceeded as exc:
+            self.status_var.set(str(exc))
+            return False
         if not folders:
             message = "No Step 3 R results were found in the selected folder or its subfolders."
             if access_errors:
@@ -4086,7 +4171,7 @@ class Step3Frame(SidebarStepFrame):
         pid = getattr(process, "pid", None)
         try:
             if os.name == "nt" and pid:
-                subprocess.run(
+                result = subprocess.run(
                     ["taskkill", "/PID", str(pid), "/T", "/F"],
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
@@ -4095,6 +4180,8 @@ class Step3Frame(SidebarStepFrame):
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                     check=False,
                 )
+                if result.returncode != 0:
+                    self._stop_r_process_direct(process, force=force)
             elif pid:
                 os.killpg(os.getpgid(pid), signal.SIGKILL if force else signal.SIGTERM)
             elif force and hasattr(process, "kill"):
@@ -4102,8 +4189,27 @@ class Step3Frame(SidebarStepFrame):
             else:
                 process.terminate()
         except Exception:
+            self._stop_r_process_direct(process, force=force)
+
+    @staticmethod
+    def _stop_r_process_direct(process, *, force=False):
+        """Reap a child even when Windows process-tree termination failed."""
+        try:
+            process.kill() if force else process.terminate()
+        except Exception:
             try:
-                process.kill() if force and hasattr(process, "kill") else process.terminate()
+                process.kill()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=2)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+            try:
+                process.wait(timeout=2)
             except Exception:
                 pass
 
@@ -4186,9 +4292,16 @@ class Step3Frame(SidebarStepFrame):
                 line_queue.put(sentinel)
 
         reader = threading.Thread(target=read_output, daemon=True)
-        reader.start()
+        try:
+            reader.start()
+        except Exception as exc:
+            self._terminate_r_process(process, force=True)
+            self._unregister_r_process(process)
+            return 1, f"Could not start the R output reader: {exc}", "failed"
         stop_reason = None
         output_complete = False
+        reader_completion = WorkerCompletionGuard(reader)
+        exited_empty_polls = 0
 
         try:
             while True:
@@ -4203,7 +4316,15 @@ class Step3Frame(SidebarStepFrame):
                 try:
                     item = line_queue.get(timeout=0.2)
                 except queue.Empty:
+                    if not self._process_is_running(process):
+                        exited_empty_polls += 1
+                    else:
+                        exited_empty_polls = 0
+                    if reader_completion.missing_result() or exited_empty_polls >= 5:
+                        stop_reason = "failed"
+                        break
                     continue
+                exited_empty_polls = 0
                 if item is sentinel:
                     output_complete = True
                     continue
@@ -4220,14 +4341,16 @@ class Step3Frame(SidebarStepFrame):
                     except Exception:
                         pass
                 reader.join(timeout=1)
-                while True:
+                for _ in range(line_queue.qsize()):
                     try:
                         item = line_queue.get_nowait()
                     except queue.Empty:
                         break
                     if item is not sentinel:
                         on_line(item)
-                return 130, "Cancelled by user.", stop_reason
+                if stop_reason == "cancelled":
+                    return 130, "Cancelled by user.", stop_reason
+                return 1, "The R output stream stopped without reporting completion.", "failed"
 
             try:
                 returncode = process.wait()
@@ -4323,9 +4446,15 @@ class Step3Frame(SidebarStepFrame):
             ),
             daemon=True,
         )
+        self._start_worker_dispatch(worker_thread, lambda: self._on_batch_r_done([
+            {"folder": Path(folder), "returncode": 1, "outcome": "failed",
+             "stderr": "The R batch worker stopped without reporting a result."}
+            for folder in folders
+        ]))
         try:
             worker_thread.start()
         except Exception as exc:
+            self._stop_worker_dispatch()
             elapsed = self._finish_r_elapsed_timer()
             elapsed_text = f" Total elapsed: {self._format_r_elapsed(elapsed)}."
             self._busy = False
@@ -4339,6 +4468,76 @@ class Step3Frame(SidebarStepFrame):
                 self.r_batch_run_panel.log(str(exc))
                 self.r_batch_run_panel.finish()
             messagebox.showerror("Batch Step 3", f"Could not start the R batch worker:\n{exc}")
+
+
+    def _start_worker_dispatch(self, worker, on_missing):
+        self._stop_worker_dispatch()
+        self._worker_ui_events = queue.Queue()
+        self._worker_ui_completion = WorkerCompletionGuard(worker)
+        self._worker_ui_missing = on_missing
+        self._worker_ui_completed = False
+        self._worker_ui_dispatch = (worker, self._worker_ui_events)
+        self._worker_ui_poll_after_id = self.after(50, self._poll_worker_dispatch)
+
+    def _post_worker_ui(self, callback, *, terminal=False):
+        if self.__dict__.get("_closing", False):
+            return
+        # Direct calls from the owning thread remain useful for synchronous
+        # handlers. Background workers only publish plain Python queue entries.
+        if threading.current_thread() is threading.main_thread():
+            callback()
+            return
+        dispatch = self.__dict__.get("_worker_ui_dispatch")
+        current_thread = threading.current_thread()
+        if dispatch is not None and (
+            dispatch[0] is current_thread
+            or getattr(current_thread, "_aidas_worker_ui_dispatch", None) is dispatch
+        ):
+            dispatch[1].put((callback, terminal))
+
+    def _poll_worker_dispatch(self):
+        self._worker_ui_poll_after_id = None
+        if self.__dict__.get("_closing", False):
+            return
+        generation = self.__dict__.get("_worker_ui_generation", 0)
+        events = self.__dict__.get("_worker_ui_events")
+        if events is None:
+            return
+        empty = False
+        try:
+            for _ in range(200):
+                try:
+                    callback, terminal = events.get_nowait()
+                except queue.Empty:
+                    empty = True
+                    break
+                if terminal:
+                    if self._worker_ui_completed:
+                        continue
+                    self._worker_ui_completed = True
+                callback()
+                if generation != self._worker_ui_generation:
+                    return
+        finally:
+            if (not self.__dict__.get("_closing", False)
+                    and generation == self._worker_ui_generation):
+                if (empty and not self._worker_ui_completed
+                        and self._worker_ui_completion.missing_result()):
+                    self._worker_ui_completed = True
+                    self._worker_ui_missing()
+                if (generation == self._worker_ui_generation
+                        and (not self._worker_ui_completed or not events.empty())):
+                    self._worker_ui_poll_after_id = self.after(50, self._poll_worker_dispatch)
+
+    def _stop_worker_dispatch(self):
+        self._worker_ui_generation = self.__dict__.get("_worker_ui_generation", 0) + 1
+        pending = self.__dict__.get("_worker_ui_poll_after_id")
+        self._worker_ui_poll_after_id = None
+        if pending is not None:
+            self.after_cancel(pending)
+        # Detach in constant time: a live producer must not prolong closing.
+        self._worker_ui_dispatch = None
+        self._worker_ui_events = None
 
     def _batch_panel_update(self, folder, status=None, progress=None, log=None):
         panel = self.r_batch_run_panel
@@ -4447,15 +4646,12 @@ class Step3Frame(SidebarStepFrame):
             env["AIDAS_STEP3_DEEP_ONLY"] = "1"
         output_lines = []
 
-        self.after(
-            0,
-            lambda f=folder: self._batch_panel_update(
+        self._post_worker_ui(lambda f=folder: self._batch_panel_update(
                 f,
                 status="Running main R script",
                 progress=1,
                 log=f"Starting main R script {Path(main_script_path).name}: {f}",
-            ),
-        )
+            ))
 
         def handle_line(line):
             output_lines.append(line)
@@ -4463,14 +4659,11 @@ class Step3Frame(SidebarStepFrame):
             if progress is None:
                 return
             percent, label = progress
-            self.after(
-                0,
-                lambda f=folder, p=min(97, percent), s=label: self._batch_panel_update(
+            self._post_worker_ui(lambda f=folder, p=min(97, percent), s=label: self._batch_panel_update(
                     f,
                     status=s,
                     progress=p,
-                ),
-            )
+                ))
 
         returncode, stderr, outcome = self._run_supervised_r_command(
             main_cmd,
@@ -4535,15 +4728,12 @@ class Step3Frame(SidebarStepFrame):
         output_lines.append(f"\n--- Output script: {Path(output_script_path).name} ---\n")
         env = self._r_run_env_for_config(r_config, r_thread_limit)
 
-        self.after(
-            0,
-            lambda f=folder, name=Path(output_script_path).name: self._batch_panel_update(
+        self._post_worker_ui(lambda f=folder, name=Path(output_script_path).name: self._batch_panel_update(
                 f,
                 status="Running output R script",
                 progress=98,
                 log=f"Starting output R script {name}: {f}",
-            ),
-        )
+            ))
         returncode, output_stderr, outcome = self._run_supervised_r_command(
             output_cmd,
             r_config["output_dir"],
@@ -4607,13 +4797,10 @@ class Step3Frame(SidebarStepFrame):
             commands,
         )
         if returncode == 0:
-            self.after(
-                0,
-                lambda f=folder, lp=log_path: self._batch_panel_update(
+            self._post_worker_ui(lambda f=folder, lp=log_path: self._batch_panel_update(
                     f,
                     log=f"Finished: {f}\nLog: {lp}",
-                ),
-            )
+                ))
         else:
             short_output = self._short_process_text(stdout)
             outcome_label = (
@@ -4621,13 +4808,10 @@ class Step3Frame(SidebarStepFrame):
                 if outcome == "cancelled"
                 else "Failed"
             )
-            self.after(
-                0,
-                lambda f=folder, lp=log_path, out=short_output, label=outcome_label: self._batch_panel_update(
+            self._post_worker_ui(lambda f=folder, lp=log_path, out=short_output, label=outcome_label: self._batch_panel_update(
                     f,
                     log=f"{label}: {f}\nLog: {lp}\n{out}",
-                ),
-            )
+                ))
         result.update(
             {
                 "folder": folder,
@@ -4706,6 +4890,20 @@ class Step3Frame(SidebarStepFrame):
         folders = [Path(folder) for folder in folders]
         results_by_folder = {}
         main_successes = {}
+        dispatch = self.__dict__.get("_worker_ui_dispatch")
+        if dispatch is not None and dispatch[0] is not threading.current_thread():
+            dispatch = None
+
+        def run_with_dispatch(task, folder):
+            # Pool threads belong to this coordinator's original UI queue, even
+            # if a newer batch replaces the frame's dispatcher before they end.
+            current_thread = threading.current_thread()
+            previous = getattr(current_thread, "_aidas_worker_ui_dispatch", None)
+            current_thread._aidas_worker_ui_dispatch = dispatch
+            try:
+                return task(folder)
+            finally:
+                current_thread._aidas_worker_ui_dispatch = previous
 
         def failed_result(folder, error, prior_result=None, *, outcome="failed", returncode=1):
             prior_result = prior_result or {}
@@ -4730,14 +4928,11 @@ class Step3Frame(SidebarStepFrame):
                 "cancelled": "Cancelled",
                 "failed": "Failed",
             }.get(outcome, "Failed")
-            self.after(
-                0,
-                lambda f=folder, s=status: self._batch_panel_update(
+            self._post_worker_ui(lambda f=folder, s=status: self._batch_panel_update(
                     f,
                     status=s,
                     progress=100 if s == "Completed" else None,
-                ),
-            )
+                ))
 
         def run_main(folder):
             folder = Path(folder)
@@ -4751,7 +4946,7 @@ class Step3Frame(SidebarStepFrame):
             pair_error = self._r_script_pair_error(main_script_path, output_script_path)
             if pair_error is not None:
                 return None, failed_result(folder, pair_error)
-            self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
+            self._post_worker_ui(lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
             r_config = None
             try:
                 if not allow_existing_rdata and self._folder_has_r_data(folder):
@@ -4778,7 +4973,7 @@ class Step3Frame(SidebarStepFrame):
                     outcome="cancelled",
                     returncode=130,
                 )
-            self.after(0, lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
+            self._post_worker_ui(lambda f=folder: self._batch_panel_update(f, status="Validating", progress=0))
             try:
                 if not allow_existing_rdata and self._folder_has_r_data(folder):
                     raise RuntimeError("Skipped because this folder contains RData.")
@@ -4832,7 +5027,7 @@ class Step3Frame(SidebarStepFrame):
             if output_mode == self.R_OUTPUT_MODE_PARALLEL:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
                     future_map = {
-                        executor.submit(run_parallel_pipeline, folder): folder
+                        executor.submit(run_with_dispatch, run_parallel_pipeline, folder): folder
                         for folder in folders
                     }
                     for future in concurrent.futures.as_completed(future_map):
@@ -4847,7 +5042,10 @@ class Step3Frame(SidebarStepFrame):
             # Sequential-output mode has an explicit phase barrier: every main
             # script settles in parallel before outputs run one folder at a time.
             with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                future_map = {executor.submit(run_main, folder): folder for folder in folders}
+                future_map = {
+                    executor.submit(run_with_dispatch, run_main, folder): folder
+                    for folder in folders
+                }
                 for future in concurrent.futures.as_completed(future_map):
                     folder = future_map[future]
                     try:
@@ -4858,15 +5056,12 @@ class Step3Frame(SidebarStepFrame):
 
                     if result["returncode"] == 0 and r_config is not None:
                         main_successes[self._folder_key(folder)] = (folder, r_config, result)
-                        self.after(
-                            0,
-                            lambda f=folder: self._batch_panel_update(
+                        self._post_worker_ui(lambda f=folder: self._batch_panel_update(
                                 f,
                                 status="Waiting for output R script",
                                 progress=97,
                                 log=f"Main R script finished; waiting for the output phase: {f}",
-                            ),
-                        )
+                            ))
                         continue
 
                     if r_config is not None:
@@ -4919,7 +5114,7 @@ class Step3Frame(SidebarStepFrame):
                 results_by_folder[self._folder_key(folder)]
                 for folder in folders
             ]
-            self.after(0, lambda batch_results=finished_results: self._on_batch_r_done(batch_results))
+            self._post_worker_ui(lambda batch_results=finished_results: self._on_batch_r_done(batch_results), terminal=True)
 
     def _on_batch_r_done(self, results):
         elapsed = self._finish_r_elapsed_timer()

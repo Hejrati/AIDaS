@@ -41,7 +41,7 @@ class Step3ElapsedTimerTests(unittest.TestCase):
         self.next_callback = 0
 
         def after(delay, callback):
-            self.assertEqual(delay, 1000)
+            self.assertIn(delay, (50, 1000))
             self.next_callback += 1
             callback_id = f"timer-{self.next_callback}"
             self.callbacks[callback_id] = callback

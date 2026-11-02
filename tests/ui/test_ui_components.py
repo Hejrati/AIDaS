@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
+import queue
+import threading
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -611,12 +615,82 @@ class WorkflowNavigationTests(unittest.TestCase):
 
     def test_batch_scan_workers_publish_to_queues_instead_of_calling_tk(self):
         for panel_type in (RBatchSelectionPanel, Step4BatchROISelectionPanel):
-            with self.subTest(panel=panel_type.__name__):
-                worker_source = inspect.getsource(panel_type._scan_worker)
-                poll_source = inspect.getsource(panel_type._poll_scan_events)
-                self.assertIn("_scan_events.put", worker_source)
-                self.assertNotIn(".after(", worker_source)
-                self.assertIn("self.after(", poll_source)
+            for outcome in ("done", "error", "cancelled"):
+                with self.subTest(panel=panel_type.__name__, outcome=outcome):
+                    panel = object.__new__(panel_type)
+                    panel.root_dir = Path("selected")
+                    panel._scan_cancel = cancelled = threading.Event()
+                    panel._scan_events = replacement_events = queue.Queue()
+                    captured_events = queue.Queue()
+                    panel.after = mock.Mock(side_effect=AssertionError("Worker called Tk.after"))
+                    panel.winfo_exists = mock.Mock(side_effect=AssertionError("Worker called Tk.winfo_exists"))
+                    panel._scan_done = mock.Mock()
+                    panel._scan_failed = mock.Mock()
+                    failure = RuntimeError("Unreadable folder")
+                    folder = panel.root_dir / "study"
+                    step = panel.step_frame = SimpleNamespace(
+                        REQUIRED_INPUTS=(("LIGHT", ("Light",), "Light", 16),),
+                        _find_input_paths=mock.Mock(return_value={"LIGHT": folder / "Light"}),
+                        _folder_has_r_data=mock.Mock(return_value=False),
+                        _scan_batch_roi_folders=mock.Mock(return_value=(
+                            [{"folder": folder}], 1, 0, [],
+                        )),
+                    )
+                    if outcome == "error":
+                        step._find_input_paths.side_effect = failure
+                        step._scan_batch_roi_folders.side_effect = failure
+                    elif outcome == "cancelled":
+                        cancelled.set()
+                    errors = []
+                    worker_threads = []
+
+                    def run():
+                        worker_threads.append(threading.get_ident())
+                        try:
+                            if panel_type is RBatchSelectionPanel:
+                                panel._scan_worker(panel.root_dir, [folder], cancelled, captured_events)
+                            else:
+                                panel._scan_worker(cancelled, captured_events)
+                        except BaseException as exc:
+                            errors.append(exc)
+
+                    worker = threading.Thread(target=run, daemon=True)
+                    worker.start()
+                    worker.join(timeout=2)
+                    self.assertFalse(worker.is_alive(), "The folder scan worker did not finish.")
+                    self.assertFalse(errors, errors)
+                    self.assertNotEqual(worker_threads, [threading.get_ident()])
+                    panel.after.assert_not_called()
+                    panel.winfo_exists.assert_not_called()
+                    panel._scan_done.assert_not_called()
+                    panel._scan_failed.assert_not_called()
+                    self.assertTrue(replacement_events.empty(), "A stale worker published to the replacement queue.")
+                    if outcome == "cancelled":
+                        self.assertTrue(captured_events.empty())
+                        continue
+                    kind, payload = captured_events.get_nowait()
+                    self.assertEqual(kind, outcome)
+                    if outcome == "error":
+                        self.assertIs(payload, failure)
+                    else:
+                        rows, scanned, skipped, access_errors = payload
+                        self.assertEqual([row["folder"] for row in rows], [folder])
+                        self.assertEqual((scanned, skipped, access_errors), (1, 0, []))
+                    self.assertTrue(captured_events.empty())
+
+                    # Only the owning-thread poll delivers completion to the view.
+                    captured_events.put((kind, payload))
+                    panel._scan_events = captured_events
+                    if panel_type is RBatchSelectionPanel:
+                        panel._scan_closed = False
+                        panel._poll_scan_events()
+                    else:
+                        panel._poll_scan_events(cancelled, captured_events)
+                    if outcome == "error":
+                        panel._scan_failed.assert_called_once_with(failure)
+                    else:
+                        panel._scan_done.assert_called_once_with(*payload)
+                    panel.after.assert_not_called()
 
     def test_header_names_all_five_workflow_steps(self):
         self.assertEqual(

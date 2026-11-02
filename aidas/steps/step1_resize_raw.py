@@ -21,7 +21,8 @@ from aidas.utils.bright_pixels import (
     detect_bright_pixels_in_bands,
     smooth_bright_pixels,
 )
-from aidas.utils.filesystem import existing_directory, find_sdb_directories, skipped_directories_warning
+from aidas.utils.filesystem import DirectoryScanLimitExceeded, existing_directory, find_sdb_directories, skipped_directories_warning
+from aidas.utils.worker_polling import WorkerCompletionGuard
 from aidas.ui.path_entry import bind_path_entry
 from aidas.utils.io_utils import read_analyze, read_raw_oct, scale_image, write_analyze
 from aidas.utils.oct_crop import detect_oct_crop, map_oct_crop_to_raw
@@ -1578,11 +1579,18 @@ class Step1Frame(SidebarStepFrame):
             try:
                 result = Step1Frame._scan_sdb_directory(root, cancelled)
             except Exception as exc:
-                result = ({}, set(), [(root, str(exc))])
+                result = exc.with_traceback(None)
             if not cancelled.is_set():
                 events.put(result)
 
-        threading.Thread(target=worker, daemon=True).start()
+        try:
+            scan_worker = threading.Thread(target=worker, daemon=True)
+            self._sdb_scan_guard = WorkerCompletionGuard(scan_worker)
+            scan_worker.start()
+        except Exception as exc:
+            events.put(exc.with_traceback(None))
+            self._poll_sdb_scan(events, cancelled, root, previous_directory, preview_first)
+            return
         self._sdb_scan_after_id = self.after(
             50, lambda: self._poll_sdb_scan(events, cancelled, root, previous_directory, preview_first)
         )
@@ -1610,6 +1618,7 @@ class Step1Frame(SidebarStepFrame):
         job = self.__dict__.get("_sdb_scan_after_id")
         self._sdb_scan_after_id = None
         self._sdb_scan_pending = False
+        self._sdb_scan_guard = None
         if job is not None:
             try:
                 self.after_cancel(job)
@@ -1624,13 +1633,36 @@ class Step1Frame(SidebarStepFrame):
             self._cancel_sdb_scan()
             return
         try:
-            directory_files, saved, errors = events.get_nowait()
+            result = events.get_nowait()
         except queue.Empty:
-            self._sdb_scan_after_id = self.after(
-                50, lambda: self._poll_sdb_scan(events, cancelled, root, previous_directory, preview_first)
-            )
-            return
+            guard = self.__dict__.get("_sdb_scan_guard")
+            if guard is not None and guard.missing_result():
+                result = RuntimeError("Folder scan stopped without returning a result. Select another folder or try again.")
+            else:
+                self._sdb_scan_after_id = self.after(
+                    50, lambda: self._poll_sdb_scan(events, cancelled, root, previous_directory, preview_first)
+                )
+                return
         self._sdb_scan_pending = False
+        self._sdb_scan_guard = None
+        if isinstance(result, Exception):
+            self._sdb_directory_files = {}
+            self._saved_output_directories = set()
+            self._sdb_scan_error = result
+            text = str(result) if isinstance(result, DirectoryScanLimitExceeded) else f"Could not scan this folder: {result}"
+            self.sdb_scan_more_label.configure(text=text, wraplength=self.SIDEBAR_TEXT_WRAP)
+            self.sdb_scan_tooltip.text = text
+            status = self.__dict__.get("status_var")
+            if status is not None:
+                status.set(text)
+            self._render_sdb_directories()
+            return
+        directory_files, saved, errors = result
+        if self.__dict__.get("_sdb_scan_error") is not None:
+            self._sdb_scan_error = None
+            status = self.__dict__.get("status_var")
+            if status is not None:
+                status.set("Folder scan complete. Select an SDB image.")
         self._sdb_directory_files = directory_files
         self._saved_output_directories = saved
         self.sdb_scan_more_label.configure(text="")

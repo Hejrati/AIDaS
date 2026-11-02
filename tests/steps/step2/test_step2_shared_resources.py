@@ -153,6 +153,8 @@ class Step2SharedResourceTests(unittest.TestCase):
         frame._image_pair_key = lambda path: path
         frame._set_segmentation_running = mock.Mock()
         frame._run_aidas_batch_segmenter_worker = mock.Mock()
+        frame.after = mock.Mock(return_value="worker-poll")
+        frame.after_cancel = mock.Mock()
 
         for step3_used, expected in ((0, 3), (1, 2)):
             frame.get_step3_core_usage = lambda: step3_used
@@ -251,7 +253,7 @@ class Step2SharedResourceTests(unittest.TestCase):
             frame.ai_device_status_var.set.call_args.args[0],
         )
 
-    def test_pending_device_probe_waits_without_reading_an_empty_queue(self):
+    def test_pending_device_probe_waits_without_applying_an_empty_queue(self):
         frame = Step2Frame.__new__(Step2Frame)
         frame.ai_device_status_var = mock.Mock()
         frame._ai_device_probe_results = mock.Mock(wraps=queue.SimpleQueue())
@@ -260,7 +262,7 @@ class Step2SharedResourceTests(unittest.TestCase):
 
         frame._poll_ai_device_probe()
 
-        frame._ai_device_probe_results.get_nowait.assert_not_called()
+        frame._ai_device_probe_results.get_nowait.assert_called_once_with()
         frame.ai_device_status_var.set.assert_not_called()
         frame.after.assert_called_once_with(50, frame._poll_ai_device_probe)
 
@@ -268,7 +270,7 @@ class Step2SharedResourceTests(unittest.TestCase):
         frame._ai_device_probe_results.put({"compatible_gpu": False})
         frame._poll_ai_device_probe()
 
-        frame._ai_device_probe_results.get_nowait.assert_called_once_with()
+        self.assertEqual(frame._ai_device_probe_results.get_nowait.call_count, 2)
         self.assertFalse(frame._ai_gpu_compatible)
         self.assertIn(
             "No compatible DirectML GPU detected",
@@ -284,7 +286,7 @@ class Step2SharedResourceTests(unittest.TestCase):
 
         frame._poll_ai_device_probe()
 
-        frame._ai_device_probe_results.get_nowait.assert_not_called()
+        frame._ai_device_probe_results.get_nowait.assert_called_once_with()
         frame.after.assert_not_called()
 
 

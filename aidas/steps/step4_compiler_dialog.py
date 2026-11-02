@@ -16,12 +16,14 @@ from aidas.services.step4_compiler import (
     DEFAULT_OUTPUT_FILENAME,
     compile_step4_results,
 )
+from aidas.services.measurement_scan import MeasurementScanLimitExceeded
 from aidas.ui.compiler import CompilerPresentationMixin
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.path_entry import bind_path_entry
 from aidas.ui.theme import COLOR_PAIRS, COLORS
 from aidas.ui.windowing import centered_logical_geometry, synchronize_window_chrome
-from aidas.utils.filesystem import existing_directory, normalize_path_input
+from aidas.utils.filesystem import DirectoryScanLimitExceeded, existing_directory, normalize_path_input
+from aidas.utils.worker_polling import WorkerCompletionGuard
 from aidas.utils.ui_utils import (
     action_button,
     apply_app_icon_to,
@@ -94,7 +96,6 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         )
         self.grab_set()
         self.input_entry.focus_set()
-        self._poll_after_id = self.after(self.EVENT_POLL_MS, self._poll_events)
 
     @staticmethod
     def _expanded_path(value: str | os.PathLike) -> Path:
@@ -361,12 +362,24 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
     def _compiler_function(self):
         return compile_step4_results
 
+    def _start_compiler(self, *args, **kwargs):
+        super()._start_compiler(*args, **kwargs)
+        if self._running and self._worker is not None:
+            self._completion_guard = WorkerCompletionGuard(self._worker)
+            if self._poll_after_id is None:
+                self._poll_after_id = self.after(self.EVENT_POLL_MS, self._poll_events)
+
     def _poll_events(self) -> None:
         self._poll_after_id = None
         if self._closing:
             return
         self._drain_compile_events()
-        if not self._closing:
+        if self._closing:
+            return
+        guard = self.__dict__.get("_completion_guard")
+        if self._running and self._events.empty() and guard is not None and guard.missing_result():
+            self._compilation_failed(RuntimeError("The compiler stopped without returning a result. Please try again."))
+        if not self._closing and (self._running or not self._events.empty()):
             self._poll_after_id = self.after(self.EVENT_POLL_MS, self._poll_events)
 
     def _set_running(self, running: bool) -> None:
@@ -401,8 +414,11 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
 
     def _compilation_failed(self, error: object) -> None:
         self._set_running(False)
-        self.status_var.set("Compilation failed. See the log for details.")
         self._append_log(f"\nERROR: {error}")
+        if isinstance(error, (DirectoryScanLimitExceeded, MeasurementScanLimitExceeded)):
+            self.status_var.set(str(error))
+            return
+        self.status_var.set("Compilation failed. See the log for details.")
         messagebox.showerror(
             "Compilation failed",
             str(error),
@@ -436,6 +452,17 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         finally:
             if callback is not None:
                 callback(self)
+
+    def destroy(self):
+        self._closing = True
+        pending = self.__dict__.get("_poll_after_id")
+        self._poll_after_id = None
+        if pending is not None:
+            try:
+                self.after_cancel(pending)
+            except tk.TclError:
+                pass
+        super().destroy()
 
 
 __all__ = ["Step4CompilerDialog"]
