@@ -21,7 +21,8 @@ class FeedbackReportTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        # Windows CI may expose TEMP through an 8.3 user-profile alias.
+        self.root = Path(self.temporary.name).resolve()
         for patch in (
             mock.patch.object(feedback, "app_base_dir", return_value=self.root),
             mock.patch.object(feedback.Config, "CONFIG_DIR", self.root / "config"),

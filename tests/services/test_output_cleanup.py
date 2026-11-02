@@ -17,14 +17,14 @@ class LegacyDarkOutputCleanupTests(unittest.TestCase):
 
     def test_fresh_output_folder_has_nothing_to_remove(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             self._write(root, "_thickness_vs_distance_from_fovea_LIGHT.txt")
             self.assertEqual(remove_legacy_dark_outputs(root), [])
             self.assertEqual(len(list(root.iterdir())), 1)
 
     def test_removes_known_generated_outputs_and_keeps_light_originals_and_unrelated_data(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             obsolete = {
                 "_flat_DARK.hdr", "_flat_DARK.img",
                 "_flat-normed_DARK.hdr", "_flat-normed_DARK.img",
@@ -63,7 +63,7 @@ class LegacyDarkOutputCleanupTests(unittest.TestCase):
         for suffix in ("RData", "npz"):
             for replacements in (0, 1, 2):
                 with self.subTest(format=suffix, replacements=replacements), tempfile.TemporaryDirectory() as temporary:
-                    root = Path(temporary)
+                    root = Path(temporary).resolve()
                     legacy = (f"DARK__and__LIGHT__flat.{suffix}", f"_done_DARK__and__LIGHT.{suffix}")
                     for name in legacy:
                         self._write(root, name)
@@ -81,7 +81,7 @@ class LegacyDarkOutputCleanupTests(unittest.TestCase):
 
     def test_skips_known_subdirectories_resolved_outside_the_output_root(self):
         with tempfile.TemporaryDirectory() as temporary:
-            sandbox = Path(temporary)
+            sandbox = Path(temporary).resolve()
             root, outside = sandbox / "output", sandbox / "other-participant"
             root.mkdir()
             protected = self._write(outside, "FLATTENED_DARK_RETINA_RRC.bin")
@@ -100,7 +100,7 @@ class LegacyDarkOutputCleanupTests(unittest.TestCase):
 
     def test_locked_obsolete_file_does_not_fail_a_successful_export(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             obsolete = self._write(root, "_flat_DARK.img")
             current = self._write(root, "_flat_LIGHT.img")
             with patch.object(Path, "unlink", side_effect=PermissionError("in use")):
