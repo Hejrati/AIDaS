@@ -340,10 +340,10 @@ class Step4ExcelHandoffTests(unittest.TestCase):
         self.assertFalse((side / "rr_MCPAR.xlsx").exists())
         workbook = load_workbook(output, data_only=True)
         try:
-            self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "ONL", "Extraction_log"])
+            self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "Extraction_log"])
             self.assertEqual(workbook["rrMCP-AR"]["A1"].value, "Control")
             self.assertEqual(workbook["rrMCP-AR"]["A3"].value, "Subject_A")
-            self.assertEqual(workbook["rrMCP-AR"]["B3"].value, 10)
+            self.assertEqual(workbook["rrMCP-AR"]["C3"].value, 10)
         finally:
             workbook.close()
 

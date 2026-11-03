@@ -5,9 +5,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import queue
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+
+import customtkinter as ctk
 
 from aidas.services.measurement_scan import MeasurementScanLimitExceeded
 from aidas.ui.compiler import CompilerPresentationMixin
@@ -58,6 +62,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._input_scan_path = None
         self._input_scan_state = "empty"
         self._input_scan_error = None
+        self._completed_output_path = None
 
         # Step 4 passes folders after stack completion or through Go to Step 5.
         initial_input = ""
@@ -72,6 +77,9 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
 
         self.input_var.trace_add("write", self._update_run_button_state)
         self.output_var.trace_add("write", self._update_run_button_state)
+        for variable in (self.input_var, self.output_var):
+            variable.trace_add("write", self._clear_completion_notice)
+        self.include_fovea_var.trace_add("write", self._fovea_option_changed)
         self._build_ui()
         self._update_run_button_state()
         self._refresh_directory_view()
@@ -278,7 +286,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self.content,
             text=(
                 "Step 5 combines rrMCP/AR measurements from Step 4 with the "
-                "ELM-RPE and ONL exports from Step 3 into one Excel workbook."
+                "ELM-RPE exports from Step 3 into one Excel workbook."
             ),
             justify="left",
             wraplength=760,
@@ -288,12 +296,118 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self.content, on_scan_state=self._directory_scan_changed,
         )
         self.directory_view.pack(fill="both", expand=True)
+
+        self.completion_notice = ctk.CTkFrame(
+            self.directory_view.canvas,
+            fg_color=COLOR_PAIRS["success_soft"],
+            bg_color=COLOR_PAIRS["surface"],
+            border_color=COLOR_PAIRS["success"],
+            border_width=1,
+            corner_radius=10,
+        )
+        self.completion_message = ctk.CTkLabel(
+            self.completion_notice,
+            text="All files have been created successfully.",
+            text_color=COLOR_PAIRS["success"],
+            font=ctk.CTkFont(size=16, weight="bold"),
+            anchor="w",
+            justify="left",
+        )
+        self.completion_message.pack(fill="x", padx=16, pady=(14, 4))
+        self.completion_path = ctk.CTkLabel(
+            self.completion_notice,
+            text="",
+            text_color=COLOR_PAIRS["text"],
+            anchor="w",
+            justify="left",
+        )
+        self.completion_path.pack(fill="x", padx=16, pady=(0, 12))
+        actions = ctk.CTkFrame(self.completion_notice, fg_color="transparent")
+        actions.pack(fill="x", padx=16, pady=(0, 14))
+        actions.grid_columnconfigure((0, 1), weight=1, uniform="completion_actions")
+        self.exit_app_button = AppButton(
+            actions, text="Exit the app", command=self._exit_app,
+        )
+        self.exit_app_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.open_excel_folder_button = AppButton(
+            actions,
+            text="Open Excel folder",
+            variant="primary",
+            command=self._open_excel_folder,
+        )
+        self.open_excel_folder_button.grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+        def wrap_completion_notice(event):
+            wraplength = max(1, self.completion_notice._reverse_widget_scaling(event.width) - 32)
+            for label in (self.completion_message, self.completion_path):
+                if label.cget("wraplength") != wraplength:
+                    label.configure(wraplength=wraplength)
+
+        self.completion_notice.bind("<Configure>", wrap_completion_notice, add="+")
+        self.directory_view.canvas.bind(
+            "<Configure>", self._position_completion_notice, add="+",
+        )
         ttk.Label(
             self.content,
             textvariable=self.status_var,
             style="AIDaS.Muted.TLabel",
             wraplength=850,
         ).pack(fill="x", pady=(8, 0))
+
+    def _clear_completion_notice(self, *_args) -> None:
+        self._completed_output_path = None
+        notice = self.__dict__.get("completion_notice")
+        if notice is not None:
+            notice.place_forget()
+
+    def _fovea_option_changed(self, *_args) -> None:
+        self._clear_completion_notice()
+        if not self._running:
+            selection = "included" if self.include_fovea_var.get() else "excluded"
+            self.status_var.set(
+                f"Fovea will be {selection} in ELM-RPE. "
+                "Press Create Excel File to save this change."
+            )
+
+    def _show_completion_notice(self, output_path: Path) -> None:
+        self._completed_output_path = output_path
+        notice = self.__dict__.get("completion_notice")
+        if notice is not None:
+            self.completion_path.configure(text=f"Saved Excel file: {output_path}")
+            self._position_completion_notice()
+
+    def _position_completion_notice(self, _event=None) -> None:
+        """Float the completion card over the tree without changing its layout."""
+        notice = self.__dict__.get("completion_notice")
+        if notice is None or self.__dict__.get("_completed_output_path") is None:
+            return
+        tree_width = max(1, notice._reverse_widget_scaling(self.directory_view.canvas.winfo_width()))
+        notice.place(
+            relx=0.5, rely=0.5, anchor="center", relwidth=min(0.9, 560 / tree_width),
+        )
+        notice.lift()
+
+    def _open_excel_folder(self) -> None:
+        output_path = self.__dict__.get("_completed_output_path")
+        if output_path is None:
+            return
+        try:
+            folder = output_path.expanduser().resolve().parent
+            if not folder.is_dir():
+                raise FileNotFoundError(f"The Excel folder is unavailable: {folder}")
+            if os.name == "nt":
+                os.startfile(str(folder))
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(folder)])
+            else:
+                subprocess.Popen(["xdg-open", str(folder)])
+        except OSError as exc:
+            messagebox.showerror(
+                "Open Excel folder", f"Could not open the Excel folder.\n{exc}", parent=self,
+            )
+
+    def _exit_app(self) -> None:
+        self.winfo_toplevel().destroy()
 
     def _refresh_directory_view(self) -> None:
         view = self.__dict__.get("directory_view")
@@ -567,6 +681,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             control.configure(state=state)
         
         if running:
+            self._clear_completion_notice()
             self.run_button.configure(
                 state="disabled",
                 text="Creating Excel File…",
@@ -585,6 +700,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self.output_var.set(str(result_path))
             self.status_var.set(f"Excel file saved: {result_path}")
             self._refresh_directory_view()
+            self._show_completion_notice(result_path)
             callback = getattr(self, "on_compilation_complete", None)
             if callable(callback):
                 callback(result_path)
@@ -594,6 +710,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
     def _compilation_failed(self, error: object) -> None:
         self._handling_completion = True
         try:
+            self._clear_completion_notice()
             self._set_running(False)
             if isinstance(error, MeasurementScanLimitExceeded):
                 self.status_var.set(str(error))

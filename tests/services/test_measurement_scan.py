@@ -207,14 +207,14 @@ class MeasurementScanLimitTests(unittest.TestCase):
 
         self.assertEqual(result.group_ids, {"Control": ("Subject_A",)})
         self.assertEqual(progress[0], (0, 1, "Scanning input folders..."))
-        self.assertEqual(progress[-1], (5, 5, "Saved compiled workbook."))
+        self.assertEqual(progress[-1], (4, 4, "Saved compiled workbook."))
         self.assertTrue(messages[-1].endswith(str(output)))
         self.assertEqual(raw.read_bytes(), original_raw)
         workbook = load_workbook(output, data_only=True)
         try:
-            self.assertEqual(workbook["rrMCP-AR"]["B3"].value, 7.25)
-            self.assertEqual(workbook["ELM-RPE"]["B3"].value, 30.125)
-            self.assertEqual(workbook["ONL"]["B3"].value, 40.25)
+            self.assertEqual(workbook["rrMCP-AR"]["C3"].value, 7.25)
+            self.assertEqual(workbook["ELM-RPE"]["C3"].value, 30.125)
+            self.assertNotIn("ONL", workbook.sheetnames)
         finally:
             workbook.close()
 

@@ -114,7 +114,7 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
 
         ttk.Label(
             panel,
-            text="Compile rrMCP/AR, ELM-RPE, and ONL measurements",
+            text="Compile rrMCP/AR and ELM-RPE measurements",
             font=("", 12, "bold"),
             anchor="w",
         ).grid(row=0, column=0, sticky="ew")

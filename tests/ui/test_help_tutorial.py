@@ -147,7 +147,6 @@ class TutorialContentTests(unittest.TestCase):
             "RE",
             "rrMCP/AR",
             "ELM-RPE",
-            "ONL",
             "Create Excel File",
             "rrMCPAR_ELMRPE_ONL.xlsx",
             "only when this button is pressed",

@@ -332,8 +332,9 @@ class Step5CompileTests(unittest.TestCase):
             try:
                 self.assertEqual(workbook["rrMCP-AR"]["A1"].value, "OCT")
                 self.assertEqual(workbook["rrMCP-AR"]["A3"].value, selected.name)
-                self.assertEqual(workbook["rrMCP-AR"]["B3"].value, 14)
-                self.assertEqual(workbook["rrMCP-AR"]["E1"].value, None)
+                self.assertEqual(workbook["rrMCP-AR"]["B3"].value, 1)
+                self.assertEqual(workbook["rrMCP-AR"]["C3"].value, 14)
+                self.assertEqual(workbook["rrMCP-AR"]["F1"].value, None)
             finally:
                 workbook.close()
 
@@ -506,10 +507,10 @@ class Step5CompileTests(unittest.TestCase):
             self.assertIn("Excel file saved", frame.status_var.get())
             workbook = load_workbook(output, data_only=True)
             try:
-                self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "ONL", "Extraction_log"])
+                self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "Extraction_log"])
                 sheet = workbook["rrMCP-AR"]
-                self.assertEqual([sheet[cell].value for cell in ("A1", "A3", "B3")], ["Control", "Subject_A", 10])
-                self.assertEqual([sheet[cell].value for cell in ("E1", "E3", "F3")], ["Treatment", "Subject_A", 20])
+                self.assertEqual([sheet[cell].value for cell in ("A1", "A3", "B3", "C3")], ["Control", "Subject_A", 1, 10])
+                self.assertEqual([sheet[cell].value for cell in ("F1", "F3", "G3", "H3")], ["Treatment", "Subject_A", 1, 20])
             finally:
                 workbook.close()
 

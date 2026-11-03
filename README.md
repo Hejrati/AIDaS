@@ -123,7 +123,7 @@ The main AIDaS workflow (Steps 1–4) saves LIGHT outputs only; it does not
 generate DARK images or files. Step 3 preserves the original R thickness export
 as `_thickness_vs_distance_from_fovea_LIGHT.txt` and saves its cleaned table as
 `_thickness_vs_distance_from_fovea_LIGHT2.xlsx`, without a separate `LIGHT2.txt`.
-Step 5 uses the cleaned Excel table for ELM-RPE and ONL compilation.
+Step 5 uses the cleaned Excel table for ELM-RPE compilation.
 
 ## Step 4 MCP/AR Automatic ROI Detection
 
@@ -225,9 +225,14 @@ Input folder
             └── MAX_Stack.tif
 ```
 
-Each measurement sheet has an `ID`, `Nasal`, and `Temporal` column block per
-discovered group. IDs retain their full spelling, including leading zeros and
-suffixes. Subjects with only one side are included with the other side blank.
+Each measurement sheet has an `ID`, `Row`, `Nasal`, and `Temporal` column block
+per discovered group. Row numbers restart at 1 for each subject and cover every
+measurement: every saved ROI in rrMCP-AR (normally 20 peripheral ROIs plus the
+fovea ROI), and 23 in ELM-RPE (24 with the fovea thickness row).
+The fovea checkbox controls only the extra ELM-RPE thickness row; the saved
+fovea ROI measurement is always retained in rrMCP-AR when present.
+IDs retain their full spelling, including leading zeros and suffixes. Subjects
+with only one side are included with the other side blank.
 Folders without nasal/temporal Step 4 measurements are ignored. Step 3 thickness
 and optional fovea extraction continue for the discovered subjects.
 
@@ -251,7 +256,7 @@ its shared input root.
 The default output
 is `rrMCPAR_ELMRPE_ONL.xlsx` in that root; an explicitly chosen output path and
 fovea option are preserved. Each compilation starts only when **Create Excel
-File** is pressed. The workbook contains `rrMCP-AR`, `ELM-RPE`, `ONL`, and `Extraction_log`;
+File** is pressed. The workbook contains `rrMCP-AR`, `ELM-RPE`, and `Extraction_log`;
 the log records each source path and extraction status.
 
 The Step 5 workspace shows an expandable folder-tree canvas for the currently
@@ -640,7 +645,7 @@ paths and foveal analysis. It retains the vitreous/retina boundary internally fo
 shared corrections, while skipping GCL/RNFL detection, correction, smoothing,
 and dependent sampling. Outputs keep the existing 90-depth layout, coordinates,
 and eight thickness columns; omitted superficial results and `Summed_layers`
-are marked `NA`. Step 5's ELM-RPE and ONL measurements keep their original columns.
+are marked `NA`. Step 5's ELM-RPE measurements keep their original columns.
 The numerical workspace records missing depths as missing values. Normalized
 Analyze images can zero-fill those depths for display; those zeros are not
 measured brightness.

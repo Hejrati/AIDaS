@@ -189,7 +189,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             "The fovea marker value is 243 and the RPE marker value is 255; the technical diagram shown in the idle Step 3 workspace explains minimum marker coverage and depth geometry.",
             "The selected R-script versions are managed in Settings; the Process panel starts setup, scanning, and result loading.",
             "Optimized deeper layers is the default for both the main and output scripts. It preserves RPE, OLM, ONL/OPL, INL/IPL, and foveal calculations; the surface boundary remains an internal reference while GCL/RNFL processing is skipped. Select Original script or Optimized version in Settings to retain all six boundaries.",
-            "Deeper-layer outputs retain all 90 depth positions and eight thickness columns. Omitted superficial results are NA; zero-filled regions in normalized Analyze images are display placeholders, not measured brightness. Step 5's ELM-RPE and ONL columns remain available.",
+            "Deeper-layer outputs retain all 90 depth positions and eight thickness columns. Omitted superficial results are NA; zero-filled regions in normalized Analyze images are display placeholders, not measured brightness. Step 5's ELM-RPE columns remain available.",
         ),
         step_index=2,
     ),
@@ -243,7 +243,7 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             "one Excel file for downstream review and analysis."
         ),
         input_summary="A group / subject / nasal or temporal folder tree containing Step 3 thickness tables and Step 4 ROI stacks",
-        function_summary="Combine rrMCP/AR, ELM-RPE, and ONL measurements into an Excel file",
+        function_summary="Combine rrMCP/AR and ELM-RPE measurements into an Excel file",
         output_summary="rrMCPAR_ELMRPE_ONL.xlsx",
         completion_check=(
             "A completion message confirms the Excel file was saved, and the "
@@ -257,17 +257,17 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
                 "Press Create Excel File to start compilation. A workbook is generated only when this button is pressed; review the paths and options before each run.",
             ),
             (
-                "AIDaS reads current measurements from ROI_to_move_stck.tif and accepts compatible legacy workbooks, then reads the Step 3 ELM-RPE and ONL exports from cleaned LIGHT2 Excel tables. Original LIGHT text exports stay unchanged. The nasal/temporal parent folder supplies the full subject ID. Its parent folder supplies the group name, including custom names or LE and RE. Folders without Step 4 measurements are ignored.",
+                "AIDaS reads current measurements from ROI_to_move_stck.tif and accepts compatible legacy workbooks, then reads the Step 3 ELM-RPE exports from cleaned LIGHT2 Excel tables. Original LIGHT text exports stay unchanged. The nasal/temporal parent folder supplies the full subject ID. Its parent folder supplies the group name, including custom names or LE and RE. Folders without Step 4 measurements are ignored.",
                 "Explore the Folder contents canvas to see recorded Step 4 results. Hide other files is checked by default; uncheck it to also see thickness tables, fovea measurements, and other image stacks. Expand or collapse folders and use Refresh to read changes. Files outside nasal/temporal folders are visible with an explanation. Inputs stay locked while the Excel file is being created.",
             ),
             (
-                "AIDaS creates the rrMCP-AR, ELM-RPE, and ONL worksheets.",
+                "AIDaS creates the rrMCP-AR, ELM-RPE, and Extraction_log worksheets.",
                 "The Excel file is saved at the selected output path.",
                 "A completion message confirms that the five-step workflow is finished. The saved workbook appears in the folder tree when it is inside the selected directory.",
             ),
         ),
         tips=(
-            "Select a common parent to include every group. Each group gets ID, Nasal, and Temporal columns on each measurement sheet.",
+            "Select a common parent to include every group. Each group gets ID, Row, Nasal, and Temporal columns on each measurement sheet. Row numbers restart at 1 for each subject. rrMCP-AR retains every saved ROI, including the fovea ROI; the fovea checkbox controls only the additional ELM-RPE thickness row.",
             "AIDaS reads measurements stored with current ROI stacks and continues to accept recognized legacy workbooks.",
         ),
         step_index=4,
@@ -356,7 +356,7 @@ class _WorkflowOverviewMap(ctk.CTkFrame):
         ),
         (
             "Create Excel File",
-            "Combine rrMCP/AR, ELM-RPE, and ONL measurements into one workbook.",
+            "Combine rrMCP/AR and ELM-RPE measurements into one workbook.",
             "primary",
             "primary_soft",
         ),

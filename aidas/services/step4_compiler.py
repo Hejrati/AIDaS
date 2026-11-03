@@ -1,8 +1,8 @@
 """Compile measurements from recursively discovered group/subject folders.
 
 This module is the non-UI implementation of the legacy
-``rrMCPAR_ELMRPE_ONL_Compiler`` utility.  It preserves the workbook layout,
-row grouping, extraction order, and legacy thickness cleanup while retaining
+``rrMCPAR_ELMRPE_ONL_Compiler`` utility.  It numbers each subject's measurement
+rows and preserves extraction order and legacy thickness cleanup while retaining
 the original ``LIGHT`` text file and saving cleaned ``LIGHT2`` Excel tables.
 """
 
@@ -36,7 +36,7 @@ BIN_SIZE = 100
 ELMRPE_COL = 3
 ONL_COL = 4
 FOVEA_LABEL = "RPEtoOLM"
-SHEET_NAMES = ("rrMCP-AR", "ELM-RPE", "ONL")
+SHEET_NAMES = ("rrMCP-AR", "ELM-RPE")
 DEFAULT_OUTPUT_FILENAME = "rrMCPAR_ELMRPE_ONL.xlsx"
 
 PathLike = str | os.PathLike[str]
@@ -153,10 +153,11 @@ def find_nasal_temporal_results(subject_path: PathLike) -> tuple[str | None, str
     return find_results_file(nasal_dir), find_results_file(temporal_dir)
 
 
-def get_first20_col_g_values(filepath: PathLike) -> list:
+def get_rrmcpar_values(filepath: PathLike) -> list:
+    """Read every saved ROI's Round value, including the fovea ROI."""
     if Path(filepath).suffix.lower() in (".tif", ".tiff"):
         rows = read_step4_measurements(filepath)
-        return [row[6] for row in (rows or ())][:RRMCPAR_BLOCK_SIZE]
+        return [row[6] for row in (rows or ())]
     workbook = load_workbook(os.fspath(filepath), data_only=True)
     try:
         worksheet = workbook.active
@@ -166,17 +167,20 @@ def get_first20_col_g_values(filepath: PathLike) -> list:
             if value is None or (isinstance(value, str) and not value.strip()):
                 continue
             values.append(value)
-            if len(values) >= RRMCPAR_BLOCK_SIZE:
-                break
         return values
     finally:
         workbook.close()
 
 
+def get_first20_col_g_values(filepath: PathLike) -> list:
+    """Retain the historical limited reader for external callers."""
+    return get_rrmcpar_values(filepath)[:RRMCPAR_BLOCK_SIZE]
+
+
 def extract_rrmcpar_from_subject(subject_path: PathLike):
     nasal_file, temporal_file = find_nasal_temporal_results(subject_path)
-    nasal_values = get_first20_col_g_values(nasal_file) if nasal_file else []
-    temporal_values = get_first20_col_g_values(temporal_file) if temporal_file else []
+    nasal_values = get_rrmcpar_values(nasal_file) if nasal_file else []
+    temporal_values = get_rrmcpar_values(temporal_file) if temporal_file else []
     return nasal_values, temporal_values, nasal_file, temporal_file
 
 
@@ -519,13 +523,18 @@ def get_column_values(light_path: PathLike | None, column_index: int) -> list[fl
     return values
 
 
-def find_fovea_file(folder_path: PathLike | None) -> str | None:
+def find_fovea_file(folder_path: PathLike | None, *, recursive: bool = True) -> str | None:
+    """Find a side's fovea profile without mixing nasal and temporal sources.
+
+    Legacy subject-root fallback uses ``recursive=False`` to inspect only the
+    root and its rrMCPAR child, excluding the other side's measurements.
+    """
     if not folder_path:
         return None
     folder = os.fspath(folder_path)
     if not os.path.isdir(folder):
         return None
-    candidates = (
+    preferred_names = (
         "_fovea_light_profiles_LIGHT.txt",
         "_fovea_light_profiles_LIGHT2.txt",
         "_fovea_light_LIGHT.txt",
@@ -535,28 +544,29 @@ def find_fovea_file(folder_path: PathLike | None) -> str | None:
         "fovea_light_LIGHT.txt",
         "fovea_light_LIGHT2.txt",
     )
-    for filename in candidates:
-        path = existing_file(folder, filename)
-        if path:
-            return path
-    for filename in os.listdir(folder):
-        if "fovea_light" in filename.lower() and filename.lower().endswith(".txt"):
-            path = os.path.join(folder, filename)
-            if os.path.isfile(path):
-                return path
-
-    rr_folder = os.path.join(folder, "rrMCPAR")
-    if os.path.isdir(rr_folder):
-        for filename in candidates:
-            path = existing_file(rr_folder, filename)
-            if path:
-                return path
-        for filename in os.listdir(rr_folder):
-            if "fovea_light" in filename.lower() and filename.lower().endswith(".txt"):
-                path = os.path.join(rr_folder, filename)
-                if os.path.isfile(path):
-                    return path
-    return None
+    priorities = {name.lower(): index for index, name in enumerate(preferred_names)}
+    if recursive:
+        directories = walk_unique_directories(folder, onerror=_raise_walk_error)
+    else:
+        roots = [folder]
+        rr_folder = find_subfolder_case_insensitive(folder, "rrMCPAR")
+        if rr_folder is not None:
+            roots.append(rr_folder)
+        directories = ((directory, [], os.listdir(directory)) for directory in roots)
+    matches = []
+    for directory, _subdirectories, filenames in directories:
+        for filename in filenames:
+            lower = filename.lower()
+            if "fovea_light" not in lower or not lower.endswith(".txt"):
+                continue
+            path = Path(directory) / filename
+            if path.is_file():
+                relative = path.relative_to(folder)
+                matches.append((
+                    len(relative.parts), priorities.get(lower, len(priorities)),
+                    _natural_key(str(relative)), str(path),
+                ))
+    return min(matches)[-1] if matches else None
 
 
 def extract_fovea_value(filepath: PathLike | None, label: str = FOVEA_LABEL) -> float | None:
@@ -598,8 +608,12 @@ def extract_elmrpe_onl_from_subject(
 
     if measure_name == "ELM-RPE" and include_fovea:
         subject = os.fspath(subject_path)
-        nasal_fovea_file = find_fovea_file(os.path.join(subject, "nasal")) or find_fovea_file(subject)
-        temporal_fovea_file = find_fovea_file(os.path.join(subject, "temporal"))
+        nasal_folder = find_subfolder_case_insensitive(subject, "nasal")
+        temporal_folder = find_subfolder_case_insensitive(subject, "temporal")
+        nasal_fovea_file = (
+            find_fovea_file(nasal_folder) or find_fovea_file(subject, recursive=False)
+        )
+        temporal_fovea_file = find_fovea_file(temporal_folder)
         nasal_blocks = [extract_fovea_value(nasal_fovea_file)] + nasal_blocks
         temporal_blocks = [extract_fovea_value(temporal_fovea_file)] + temporal_blocks
 
@@ -659,16 +673,19 @@ def write_group_block(
     subject_processed_callback: SubjectProcessedCallback | None = None,
 ) -> tuple[int, int]:
     id_column = start_column
-    nasal_column = start_column + 1
-    temporal_column = start_column + 2
+    row_number_column = start_column + 1
+    nasal_column = start_column + 2
+    temporal_column = start_column + 3
+    group_columns = (id_column, row_number_column, nasal_column, temporal_column)
 
     worksheet.cell(1, id_column).value = group_name
     worksheet.cell(1, id_column).data_type = "s"
     worksheet.cell(1, id_column).font = Font(bold=True)
     worksheet.cell(2, id_column).value = "ID"
+    worksheet.cell(2, row_number_column).value = "Row"
     worksheet.cell(2, nasal_column).value = "Nasal"
     worksheet.cell(2, temporal_column).value = "Temporal"
-    for column in (id_column, nasal_column, temporal_column):
+    for column in group_columns:
         worksheet.cell(2, column).font = Font(bold=True)
         worksheet.cell(2, column).alignment = Alignment(horizontal="center")
 
@@ -684,6 +701,9 @@ def write_group_block(
                     subject_path
                 )
                 nasal_count, temporal_count = len(nasal_values), len(temporal_values)
+                # Keep the historical space for partial legacy results while
+                # retaining every ROI present in either side's saved record.
+                row_count = max(RRMCPAR_BLOCK_SIZE, nasal_count, temporal_count)
             else:
                 (
                     nasal_values,
@@ -730,6 +750,9 @@ def write_group_block(
         id_cell.alignment = Alignment(horizontal="center", vertical="center")
         for index in range(row_count):
             output_row = row + index
+            row_number_cell = worksheet.cell(output_row, row_number_column, index + 1)
+            row_number_cell.number_format = "0"
+            row_number_cell.alignment = Alignment(horizontal="center")
             nasal_cell = worksheet.cell(output_row, nasal_column)
             temporal_cell = worksheet.cell(output_row, temporal_column)
             nasal_cell.value = nasal_values[index] if index < len(nasal_values) else None
@@ -757,7 +780,7 @@ def write_group_block(
         if subject_processed_callback is not None:
             subject_processed_callback(measure_name, group_name, subject_id)
 
-    for column in (id_column, nasal_column, temporal_column):
+    for column in group_columns:
         worksheet.column_dimensions[get_column_letter(column)].width = 12
     return included, skipped
 
@@ -777,7 +800,7 @@ def write_measure_sheet(
             log_worksheet,
             measure_name,
             group_name,
-            1 + index * 4,
+            1 + index * 5,
             subject_folders[group_name],
             include_fovea,
             subject_processed_callback,

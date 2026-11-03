@@ -86,18 +86,19 @@ class Step4CompilerTests(unittest.TestCase):
                 image = Image.new("RGB", (2, 2))
                 image.save(source, tiffinfo={270: encode_step4_measurements(rows)})
                 image.close()
-                expected[side_name] = [row["Round"] for row in rows[:20]]
+                expected[side_name] = [row["Round"] for row in rows]
                 _write_thickness(side / "_thickness_vs_distance_from_fovea_LIGHT.txt", 30, 40)
                 self.assertEqual(Path(find_results_file(side)), source)
-                self.assertEqual(get_first20_col_g_values(source), expected[side_name])
+                self.assertEqual(get_first20_col_g_values(source), expected[side_name][:20])
 
             output = root / "compiled.xlsx"
             result = compile_step4_results(root, output, include_fovea=False)
             self.assertEqual(result.group_ids, {"Control": ("Subject_1",)})
             workbook = load_workbook(output, data_only=True)
             try:
-                for column, side_name in ((2, "nasal"), (3, "temporal")):
-                    values = [workbook["rrMCP-AR"].cell(row, column).value for row in range(3, 23)]
+                for column, side_name in ((3, "nasal"), (4, "temporal")):
+                    values = [workbook["rrMCP-AR"].cell(row, column).value for row in range(3, 28)]
+                    self.assertEqual(len(values), len(expected[side_name]))
                     for actual, original in zip(values, expected[side_name]):
                         self.assertAlmostEqual(actual, original, places=12)
                 self.assertTrue(workbook["Extraction_log"]["E2"].value.endswith("ROI_to_move_stck.tif"))
@@ -231,10 +232,9 @@ class Step4CompilerTests(unittest.TestCase):
 
             workbook = load_workbook(output, data_only=True)
             try:
-                self.assertEqual(workbook["ELM-RPE"]["B3"].value, 12.5)
-                self.assertEqual(workbook["ONL"]["B3"].value, 25.5)
+                self.assertEqual(workbook["ELM-RPE"]["C3"].value, 12.5)
+                self.assertNotIn("ONL", workbook.sheetnames)
                 self.assertEqual(workbook["Extraction_log"]["I3"].value, "OK")
-                self.assertEqual(workbook["Extraction_log"]["I4"].value, "OK")
             finally:
                 workbook.close()
             self.assertEqual(source.read_bytes(), original)
@@ -509,11 +509,10 @@ class Step4CompilerTests(unittest.TestCase):
 
             workbook = load_workbook(output, data_only=True)
             try:
-                self.assertEqual(workbook["ELM-RPE"]["B3"].value, 30)
-                self.assertAlmostEqual(workbook["ONL"]["B3"].value, (300 + 400 + 700) / 3)
+                self.assertEqual(workbook["ELM-RPE"]["C3"].value, 30)
+                self.assertNotIn("ONL", workbook.sheetnames)
                 log = workbook["Extraction_log"]
                 self.assertEqual(log["G3"].value, 3)
-                self.assertEqual(log["G4"].value, 3)
             finally:
                 workbook.close()
             self.assertEqual(
@@ -522,7 +521,7 @@ class Step4CompilerTests(unittest.TestCase):
             )
             self.assertEqual(source.read_bytes(), original)
 
-    def test_compile_matches_legacy_layout_and_reads_current_step4_results(self):
+    def test_compile_numbers_measurement_rows_and_reads_current_step4_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             subject = _build_subject(root)
@@ -548,19 +547,18 @@ class Step4CompilerTests(unittest.TestCase):
                 (
                     MeasureCompilation("rrMCP-AR", 1, 0),
                     MeasureCompilation("ELM-RPE", 1, 0),
-                    MeasureCompilation("ONL", 1, 0),
                 ),
             )
             self.assertTrue(any("LE subject(s) found: 7_0_0" in line for line in log_messages))
             self.assertTrue(log_messages[-1].endswith(str(output)))
             self.assertEqual(progress_events[0], (0, 1, "Scanning input folders..."))
-            self.assertEqual(progress_events[1][:2], (1, 5))
+            self.assertEqual(progress_events[1][:2], (1, 4))
             self.assertEqual(
                 [event[:2] for event in progress_events if event[2].startswith("Processed ")],
-                [(2, 5), (3, 5), (4, 5)],
+                [(2, 4), (3, 4)],
             )
-            self.assertEqual(progress_events[-2], (4, 5, "Saving workbook..."))
-            self.assertEqual(progress_events[-1], (5, 5, "Saved compiled workbook."))
+            self.assertEqual(progress_events[-2], (3, 4, "Saving workbook..."))
+            self.assertEqual(progress_events[-1], (4, 4, "Saved compiled workbook."))
             self.assertEqual(
                 [completed for completed, _total, _message in progress_events],
                 sorted(completed for completed, _total, _message in progress_events),
@@ -570,7 +568,7 @@ class Step4CompilerTests(unittest.TestCase):
             try:
                 self.assertEqual(
                     workbook.sheetnames,
-                    ["rrMCP-AR", "ELM-RPE", "ONL", "Extraction_log"],
+                    ["rrMCP-AR", "ELM-RPE", "Extraction_log"],
                 )
 
                 rr_sheet = workbook["rrMCP-AR"]
@@ -578,39 +576,41 @@ class Step4CompilerTests(unittest.TestCase):
                 self.assertEqual(rr_sheet["A1"].value, "LE")
                 self.assertIsNone(rr_sheet["E1"].value)
                 self.assertEqual(
-                    [rr_sheet.cell(2, column).value for column in range(1, 8)],
-                    ["ID", "Nasal", "Temporal", None, None, None, None],
+                    [rr_sheet.cell(2, column).value for column in range(1, 6)],
+                    ["ID", "Row", "Nasal", "Temporal", None],
                 )
                 self.assertEqual(rr_sheet["A3"].value, "7_0_0")
                 self.assertEqual(rr_sheet["B3"].value, 1)
                 self.assertEqual(rr_sheet["B22"].value, 20)
-                self.assertEqual(rr_sheet["C3"].value, 101)
-                self.assertEqual(rr_sheet["C22"].value, 120)
+                self.assertEqual(rr_sheet["C3"].value, 1)
+                self.assertEqual(rr_sheet["C22"].value, 20)
+                self.assertEqual(rr_sheet["D3"].value, 101)
+                self.assertEqual(rr_sheet["D22"].value, 120)
                 self.assertTrue(rr_sheet["A3"].font.bold)
                 self.assertEqual(rr_sheet["A3"].alignment.horizontal, "center")
                 self.assertEqual(rr_sheet["A3"].alignment.vertical, "center")
-                self.assertEqual(rr_sheet["B3"].number_format, "0.000")
-                for column in ("A", "B", "C"):
+                self.assertEqual(rr_sheet["B3"].number_format, "0")
+                self.assertEqual(rr_sheet["C3"].number_format, "0.000")
+                for column in ("A", "B", "C", "D"):
                     self.assertEqual(rr_sheet.column_dimensions[column].width, 12.0)
 
                 elm_sheet = workbook["ELM-RPE"]
                 self.assertEqual(elm_sheet.max_row, 26)
                 self.assertEqual(elm_sheet["A3"].value, "7_0_0")
-                self.assertAlmostEqual(elm_sheet["B3"].value, 55.77)
-                self.assertAlmostEqual(elm_sheet["C3"].value, 66.88)
-                self.assertEqual(elm_sheet["B4"].value, 10.0)
-                self.assertEqual(elm_sheet["B26"].value, 10.0)
-                self.assertEqual(elm_sheet["C4"].value, 30.0)
+                self.assertAlmostEqual(elm_sheet["C3"].value, 55.77)
+                self.assertAlmostEqual(elm_sheet["D3"].value, 66.88)
+                self.assertEqual(elm_sheet["C4"].value, 10.0)
+                self.assertEqual(elm_sheet["C26"].value, 10.0)
+                self.assertEqual(elm_sheet["D4"].value, 30.0)
 
-                onl_sheet = workbook["ONL"]
-                self.assertEqual(onl_sheet.max_row, 25)
-                self.assertEqual(onl_sheet["A3"].value, "7_0_0")
-                self.assertEqual(onl_sheet["B3"].value, 20.0)
-                self.assertEqual(onl_sheet["B25"].value, 20.0)
-                self.assertEqual(onl_sheet["C3"].value, 40.0)
+                for sheet, count in ((rr_sheet, 20), (elm_sheet, 24)):
+                    self.assertEqual(
+                        [sheet.cell(row, 2).value for row in range(3, 3 + count)],
+                        list(range(1, count + 1)),
+                    )
 
                 log_sheet = workbook["Extraction_log"]
-                self.assertEqual(log_sheet.max_row, 4)
+                self.assertEqual(log_sheet.max_row, 3)
                 self.assertEqual(log_sheet.max_column, 9)
                 self.assertEqual(log_sheet["A2"].value, "rrMCP-AR")
                 self.assertEqual(log_sheet["B2"].value, "LE")
@@ -645,10 +645,43 @@ class Step4CompilerTests(unittest.TestCase):
             try:
                 elm_sheet = workbook["ELM-RPE"]
                 self.assertEqual(elm_sheet.max_row, 25)
-                self.assertEqual(elm_sheet["B3"].value, 10.0)
-                self.assertEqual(elm_sheet["B25"].value, 10.0)
+                self.assertEqual(elm_sheet["C3"].value, 10.0)
+                self.assertEqual(elm_sheet["C25"].value, 10.0)
+                self.assertEqual(
+                    [elm_sheet.cell(row, 2).value for row in range(3, 26)],
+                    list(range(1, 24)),
+                )
             finally:
                 workbook.close()
+
+    def test_row_numbers_restart_for_each_subject_on_all_measurement_sheets(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            _build_subject(root)
+            second_subject = _build_subject(root / "Second batch")
+            second_subject.rename(second_subject.with_name("8_0_0"))
+
+            for include_fovea in (False, True):
+                with self.subTest(include_fovea=include_fovea):
+                    output = root / f"numbered_{include_fovea}.xlsx"
+                    compile_step4_results(root, output, include_fovea=include_fovea)
+                    workbook = load_workbook(output, data_only=True)
+                    try:
+                        for measure, count in (
+                            ("rrMCP-AR", 20),
+                            ("ELM-RPE", 24 if include_fovea else 23),
+                        ):
+                            sheet = workbook[measure]
+                            self.assertEqual(sheet.max_row, 2 + 2 * count)
+                            for index, subject_id in enumerate(("7_0_0", "8_0_0")):
+                                first_row = 3 + index * count
+                                self.assertEqual(sheet.cell(first_row, 1).value, subject_id)
+                                self.assertEqual(
+                                    [sheet.cell(first_row + offset, 2).value for offset in range(count)],
+                                    list(range(1, count + 1)),
+                                )
+                    finally:
+                        workbook.close()
 
     def test_current_step4_workbook_takes_precedence_over_legacy_results(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -685,14 +718,13 @@ class Step4CompilerTests(unittest.TestCase):
                 (
                     MeasureCompilation("rrMCP-AR", 0, 1),
                     MeasureCompilation("ELM-RPE", 0, 1),
-                    MeasureCompilation("ONL", 0, 1),
                 ),
             )
             self.assertEqual(
                 [event[:2] for event in progress_events if event[2].startswith("Processed ")],
-                [(2, 5), (3, 5), (4, 5)],
+                [(2, 4), (3, 4)],
             )
-            self.assertEqual(progress_events[-1][:2], (5, 5))
+            self.assertEqual(progress_events[-1][:2], (4, 4))
 
     def test_save_failure_does_not_report_full_progress(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -714,7 +746,7 @@ class Step4CompilerTests(unittest.TestCase):
                         ),
                     )
 
-            self.assertEqual(progress_events[-1], (4, 5, "Saving workbook..."))
+            self.assertEqual(progress_events[-1], (3, 4, "Saving workbook..."))
             self.assertFalse(
                 any(completed == total for completed, total, _message in progress_events)
             )
@@ -773,14 +805,20 @@ class Step4CompilerTests(unittest.TestCase):
             with_workbook = load_workbook(output, data_only=True)
             try:
                 sheet = with_workbook["rrMCP-AR"]
-                for column, (group, ids) in zip((1, 5, 9), expected.items()):
+                for column, (group, ids) in zip((1, 6, 11), expected.items()):
                     self.assertEqual(sheet.cell(1, column).value, group)
                     self.assertEqual(sheet.cell(2, column).value, "ID")
+                    self.assertEqual(sheet.cell(2, column + 1).value, "Row")
+                    self.assertIsNone(sheet.cell(2, column + 4).value)
                     for index, subject_id in enumerate(ids):
                         row = 3 + index * 20
                         self.assertEqual(sheet.cell(row, column).value, subject_id)
-                        self.assertEqual(sheet.cell(row, column + 1).value, 1)
-                        self.assertEqual(sheet.cell(row, column + 2).value, 101)
+                        self.assertEqual(
+                            [sheet.cell(row + offset, column + 1).value for offset in range(20)],
+                            list(range(1, 21)),
+                        )
+                        self.assertEqual(sheet.cell(row, column + 2).value, 1)
+                        self.assertEqual(sheet.cell(row, column + 3).value, 101)
                 log = with_workbook["Extraction_log"]
                 self.assertEqual(log["B1"].value, "Group")
                 rr_rows = [row for row in log.iter_rows(min_row=2, values_only=True) if row[0] == "rrMCP-AR"]
@@ -818,9 +856,10 @@ class Step4CompilerTests(unittest.TestCase):
             self.assertEqual(result.group_ids, {"Temporal group": ("Subject_A",)})
             workbook = load_workbook(output, data_only=True)
             try:
-                for measure, value in (("rrMCP-AR", 101), ("ELM-RPE", 30), ("ONL", 40)):
-                    self.assertIsNone(workbook[measure]["B3"].value)
-                    self.assertEqual(workbook[measure]["C3"].value, value)
+                for measure, value in (("rrMCP-AR", 101), ("ELM-RPE", 30)):
+                    self.assertEqual(workbook[measure]["B3"].value, 1)
+                    self.assertIsNone(workbook[measure]["C3"].value)
+                    self.assertEqual(workbook[measure]["D3"].value, value)
             finally:
                 workbook.close()
 

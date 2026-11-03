@@ -154,9 +154,9 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
         self.assertTrue(output.is_file())
         workbook = load_workbook(output, data_only=True)
         try:
-            self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "ONL", "Extraction_log"])
+            self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "Extraction_log"])
             self.assertEqual(workbook["rrMCP-AR"]["A3"].value, "Subject_A")
-            self.assertEqual(workbook["rrMCP-AR"]["B3"].value, 0.75)
+            self.assertEqual(workbook["rrMCP-AR"]["C3"].value, 0.75)
         finally:
             workbook.close()
         self.assertEqual(frame._pending_step4_handoffs, [])

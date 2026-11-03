@@ -178,8 +178,9 @@ class Step5ScanCycleTests(unittest.TestCase):
             self.assertEqual(result.group_ids, {"Control": ("Subject_A",)})
             compiled = load_workbook(output, data_only=True)
             try:
-                for sheet, value in (("rrMCP-AR", 7.25), ("ELM-RPE", 30), ("ONL", 40)):
-                    self.assertEqual(compiled[sheet]["B3"].value, value)
+                for sheet, value in (("rrMCP-AR", 7.25), ("ELM-RPE", 30)):
+                    self.assertEqual(compiled[sheet]["B3"].value, 1)
+                    self.assertEqual(compiled[sheet]["C3"].value, value)
             finally:
                 compiled.close()
             self.assertEqual(find_light_files(subject), (str(thickness), None))
