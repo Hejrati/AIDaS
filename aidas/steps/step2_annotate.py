@@ -839,7 +839,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.more_label.configure(text="More" if access_errors else "")
         self.more_tooltip.text = skipped_directories_warning(access_errors) if access_errors else ""
         self.step_frame.status_var.set("Batch segmentation scan complete. Confirm folders to process.")
-        if rows and ready == 0 and already_segmented:
+        if (rows and ready == 0 and already_segmented
+                and all(row.get("step3_folders") for row in rows)):
             self._show_processed_notice()
             self.step_frame.status_var.set("All images are already segmented. Continue to Step 3 or choose Override.")
         elif not rows:
