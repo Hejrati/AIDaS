@@ -27,6 +27,7 @@ from openpyxl.utils import get_column_letter
 from aidas.utils.filesystem import walk_unique_directories
 from aidas.services.measurement_scan import validate_measurement_subfolder_limit
 from aidas.services.step4_results import STEP4_STACK_FILENAMES, read_step4_measurements
+from aidas.services.cleaned_workbook import matches_generated_light_workbook
 
 
 ID_ROW_START = 3
@@ -129,18 +130,20 @@ def find_results_file(folder_path: PathLike | None) -> str | None:
         return None
 
     candidates = []
+    stack_names = {name.lower() for name in STEP4_STACK_FILENAMES}
     for directory, subdirectories, filenames in walk_unique_directories(folder, onerror=_raise_walk_error):
         subdirectories.sort(key=_natural_key)
         for filename in filenames:
             lower = filename.lower()
+            stack = lower in stack_names
+            if not stack and (not lower.endswith(".xlsx") or filename.startswith("~$")
+                    or _is_thickness_filename(filename) or _is_light_profile_file(filename)):
+                continue
             path = Path(directory) / filename
             relative = path.relative_to(folder)
-            if lower in {name.lower() for name in STEP4_STACK_FILENAMES}:
+            if stack:
                 if read_step4_measurements(path) is not None:
                     candidates.append((0, len(relative.parts), _natural_key(str(relative)), str(path)))
-                continue
-            if (not lower.endswith(".xlsx") or filename.startswith("~$")
-                    or _is_thickness_filename(filename) or _is_light_profile_file(filename)):
                 continue
             rank = 1 if lower == "rr_mcpar.xlsx" else 2 if lower.startswith("results") else 3
             candidates.append((rank, len(relative.parts), _natural_key(str(relative)), str(path)))
@@ -458,7 +461,7 @@ def create_cleaned_light_thickness_workbook(light_path: PathLike | None) -> str 
         if existing is not None:
             width = max((len(row) for row in excel_rows), default=0)
             expected = [row + [None] * (width - len(row)) for row in excel_rows]
-            if existing == expected:
+            if existing == expected or matches_generated_light_workbook(destination, excel_rows):
                 _remove_replaced_light2_text(source, destination)
                 return str(destination)
 

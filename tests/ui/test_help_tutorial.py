@@ -220,8 +220,8 @@ class TutorialNavigationTests(unittest.TestCase):
         self.assertIn('self.bind("<Escape>"', source)
         self.assertIn('self.bind("<Alt-Left>"', source)
         self.assertIn('self.bind("<Alt-Right>"', source)
-        self.assertIn("self.back_button", source)
-        self.assertIn("self.next_button", source)
+        self.assertNotIn("self.back_button", source)
+        self.assertNotIn("self.next_button", source)
         self.assertIn("self.close_button", source)
         self.assertIn("self.open_step_button", source)
         self.assertIn("self.resizable(True, True)", source)
@@ -237,8 +237,6 @@ class TutorialNavigationTests(unittest.TestCase):
         dialog._render_page = mock.Mock()
         dialog.page_indicator = mock.Mock()
         dialog._navigation_buttons = [mock.Mock() for _page in TUTORIAL_PAGES]
-        dialog.back_button = mock.Mock()
-        dialog.next_button = mock.Mock()
         dialog.open_step_button = mock.Mock()
         dialog._schedule_scrollbar_sync = mock.Mock()
         canvas = mock.Mock()
@@ -251,8 +249,6 @@ class TutorialNavigationTests(unittest.TestCase):
         dialog.page_indicator.configure.assert_called_once_with(
             text=f"  4 of {len(TUTORIAL_PAGES)}  "
         )
-        dialog.back_button.configure.assert_called_once_with(state="normal")
-        dialog.next_button.configure.assert_called_once_with(state="normal")
         dialog.open_step_button.configure.assert_called_once_with(text="Open Step 3")
         dialog.open_step_button.grid.assert_called_once_with()
         canvas.yview_moveto.assert_called_once_with(0)

@@ -11,6 +11,7 @@ from unittest import mock
 
 import customtkinter as ctk
 
+from aidas.ui.bindings import unbind_callback
 from aidas.ui.path_entry import bind_path_entry
 from aidas.ui.theme import (
     COLOR_PAIRS,
@@ -520,7 +521,7 @@ class DirectoryCompletionInteractionTests(unittest.TestCase):
                     entry.destroy()
         finally:
             for sequence, binding in bindings:
-                self.root._unbind(("bind", "all", sequence), binding)
+                unbind_callback(self.root, sequence, binding, bindtag="all")
 
     def test_external_textvariable_updates_refresh_suggestions_and_destroy_removes_the_trace(self):
         for kind in (ttk.Entry, ctk.CTkEntry):

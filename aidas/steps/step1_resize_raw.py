@@ -822,6 +822,14 @@ class Step1Frame(SidebarStepFrame):
 
     def destroy(self):
         self._cancel_sdb_scan()
+        mouse_job = self.__dict__.get("_mouse_status_after_id")
+        self._mouse_status_after_id = None
+        self._pending_mouse_status = None
+        if mouse_job is not None:
+            try:
+                self.after_cancel(mouse_job)
+            except tk.TclError:
+                pass
         selection_job = self.__dict__.get("_sdb_selection_after_id")
         if selection_job is not None:
             self.after_cancel(selection_job)

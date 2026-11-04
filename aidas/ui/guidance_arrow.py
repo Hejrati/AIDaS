@@ -7,6 +7,8 @@ import math
 import sys
 import tkinter as tk
 
+from aidas.ui.bindings import unbind_callback
+
 
 class _WindowsOverlay:
     """Keep the arrow out of activation, hit testing, and the taskbar."""
@@ -195,7 +197,7 @@ class GuidanceArrow(tk.Toplevel):
         self._endpoints = None
         for widget, sequence, binding in self._bindings:
             try:
-                tk.Misc.unbind(widget, sequence, binding)
+                unbind_callback(widget, sequence, binding)
             except tk.TclError:
                 pass
         self._bindings.clear()

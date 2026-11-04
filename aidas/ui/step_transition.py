@@ -8,7 +8,7 @@ from aidas.ui.theme import COLOR_PAIRS, resolve_color
 
 
 class StepTransition(tk.Toplevel):
-    DURATION_MS = 360
+    DURATION_MS = 600
     FRAME_MS = 16
     START_SIZE = 44
 
@@ -76,8 +76,6 @@ class StepTransition(tk.Toplevel):
         self._on_complete = on_complete
         self.canvas.itemconfigure(self._number, text=str(number))
         self._started = time.monotonic()
-        self._last_frame = self._started
-        self._elapsed_ms = 0
         self._render()
         self.deiconify()
         self.lift()
@@ -107,15 +105,15 @@ class StepTransition(tk.Toplevel):
     def _render(self):
         self._job = None
         now = time.monotonic()
-        # Preserve visible frames if page loading temporarily occupies Tk.
-        self._elapsed_ms += min((now - self._last_frame) * 1000, self.FRAME_MS * 2)
-        self._last_frame = now
+        # A busy page may delay a frame. Advance by elapsed wall time rather
+        # than replaying those missed frames after the page has loaded.
+        elapsed_ms = max(0, (now - self._started) * 1000)
         if self._target_gone:
             self.destroy()
             return
         if self._target_dirty and not self._read_target():
             return
-        progress = min(1, self._elapsed_ms / self.DURATION_MS)
+        progress = min(1, elapsed_ms / self.DURATION_MS)
         eased = 1 - (1 - progress) ** 3
         end_x, end_y, end_size = self._target_bounds
         start_x, start_y = self._source
@@ -159,4 +157,5 @@ class StepTransition(tk.Toplevel):
             self.after_cancel(self._job)
             self._job = None
         self._clear_bindings()
+        self._on_complete = None
         super().destroy()

@@ -126,7 +126,7 @@ class Config:
                 loaded = json.load(file)
             if isinstance(loaded, dict):
                 return loaded.get(key, fallback)
-        except (json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
             pass
         return fallback
     
@@ -175,7 +175,7 @@ class Config:
                         "step4_auto_consistency_tolerance_percent",
                     ):
                         prefs.pop(obsolete_key, None)
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                 pass
         return prefs
     

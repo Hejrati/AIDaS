@@ -13,6 +13,7 @@ import customtkinter as ctk
 from aidas.core.display import work_area_bounds
 from aidas.ui.components import AppButton
 from aidas.ui.rendering import finish_deferred_rendering
+from aidas.ui.scrolling import DeferredScrollbar
 from aidas.ui.theme import (
     COLOR_PAIRS,
     SHAPES,
@@ -693,6 +694,25 @@ class _WorkflowPipeline(ctk.CTkFrame):
         """No animation timers or theme-event handlers to tear down."""
 
 
+class _TutorialScrollableFrame(ctk.CTkScrollableFrame):
+    """Retain native scrolling while deferring redundant scrollbar paints."""
+
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        previous = self._scrollbar
+        values = previous.get()
+        options = {name: previous.cget(name) for name in (
+            "width", "height", "corner_radius", "border_spacing", "minimum_pixel_length",
+            "bg_color", "fg_color", "button_color", "button_hover_color", "hover", "command", "orientation",
+        )}
+        self._scrollbar = DeferredScrollbar(self._parent_frame, **options)
+        previous.destroy()
+        self._create_grid()
+        axis = "xscrollcommand" if self._orientation == "horizontal" else "yscrollcommand"
+        self._parent_canvas.configure(**{axis: self._scrollbar.set})
+        self._scrollbar.set(*values)
+
+
 class TutorialDialog(ctk.CTkToplevel):
     """Scrollable, keyboard-friendly guide to the complete AIDaS workflow."""
 
@@ -881,7 +901,7 @@ class TutorialDialog(ctk.CTkToplevel):
             button.pack(fill="x", padx=8, pady=2)
             self._navigation_buttons.append(button)
 
-        self.content_scroll = ctk.CTkScrollableFrame(
+        self.content_scroll = _TutorialScrollableFrame(
             shell,
             fg_color=COLOR_PAIRS["surface_subtle"],
             corner_radius=SHAPES.corner_radius_md,
@@ -932,16 +952,7 @@ class TutorialDialog(ctk.CTkToplevel):
 
         footer = ctk.CTkFrame(shell, fg_color="transparent", corner_radius=0)
         footer.grid(row=2, column=0, columnspan=2, sticky="ew", padx=18, pady=(0, 12))
-        footer.grid_columnconfigure(1, weight=1)
-
-        self.back_button = AppButton(
-            footer,
-            text="Back",
-            variant="secondary",
-            width=104,
-            command=self._previous_page,
-        )
-        self.back_button.grid(row=0, column=0, sticky="w")
+        footer.grid_columnconfigure(0, weight=1)
 
         self.open_step_button = AppButton(
             footer,
@@ -950,25 +961,16 @@ class TutorialDialog(ctk.CTkToplevel):
             width=136,
             command=self._open_current_step,
         )
-        self.open_step_button.grid(row=0, column=1, sticky="e", padx=(10, 6))
-
-        self.next_button = AppButton(
-            footer,
-            text="Next",
-            variant="primary",
-            width=104,
-            command=self._next_page,
-        )
-        self.next_button.grid(row=0, column=2, sticky="e", padx=(0, 6))
+        self.open_step_button.grid(row=0, column=1, sticky="e", padx=(0, 6))
 
         self.close_button = AppButton(
             footer,
             text="Close",
-            variant="ghost",
+            variant="danger",
             width=104,
             command=self.close,
         )
-        self.close_button.grid(row=0, column=3, sticky="e")
+        self.close_button.grid(row=0, column=2, sticky="e")
 
     @staticmethod
     def _body_font(*, bold: bool = False) -> ctk.CTkFont:
@@ -1339,16 +1341,6 @@ class TutorialDialog(ctk.CTkToplevel):
                 ),
             )
 
-        self.back_button.configure(
-            state="disabled" if self._page_index == 0 else "normal"
-        )
-        self.next_button.configure(
-            state=(
-                "disabled"
-                if self._page_index == len(TUTORIAL_PAGES) - 1
-                else "normal"
-            )
-        )
         if page.step_index is None:
             self.open_step_button.grid_remove()
         else:

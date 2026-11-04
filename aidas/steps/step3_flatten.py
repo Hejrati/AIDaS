@@ -580,6 +580,16 @@ class RSetupWizard(ttk.Frame):
         HoverToolTip(self.close_button, "Close setup and cancel pending operations.")
         self._log("R setup opened.")
 
+    def _fit_package_tree_rows(self, event):
+        """Keep the last package fully reachable when the wizard is compact."""
+        tree = self.package_tree
+        row_height = int(self.style.lookup("Wizard.Treeview", "rowheight"))
+        current_rows = int(tree.cget("height"))
+        chrome_height = tree.winfo_reqheight() - current_rows * row_height
+        rows = max(1, (event.height - chrome_height) // row_height)
+        if rows != current_rows:
+            tree.configure(height=rows)
+
     def _set_busy(self, busy, text=None):
         self.busy = bool(busy)
         self._set_content_buttons("disabled" if busy else "normal")
@@ -694,7 +704,17 @@ class RSetupWizard(ttk.Frame):
         self.package_tree.tag_configure("installed", foreground=COLORS.success)
         self.package_tree.tag_configure("missing", foreground=COLORS.danger)
         self.package_tree.tag_configure("neutral", foreground=COLORS.muted_text)
-        self.package_tree.grid(row=0, column=0, sticky="nsew")
+        # Older Tk leaves the final scrolled row partly clipped when the
+        # available height ends inside a row. Fit whole rows to that space.
+        self.package_tree.grid(row=0, column=0, sticky="new")
+        # Row fitting must not feed a new requested height back into an
+        # automatically sized parent window on every Configure event.
+        self.package_status_holder.configure(
+            width=self.package_tree.winfo_reqwidth() + package_scroll.winfo_reqwidth(),
+            height=self.package_tree.winfo_reqheight(),
+        )
+        self.package_status_holder.grid_propagate(False)
+        self.package_status_holder.bind("<Configure>", self._fit_package_tree_rows)
         package_scroll.grid(row=0, column=1, sticky="ns")
         self.package_tree_items = {}
         required_packages = set(self.step_frame.R_REQUIRED_PACKAGES)
@@ -2249,7 +2269,7 @@ class RBatchRunPanel(ttk.Frame):
                 break
         if status is not None:
             if status == "Completed":
-                self._finish_current_step(folder, "Done")
+                self._finish_current_step(folder, "Done", render=False)
                 self._append_step(folder, "Completed", "Done")
             elif status in {"Failed", "Cancelled"}:
                 self._finish_current_step(folder, status)
@@ -2330,7 +2350,7 @@ class RBatchRunPanel(ttk.Frame):
             entries.append({"label": label, "state": state})
         self._render_step_progress()
 
-    def _finish_current_step(self, folder, state):
+    def _finish_current_step(self, folder, state, *, render=True):
         key = str(folder)
         current = self.current_step_by_folder.get(key)
         if not current:
@@ -2341,7 +2361,8 @@ class RBatchRunPanel(ttk.Frame):
                 entry["state"] = state
                 break
         self.current_step_by_folder[key] = None
-        self._render_step_progress()
+        if render:
+            self._render_step_progress()
 
     def _start_step(self, folder, label):
         if label in {"Validating", "Running R script", "Starting R script"}:
@@ -2351,7 +2372,7 @@ class RBatchRunPanel(ttk.Frame):
         if current == label:
             return
         if current:
-            self._finish_current_step(folder, "Done")
+            self._finish_current_step(folder, "Done", render=False)
         self.current_step_by_folder[key] = label
         self._append_step(folder, label, "Running")
 

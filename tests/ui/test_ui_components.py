@@ -63,10 +63,63 @@ class _StyleTarget:
 
 
 class AppSplitButtonTests(unittest.TestCase):
-    def test_dropdown_uses_the_standard_small_triangle_glyph(self):
-        self.assertEqual(AppSplitButton.CHEVRON, "\u25be")
-        self.assertEqual(AppSplitButton.CHEVRON_FONT_SIZE, 14)
-        self.assertNotIn(AppSplitButton.CHEVRON, {"v", "V", "\u2304"})
+    def test_dropdown_uses_a_dpi_aware_icon(self):
+        source = inspect.getsource(AppSplitButton.__init__)
+        self.assertIn("chevron = OwnedCTkImage(", source)
+        self.assertIn("image=chevron", source)
+        self.assertNotIn("Segoe UI Symbol", source)
+
+    def test_dropdown_keeps_balanced_padding_when_scaled_resized_and_disabled(self):
+        try:
+            root = ctk.CTk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        original_scale = ctk.ScalingTracker.widget_scaling
+        try:
+            root.attributes("-alpha", 0)
+            root.geometry("900x400+0+0")
+            split = AppSplitButton(
+                root, text="Crop & Scale", command=lambda: None,
+                options_command=lambda: None,
+            )
+            split.pack(padx=20, pady=20)
+            for mode in ("light_image", "dark_image"):
+                image = split.options_button.cget("image").cget(mode)
+                left, top, right, bottom = image.getbbox()
+                self.assertEqual(left + right, image.width)
+                self.assertEqual(top + bottom, image.height)
+            for scale in (0.75, 1, 1.25, 1.5, 1.75, 2):
+                ctk.set_widget_scaling(scale)
+                for width in (198, 240):
+                    split.configure(width=width)
+                    for state in ("normal", "disabled", "normal"):
+                        with self.subTest(scale=scale, width=width, state=state):
+                            button = split.options_button
+                            button.configure(state=state)
+                            root.update()
+                            label = button._image_label
+                            icon_size = round(button._apply_widget_scaling(split.CHEVRON_SIZE))
+                            self.assertEqual(
+                                (label.winfo_width(), label.winfo_height()),
+                                (icon_size, icon_size),
+                            )
+                            left, top = label.winfo_x(), label.winfo_y()
+                            right = button.winfo_width() - left - label.winfo_width()
+                            bottom = button.winfo_height() - top - label.winfo_height()
+                            self.assertLessEqual(abs(left - right), 1)
+                            self.assertLessEqual(abs(top - bottom), 1)
+                            self.assertGreater(min(left, top, right, bottom), 0)
+                            self.assertEqual(
+                                button.winfo_x() + button.winfo_width(),
+                                split.winfo_width(),
+                            )
+                            self.assertLessEqual(abs(
+                                split.divider.winfo_x() + split.divider.winfo_width() / 2
+                                - button.winfo_x()
+                            ), 1)
+        finally:
+            root.destroy()
+            ctk.set_widget_scaling(original_scale)
 
     def test_split_button_uses_standard_large_control_height(self):
         signature = inspect.signature(AppSplitButton.__init__)
@@ -707,6 +760,8 @@ class WorkflowNavigationTests(unittest.TestCase):
     def test_header_progress_reports_current_total_and_remaining_steps(self):
         strip = WorkflowProgressStrip.__new__(WorkflowProgressStrip)
         strip._step_labels = WorkflowProgressStrip.DEFAULT_STEPS
+        strip._workflow_state = None
+        strip._cancel_completion_animation = mock.Mock()
         strip.circles = [mock.Mock() for _ in range(len(strip._step_labels))]
         strip.workflow_progress_label = mock.Mock()
 
@@ -740,6 +795,8 @@ class WorkflowNavigationTests(unittest.TestCase):
     def test_workflow_progress_can_show_all_steps_complete(self):
         strip = WorkflowProgressStrip.__new__(WorkflowProgressStrip)
         strip._step_labels = WorkflowProgressStrip.DEFAULT_STEPS
+        strip._workflow_state = None
+        strip._cancel_completion_animation = mock.Mock()
         strip.circles = [mock.Mock() for _ in strip._step_labels]
         strip.workflow_progress_label = mock.Mock()
 

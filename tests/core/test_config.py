@@ -14,6 +14,72 @@ from aidas.core.config import (
 
 
 class ConfigPersistenceTests(unittest.TestCase):
+    def test_peek_falls_back_for_invalid_utf8_without_rewriting_preferences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            config_file = config_dir / "preferences.json"
+            original = b'{"interface_mode": "\xff"}'
+            config_file.write_bytes(original)
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file
+            ):
+                self.assertEqual(Config.peek("interface_mode"), Config.DEFAULTS["interface_mode"])
+                self.assertEqual(Config.peek("unknown_key", "fallback"), "fallback")
+            self.assertEqual(config_file.read_bytes(), original)
+            self.assertEqual(list(config_dir.iterdir()), [config_file])
+
+    def test_loading_invalid_utf8_retains_defaults_without_rewriting_preferences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            config_file = config_dir / "preferences.json"
+            original = b'{"rscript_path": "\xe2\x82"}'
+            config_file.write_bytes(original)
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file
+            ):
+                config = Config()
+            self.assertEqual(config.prefs, Config.DEFAULTS)
+            self.assertIsNot(config.prefs, Config.DEFAULTS)
+            self.assertEqual(config_file.read_bytes(), original)
+            self.assertEqual(list(config_dir.iterdir()), [config_file])
+
+    def test_valid_utf8_unicode_preferences_are_preserved_exactly_during_load(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            config_file = config_dir / "preferences.json"
+            values = {
+                "interface_mode": "Classic",
+                "rscript_path": r"C:\Données\研究\Rscript.exe",
+                "custom_future_setting": "Δοκιμή — داده",
+                "step4_auto_confidence_percent": 72.125,
+            }
+            original = json.dumps(values, ensure_ascii=False).encode("utf-8") + b"\r\n"
+            config_file.write_bytes(original)
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file
+            ):
+                config = Config()
+                for key, value in values.items():
+                    self.assertEqual(Config.peek(key), value)
+                    self.assertEqual(config.get(key), value)
+            self.assertEqual(config_file.read_bytes(), original)
+            self.assertEqual(list(config_dir.iterdir()), [config_file])
+
+    def test_malformed_json_keeps_existing_read_only_default_fallback(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            config_file = config_dir / "preferences.json"
+            original = b'{"interface_mode": "Classic",'
+            config_file.write_bytes(original)
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file
+            ):
+                self.assertEqual(Config.peek("interface_mode"), Config.DEFAULTS["interface_mode"])
+                config = Config()
+            self.assertEqual(config.prefs, Config.DEFAULTS)
+            self.assertEqual(config_file.read_bytes(), original)
+            self.assertEqual(list(config_dir.iterdir()), [config_file])
+
     def test_peek_reads_without_creating_the_preferences_directory(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             config_dir = Path(temp_dir) / ".aidas"

@@ -5,6 +5,8 @@ from __future__ import annotations
 import math
 import tkinter as tk
 
+from aidas.ui.bindings import unbind_callback
+
 
 class PromptCue:
     """Move a prompt twice, then leave it still and release its timer jobs.
@@ -69,7 +71,7 @@ class PromptCue:
         self.stop()
         if self._destroy_binding is not None:
             try:
-                tk.Misc.unbind(self._owner, "<Destroy>", self._destroy_binding)
+                unbind_callback(self._owner, "<Destroy>", self._destroy_binding)
             except tk.TclError:
                 pass
             self._destroy_binding = None

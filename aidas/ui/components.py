@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from math import cos, sin, pi
+import time
 import tkinter as tk
 from typing import Callable, Sequence
 
@@ -329,6 +330,8 @@ class AppRunButton(AppButton):
 class AppOptionMenu(ctk.CTkOptionMenu):
     """A semantic option menu with a crisp, independently colored chevron."""
 
+    CHEVRON_SIZE = 18
+
     def __init__(self, master, **kwargs):
         self._arrow_hovered = False
         self._arrow_signature = None
@@ -349,7 +352,7 @@ class AppOptionMenu(ctk.CTkOptionMenu):
     @staticmethod
     def _chevron_image(size: int, color: str) -> Image.Image:
         """Supersample the stroke so it stays smooth at fractional DPI scales."""
-        supersampling = 4
+        supersampling = 8
         image = Image.new("RGBA", (size * supersampling, size * supersampling))
         draw = ImageDraw.Draw(image)
         unit = size * supersampling / 16
@@ -359,7 +362,11 @@ class AppOptionMenu(ctk.CTkOptionMenu):
         radius = stroke / 2
         for x, y in points:
             draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-        return image.resize((size, size), Image.Resampling.LANCZOS)
+        rendered = image.resize((size, size), Image.Resampling.LANCZOS)
+        glyph = rendered.crop(rendered.getbbox())
+        centered = Image.new("RGBA", rendered.size)
+        centered.paste(glyph, ((size - glyph.width) // 2, (size - glyph.height) // 2))
+        return centered
 
     def _sync_arrow(self):
         disabled = self._state == tk.DISABLED
@@ -376,21 +383,23 @@ class AppOptionMenu(ctk.CTkOptionMenu):
         # CTk uses the selected-value text color for its small font glyph;
         # that dark foreground has poor contrast against the blue segment.
         self._canvas.itemconfig("dropdown_arrow", state="hidden")
-        size = max(8, round(self._apply_widget_scaling(16)))
+        size = max(8, round(self._apply_widget_scaling(self.CHEVRON_SIZE)))
         signature = (size, color)
         if signature != self._arrow_signature:
             self._arrow_photo = ImageTk.PhotoImage(self._chevron_image(size, color), master=self._canvas)
             self._arrow_signature = signature
         tag = "aidas_dropdown_arrow"
-        center = (
-            self._apply_widget_scaling(self._current_width - self._current_height / 2),
-            self._apply_widget_scaling(self._current_height / 2),
+        # Position the image by its top-left pixel. Tk's center anchor adds
+        # a pixel of bias when fractional DPI produces an odd image size.
+        position = (
+            round(self._apply_widget_scaling(self._current_width - self._current_height / 2) - size / 2),
+            round(self._apply_widget_scaling(self._current_height / 2) - size / 2),
         )
         if self._canvas.find_withtag(tag):
-            self._canvas.coords(tag, *center)
+            self._canvas.coords(tag, *position)
             self._canvas.itemconfig(tag, image=self._arrow_photo)
         else:
-            self._canvas.create_image(*center, image=self._arrow_photo, tags=tag)
+            self._canvas.create_image(*position, anchor="nw", image=self._arrow_photo, tags=tag)
         self._canvas.tag_raise(tag)
 
     def _draw(self, no_color_updates=False):
@@ -408,14 +417,23 @@ class AppOptionMenu(ctk.CTkOptionMenu):
         self._sync_arrow()
 
 
+class _SplitOptionsButton(AppButton):
+    """Keep the dropdown icon centered without native label padding."""
+
+    def _create_grid(self):
+        super()._create_grid()
+        if self._image_label is not None and self._text_label is None:
+            self._image_label.grid_forget()
+            self._image_label.configure(
+                borderwidth=0, highlightthickness=0, padx=0, pady=0,
+            )
+            self._image_label.place(relx=0.5, rely=0.5, anchor="center")
+
+
 class AppSplitButton(ctk.CTkFrame):
     """Primary action with a conventional, two-part split-button shape."""
 
-    # U+25BE is the standard filled dropdown indicator.  The previous U+2304
-    # glyph rendered as a wide, curved ``v`` in Segoe UI and looked unrelated
-    # to a native menu indicator.
-    CHEVRON = "\u25be"
-    CHEVRON_FONT_SIZE = 14
+    CHEVRON_SIZE = 16
     DEFAULT_WIDTH = 198
     SEGMENT_WIDTH = 40
 
@@ -448,8 +466,10 @@ class AppSplitButton(ctk.CTkFrame):
         )
         self.grid_propagate(False)
         self.grid_rowconfigure(0, weight=1)
-        self.grid_columnconfigure(0, weight=1, minsize=action_width)
-        self.grid_columnconfigure(1, weight=0, minsize=self.SEGMENT_WIDTH)
+        # The child buttons provide DPI-scaled requested widths. Unscaled
+        # grid minimums would push the dropdown outside the frame below 100%.
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=0)
 
         # CustomTkinter uses this same background-corner technique for its
         # segmented button.  The exterior corners remain rounded while the
@@ -484,9 +504,30 @@ class AppSplitButton(ctk.CTkFrame):
             fg_color=COLOR_PAIRS["on_primary"],
         )
 
-        self.options_button = AppButton(
+        # Keep a high-resolution source so CTk can render smooth edges at
+        # each display scale without depending on a font's triangle glyph.
+        chevron_source_size = self.CHEVRON_SIZE * 4
+
+        def chevron_image(color):
+            source = AppOptionMenu._chevron_image(chevron_source_size, color)
+            glyph = source.crop(source.getbbox())
+            centered = Image.new("RGBA", source.size)
+            centered.paste(glyph, (
+                (source.width - glyph.width) // 2,
+                (source.height - glyph.height) // 2,
+            ))
+            return centered
+
+        chevron = OwnedCTkImage(
             self,
-            text=self.CHEVRON,
+            light_image=chevron_image(COLOR_PAIRS["on_primary"][0]),
+            dark_image=chevron_image(COLOR_PAIRS["on_primary"][1]),
+            size=(self.CHEVRON_SIZE, self.CHEVRON_SIZE),
+        )
+        self.options_button = _SplitOptionsButton(
+            self,
+            text="",
+            image=chevron,
             variant="primary",
             width=self.SEGMENT_WIDTH,
             height=height,
@@ -501,11 +542,6 @@ class AppSplitButton(ctk.CTkFrame):
             ),
             command=options_command,
             anchor="center",
-            font=ctk.CTkFont(
-                family="Segoe UI Symbol",
-                size=self.CHEVRON_FONT_SIZE,
-                weight=TYPOGRAPHY.normal_weight,
-            ),
         )
         self.options_button.grid(row=0, column=1, sticky="nsew")
 
@@ -981,6 +1017,9 @@ class ProgressCircle(tk.Canvas):
         self._fill_color_ref = ""
         self._text_color_ref = "black"
         self._state_text = text
+        self._pulse_amount = 0.0
+        self._status_photo = None
+        self._status_signature = None
         self.font_size = (
             font_size
             if font_size is not None
@@ -999,6 +1038,44 @@ class ProgressCircle(tk.Canvas):
             ),
             fill="black"
         )
+        self._status_icon_id = self.create_image(0, 0, anchor="nw", state="hidden")
+
+    def _sync_status_icon(self, color):
+        """Render completed/cancelled marks without relying on font glyphs."""
+        if self._state_text not in ("\u2713", "\u00d7"):
+            self.itemconfig(self._status_icon_id, state="hidden")
+            return
+        signature = (self._state_text, color)
+        if signature != self._status_signature:
+            scale = 8
+            image = Image.new("RGBA", (self.size * scale,) * 2)
+            unit = self.size * scale / 24
+            paths = (
+                (((6, 12), (10, 16), (18, 8)),)
+                if self._state_text == "\u2713"
+                else (((8, 8), (16, 16)), ((16, 8), (8, 16)))
+            )
+            draw = ImageDraw.Draw(image)
+            stroke = max(1, round(2 * unit))
+            radius = stroke / 2
+            for path in paths:
+                points = [(x * unit, y * unit) for x, y in path]
+                draw.line(points, fill=color, width=stroke, joint="curve")
+                for x, y in points:
+                    draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+            self._status_photo = ImageTk.PhotoImage(
+                _tint_icon(image.resize((self.size, self.size), Image.Resampling.LANCZOS), color),
+                master=self,
+            )
+            self._status_signature = signature
+        self.itemconfig(self._status_icon_id, image=self._status_photo, state="normal")
+
+    def set_completion_pulse(self, amount):
+        """Tint the existing circle while keeping its icon and layout fixed."""
+        amount = min(1.0, max(0.0, float(amount)))
+        if amount != self._pulse_amount:
+            self._pulse_amount = amount
+            self._apply_aidas_theme()
 
     def update_state(self, fill_color, text_color, text):
         self._fill_color_ref = fill_color
@@ -1011,19 +1088,41 @@ class ProgressCircle(tk.Canvas):
 
         f_color = _resolve_color(self.master, self._fill_color_ref)
         t_color = _resolve_color(self.master, self._text_color_ref)
+        amount = self.__dict__.get("_pulse_amount", 0.0)
+        if amount:
+            channels = self.winfo_rgb(f_color)
+            # Pulse away from the foreground to retain readable contrast.
+            target = 0 if sum(self.winfo_rgb(t_color)) > 3 * 32767 else 65535
+            f_color = "#" + "".join(
+                f"{round((value + (target - value) * amount) / 257):02x}"
+                for value in channels
+            )
         background = _resolve_color(self.master, self.bg_color_ref) if self.bg_color_ref else None
         signature = (background, f_color, t_color, self._state_text)
-        if signature == self.__dict__.get("_rendered_state"):
+        previous = self.__dict__.get("_rendered_state")
+        if signature == previous:
             return
-        if self.bg_color_ref:
+        if self.bg_color_ref and (previous is None or background != previous[0]):
             self.configure(bg=background)
-        self.itemconfig(self.oval_id, fill=f_color, outline=f_color)
-        self.itemconfig(self.text_id, fill=t_color, text=self._state_text)
+        if previous is None or f_color != previous[1]:
+            self.itemconfig(self.oval_id, fill=f_color, outline=f_color)
+        if previous is None or signature[2:] != previous[2:]:
+            self.itemconfig(
+                self.text_id, fill=t_color, text=self._state_text,
+                state="hidden" if self._state_text in ("\u2713", "\u00d7") else "normal",
+            )
+            self._sync_status_icon(t_color)
         self._rendered_state = signature
+
+    def destroy(self):
+        super().destroy()
+        self._status_photo = None
 
 
 class WorkflowProgressStrip(ctk.CTkFrame):
     """Show completed workflow milestones independently of tab selection."""
+
+    COMPLETION_PULSE_DURATION_MS = 240
 
     DEFAULT_STEPS = (
         "1  Load & Crop",
@@ -1050,8 +1149,10 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         self.pack_propagate(False)
         self.grid_propagate(False)
         self._step_labels = tuple(step_labels or self.DEFAULT_STEPS)
+        self._workflow_state = None
         self._completion_animation_job = None
-        self._completion_animation_overlay = None
+        self._completion_animation_circle = None
+        self._completion_animation_generation = 0
 
         self.center_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.center_frame.place(relx=0.5, rely=0.5, anchor="center")
@@ -1095,15 +1196,11 @@ class WorkflowProgressStrip(ctk.CTkFrame):
         total = max(1, len(self._step_labels))
         completed = {index for index in completed_steps if 0 <= index < total}
         active_index = min(total - 1, max(0, int(active_index)))
-        if cancelled_step is not None:
-            job = self.__dict__.get("_completion_animation_job")
-            if job is not None:
-                self.after_cancel(job)
-                self._completion_animation_job = None
-            overlay = self.__dict__.get("_completion_animation_overlay")
-            if overlay is not None:
-                overlay.destroy()
-                self._completion_animation_overlay = None
+        state = (frozenset(completed), active_index, cancelled_step)
+        if state == self._workflow_state:
+            return
+        self._cancel_completion_animation()
+        self._workflow_state = state
         for index, circle in enumerate(self.circles):
             if index == cancelled_step:
                 circle.update_state(fill_color=COLOR_PAIRS["danger"],
@@ -1126,8 +1223,24 @@ class WorkflowProgressStrip(ctk.CTkFrame):
                 label += " \u2014 Cancelled"
         self.workflow_progress_label.configure(text=label)
 
+    def _cancel_completion_animation(self):
+        self._completion_animation_generation += 1
+        if self._completion_animation_job is not None:
+            try:
+                self.after_cancel(self._completion_animation_job)
+            except tk.TclError:
+                pass
+            self._completion_animation_job = None
+        circle = self._completion_animation_circle
+        self._completion_animation_circle = None
+        if circle is not None:
+            try:
+                circle.set_completion_pulse(0)
+            except tk.TclError:
+                pass
+
     def animate_completion(self, completed_index: int) -> None:
-        """Show a brief oversized check when a workflow milestone completes."""
+        """Briefly pulse the completed badge without creating a glyph overlay."""
 
         try:
             index = int(completed_index)
@@ -1135,63 +1248,31 @@ class WorkflowProgressStrip(ctk.CTkFrame):
             return
         if index < 0 or index >= len(self.circles):
             return
-
-        if self._completion_animation_job is not None:
-            try:
-                self.after_cancel(self._completion_animation_job)
-            except tk.TclError:
-                pass
-            self._completion_animation_job = None
-        if self._completion_animation_overlay is not None:
-            try:
-                self._completion_animation_overlay.destroy()
-            except tk.TclError:
-                pass
-
-        self.update_idletasks()
+        if self._workflow_state is None or index not in self._workflow_state[0]:
+            return
+        self._cancel_completion_animation()
         circle = self.circles[index]
-        x = circle.winfo_rootx() - self.winfo_rootx() + (circle.winfo_width() // 2)
-        y = circle.winfo_rooty() - self.winfo_rooty() + (circle.winfo_height() // 2)
-        pulse_font = ctk.CTkFont(
-            family=TYPOGRAPHY.family, size=10, weight=TYPOGRAPHY.bold_weight,
-        )
-        overlay = ctk.CTkLabel(
-            self,
-            text="✓",
-            fg_color="transparent",
-            text_color=COLOR_PAIRS["success"],
-            font=pulse_font,
-        )
-        overlay.place(x=x, y=y, anchor="center")
-        self._completion_animation_overlay = overlay
+        self._completion_animation_circle = circle
+        generation = self._completion_animation_generation
+        started = time.monotonic()
 
-        frames = (10, 19, 25, 19, 14)
-
-        def render(frame_index: int = 0) -> None:
-            if self._completion_animation_overlay is not overlay:
+        def render() -> None:
+            if generation != self._completion_animation_generation:
                 return
-            if frame_index >= len(frames):
-                try:
-                    overlay.destroy()
-                except tk.TclError:
-                    pass
-                self._completion_animation_overlay = None
-                self._completion_animation_job = None
+            self._completion_animation_job = None
+            progress = min(1.0, (time.monotonic() - started) * 1000 / self.COMPLETION_PULSE_DURATION_MS)
+            if progress >= 1:
+                circle.set_completion_pulse(0)
+                self._completion_animation_circle = None
                 return
-            pulse_font.configure(size=frames[frame_index])
-            self._completion_animation_job = self.after(
-                35,
-                lambda: render(frame_index + 1),
-            )
+            circle.set_completion_pulse(0.16 * sin(pi * progress))
+            self._completion_animation_job = self.after(16, render)
 
         render()
 
     def destroy(self):
-        if self._completion_animation_job is not None:
-            self.after_cancel(self._completion_animation_job)
-            self._completion_animation_job = None
+        self._cancel_completion_animation()
         super().destroy()
-        self._completion_animation_overlay = None
 
     def select_step(self, index: int) -> None:
         """Compatibility alias for callers that supply a zero-based step index."""

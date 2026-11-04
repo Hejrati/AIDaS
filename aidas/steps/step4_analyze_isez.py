@@ -1246,8 +1246,9 @@ def _imagej_boundary_points(mask: np.ndarray) -> np.ndarray:
     if xs.size == 0:
         return np.empty((0, 2), dtype=np.float64)
 
-    order = np.lexsort((xs, ys))
-    start = (int(ys[order[0]]), int(xs[order[0]]))
+    # np.where already returns coordinates in row-major order, including for
+    # strided masks. Its first point is the same topmost-leftmost pixel.
+    start = (int(ys[0]), int(xs[0]))
     directions = [(0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1)]
     height, width = mask.shape
     point = start
@@ -3295,8 +3296,34 @@ class Step4Frame(SidebarStepFrame):
             pass
 
     def destroy(self) -> None:
+        if self.__dict__.get("_step4_destroying", False):
+            return
+        self._step4_destroying = True
         self._cancel_batch_stack_build()
         self._cancel_batch_roi_open()
+        self._invalidate_roi_work()
+        self._close_profile_zoom()
+        if "_roi_update_animation_jobs" in self.__dict__:
+            self.__dict__.setdefault("_flashing_updated_rois", set())
+            self._cancel_roi_update_animations(redraw=False)
+
+        # The active plot is also cached by its tab. Dispose each backend once
+        # before Tk deletes the commands used by Matplotlib's pending timers.
+        states = self.__dict__.get("batch_roi_tab_states", {})
+        plots = [(self.__dict__.get("canvas"), self.__dict__.get("figure"))]
+        plots.extend((state.get("canvas"), state.get("figure")) for state in states.values())
+        disposed = set()
+        for canvas, figure in plots:
+            if canvas is None and figure is None:
+                continue
+            identity = id(canvas) if canvas is not None else id(figure)
+            if identity not in disposed:
+                disposed.add(identity)
+                self._dispose_roi_plot(canvas, figure)
+        for name in ("canvas", "figure", "ax_profile", "ax_roi_grid"):
+            setattr(self, name, None)
+            for state in states.values():
+                state[name] = None
         super().destroy()
 
     def _restart_current_file(self) -> None:

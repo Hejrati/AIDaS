@@ -1,5 +1,4 @@
 import tkinter as tk
-import time
 from tkinter import ttk
 import unittest
 from unittest.mock import Mock, patch
@@ -194,18 +193,48 @@ class StepTransitionUITests(unittest.TestCase):
         self.assertIs(root._step_transition._target, root.progress_strip.circles[0])
         root._step_transition.destroy()
 
-    def test_slow_page_loading_does_not_skip_the_badge_flight(self):
+    def test_delayed_frame_finishes_without_replaying_missed_frames(self):
         target = tk.Canvas(self.host, width=24, height=24)
         target.pack()
         self.root.update()
         landed = Mock()
         transition = StepTransition(self.root)
         transition.start((300, 300), target, 1, on_complete=landed)
-        time.sleep(transition.DURATION_MS / 1000 + 0.1)
+        # Simulate a page holding Tk beyond the flight's deadline without
+        # spending that time in a real sleep.
+        transition._started -= transition.DURATION_MS / 1000 + 0.1
+        done = tk.BooleanVar(self.root, False)
+        self.root.after(transition.FRAME_MS + 30, done.set, True)
+        self.root.wait_variable(done)
+        self.assertFalse(transition.winfo_exists())
+        self.assertIsNone(transition._job)
+        landed.assert_called_once_with()
+
+    def test_restarting_sprite_cancels_the_old_timer_and_completion_callback(self):
+        target = tk.Canvas(self.host, width=24, height=24)
+        target.pack()
         self.root.update()
-        self.assertTrue(transition.winfo_exists())
-        landed.assert_not_called()
+        old_landed, new_landed = Mock(), Mock()
+        transition = StepTransition(self.root)
+        transition.start((300, 300), target, 1, on_complete=old_landed)
+        old_job = transition._job
+
+        transition.start((200, 200), target, 2, on_complete=new_landed)
+
+        self.assertNotIn(old_job, self.root.tk.call("after", "info"))
+        bindings = list(transition._bindings)
+        for widget, sequence, _binding in bindings:
+            handler = "_target_destroyed" if sequence == "<Destroy>" else "_invalidate_target"
+            self.assertEqual(widget.bind(sequence).count(handler), 1)
+        self.assertEqual(transition.canvas.itemcget(transition._number, "text"), "2")
         transition.destroy()
+        for widget, sequence, _binding in bindings:
+            self.assertNotIn("_invalidate_target", widget.bind(sequence))
+            self.assertNotIn("_target_destroyed", widget.bind(sequence))
+        self.assertIsNone(transition._job)
+        self.assertIsNone(transition._on_complete)
+        old_landed.assert_not_called()
+        new_landed.assert_not_called()
 
     def test_cached_destination_updates_when_the_target_moves(self):
         holder = ttk.Frame(self.host, width=80, height=80)

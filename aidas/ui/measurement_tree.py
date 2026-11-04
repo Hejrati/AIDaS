@@ -8,9 +8,41 @@ import threading
 import tkinter as tk
 from tkinter import font as tkfont, ttk
 
+import customtkinter as ctk
+from PIL import Image, ImageDraw
+
 from aidas.services.measurement_inventory import InventoryCancelled, scan_measurement_directory
 from aidas.services.measurement_scan import MeasurementScanLimitExceeded
-from aidas.ui.theme import COLORS, TYPOGRAPHY
+from aidas.ui.components import AppButton
+from aidas.ui.images import OwnedCTkImage
+from aidas.ui.theme import (
+    COLORS, COLOR_PAIRS, CONTROLS, TYPOGRAPHY, refresh_interface_widgets,
+)
+
+
+def _tree_action_image(action, color):
+    """Draw matching toolbar glyphs from geometry for high-DPI displays."""
+    scale = 4
+    image = Image.new("RGBA", (16 * scale, 16 * scale))
+    draw = ImageDraw.Draw(image)
+    stroke = 6
+    if action in ("collapse", "expand"):
+        draw.rounded_rectangle(
+            (3 * scale, 3 * scale, 13 * scale, 13 * scale),
+            radius=6, outline=color, width=stroke,
+        )
+        draw.line((5 * scale, 8 * scale, 11 * scale, 8 * scale),
+                  fill=color, width=stroke)
+        if action == "expand":
+            draw.line((8 * scale, 5 * scale, 8 * scale, 11 * scale),
+                      fill=color, width=stroke)
+    elif action == "refresh":
+        draw.arc((3 * scale, 3 * scale, 13 * scale, 13 * scale),
+                 start=45, end=315, fill=color, width=stroke)
+        draw.polygon([(54, 10), (54, 26), (38, 26)], fill=color)
+    else:
+        raise ValueError(f"Unknown tree action: {action}")
+    return image
 
 
 class MeasurementDirectoryTree(ttk.Frame):
@@ -43,25 +75,69 @@ class MeasurementDirectoryTree(ttk.Frame):
         self._detail_x = 450
         self._content_width = 800
         self._empty_message = "Choose an input folder to explore its recorded measurements."
-        self.path_var = tk.StringVar(master=self, value="Choose an input folder to view its contents.")
+        self.path_var = tk.StringVar(master=self, value="")
         self.summary_var = tk.StringVar(master=self, value="")
         self.notice_var = tk.StringVar(master=self, value="")
         self.selection_var = tk.StringVar(master=self, value="")
         self.hide_other_files_var = tk.BooleanVar(master=self, value=True)
 
-        toolbar = ttk.Frame(self)
-        toolbar.pack(fill="x", pady=(0, 6))
-        ttk.Label(toolbar, text="Folder contents", font=("", 12, "bold")).pack(side="left")
+        self._toolbar = ttk.Frame(self)
+        self._toolbar.pack(fill="x", pady=(0, 6))
+        self._toolbar.columnconfigure(0, weight=1)
+        self._toolbar_heading = ttk.Frame(self._toolbar)
+        self._toolbar_heading.grid(row=0, column=0, sticky="w")
+        ttk.Label(self._toolbar_heading, text="Folder contents", font=("", 12, "bold")).pack(side="left")
         self.hide_other_files_checkbox = ttk.Checkbutton(
-            toolbar, text="Hide other files", variable=self.hide_other_files_var,
+            self._toolbar_heading, text="Hide other files", variable=self.hide_other_files_var,
             command=self._filter_changed,
         )
         self.hide_other_files_checkbox.pack(side="left", padx=(16, 0))
-        for label, command in (("Refresh", self.refresh), ("Expand all", self.expand_all), ("Collapse all", self.collapse_all)):
-            ttk.Button(toolbar, text=label, command=command).pack(side="right", padx=(6, 0))
-        self.path_label = ttk.Label(self, textvariable=self.path_var, style="AIDaS.Muted.TLabel", wraplength=850)
-        self.path_label.pack(fill="x")
-        ttk.Label(self, textvariable=self.summary_var).pack(fill="x", pady=(6, 8))
+        self._toolbar_actions = ttk.Frame(self._toolbar)
+        self._toolbar_actions.grid(row=0, column=1, sticky="e")
+        self._toolbar_row = 0
+        self._toolbar_buttons = {}
+        action_font = ctk.CTkFont(
+            family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size,
+            weight=TYPOGRAPHY.semibold_weight,
+        )
+        for action, label, command in (
+            ("refresh", "Refresh", self.refresh),
+            ("expand", "Expand all", self.expand_all),
+            ("collapse", "Collapse all", self.collapse_all),
+        ):
+            icon = OwnedCTkImage(
+                self,
+                light_image=_tree_action_image(action, COLOR_PAIRS["text"][0]),
+                dark_image=_tree_action_image(action, COLOR_PAIRS["text"][1]),
+                size=(16, 16),
+            )
+            icon._aidas_monochrome_action = True
+            button = AppButton(
+                self._toolbar_actions, text=label, command=command, image=icon,
+                compound="left", font=action_font, height=CONTROLS.height_md,
+                width=max(96, action_font.measure(label) + 16 + CONTROLS.gap + 24),
+            )
+            button.pack(side="right", padx=(6, 0))
+            refresh_interface_widgets(button, recursive=False)
+            # Keep native toolbar keyboard activation after adding CTk icons.
+            focus_command = button.register(
+                lambda _path, target=button: target.cget("state") != "disabled",
+            )
+            tk.Frame.configure(button, takefocus=focus_command)
+            for child in button.winfo_children():
+                child.configure(takefocus=False)
+            for sequence in ("<Return>", "<space>"):
+                activate = lambda _event, target=button: (target.invoke(), "break")[1]
+                tk.Misc.bind(button, sequence, activate, add="+")
+                button.bind(sequence, activate, add="+")
+            self._toolbar_buttons[action] = button
+        self._toolbar.bind("<Configure>", self._layout_toolbar)
+        self._metadata = ttk.Frame(self)
+        self._metadata.columnconfigure(0, weight=1)
+        self.path_label = ttk.Label(self._metadata, textvariable=self.path_var, style="AIDaS.Muted.TLabel", wraplength=850)
+        self.path_label.grid(row=0, column=0, sticky="ew")
+        self.summary_label = ttk.Label(self._metadata, textvariable=self.summary_var)
+        self.summary_label.grid(row=1, column=0, sticky="ew", pady=(4, 6))
         self.notice = ttk.Label(self, textvariable=self.notice_var, wraplength=850, foreground=COLORS.warning)
 
         holder = ttk.Frame(self)
@@ -72,9 +148,9 @@ class MeasurementDirectoryTree(ttk.Frame):
         self.canvas.grid(row=0, column=0, sticky="nsew")
         self._ybar = ttk.Scrollbar(holder, orient="vertical", command=self._yview)
         self._ybar.grid(row=0, column=1, sticky="ns")
-        xbar = ttk.Scrollbar(holder, orient="horizontal", command=self.canvas.xview)
-        xbar.grid(row=1, column=0, sticky="ew")
-        self.canvas.configure(yscrollcommand=self._on_scroll, xscrollcommand=xbar.set)
+        self._xbar = ttk.Scrollbar(holder, orient="horizontal", command=self.canvas.xview)
+        self._xbar.grid(row=1, column=0, sticky="ew")
+        self.canvas.configure(yscrollcommand=self._on_scroll, xscrollcommand=self._xbar.set)
         self.canvas.bind("<Configure>", self._resize)
         self.canvas.bind("<Button-1>", self._click)
         self.canvas.bind("<MouseWheel>", self._wheel)
@@ -86,7 +162,34 @@ class MeasurementDirectoryTree(ttk.Frame):
         self.canvas.bind("<Prior>", lambda _event: self._scroll(-10))
         self.selection_label = ttk.Label(self, textvariable=self.selection_var, style="AIDaS.Muted.TLabel", wraplength=850)
         self.selection_label.pack(fill="x", pady=(6, 0))
+        self.path_var.trace_add("write", self._update_metadata)
+        self.summary_var.trace_add("write", self._update_metadata)
         self._apply_aidas_theme()
+
+    def _update_metadata(self, *_args):
+        visible = False
+        for label, variable in ((self.path_label, self.path_var),
+                                (self.summary_label, self.summary_var)):
+            if variable.get():
+                label.grid()
+                visible = True
+            else:
+                label.grid_remove()
+        if visible:
+            before = self.notice if self.notice.winfo_manager() else self.canvas.master
+            self._metadata.pack(before=before, fill="x")
+        else:
+            self._metadata.pack_forget()
+
+    def _layout_toolbar(self, event):
+        needed = self._toolbar_heading.winfo_reqwidth() + self._toolbar_actions.winfo_reqwidth() + 12
+        row = int(event.width < needed)
+        if row != self._toolbar_row:
+            self._toolbar_row = row
+            self._toolbar_actions.grid(
+                row=row, column=0 if row else 1, columnspan=2 if row else 1,
+                sticky="e", pady=(6, 0) if row else 0,
+            )
 
     def set_directory(self, directory: Path, *, output_path: Path | None = None):
         self._directory, self._output = Path(directory), output_path
@@ -267,15 +370,30 @@ class MeasurementDirectoryTree(ttk.Frame):
 
     def _resize(self, _event=None):
         canvas_width = self.canvas.winfo_width()
-        width = max(canvas_width, self._content_width)
+        # Scroll regions describe drawable pixels, excluding the canvas's
+        # border. Using the outer width creates a tiny, scrollable overflow
+        # even when every row fits inside the viewport.
+        inset = sum(self.canvas.winfo_pixels(self.canvas.cget(option))
+                    for option in ("borderwidth", "highlightthickness"))
+        viewport_width = max(1, canvas_width - 2 * inset)
+        viewport_height = max(1, self.canvas.winfo_height() - 2 * inset)
+        content_width = self._content_width if self._rows else 0
+        content_height = len(self._rows) * self._row_height + 24 if self._rows else 0
         wrap = max(240, canvas_width - 20)
-        region = (0, 0, width, max(1, len(self._rows) * self._row_height + 24))
+        region = (0, 0, max(viewport_width, content_width),
+                  max(viewport_height, content_height))
         signature = (wrap, region)
         if signature != self._resize_signature:
             for label in (self.path_label, self.notice, self.selection_label):
                 label.configure(wraplength=wrap)
             self.canvas.configure(scrollregion=region)
             self._resize_signature = signature
+        # Reset either axis when filtering, collapsing, or resizing leaves
+        # all its content visible. ttk disables a full-range scrollbar.
+        if content_width <= viewport_width:
+            self.canvas.xview_moveto(0)
+        if content_height <= viewport_height:
+            self.canvas.yview_moveto(0)
         self._schedule_draw()
 
     def _schedule_draw(self):
@@ -287,12 +405,14 @@ class MeasurementDirectoryTree(ttk.Frame):
         self._schedule_draw()
 
     def _yview(self, *args):
-        self.canvas.yview(*args)
-        self._schedule_draw()
+        if self.canvas.yview() != (0.0, 1.0):
+            self.canvas.yview(*args)
+            self._schedule_draw()
 
     def _scroll(self, units):
-        self.canvas.yview_scroll(units, "units")
-        self._schedule_draw()
+        if self.canvas.yview() != (0.0, 1.0):
+            self.canvas.yview_scroll(units, "units")
+            self._schedule_draw()
         return "break"
 
     def _wheel(self, event):
@@ -321,7 +441,7 @@ class MeasurementDirectoryTree(ttk.Frame):
         height = self._row_height
         first = max(0, int(canvas.canvasy(0) // height) - 1)
         last_visible = min(len(self._rows), first + int(canvas.winfo_height() // height) + 4)
-        width = max(canvas.winfo_width(), self._content_width)
+        width = max(canvas.winfo_width(), self._content_width if self._rows else 0)
         signature = (self._rows_revision, first, last_visible, width,
                      self._selected, self._empty_message)
         if signature == self._last_draw_signature:
@@ -329,7 +449,9 @@ class MeasurementDirectoryTree(ttk.Frame):
         self._last_draw_signature = signature
         canvas.delete("all")
         if not self._rows:
-            canvas.create_text(24, 28, anchor="nw", text=self._empty_message, fill=COLORS.muted_text, font=self._name_font)
+            canvas.create_text(24, 28, anchor="nw", text=self._empty_message,
+                               width=max(1, canvas.winfo_width() - 48),
+                               fill=COLORS.muted_text, font=self._name_font)
             return
         for index in range(first, last_visible):
             node, depth, ancestors, last = self._rows[index]
@@ -397,6 +519,7 @@ class MeasurementDirectoryTree(ttk.Frame):
                 except tk.TclError:
                     pass
         super().destroy()
+        self._toolbar_buttons.clear()
         # Release Tcl-owned resources on the UI thread. Otherwise Python's
         # cyclic GC can finalize an old view during a later background scan.
         for name in ("path_var", "summary_var", "notice_var", "selection_var", "hide_other_files_var", "_name_font", "_detail_font"):

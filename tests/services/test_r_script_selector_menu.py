@@ -121,6 +121,9 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         dialog._script_status_vars = {role: _Var() for role in self.choices}
         dialog._script_custom_choices = {role: None for role in self.choices}
         dialog._script_popups = {role: _Popup() for role in self.choices}
+        dialog._r_script_check_images = mock.Mock(
+            return_value=(mock.sentinel.script_check, mock.sentinel.script_spacer),
+        )
         dialog.script_menus = {role: mock.Mock() for role in self.choices}
         dialog._mark_dirty = mock.Mock()
         for role in self.choices:
@@ -128,14 +131,14 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         return dialog
 
     def _labels(self, dialog, role):
-        return [entry["label"].lstrip("\u2713 ")
+        return [entry["label"]
                 for entry in dialog._script_popups[role].entries
                 if entry["kind"] == "command"]
 
     def _checked(self, dialog, role):
-        return [entry["label"][2:]
+        return [entry["label"]
                 for entry in dialog._script_popups[role].entries
-                if entry["kind"] == "command" and entry["label"].startswith("\u2713 ")]
+                if entry["kind"] == "command" and entry.get("image") is mock.sentinel.script_check]
 
     def _prepare_apply(self, dialog):
         dialog._validated_sdb_defaults = mock.Mock(return_value=(10, 20, 0, True))

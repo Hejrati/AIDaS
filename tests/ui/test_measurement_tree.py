@@ -9,7 +9,9 @@ from unittest import mock
 
 import customtkinter as ctk
 
-from aidas.services.measurement_inventory import scan_measurement_directory
+from aidas.services.measurement_inventory import (
+    DirectoryInventory, DirectoryNode, scan_measurement_directory,
+)
 from aidas.steps.step5_compile import Step5Frame
 from aidas.ui.measurement_tree import MeasurementDirectoryTree
 from aidas.ui.theme import COLORS, apply_appearance_mode, get_interface_mode, set_interface_mode
@@ -52,6 +54,149 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
 
     def _texts(self, tree):
         return [tree.canvas.itemcget(item, "text") for item in tree.canvas.find_all() if tree.canvas.type(item) == "text"]
+
+    def _show_nodes(self, tree, children):
+        count = sum(node.excel_files for node in children)
+        root = DirectoryNode(
+            self.directory, "Subject", "folder", "Subject ID", tuple(children),
+            excel_files=count,
+        )
+        tree._filtered_children.clear()
+        tree._inventory = DirectoryInventory(root, count, 0, 0, 0, ())
+        tree._rebuild_rows()
+        self.root.update()
+
+    def _assert_scrollbars_disabled(self, tree):
+        self.assertTrue(tree._xbar.instate(("disabled",)))
+        self.assertTrue(tree._ybar.instate(("disabled",)))
+        self.assertEqual(tree.canvas.xview(), (0.0, 1.0))
+        self.assertEqual(tree.canvas.yview(), (0.0, 1.0))
+
+    def test_empty_and_short_trees_disable_scrollbars_and_ignore_scroll_input(self):
+        tree = self._tree()
+        self.root.geometry("650x520+10000+10000")
+        self.root.update()
+        self.assertEqual(tree.path_var.get(), "")
+        self._assert_scrollbars_disabled(tree)
+        message = tree.canvas.bbox("all")
+        self.assertLessEqual(message[2], tree.canvas.winfo_width() - 1)
+
+        short = DirectoryNode(
+            self.directory / "Results.xlsx", "Results.xlsx", "excel",
+            "Step 4 measurements", excel_files=1,
+        )
+        for children in (None, (short,)):
+            with self.subTest(empty=children is None):
+                if children is not None:
+                    self._show_nodes(tree, children)
+                self._assert_scrollbars_disabled(tree)
+                origin = tree.canvas.canvasx(0), tree.canvas.canvasy(0)
+                for units in (-10, 10):
+                    tree._scroll(units)
+                    tree._wheel(SimpleNamespace(delta=units * 120))
+                tree._yview("moveto", 1)
+                for bar in (tree._xbar, tree._ybar):
+                    self.root.tk.call(bar.cget("command"), "moveto", 1)
+                self.root.update()
+                self._assert_scrollbars_disabled(tree)
+                self.assertEqual((tree.canvas.canvasx(0), tree.canvas.canvasy(0)), origin)
+
+    def test_horizontal_and_vertical_overflow_enable_only_the_needed_scrollbar(self):
+        tree = self._tree()
+        tall = tuple(DirectoryNode(
+            self.directory / f"Results_{index}.xlsx", f"Results_{index}.xlsx",
+            "excel", "Step 4 measurements", excel_files=1,
+        ) for index in range(40))
+        self._show_nodes(tree, tall)
+        self.assertTrue(tree._xbar.instate(("disabled",)))
+        self.assertFalse(tree._ybar.instate(("disabled",)))
+        tree._scroll(10)
+        self.root.update()
+        self.assertGreater(tree.canvas.yview()[0], 0)
+
+        name = "Results_" + "wide_" * 40 + ".xlsx"
+        wide = DirectoryNode(self.directory / name, name, "excel", "Step 4 measurements", excel_files=1)
+        self._show_nodes(tree, (wide,))
+        self.assertFalse(tree._xbar.instate(("disabled",)))
+        self.assertTrue(tree._ybar.instate(("disabled",)))
+        self.assertEqual(tree.canvas.yview(), (0.0, 1.0))
+        tree.canvas.xview_moveto(1)
+        self.root.update()
+        self.assertGreater(tree.canvas.xview()[0], 0)
+
+        inset = int(tree.canvas.cget("highlightthickness")) + int(tree.canvas.cget("borderwidth"))
+        viewport_width = tree.canvas.winfo_width() - 2 * inset
+        for overflow in (0, 1):
+            with self.subTest(horizontal_overflow_pixels=overflow):
+                tree._content_width = viewport_width + overflow
+                tree._resize()
+                self.root.update()
+                self.assertEqual(tree._xbar.instate(("disabled",)), overflow == 0)
+
+    def test_filter_and_collapse_disable_scrolled_axes_and_expand_restores_them(self):
+        tree = self._tree()
+        excel = DirectoryNode(
+            self.directory / "nasal" / "Results.xlsx", "Results.xlsx", "excel",
+            "Step 4 measurements", excel_files=1,
+        )
+        others = tuple(DirectoryNode(
+            self.directory / "nasal" / f"Image_{index}.img",
+            f"Image_{index}_" + "wide_" * 40, "image", "Flattened image",
+        ) for index in range(30))
+        folder = DirectoryNode(
+            self.directory / "nasal", "nasal", "folder", "Nasal",
+            (excel, *others), excel_files=1,
+        )
+        tree.hide_other_files_var.set(False)
+        self._show_nodes(tree, (folder,))
+
+        def scroll_to_end():
+            self.assertFalse(tree._xbar.instate(("disabled",)))
+            self.assertFalse(tree._ybar.instate(("disabled",)))
+            tree.canvas.xview_moveto(1)
+            tree.canvas.yview_moveto(1)
+            self.root.update()
+            self.assertGreater(tree.canvas.xview()[0], 0)
+            self.assertGreater(tree.canvas.yview()[0], 0)
+
+        scroll_to_end()
+        tree.hide_other_files_checkbox.invoke()
+        self.root.update()
+        self._assert_scrollbars_disabled(tree)
+        tree.hide_other_files_checkbox.invoke()
+        self.root.update()
+        scroll_to_end()
+        tree.collapse_all()
+        self.root.update()
+        self._assert_scrollbars_disabled(tree)
+        tree.expand_all()
+        self.root.update()
+        scroll_to_end()
+
+    def test_resizing_to_fit_resets_vertical_scroll_and_shrinking_restores_it(self):
+        tree = self._tree()
+        self.root.geometry("1300x350+10000+10000")
+        children = tuple(DirectoryNode(
+            self.directory / f"Results_{index}.xlsx", f"Results_{index}.xlsx",
+            "excel", "Step 4 measurements", excel_files=1,
+        ) for index in range(10))
+        self._show_nodes(tree, children)
+        self.assertFalse(tree._ybar.instate(("disabled",)))
+        tree._yview("moveto", 1)
+        self.root.update()
+        self.assertGreater(tree.canvas.yview()[0], 0)
+        self.root.geometry("1300x820+10000+10000")
+        self.root.update()
+        self._assert_scrollbars_disabled(tree)
+        tree._scroll(10)
+        self.root.update()
+        self.assertEqual(tree.canvas.yview(), (0.0, 1.0))
+        self.root.geometry("1300x350+10000+10000")
+        self.root.update()
+        self.assertFalse(tree._ybar.instate(("disabled",)))
+        tree._scroll(5)
+        self.root.update()
+        self.assertGreater(tree.canvas.yview()[0], 0)
 
     def test_step5_replaces_logs_and_progress_with_actual_directory_contents(self):
         folder = self.directory / "flip human - Copy - Copy (12)"

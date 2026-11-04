@@ -12,6 +12,7 @@ import customtkinter as ctk
 from PIL import Image, ImageChops, ImageDraw, ImageOps, ImageTk
 
 from aidas.core.display import work_area_bounds
+from aidas.ui.bindings import bind_native_callback
 from aidas.ui.images import OwnedCTkImage
 from aidas.ui.popups import PopupPanel
 from aidas.ui.scrolling import DeferredScrollbar
@@ -736,7 +737,10 @@ class HoverToolTip:
         setattr(owner, marker, True)
         for sequence in self._OWNER_DISMISS_EVENTS:
             try:
-                owner.bind(sequence, type(self)._dismiss_for_owner_event, add="+")
+                if hasattr(owner, "tk") and hasattr(owner, "_w"):
+                    bind_native_callback(owner, sequence, type(self)._dismiss_for_owner_event)
+                else:
+                    owner.bind(sequence, type(self)._dismiss_for_owner_event, add="+")
             except (AttributeError, tk.TclError):
                 pass
 

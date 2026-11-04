@@ -327,6 +327,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         actions.grid_columnconfigure((0, 1), weight=1, uniform="completion_actions")
         self.exit_app_button = AppButton(
             actions, text="Exit the app", command=self._exit_app,
+            variant="danger",
         )
         self.exit_app_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         self.open_excel_folder_button = AppButton(
@@ -347,12 +348,6 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self.directory_view.canvas.bind(
             "<Configure>", self._position_completion_notice, add="+",
         )
-        ttk.Label(
-            self.content,
-            textvariable=self.status_var,
-            style="AIDaS.Muted.TLabel",
-            wraplength=850,
-        ).pack(fill="x", pady=(8, 0))
 
     def _clear_completion_notice(self, *_args) -> None:
         self._completed_output_path = None

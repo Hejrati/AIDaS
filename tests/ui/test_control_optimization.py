@@ -138,6 +138,7 @@ class ProgressBadgeUpdateTests(unittest.TestCase):
         circle.oval_id, circle.text_id = 1, 2
         circle.configure = mock.Mock()
         circle.itemconfig = mock.Mock()
+        circle._sync_status_icon = mock.Mock()
         return circle
 
     def test_repeated_state_skips_native_canvas_mutations(self):
@@ -167,7 +168,7 @@ class ProgressBadgeUpdateTests(unittest.TestCase):
                 circle.configure.assert_called_once_with(bg=background)
                 circle.itemconfig.assert_has_calls([
                     mock.call(1, fill=fill, outline=fill),
-                    mock.call(2, fill=foreground, text="2"),
+                    mock.call(2, fill=foreground, text="2", state="normal"),
                 ])
 
     def test_text_and_completion_changes_still_repaint(self):
@@ -178,7 +179,7 @@ class ProgressBadgeUpdateTests(unittest.TestCase):
             circle.update_state("#00aa00", "#ffffff", "\u2713")
         circle.itemconfig.assert_has_calls([
             mock.call(1, fill="#00aa00", outline="#00aa00"),
-            mock.call(2, fill="#ffffff", text="\u2713"),
+            mock.call(2, fill="#ffffff", text="\u2713", state="hidden"),
         ])
 
 

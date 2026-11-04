@@ -71,6 +71,26 @@ class Step2CompletedFolderPromptTests(unittest.TestCase):
         self.step._close_step2_batch_segmentation_panel.assert_called_once_with(restore_previous=True)
         self.step._start_step2_batch_segmentation_from_rows.assert_not_called()
 
+    def test_processed_notice_hides_filter_and_ignores_queued_filter_changes(self):
+        panel = self._panel(self._completed_sides())
+        notice = panel.processed_notice
+        self.assertFalse(panel.hide_processed_check.winfo_viewable())
+        self.assertEqual(panel.hide_processed_check.winfo_manager(), "")
+        self.assertIn("disabled", panel.hide_processed_check.state())
+
+        for hide in (False, True, False):
+            with self.subTest(hide_processed=hide):
+                panel.hide_processed_var.set(hide)
+                panel._on_hide_processed_changed()
+                self.root.update()
+                self.assertIs(panel.processed_notice, notice)
+                self.assertTrue(notice.winfo_viewable())
+                self.assertTrue(panel.override_button.winfo_viewable())
+                self.assertTrue(panel.go_to_step3_button.winfo_viewable())
+                self.assertFalse(panel.table.winfo_viewable())
+                self.assertFalse(panel.next_button.winfo_viewable())
+                self.assertFalse(panel.hide_processed_check.winfo_viewable())
+
     def test_override_requeues_original_source_and_preserves_saved_files(self):
         rows = self._completed_sides()
         before = {str(path): path.read_bytes() for path in self.folder.rglob("*") if path.is_file()}
@@ -80,6 +100,12 @@ class Step2CompletedFolderPromptTests(unittest.TestCase):
         self.assertIsNone(panel.processed_notice)
         self.assertTrue(panel.next_button.winfo_viewable())
         self.assertNotIn("disabled", panel.next_button.state())
+        self.assertTrue(panel.hide_processed_check.winfo_viewable())
+        self.assertNotIn("disabled", panel.hide_processed_check.state())
+        panel.hide_processed_check.invoke()
+        self.root.update()
+        self.assertTrue(panel.table.winfo_viewable())
+        self.assertIsNone(panel.processed_notice)
         selected = panel.table.selected_rows()
         self.assertEqual(len(selected), 1)
         self.assertEqual(selected[0]["image_paths"], [str(self.folder / "Light.img")])
@@ -125,6 +151,8 @@ class Step2CompletedFolderPromptTests(unittest.TestCase):
         rows = self.frame._scan_step2_batch_segmentation_folders(self.folder)[0]
         panel = self._panel(rows)
         self.assertIsNone(panel.processed_notice)
+        self.assertTrue(panel.hide_processed_check.winfo_viewable())
+        self.assertNotIn("disabled", panel.hide_processed_check.state())
         self.assertEqual(len(panel.table.selected_rows()), 1)
         self.assertTrue(panel.next_button.winfo_viewable())
         panel._scan_done([], 0, 0, [])

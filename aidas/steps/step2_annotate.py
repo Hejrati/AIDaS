@@ -682,6 +682,7 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
                 pass
         self.processed_notice = None
         self.empty_notice = None
+        self.hide_processed_check.pack(side="right", padx=(12, 0))
         self.hide_processed_check.state(["!disabled"])
         self.next_button.pack(side="right")
 
@@ -694,13 +695,10 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         self.table = table
 
     def _on_hide_processed_changed(self):
+        if self.processed_notice is not None or self.empty_notice is not None:
+            return
         if self.table is not None:
             self.table.set_hide_processed(self.hide_processed_var.get())
-        if self.processed_notice is not None:
-            self.table.pack_forget()
-            self.processed_notice.pack_forget()
-            view = self.processed_notice if self.hide_processed_var.get() else self.table
-            view.pack(fill="both", expand=True)
 
     def _show_empty_notice(self):
         self.table.pack_forget()
@@ -736,6 +734,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
     def _show_processed_notice(self):
         self.table.pack_forget()
         self.next_button.pack_forget()
+        self.hide_processed_check.state(["disabled"])
+        self.hide_processed_check.pack_forget()
         notice = ttk.Frame(self.table_host, padding=24)
         notice.pack(fill="both", expand=True)
         notice.columnconfigure(0, weight=1)
@@ -1289,6 +1289,7 @@ class Step2Frame(SidebarStepFrame):
 
     def destroy(self):
         self._closing = True
+        self._stop_fovea_repeat()
         cancelled = self.__dict__.get("_ai_cancel_event")
         if cancelled is not None:
             cancelled.set()
@@ -3512,9 +3513,13 @@ class Step2Frame(SidebarStepFrame):
         self._fovea_repeat_job = self.after(interval, self._run_fovea_repeat)
 
     def _stop_fovea_repeat(self):
-        if self._fovea_repeat_job is not None:
-            self.after_cancel(self._fovea_repeat_job)
-            self._fovea_repeat_job = None
+        job = self.__dict__.get("_fovea_repeat_job")
+        self._fovea_repeat_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
         self._fovea_repeat_dir = 0
         self._fovea_repeat_ticks = 0
 

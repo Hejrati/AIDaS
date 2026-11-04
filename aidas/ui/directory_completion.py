@@ -5,8 +5,10 @@ from __future__ import annotations
 import queue
 import threading
 import tkinter as tk
+from types import SimpleNamespace
 
 from aidas.core.display import monitor_work_area_for_window
+from aidas.ui.bindings import bind_native_callback, unbind_callback
 from aidas.ui.scrolling import DeferredScrollbar
 from aidas.ui.theme import COLORS
 from aidas.utils.path_completion import directory_completions
@@ -77,7 +79,19 @@ class DirectoryCompletion:
         self._bind(self.owner, "<Unmap>", self._owner_changed)
 
     def _bind(self, widget, event, callback):
-        binding = widget.bind(event, callback, add="+")
+        if (widget is self.owner and event in {"<Configure>", "<Unmap>"}
+                and callback == self._owner_changed):
+            anchors = {str(anchor): anchor for anchor in self._anchor_widgets}
+
+            def changed(path):
+                anchor = anchors.get(path)
+                if anchor is not None:
+                    return callback(SimpleNamespace(widget=anchor))
+                return None
+
+            binding = bind_native_callback(widget, event, changed, widget_path=True)
+        else:
+            binding = widget.bind(event, callback, add="+")
         self._bindings.append((widget, event, binding))
 
     def _cancel(self, name):
@@ -439,7 +453,7 @@ class DirectoryCompletion:
             self._update_scrollbar_visibility()
         self.suggestions = []
         if self._outside_id is not None:
-            self.owner.unbind("<ButtonPress-1>", self._outside_id)
+            unbind_callback(self.owner, "<ButtonPress-1>", self._outside_id)
             self._outside_id = None
 
     def _target_destroyed(self, event):
@@ -457,7 +471,7 @@ class DirectoryCompletion:
             self.target.deletecommand(self._trace_command)
         for widget, event, binding in self._bindings:
             try:
-                widget.unbind(event, binding)
+                unbind_callback(widget, event, binding)
             except tk.TclError:
                 pass
         self._bindings.clear()

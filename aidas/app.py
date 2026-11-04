@@ -16,7 +16,7 @@ import weakref
 from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageTk
 
 from aidas import __version__
 from aidas.core.config import (
@@ -35,6 +35,7 @@ from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
 from aidas.services.feedback import install_exception_capture, record_event, record_exception
+from aidas.ui.bindings import bind_all_widget_event
 from aidas.ui.classic import build_classic_application_menu
 from aidas.ui.components import (
     AppButton,
@@ -921,11 +922,44 @@ class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
         else:
             self._script_status_vars[role].set("No runnable script is available")
 
+    def _r_script_check_images(self, popup):
+        """Keep a smooth, DPI-sized selection icon in the menu's interpreter."""
+        size = max(8, round(16 * ctk.ScalingTracker.get_widget_scaling(popup)))
+        color = tuple(value // 257 for value in popup.winfo_rgb(popup.cget("fg")))
+        signature = (size, color)
+        cached = getattr(popup, "_aidas_script_check_icons", None)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        supersampling = 8
+        image = Image.new("RGBA", (size * supersampling,) * 2)
+        unit = size * supersampling / 16
+        points = [(x * unit, y * unit) for x, y in ((3, 8), (6.5, 11.5), (13, 4.5))]
+        stroke = max(1, round(1.7 * unit))
+        draw = ImageDraw.Draw(image)
+        draw.line(points, fill=color, width=stroke, joint="curve")
+        radius = stroke / 2
+        for x, y in points:
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
+        rendered = image.resize((size, size), Image.Resampling.LANCZOS)
+        icons = (
+            ImageTk.PhotoImage(rendered, master=popup),
+            ImageTk.PhotoImage(Image.new("RGBA", (size, size)), master=popup),
+        )
+        popup._aidas_script_check_icons = (signature, icons)
+        if not getattr(popup, "_aidas_script_check_cleanup", False):
+            popup.bind("<Destroy>", lambda _event: popup.__dict__.pop(
+                "_aidas_script_check_icons", None,
+            ), add="+")
+            popup._aidas_script_check_cleanup = True
+        return icons
+
     def _update_r_script_popup(self, role) -> None:
         popup = getattr(self, "_script_popups", {}).get(role)
         if popup is None:
             return
         popup.delete(0, "end")
+        check_icon, spacer = self._r_script_check_images(popup)
         selected = self._script_vars[role].get()
         for label in self._r_script_options(role):
             if label == "Custom script":
@@ -937,7 +971,9 @@ class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
                 enabled = label in self._script_by_label[role]
             checked = label == selected and label in self._script_by_label[role]
             popup.add_command(
-                label=("✓ " if checked else "   ") + display,
+                label=display,
+                image=check_icon if checked else spacer,
+                compound="left",
                 state="normal" if enabled else "disabled",
                 command=lambda selected_label=label, selected_role=role: self._choose_r_script_option(
                     selected_role, selected_label
@@ -1161,11 +1197,10 @@ class AIDaSApp(ctk.CTk):
         self._normal_logical_client_size = None
         self._pending_normal_client_size = None
         self._normal_size_restore_after_id = None
-        tk.Misc.bind_all(
+        bind_all_widget_event(
             self,
             "<Map>",
             self._on_interface_widget_mapped,
-            add="+",
         )
         self.bind(
             "<Configure>",

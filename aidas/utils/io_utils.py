@@ -91,18 +91,41 @@ def read_tiff(filepath):
     img = Image.open(filepath)
     n_frames = getattr(img, "n_frames", 1)
 
-    frames = []
-    for i in range(n_frames):
-        img.seek(i)
-        arr = np.array(img)
-        # Pillow may return big-endian dtype ('>u2') — convert to native
-        if arr.dtype.byteorder not in ("=", "|", _NATIVE_ENDIAN):
-            arr = arr.astype(arr.dtype.newbyteorder("="))
-        frames.append(arr)
-
-    if len(frames) == 1:
-        return frames[0]
-    return np.stack(frames, axis=0)
+    frames = None
+    stack = None
+    arr = None
+    try:
+        for i in range(n_frames):
+            img.seek(i)
+            arr = np.array(img) if n_frames == 1 else np.asarray(img)
+            # Pillow may return big-endian dtype ('>u2') — convert to native.
+            if arr.dtype.byteorder not in ("=", "|", _NATIVE_ENDIAN):
+                arr = arr.astype(arr.dtype.newbyteorder("="))
+            if n_frames == 1:
+                return arr
+            if i == 0:
+                try:
+                    stack = np.empty((n_frames, *arr.shape), dtype=arr.dtype)
+                except MemoryError:
+                    # Retain the original later-page/error behavior if allocation fails.
+                    frames = [arr]
+                    continue
+            if frames is not None:
+                frames.append(arr)
+            elif arr.shape == stack.shape[1:] and arr.dtype == stack.dtype:
+                stack[i] = arr
+            else:
+                # Preserve np.stack's promotion and shape errors for mixed pages.
+                frames = [stack[index].copy() for index in range(i)]
+                stack = None
+                frames.append(arr)
+        if stack is not None:
+            return stack
+        return np.stack(frames or [], axis=0)
+    except BaseException:
+        # An error traceback must not retain an unused preallocated volume.
+        frames = stack = arr = None
+        raise
 
 
 # ════════════════════════════════════════════════════════════════════════════
