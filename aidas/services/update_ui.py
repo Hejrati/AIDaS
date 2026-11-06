@@ -146,8 +146,8 @@ class UpdateController:
         self._progress_dialog: DownloadProgressDialog | None = None
 
     def check_automatically(self) -> None:
-        """Check once per app launch, independently of earlier launches."""
-        if self._automatic_check_started or not self.preferences.get("check_for_updates", True):
+        """Always check once per launch, including with legacy opt-out preferences."""
+        if self._automatic_check_started:
             return
         self._automatic_check_started = True
         self._begin_check(manual=False)

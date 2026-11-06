@@ -138,6 +138,26 @@ class ReleaseSelectionTests(unittest.TestCase):
         release = select_available_update([release_payload("2.0.0")], "2.0.0")
         self.assertIsNone(release)
 
+    def test_old_and_current_releases_skip_checksum_fetches_before_a_newer_release(self):
+        payloads = []
+        for version in ("1.5.4", "1.5.5"):
+            payload = release_payload(version)
+            installer = payload["assets"][0]
+            installer["digest"] = None
+            payload["assets"].append({
+                "name": installer["name"] + ".sha256",
+                "browser_download_url": installer["browser_download_url"] + ".sha256",
+            })
+            payloads.append(payload)
+        payloads.append(release_payload("1.5.6"))
+
+        with mock.patch("aidas.services.update_service._fetch_checksum") as checksum:
+            release = select_available_update(payloads, "1.5.5")
+
+        checksum.assert_not_called()
+        self.assertIsNotNone(release)
+        self.assertEqual(release.version, Version("1.5.6"))
+
     def test_installer_asset_must_match_release_version(self):
         payload = release_payload("1.5.6")
         payload["assets"][0]["name"] = "AIDaS-Setup-1.5.5.exe"

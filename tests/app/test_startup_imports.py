@@ -53,6 +53,7 @@ class StartupImportTests(unittest.TestCase):
             import customtkinter as ctk
             from aidas.app import AIDaSApp
             from aidas.core.config import Config
+            from aidas.services.update_ui import UpdateController
             from aidas.steps.step2_annotate import Step2Frame
             from aidas.steps.step3_flatten import Step3Frame
             from aidas.ui.splash import SplashWindow
@@ -107,7 +108,8 @@ class StartupImportTests(unittest.TestCase):
                 assert self._splash.percent_var.get() == f'{value:.0f}%'
                 stages.append(value)
 
-            with tempfile.TemporaryDirectory() as directory:
+            with tempfile.TemporaryDirectory() as directory, patch.object(
+                    UpdateController, 'check_automatically'):
                 Config.CONFIG_DIR = Path(directory)
                 Config.CONFIG_FILE = Path(directory) / 'preferences.json'
                 for mode in ('Modern', 'Classic'):
@@ -115,8 +117,7 @@ class StartupImportTests(unittest.TestCase):
                     exposed.clear()
                     tutorials.clear()
                     unmapped.clear()
-                    Config.CONFIG_FILE.write_text(json.dumps({
-                        'interface_mode': mode, 'check_for_updates': False}))
+                    Config.CONFIG_FILE.write_text(json.dumps({'interface_mode': mode}))
                     with patch.object(ctk.CTk, '__init__', root_init), patch.object(
                             ctk.CTkToplevel, '__init__', window_init), patch.object(
                             Step2Frame, '_start_ai_device_probe'), patch.object(

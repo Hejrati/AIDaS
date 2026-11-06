@@ -576,9 +576,6 @@ class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
         self._initial_appearance_mode = normalize_appearance_mode(appearance_mode)
         self._scripts_initialized = False
         self._pending_script_roles = set()
-        self.update_checks_var = tk.BooleanVar(
-            master=self, value=bool(preferences.get("check_for_updates", True)),
-        )
         self.sdb_default_vars = {
             key: tk.StringVar(master=self, value=str(preferences.get(key, default)))
             for key, default in (("sdb_raw_width", 768), ("sdb_raw_height", 1200), ("sdb_raw_offset", 1050))
@@ -1087,7 +1084,6 @@ class SettingsDialog(SettingsLayoutMixin, ctk.CTkToplevel):
         self._apply_annotation_tutorial_setting()
         self._apply_manual_segmentation_setting()
         width, height, offset, little_endian = sdb_defaults
-        self._preferences.set("check_for_updates", bool(self.update_checks_var.get()))
         remembered_choice = self._preferences.get("step1_bright_pixel_choice", "")
         if self.bright_pixel_confirmation_var.get():
             remembered_choice = ""

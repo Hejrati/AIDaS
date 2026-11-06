@@ -127,7 +127,6 @@ class ConfigPersistenceTests(unittest.TestCase):
                 self.assertEqual(config.get("r_main_script_path"), "")
                 self.assertEqual(config.get("r_output_script_path"), "")
                 self.assertEqual(config.get("custom_future_setting"), "keep me")
-                self.assertTrue(config.get("check_for_updates"))
                 for key, value in STEP4_AUTO_DETECTION_DEFAULTS.items():
                     self.assertEqual(config.get(key), value)
                 config.set("last_successful_update_check", 123)
@@ -138,6 +137,25 @@ class ConfigPersistenceTests(unittest.TestCase):
             self.assertEqual(saved["custom_future_setting"], "keep me")
             self.assertEqual(saved["last_successful_update_check"], 123)
             self.assertEqual(list(config_dir.glob("*.tmp")), [])
+
+    def test_legacy_update_opt_out_is_discarded_without_changing_other_preferences(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            config_file = config_dir / "preferences.json"
+            config_file.write_text(
+                json.dumps({"check_for_updates": False, "interface_mode": "Classic"}),
+                encoding="utf-8",
+            )
+            with mock.patch.object(Config, "CONFIG_DIR", config_dir), mock.patch.object(
+                Config, "CONFIG_FILE", config_file,
+            ):
+                config = Config()
+                self.assertNotIn("check_for_updates", config.prefs)
+                self.assertEqual(config.get("interface_mode"), "Classic")
+                config.set("last_successful_update_check", 123)
+            saved = json.loads(config_file.read_text(encoding="utf-8"))
+            self.assertNotIn("check_for_updates", saved)
+            self.assertEqual(saved["interface_mode"], "Classic")
 
     def test_manual_segmentation_preference_survives_reloading(self):
         with tempfile.TemporaryDirectory() as temp_dir:

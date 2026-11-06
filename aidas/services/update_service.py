@@ -278,13 +278,18 @@ def select_available_update(
     candidates: list[ReleaseInfo] = []
     metadata_errors: list[UpdateError] = []
     for payload in payloads:
-        if not include_prereleases:
-            try:
-                tagged_version = _version_from_tag(str(payload.get("tag_name") or ""))
-            except UpdateError:
-                tagged_version = None
-            if payload.get("prerelease") or (tagged_version is not None and tagged_version.is_prerelease):
-                continue
+        if payload.get("draft"):
+            continue
+        try:
+            tagged_version = _version_from_tag(str(payload.get("tag_name") or ""))
+        except UpdateError:
+            continue
+        # Older releases cannot be offered. Skip them before metadata validation,
+        # which may otherwise fetch a legacy checksum file over the network.
+        if tagged_version <= installed:
+            continue
+        if not include_prereleases and (payload.get("prerelease") or tagged_version.is_prerelease):
+            continue
         try:
             release = _release_from_payload(payload)
         except UpdateError as exc:
@@ -299,19 +304,9 @@ def select_available_update(
     if candidates:
         return max(candidates, key=lambda item: item.version)
     if metadata_errors:
-        # A malformed old release should not break update checks. Only surface
-        # metadata errors when no valid release can be evaluated at all.
-        parseable_versions = []
-        for payload in payloads:
-            try:
-                version = _version_from_tag(str(payload.get("tag_name") or ""))
-            except UpdateError:
-                pass
-            else:
-                if include_prereleases or not (payload.get("prerelease") or version.is_prerelease):
-                    parseable_versions.append(version)
-        if any(version > installed for version in parseable_versions):
-            raise metadata_errors[0]
+        # Only eligible newer releases reach metadata validation. Surface their
+        # errors when none of those releases is installable.
+        raise metadata_errors[0]
     return None
 
 

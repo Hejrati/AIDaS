@@ -186,6 +186,7 @@ class Step4BatchLoadingTests(unittest.TestCase):
             import numpy as np
             from aidas.app import AIDaSApp
             from aidas.core.config import Config
+            from aidas.services.update_ui import UpdateController
             from aidas.steps.step2_annotate import Step2Frame
             from aidas.steps import step4_analyze_isez as module
 
@@ -200,12 +201,13 @@ class Step4BatchLoadingTests(unittest.TestCase):
             with TemporaryDirectory() as directory:
                 config = Path(directory) / 'preferences.json'
                 config.write_text(json.dumps({
-                    'interface_mode': 'Modern', 'check_for_updates': False,
+                    'interface_mode': 'Modern',
                     'show_step2_annotation_tutorial': False,
                 }), encoding='utf-8')
                 with (
                     mock.patch.object(Config, 'CONFIG_DIR', Path(directory)),
                     mock.patch.object(Config, 'CONFIG_FILE', config),
+                    mock.patch.object(UpdateController, 'check_automatically'),
                     mock.patch.object(ctk.CTk, '__init__', hidden_initializer(ctk.CTk.__init__)),
                     mock.patch.object(ctk.CTkToplevel, '__init__', hidden_initializer(ctk.CTkToplevel.__init__)),
                     mock.patch.object(Step2Frame, '_start_ai_device_probe'),

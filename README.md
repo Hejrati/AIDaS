@@ -10,6 +10,11 @@ The easiest way to run AIDaS on Windows is to use the release installer:
 2. Run the installer, then launch AIDaS from the Start menu
 3. **No Python installation required!**
 
+AIDaS checks GitHub for updates every time it opens and prompts when a newer
+release is available. Declining an update leaves it available at the next launch.
+Automatic check failures do not interrupt users. Use **Help > Check for Updates**
+to retry at any time.
+
 ## Prerequisites for Running from Source
 
 This document lists what you need before running AIDaS as a Python application.

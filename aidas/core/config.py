@@ -101,7 +101,6 @@ class Config:
         "r_output_script_path": "",
         "r_main_script_defaults_version": 0,
         "r_output_script_defaults_version": 0,
-        "check_for_updates": True,
         "last_successful_update_check": 0,
         **STEP4_AUTO_DETECTION_DEFAULTS,
     }
@@ -144,6 +143,8 @@ class Config:
                     loaded = json.load(f)
                 if isinstance(loaded, dict):
                     prefs.update(loaded)
+                    # Every launch checks for updates, including legacy opt-outs.
+                    prefs.pop("check_for_updates", None)
                     if (
                         "step4_auto_confidence_percent" not in loaded
                         and "step4_auto_confidence" in loaded

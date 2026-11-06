@@ -13,6 +13,7 @@ import numpy as np
 
 from aidas.app import AIDaSApp
 from aidas.core.config import Config
+from aidas.services.update_ui import UpdateController
 from aidas.steps.step2_annotate import Step2Frame
 from aidas.steps.step4_analyze_isez import Step4Frame
 
@@ -197,11 +198,12 @@ class ImagePathStatusTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "preferences.json"
-            config.write_text(json.dumps({"interface_mode": "Modern", "check_for_updates": False,
+            config.write_text(json.dumps({"interface_mode": "Modern",
                                           "show_step2_annotation_tutorial": False}), encoding="utf-8")
             app = None
             with (mock.patch.object(Config, "CONFIG_DIR", Path(directory)),
                   mock.patch.object(Config, "CONFIG_FILE", config),
+                  mock.patch.object(UpdateController, "check_automatically"),
                   mock.patch.object(ctk.CTk, "__init__", transparent_init),
                   mock.patch.object(Step2Frame, "_start_ai_device_probe"),
                   mock.patch.object(Step4Frame, "_warm_auto_detection_tools")):

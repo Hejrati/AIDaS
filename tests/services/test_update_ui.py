@@ -37,7 +37,7 @@ class _Root:
 class UpdateControllerTests(unittest.TestCase):
     def setUp(self):
         self.root = _Root()
-        self.preferences = _Preferences(check_for_updates=True)
+        self.preferences = _Preferences()
         self.status = mock.Mock()
         self.controller = self.make_controller()
         self.dialogs = self.enterContext(mock.patch("aidas.services.update_ui.messagebox"))
@@ -91,26 +91,18 @@ class UpdateControllerTests(unittest.TestCase):
                 begin.assert_called_once_with(manual=False)
 
     def test_automatic_check_is_enabled_by_default_for_older_preferences(self):
-        self.preferences.pop("check_for_updates")
         with mock.patch.object(self.controller, "_begin_check") as begin:
             self.controller.check_automatically()
         begin.assert_called_once_with(manual=False)
 
-    def test_automatic_opt_out_keeps_manual_checks_available(self):
-        self.preferences["check_for_updates"] = False
-        with mock.patch.object(self.controller, "_begin_check") as begin:
-            self.controller.check_automatically()
-            begin.assert_not_called()
-            self.controller.check_now()
-        begin.assert_called_once_with(manual=True)
-
-    def test_an_opted_out_check_does_not_consume_a_later_enabled_check(self):
-        self.preferences["check_for_updates"] = False
-        with mock.patch.object(self.controller, "_begin_check") as begin:
-            self.controller.check_automatically()
-            self.preferences["check_for_updates"] = True
-            self.controller.check_automatically()
-        begin.assert_called_once_with(manual=False)
+    def test_legacy_opt_out_cannot_disable_launch_checks(self):
+        for value in (False, None, 0, ""):
+            with self.subTest(value=value):
+                self.preferences["check_for_updates"] = value
+                controller = self.make_controller()
+                with mock.patch.object(controller, "_begin_check") as begin:
+                    controller.check_automatically()
+                begin.assert_called_once_with(manual=False)
 
     def test_duplicate_automatic_calls_do_not_repeat_after_completion(self):
         with mock.patch("aidas.services.update_ui.threading.Thread") as thread_factory, mock.patch(
@@ -204,7 +196,7 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertFalse(self.controller._checking)
         self.status.assert_called_with("AIDaS 3.4.4a4 is up to date")
 
-    def test_offline_automatic_check_is_quiet_and_does_not_record_success(self):
+    def test_failed_automatic_check_is_quiet_and_does_not_record_success(self):
         self.preferences["last_successful_update_check"] = 123
         with mock.patch("aidas.services.update_ui.threading.Thread") as thread_factory, mock.patch(
             "aidas.services.update_ui.find_available_update", side_effect=OSError("offline"),
@@ -214,6 +206,7 @@ class UpdateControllerTests(unittest.TestCase):
         self.assertEqual(self.preferences["last_successful_update_check"], 123)
         self.assertFalse(self.controller._checking)
         self.status.assert_called_with("Update check could not be completed")
+        self.dialogs.showwarning.assert_not_called()
         self.dialogs.showerror.assert_not_called()
         self.dialogs.showinfo.assert_not_called()
         self.dialogs.askyesno.assert_not_called()
@@ -225,7 +218,24 @@ class UpdateControllerTests(unittest.TestCase):
             self.controller.check_now()
             self.run_worker(thread_factory)
         self.dialogs.showerror.assert_called_once()
+        self.dialogs.showwarning.assert_not_called()
         self.assertIn("offline", self.dialogs.showerror.call_args.args[1])
+
+    def test_failed_launch_checks_again_and_prompts_for_update_on_next_launch(self):
+        release = SimpleNamespace(version_text="3.4.4a5")
+        with mock.patch("aidas.services.update_ui.threading.Thread") as thread_factory, mock.patch(
+            "aidas.services.update_ui.find_available_update", side_effect=[OSError("offline"), release],
+        ) as discover, mock.patch.object(UpdateController, "_offer_release") as offer:
+            self.controller.check_automatically()
+            self.run_worker(thread_factory)
+            next_launch = self.make_controller()
+            next_launch.check_automatically()
+            self.run_worker(thread_factory)
+        self.assertEqual(discover.call_count, 2)
+        self.dialogs.showwarning.assert_not_called()
+        self.dialogs.showerror.assert_not_called()
+        self.dialogs.showinfo.assert_not_called()
+        offer.assert_called_once_with(release)
 
     def test_newer_release_is_offered_after_ui_delivery(self):
         release = SimpleNamespace(version_text="3.4.4a5")
@@ -253,6 +263,31 @@ class UpdateControllerTests(unittest.TestCase):
             self.controller._offer_release(release)
         self.browser.open_new_tab.assert_called_once_with(release.page_url)
         download.assert_not_called()
+
+    def test_declined_update_prompts_again_on_every_launch(self):
+        release = SimpleNamespace(
+            version_text="3.4.4a5", notes="Changes", page_url="https://github.com/Hejrati/AIDaS/releases",
+        )
+        for packaged in (False, True):
+            with self.subTest(packaged=packaged), mock.patch(
+                "aidas.services.update_ui.supports_in_app_install", return_value=packaged,
+            ), mock.patch("aidas.services.update_ui.threading.Thread") as thread_factory, mock.patch(
+                "aidas.services.update_ui.find_available_update", return_value=release,
+            ) as discover, mock.patch.object(UpdateController, "_begin_download") as download:
+                self.dialogs.reset_mock()
+                self.preferences["check_for_updates"] = False
+                for _ in range(2):
+                    controller = self.make_controller()
+                    controller.check_automatically()
+                    self.run_worker(thread_factory)
+                self.assertEqual(discover.call_count, 2)
+                self.assertEqual(self.dialogs.askyesno.call_count, 2)
+                prompt = self.dialogs.askyesno.call_args
+                self.assertEqual(prompt.args[0], "AIDaS Update Available")
+                self.assertIn(release.version_text, prompt.args[1])
+                self.assertIs(prompt.kwargs["parent"], self.root)
+                download.assert_not_called()
+                self.browser.open_new_tab.assert_not_called()
 
     def test_closing_before_worker_finishes_skips_scheduling_and_dialogs(self):
         release = SimpleNamespace(version_text="3.4.4a5")

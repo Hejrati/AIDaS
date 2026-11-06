@@ -12,6 +12,7 @@ import pstats
 import sys
 import tempfile
 import time
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -20,12 +21,13 @@ from aidas.app import AIDaSApp
 
 
 def main():
-    with tempfile.TemporaryDirectory(prefix="aidas-ui-profile-") as directory:
+    with tempfile.TemporaryDirectory(prefix="aidas-ui-profile-") as directory, patch(
+        "aidas.services.update_ui.UpdateController.check_automatically"
+    ):
         Config.CONFIG_DIR = Path(directory)
         Config.CONFIG_FILE = Config.CONFIG_DIR / "preferences.json"
         Config.CONFIG_FILE.write_text(json.dumps({
             "interface_mode": "Classic" if "--classic" in sys.argv else "Modern",
-            "check_for_updates": False,
         }), encoding="utf-8")
         app = None
         try:

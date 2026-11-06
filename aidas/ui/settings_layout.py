@@ -317,11 +317,12 @@ class SettingsLayoutMixin:
         self._page_field(appearance, 1, "Appearance", self.appearance_menu)
         self._sync_interface_controls(self._presentation_mode, self._initial_appearance_mode)
         updates = self._page_section(page, "Application Updates", row=3)
-        self.update_switch = self._page_check(
-            updates, "Check for updates whenever AIDaS opens", self.update_checks_var,
-            self._mark_dirty,
-        )
-        self.update_switch.grid(row=0, column=0, columnspan=2, sticky="w", pady=6)
+        self._page_label(
+            updates,
+            "AIDaS automatically checks for updates every time it opens and prompts you "
+            "when an update is available.",
+            wraplength=580,
+        ).grid(row=0, column=0, sticky="w", pady=6)
 
     def _build_step1_page(self, page):
         parameters = self._page_section(page, "Default SDB Image Parameters", row=2)

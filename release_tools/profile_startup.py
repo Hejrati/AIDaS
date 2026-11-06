@@ -5,6 +5,7 @@ Uses temporary preferences and transparent windows. Includes application module
 imports; timings are source-run measurements with cProfile overhead.
 """
 import cProfile
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import pstats
@@ -31,12 +32,11 @@ def main():
         window_init(self, *args, **kwargs)
         self.attributes('-alpha', 0)
 
-    with tempfile.TemporaryDirectory(prefix='aidas-startup-profile-') as directory:
+    with tempfile.TemporaryDirectory(prefix='aidas-startup-profile-') as directory, ExitStack() as patches:
         Config.CONFIG_DIR = Path(directory)
         Config.CONFIG_FILE = Path(directory) / 'preferences.json'
         Config.CONFIG_FILE.write_text(json.dumps({
             'interface_mode': 'Classic' if '--classic' in sys.argv else 'Modern',
-            'check_for_updates': False,
         }), encoding='utf-8')
         profiler = cProfile.Profile()
         stages = []
@@ -45,6 +45,7 @@ def main():
         profiler.enable()
         from aidas.app import AIDaSApp
         imported = time.perf_counter()
+        patches.enter_context(patch('aidas.services.update_ui.UpdateController.check_automatically'))
         original_progress = AIDaSApp._set_splash_progress
 
         def progress(self, value, message):
