@@ -54,6 +54,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self._running = False
         self._output_user_selected = False
         self._pending_step4_handoffs = []
+        self._automatic_step4_exports = {}
+        self._pending_automatic_export = None
         self._poll_after_id = None
         self._polling_compile_events = False
         self._handling_completion = False
@@ -133,7 +135,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
     def start_from_step4(
         self, folder: str | os.PathLike | None = None, *, _generation=None,
     ) -> None:
-        """Prepare the Step 4 folders; only the Create Excel File button runs work."""
+        """Prepare Step 4 folders and export each completed run automatically."""
         if self.__dict__.get("_closing", False):
             return
         source = self.source_step
@@ -160,15 +162,50 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             getattr(source, "_step5_handoff_generation", 0)
             if _generation is None else _generation
         )
+        handoff = (os.path.normcase(str(root)), generation)
+        automatic_exports = self.__dict__.setdefault("_automatic_step4_exports", {})
+        completion_ready = getattr(source, "_completion_step5_handoff_ready", None)
+        if _generation is None and callable(completion_ready) and completion_ready():
+            automatic_exports.setdefault(handoff, False)
+        if automatic_exports.get(handoff, False):
+            # Completion callbacks, retained Step 4 buttons, and folder aliases
+            # must not export the same completed run repeatedly.
+            return
         if self._running or self.__dict__.get("_handling_completion", False):
             pending = self.__dict__.setdefault("_pending_step4_handoffs", [])
             # Keep the latest requested folder without changing the inputs of
-            # the user's active run. Applying it later only updates the view.
+            # the user's active run. Completed runs retain their export request
+            # even if Step 4 moves on before this compiler becomes available.
             pending[:] = [(root, generation)]
             self._ensure_event_poll()
             return
         self.__dict__.get("_pending_step4_handoffs", []).clear()
-        self.set_input_folder(root)
+        if self.set_input_folder(root) and handoff in automatic_exports:
+            self._pending_automatic_export = handoff
+            self._try_automatic_export()
+
+    def _try_automatic_export(self) -> None:
+        """Start a completed Step 4 export only after its folder scan succeeds."""
+        handoff = self.__dict__.get("_pending_automatic_export")
+        if (handoff is None or self._running
+                or self.__dict__.get("_handling_completion", False)
+                or self.__dict__.get("_closing", False)):
+            return
+        root, _generation = handoff
+        folder = self._existing_directory(self.input_var.get())
+        if folder is None or os.path.normcase(str(folder)) != root:
+            self._pending_automatic_export = None
+            return
+        if self.__dict__.get("directory_view") is not None:
+            scan_path = self.__dict__.get("_input_scan_path")
+            if (scan_path is None or os.path.normcase(str(scan_path)) != root
+                    or self.__dict__.get("_input_scan_state") != "ready"):
+                return
+        self._pending_automatic_export = None
+        # Consume before starting: even a synchronous completion callback or a
+        # failed worker must leave retries under the user's Create Excel button.
+        self._automatic_step4_exports[handoff] = True
+        self._run_clicked()
 
     def _build_ui(self) -> None:
         self.build_standard_layout(
@@ -434,6 +471,10 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
                 self._scan_message_in_status = False
                 self.status_var.set(f"Ready to create an Excel file from measurements in {directory}.")
         self._update_run_button_state()
+        if state == "ready":
+            self._try_automatic_export()
+        elif state == "error":
+            self._pending_automatic_export = None
 
     def set_input_folder(self, folder: str | os.PathLike | None) -> bool:
         if getattr(self, "_running", False):
@@ -441,6 +482,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         path = self._existing_directory(folder)
         if path is None:
             return False
+        self._pending_automatic_export = None
         self._accepted_input_folder = str(path)
         self.input_var.set(str(path))
         current_output = self.output_var.get().strip()
@@ -720,6 +762,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
 
     def destroy(self):
         self._closing = True
+        self._pending_automatic_export = None
         self.__dict__.get("_pending_step4_handoffs", []).clear()
         poll = self.__dict__.get("_poll_after_id")
         self._poll_after_id = None

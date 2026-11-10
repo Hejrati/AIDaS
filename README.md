@@ -171,7 +171,12 @@ For each profile, AIDaS performs these deterministic steps:
 High-confidence detections are saved in memory and shown with green checkmarks.
 Low-confidence, invalid, or cross-ROI outlier detections are shown as amber
 `!` cells and are not considered complete. ROI 21 is always shown for manual
-review unless it was already confirmed before automatic detection. Click an amber cell to open its
+review unless it was already confirmed before automatic detection. After detection,
+the enlarged MCP/AR profile editor opens at ROI 1, or the first available peripheral
+profile. Use **Previous** and **Next** to review the profiles and **Apply** or
+**Save and Exit** to keep corrections. At the last peripheral profile, **Now do
+foveola** closes the editor and selects the manual foveola ROI (ROI 21).
+Click an amber cell to open its
 zoomed profile, click the exact sample or drag either boundary line, and apply the correction. Manual
 zoom edits do not snap to a nearby minimum. **Build
 stack** remains disabled until every amber result has been reviewed. The final
@@ -251,17 +256,18 @@ a clear error rather than
 silently dropping data.
 
 After all selected Step 4 stacks finish saving, Step 5 opens with the measurement
-root, default output path, and folder tree prepared. **Go to Step 5** also
-transfers the measurement root for all Step 4 tabs. Review the input folder,
-output path, and fovea option, then press **Create Excel File** to generate the
-workbook. Opening Step 5, receiving folders, and refreshing the tree do not
-create an Excel file. Step 5 keeps the selected SDB or subject folder. A handoff from
+root, output path, and folder tree prepared and creates the final workbook
+automatically after the folder scan completes. No extra confirmation or button
+press is required. **Go to Step 5** also transfers the measurement root for all
+Step 4 tabs; completed results are exported once per completed stack build.
+Simply opening Step 5, browsing to a folder, or refreshing the tree does not
+start an export. Use **Create Excel File** to rerun an export after changing
+the paths or fovea option. Step 5 keeps the selected SDB or subject folder. A handoff from
 inside a nasal or temporal folder uses its containing subject. A batch keeps
 its shared input root.
 The default output
 is `rrMCPAR_ELMRPE_ONL.xlsx` in that root; an explicitly chosen output path and
-fovea option are preserved. Each compilation starts only when **Create Excel
-File** is pressed. The workbook contains `rrMCP-AR`, `ELM-RPE`, and `Extraction_log`;
+fovea option are preserved. The workbook contains `rrMCP-AR`, `ELM-RPE`, and `Extraction_log`;
 the log records each source path and extraction status.
 
 The Step 5 workspace shows an expandable folder-tree canvas for the currently

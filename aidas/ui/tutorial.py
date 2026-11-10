@@ -219,12 +219,12 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             ),
             (
                 "For ROIs 1-20, automatic detection smooths each profile with a degree-2 Savitzky-Golay filter, finds two minima around an internal maximum, validates peak prominence and quadratic fit, and checks agreement across those ROIs. High-confidence results are accepted; ROI 21 and other amber ! cells require review.",
-                "Review the grid previews and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, click the exact sample or drag the Start or End line in the zoomed editor, and use Apply changes to confirm it. Zoomed manual edits do not snap to a nearby minimum.",
+                "The enlarged MCP/AR profile editor opens automatically at ROI 1, or the first available peripheral profile, after detection. Use Previous and Next to review the profiles and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, click the exact sample or drag the Start or End line in the zoomed editor, and use Apply changes to confirm it. Zoomed manual edits do not snap to a nearby minimum. At the last peripheral profile, use Now do foveola to close the editor and select the manual foveola ROI (ROI 21). Apply or save corrections before continuing.",
             ),
             (
                 "When all 21 ROIs are complete, Build stack becomes available. Folder tab names stay fixed while you work.",
                 "The build shows a wait message while saving ROI_to_move_stck.tif with its measurements and MAX_Stack.tif. After saving, Go to next tab becomes available while folders remain; Go to Step 5 becomes available when all are complete. Saved tabs also provide Open results folder and Restart this file.",
-                "After all stacks finish saving, Step 5 opens with the measurement root, output path, and folder tree prepared. Go to Step 5 also transfers the measurement folders. Press Create Excel File when ready to generate the workbook.",
+                "After all stacks finish saving, Step 5 opens with the measurement root, output path, and folder tree prepared, then creates the final Excel workbook automatically after checking the folders. No extra confirmation is needed. Go to Step 5 also transfers the measurement folders.",
             ),
         ),
         tips=(
@@ -252,10 +252,10 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         ),
         stage_points=(
             (
-                "Use the Step 4 handoff or Go to Step 5 to prepare the measurement folders, output path, and folder tree. Opening this workspace or receiving folders does not create an Excel file. You can also browse to a folder containing group and subject folders at any depth.",
+                "When all selected Step 4 stacks have finished saving, the handoff prepares the measurement folders, output path, and folder tree and starts compilation automatically after the folder scan. Each completed stack build triggers one export. Opening this workspace or browsing to another folder alone does not create an Excel file.",
                 "Review the Excel file path and choose a different .xlsx destination if needed.",
                 "Choose whether to include the fovea RPEtoOLM row in the ELM-RPE sheet.",
-                "Press Create Excel File to start compilation. A workbook is generated only when this button is pressed; review the paths and options before each run.",
+                "Use Create Excel File to rerun compilation after changing the paths or options, or to compile an existing folder of measurements selected through Browse.",
             ),
             (
                 "AIDaS reads current measurements from ROI_to_move_stck.tif and accepts compatible legacy workbooks, then reads the Step 3 ELM-RPE exports from cleaned LIGHT2 Excel tables. Original LIGHT text exports stay unchanged. The nasal/temporal parent folder supplies the full subject ID. Its parent folder supplies the group name, including custom names or LE and RE. Folders without Step 4 measurements are ignored.",

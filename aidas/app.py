@@ -2507,7 +2507,7 @@ class AIDaSApp(ctk.CTk):
         step4.open_batch_folders(folders)
 
     def _on_step4_continue_to_step5(self, folder=None) -> None:
-        """Open Step 5 with measurement folders prepared for an explicit run."""
+        """Open Step 5 and export measurements when the Step 4 run is complete."""
 
         step5 = self.__dict__.get("step5")
         if step5 is None:

@@ -1,4 +1,4 @@
-"""Keep Step 5 handoffs passive and manual export workers bounded by lifecycle."""
+"""Bound automatic completed-run exports and manual workers by lifecycle."""
 
 from pathlib import Path
 import queue
@@ -66,6 +66,90 @@ class Step5LoopGuardTests(unittest.TestCase):
 
     def _finish(self, frame):
         frame._compilation_succeeded(SimpleNamespace(output_path=Path(frame.output_var.get())))
+
+    def test_completed_handoff_exports_once_across_aliases_and_completion_reentry(self):
+        subject = self.root / "Subject_A"
+        side = subject / "nasal"
+        side.mkdir(parents=True)
+        frame = self._frame()
+        frame.source_step._completion_step5_handoff_ready = lambda: True
+        frame.start_from_step4(side)
+        self.assertTrue(frame._running)
+        for folder in (subject, str(subject / "."), side):
+            frame.start_from_step4(folder)
+        frame.on_compilation_complete = lambda _result: frame.start_from_step4(side)
+
+        self._finish(frame)
+        for _ in range(4):
+            frame.start_from_step4(subject)
+            frame._poll_events()
+
+        self.assertEqual(self.thread_factory.call_count, 1)
+        self.assertFalse(frame._running)
+        self.assertEqual(frame._pending_step4_handoffs, [])
+        self.assertIn("Excel file saved", frame.status_var.get())
+        self.popup.assert_not_called()
+
+    def test_each_completed_step4_generation_exports_automatically(self):
+        frame = self._frame()
+        frame.source_step._completion_step5_handoff_ready = lambda: True
+
+        for generation in range(8):
+            frame.source_step._step5_handoff_generation = generation
+            frame.start_from_step4(self.root)
+            self.assertEqual(self.thread_factory.call_count, generation + 1)
+            self.assertTrue(frame._running)
+            self._finish(frame)
+            frame._poll_events()
+
+        self.assertFalse(frame._running)
+        self.popup.assert_not_called()
+
+    def test_latest_completed_busy_handoff_exports_its_captured_generation(self):
+        frame = self._frame()
+        frame.source_step._completion_step5_handoff_ready = lambda: True
+        frame.start_from_step4(self.root)
+        first = self.root / "first"
+        latest = self.root / "latest"
+        first.mkdir()
+        latest.mkdir()
+        frame.source_step._step5_handoff_generation = 1
+        frame.start_from_step4(first)
+        frame.source_step._step5_handoff_generation = 2
+        frame.start_from_step4(latest)
+        frame.start_from_step4(latest)
+        frame.source_step._step5_handoff_generation = 3
+        frame.source_step._completion_step5_handoff_ready = lambda: False
+        self.assertEqual(self.thread_factory.call_count, 1)
+
+        self._finish(frame)
+        frame._poll_events()
+
+        self.assertEqual(self.thread_factory.call_count, 2)
+        self.assertTrue(frame._running)
+        self.assertEqual(Path(frame.input_var.get()), latest)
+        self._finish(frame)
+        frame._poll_events()
+        frame.start_from_step4(latest, _generation=2)
+        self.assertEqual(self.thread_factory.call_count, 2)
+        self.assertEqual(frame._pending_step4_handoffs, [])
+
+    def test_failed_automatic_export_does_not_retry_on_handoffs_or_polls(self):
+        frame = self._frame()
+        frame.source_step._completion_step5_handoff_ready = lambda: True
+        frame.start_from_step4(self.root)
+        frame._events.put(("error", RuntimeError("Cannot save workbook")))
+        frame._poll_events()
+        for _ in range(4):
+            frame.start_from_step4(self.root)
+            frame._poll_events()
+
+        self.assertEqual(self.thread_factory.call_count, 1)
+        self.assertFalse(frame._running)
+        self.popup.assert_called_once()
+        frame._run_clicked()
+        self.assertEqual(self.thread_factory.call_count, 2)
+        self.assertTrue(frame._running)
 
     def test_repeated_handoffs_never_start_a_worker_or_an_idle_poll(self):
         frame = self._frame()

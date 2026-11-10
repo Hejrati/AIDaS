@@ -133,6 +133,7 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         frame._refresh_roi_list = mock.Mock()
         frame._select_roi_in_list = mock.Mock()
         frame._render_current_roi = mock.Mock()
+        frame._open_automatic_profile_review = mock.Mock()
         frame._start_background_worker = lambda worker: worker()
         frame.after = lambda _delay, callback: callback()
         custom_parameters = dict(STEP4_AUTO_DETECTION_DEFAULTS)
@@ -175,6 +176,8 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         self.assertEqual(frame.current_roi_idx, 1)
         self.assertIn("amber", frame.status_var.value)
         self.assertFalse(frame._auto_detecting)
+        self.assertTrue(frame._automatic_profile_review_ready)
+        frame._open_automatic_profile_review.assert_called_once_with()
         self.assertEqual(
             detect.call_args.kwargs,
             {
@@ -210,6 +213,7 @@ class Step4AutomaticBoundaryDetectionTests(unittest.TestCase):
         frame._refresh_roi_list = mock.Mock()
         frame._select_roi_in_list = mock.Mock()
         frame._render_current_roi = mock.Mock()
+        frame._open_automatic_profile_review = mock.Mock()
         frame._start_background_worker = lambda worker: worker()
         frame.after = lambda _delay, callback: callback()
 

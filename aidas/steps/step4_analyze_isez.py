@@ -1808,6 +1808,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         saved_adjust_bounds: bool | None = None,
         navigation_indices: list[int] | None = None,
         on_navigate=None,
+        on_foveola=None,
+        foveola_after_index: int | None = None,
     ):
         super().__init__(owner)
         self.withdraw()
@@ -1824,6 +1826,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._on_save_callback = on_save
         self._on_close_callback = on_close
         self._on_navigate_callback = on_navigate
+        self._on_foveola_callback = on_foveola
+        self._foveola_after_index = foveola_after_index
         self._navigation_indices = sorted(set(navigation_indices or [self.roi_index]))
         self._profile_drafts = {}
         self._roi_suffix = str(roi_suffix)
@@ -1982,6 +1986,29 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.previous_plot_button.state(["!disabled"] if enabled and previous else ["disabled"])
         self.next_plot_button.state(["!disabled"] if enabled and following else ["disabled"])
         self.plot_number_label.configure(text=f"ROI {self._roi_suffix}")
+        button = self.__dict__.get("cancel_button")
+        if button is not None:
+            foveola_action = (
+                self.__dict__.get("_on_foveola_callback") is not None
+                and self.roi_index == self.__dict__.get("_foveola_after_index")
+            )
+            button.configure(
+                text="Now do foveola" if foveola_action else "Cancel",
+                command=self._continue_to_foveola if foveola_action else self.close,
+                width=156 if foveola_action else 104,
+            )
+            button.set_variant("success" if foveola_action else "danger")
+            button.state(["disabled"] if self._actions_busy else ["!disabled"])
+
+    def _continue_to_foveola(self) -> None:
+        """Dismiss the final peripheral review and select the manual fovea."""
+        if self._actions_busy or self._closing:
+            return
+        callback = self.__dict__.get("_on_foveola_callback")
+        if callback is None or self.roi_index != self.__dict__.get("_foveola_after_index"):
+            return
+        self.close()
+        callback()
 
     def _navigate_profile(self, direction: int) -> None:
         if self._actions_busy or self._on_navigate_callback is None:
@@ -2546,6 +2573,8 @@ class Step4Frame(SidebarStepFrame):
         self._current_profile = None
         self._profile_zoom_dialog = None
         self._opening_profile_zoom = False
+        self._automatic_profile_review_ready = False
+        self._automatic_profile_review_opened = False
         self._last_results_dir = None
         self._stack_building = False
         self._stack_build_complete = False
@@ -3180,6 +3209,8 @@ class Step4Frame(SidebarStepFrame):
         self._current_profile = None
         self._last_results_dir = None
         self._stack_build_complete = False
+        self._automatic_profile_review_ready = False
+        self._automatic_profile_review_opened = False
         if self.empty_placeholder is not None:
             try:
                 self.empty_placeholder.destroy()
@@ -3341,6 +3372,8 @@ class Step4Frame(SidebarStepFrame):
         self.profile_clicks.clear()
         self._last_results_dir = None
         self._current_profile = None
+        self._automatic_profile_review_ready = False
+        self._automatic_profile_review_opened = False
         self.stats_var.set("")
         self.current_roi_idx = 0
         self.start_var.set("")
@@ -3351,6 +3384,8 @@ class Step4Frame(SidebarStepFrame):
             state = self.batch_roi_tab_states.get(tab_key)
             if state is not None:
                 state["complete"] = False
+                state["_automatic_profile_review_ready"] = False
+                state["_automatic_profile_review_opened"] = False
         self._refresh_roi_list()
         self._select_roi_in_list()
         if self.image is not None:
@@ -3662,6 +3697,7 @@ class Step4Frame(SidebarStepFrame):
                 self._batch_roi_open_cancel = None
                 loading_surface._step4_progress.set(1.0)
                 self._hide_batch_roi_loading_canvas()
+                self._open_automatic_profile_review()
 
         def _detect_one_file(item):
             key, job_path = item
@@ -3811,6 +3847,7 @@ class Step4Frame(SidebarStepFrame):
                 state["auto_detection_reviews"] = reviews
                 state["roi_clicks"] = roi_clicks
                 state["roi_adjust_bounds"] = adjust
+                state["_automatic_profile_review_ready"] = True
                 if not protected and not state.get("profile_clicks"):
                     state["current_roi_idx"] = int(result.current_roi_idx)
                     state["profile_clicks"] = []
@@ -4110,6 +4147,7 @@ class Step4Frame(SidebarStepFrame):
         )
         self._refresh_completion_notice_progress()
         self._update_continue_to_step5_button_state()
+        self._open_automatic_profile_review()
         return True
 
     def _close_batch_roi_tab(self, notebook, tab) -> None:
@@ -4273,6 +4311,9 @@ class Step4Frame(SidebarStepFrame):
             f"Loaded {self.current_path}. {self._line_positioning_hint()}"
         )
         self._update_continue_to_step5_button_state()
+
+        if restore_state is not None:
+            self._open_automatic_profile_review()
 
     def _set_slice_zero(self, *, render: bool = True) -> None:
         if self.volume is None:
@@ -5048,6 +5089,9 @@ class Step4Frame(SidebarStepFrame):
                 return
             available = [candidate for candidate in range(len(self.rois))
                          if self._roi_overview_result(candidate) is not None]
+            peripheral = [candidate for candidate in available
+                          if candidate < AUTO_MANUAL_ONLY_ROI_INDEX]
+            foveola_after = max(peripheral) if peripheral and len(self.rois) > AUTO_MANUAL_ONLY_ROI_INDEX else None
             self._profile_zoom_dialog = Step4ProfileZoomDialog(
                 self, **options,
                 navigation_indices=available,
@@ -5056,6 +5100,8 @@ class Step4Frame(SidebarStepFrame):
                 on_apply=self._apply_profile_zoom_clicks,
                 on_save=self._save_profile_zoom_clicks,
                 on_close=self._profile_zoom_closed,
+                on_foveola=self._continue_to_foveola if foveola_after is not None else None,
+                foveola_after_index=foveola_after,
             )
         except Exception as exc:
             self._profile_zoom_dialog = None
@@ -5064,6 +5110,53 @@ class Step4Frame(SidebarStepFrame):
             self._opening_profile_zoom = False
         if error is not None:
             messagebox.showerror("Profile Detail", f"Could not open the detailed profile.\n{error}", parent=self)
+
+    def _open_automatic_profile_review(self) -> None:
+        """Open the first peripheral preview once when a file is ready."""
+        values = self.__dict__
+        if (values.get("image") is None or values.get("_step4_destroying", False)
+                or values.get("_stack_building", False) or values.get("_stack_build_complete", False)
+                or values.get("_batch_roi_open_cancel") is not None):
+            return
+        state = values
+        if values.get("batch_roi_notebook") is not None:
+            state = values.get("batch_roi_tab_states", {}).get(values.get("_active_batch_roi_tab"))
+            if state is None or state.get("complete", False):
+                return
+        if (not state.get("_automatic_profile_review_ready", False)
+                or state.get("_automatic_profile_review_opened", False)):
+            return
+        if values.get("_profile_zoom_dialog") is not None:
+            state["_automatic_profile_review_opened"] = True
+            return
+        first = next((index for index in range(min(len(self.rois), AUTO_MANUAL_ONLY_ROI_INDEX))
+                      if self._roi_overview_result(index) is not None), None)
+        if first is None:
+            return
+        state["_automatic_profile_review_opened"] = True
+        self._remember_current_roi_clicks()
+        self.current_roi_idx = first
+        self._load_current_roi_clicks()
+        self._select_roi_in_list()
+        self._render_current_roi()
+        self._open_profile_zoom(first)
+        if values.get("batch_roi_notebook") is not None:
+            self._sync_active_batch_roi_state()
+
+    def _continue_to_foveola(self) -> None:
+        """Select the manual fovea after closing the peripheral profile review."""
+        if (self.image is None or len(self.rois) <= AUTO_MANUAL_ONLY_ROI_INDEX
+                or self.__dict__.get("_step4_destroying", False)):
+            return
+        self._close_profile_zoom()
+        self._remember_current_roi_clicks()
+        self.current_roi_idx = AUTO_MANUAL_ONLY_ROI_INDEX
+        self._load_current_roi_clicks()
+        self._select_roi_in_list()
+        self._render_current_roi()
+        self.status_var.set("Now select the start and end of the foveola profile (ROI 21).")
+        if self.__dict__.get("batch_roi_notebook") is not None:
+            self._sync_active_batch_roi_state()
 
     def _profile_zoom_options(self, index: int) -> dict | None:
         if self.image is None or not 0 <= index < len(self.rois):
@@ -5648,6 +5741,12 @@ class Step4Frame(SidebarStepFrame):
                 f"Automatic detection accepted all {completed_count} ROI(s). "
                 "Review the grid, then build the stack."
             )
+        state = self.__dict__
+        if self.batch_roi_notebook is not None:
+            state = self.batch_roi_tab_states.get(self._active_batch_roi_tab, state)
+        state["_automatic_profile_review_ready"] = True
+        state["_automatic_profile_review_opened"] = False
+        self._open_automatic_profile_review()
 
     def _poll_auto_detection_events(self, events) -> None:
         """Finish an auto-detection worker while keeping Tk operations local."""

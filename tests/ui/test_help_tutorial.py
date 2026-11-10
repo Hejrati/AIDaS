@@ -136,6 +136,8 @@ class TutorialContentTests(unittest.TestCase):
             "Apply changes",
             "Auto-detect ROIs 1-20",
             "ROI 21",
+            "opens automatically",
+            "Now do foveola",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, text)
@@ -149,7 +151,7 @@ class TutorialContentTests(unittest.TestCase):
             "ELM-RPE",
             "Create Excel File",
             "rrMCPAR_ELMRPE_ONL.xlsx",
-            "only when this button is pressed",
+            "starts compilation automatically",
             "group",
             "subject ID",
             "Folder contents",
@@ -158,7 +160,7 @@ class TutorialContentTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, text)
 
-        self.assertNotIn("start compilation automatically", text)
+        self.assertNotIn("only when this button is pressed", text)
 
     @staticmethod
     def _page_text(key):

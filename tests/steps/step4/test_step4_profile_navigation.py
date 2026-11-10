@@ -4,7 +4,7 @@ from unittest import mock
 
 import numpy as np
 
-from aidas.steps.step4_analyze_isez import Step4Frame
+from aidas.steps.step4_analyze_isez import AutoDetectionRunResult, Step4Frame
 
 
 class Step4ProfileNavigationTests(unittest.TestCase):
@@ -157,6 +157,101 @@ class Step4ProfileNavigationTests(unittest.TestCase):
         self.assertEqual(frame.current_roi_idx, 0)
         frame._render_current_roi.assert_not_called()
         frame._save_current_roi.assert_not_called()
+
+    def _automatic_review_frame(self):
+        frame = self._frame()
+        frame.rois = [SimpleNamespace(suffix=f"{index + 1:02d}") for index in range(21)]
+        frame.current_roi_idx = 20
+        frame._automatic_profile_review_ready = True
+        frame._profile_zoom_dialog = None
+        frame._remember_current_roi_clicks = mock.Mock()
+        frame._load_current_roi_clicks = mock.Mock()
+        frame._open_profile_zoom = mock.Mock()
+        return frame
+
+    def test_automatic_review_starts_at_roi_one_and_opens_only_once(self):
+        frame = self._automatic_review_frame()
+
+        frame._open_automatic_profile_review()
+        # Closing the editor, rendering, and revisiting the same file must not
+        # repeatedly force the review window back onto the user.
+        frame._profile_zoom_dialog = None
+        frame._open_automatic_profile_review()
+
+        self.assertEqual(frame.current_roi_idx, 0)
+        frame._open_profile_zoom.assert_called_once_with(0)
+        frame._save_current_roi.assert_not_called()
+        frame._queue_roi_auto_save.assert_not_called()
+
+    def test_new_detection_run_reopens_review_after_the_previous_review_closed(self):
+        frame = self._automatic_review_frame()
+        frame.batch_roi_notebook = None
+        frame.auto_detection_reviews = {}
+        frame.status_var = mock.Mock()
+        frame._refresh_roi_list = mock.Mock()
+        result = AutoDetectionRunResult(
+            completed={}, reviews={}, roi_clicks={}, removed_clicks=set(),
+            review_count=0, current_roi_idx=20,
+        )
+
+        frame._apply_auto_detection_run(result)
+        frame._apply_auto_detection_run(result)
+
+        self.assertEqual(frame._open_profile_zoom.call_args_list, [mock.call(0), mock.call(0)])
+        self.assertEqual(frame.current_roi_idx, 0)
+        frame._save_current_roi.assert_not_called()
+
+    def test_automatic_review_skips_missing_previews_and_never_opens_fovea(self):
+        frame = self._automatic_review_frame()
+        frame.completed = {"04": object(), "21": object()}
+
+        frame._open_automatic_profile_review()
+
+        frame._open_profile_zoom.assert_called_once_with(3)
+        frame._automatic_profile_review_opened = False
+        frame.completed = {"21": object()}
+        frame._open_profile_zoom.reset_mock()
+        frame._open_automatic_profile_review()
+        frame._open_profile_zoom.assert_not_called()
+
+    def test_automatic_review_waits_for_loading_and_respects_finished_or_destroyed_files(self):
+        for name in ("_stack_building", "_stack_build_complete", "_step4_destroying", "_batch_roi_open_cancel"):
+            with self.subTest(name=name):
+                frame = self._automatic_review_frame()
+                setattr(frame, name, True)
+
+                frame._open_automatic_profile_review()
+
+                frame._open_profile_zoom.assert_not_called()
+                self.assertFalse(frame.__dict__.get("_automatic_profile_review_opened", False))
+
+    def test_automatic_review_has_independent_once_only_state_per_file_tab(self):
+        frame = self._automatic_review_frame()
+        frame.batch_roi_notebook = object()
+        frame.batch_roi_tab_states = {
+            "first": {"_automatic_profile_review_ready": True},
+            "second": {"_automatic_profile_review_ready": True},
+            "done": {"_automatic_profile_review_ready": True, "complete": True},
+        }
+        for key in ("first", "second", "first", "done"):
+            frame._active_batch_roi_tab = key
+            frame._open_automatic_profile_review()
+
+        self.assertEqual(frame._open_profile_zoom.call_args_list, [mock.call(0), mock.call(0)])
+
+    def test_foveola_action_selects_manual_roi_without_saving(self):
+        frame = self._automatic_review_frame()
+        frame.status_var = mock.Mock()
+        frame.current_roi_idx = 19
+
+        frame._continue_to_foveola()
+
+        self.assertEqual(frame.current_roi_idx, 20)
+        frame._close_profile_zoom.assert_called_once_with()
+        frame._load_current_roi_clicks.assert_called_once_with()
+        frame._render_current_roi.assert_called_once_with()
+        frame._save_current_roi.assert_not_called()
+        frame._queue_roi_auto_save.assert_not_called()
 
 
 if __name__ == "__main__":

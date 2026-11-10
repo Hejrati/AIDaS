@@ -1,4 +1,4 @@
-"""Completed stacks prepare Step 5; its button alone creates the workbook."""
+"""Completed stacks automatically create the final Step 5 workbook."""
 
 from pathlib import Path
 import queue
@@ -281,7 +281,7 @@ class Step4ExcelHandoffTests(unittest.TestCase):
         frame._show_processing_complete.assert_called_once()
         self.info.assert_not_called()
 
-    def test_stack_handoff_prepares_paths_and_only_explicit_run_creates_real_excel(self):
+    def test_completed_stack_handoff_automatically_creates_real_excel_without_prompts(self):
         frame = self._single_frame()
         side = self.root / "Control" / "Subject_A" / "nasal"
         side.mkdir(parents=True)
@@ -320,12 +320,8 @@ class Step4ExcelHandoffTests(unittest.TestCase):
             output = side.parent / DEFAULT_OUTPUT_FILENAME
             self.assertEqual(Path(step5.input_var.get()), side.parent)
             self.assertEqual(Path(step5.output_var.get()), output)
-            self.assertFalse(output.exists())
-            self.assertFalse(step5._running)
-            self.assertNotIn("_worker", step5.__dict__)
+            self.assertTrue(step5._running)
             step5.on_compilation_complete.assert_not_called()
-
-            step5._run_clicked()
             step5._worker.join(timeout=10)
             self.assertFalse(step5._worker.is_alive())
             step5._drain_compile_events()

@@ -362,15 +362,12 @@ class Step5CompileTests(unittest.TestCase):
             frame.output_var.set(str(output))
             frame._output_user_selected = True
             frame.include_fovea_var.set(False)
+            frame.source_step._completion_step5_handoff_ready = lambda: True
             frame.start_from_step4()
 
             self.assertEqual(Path(frame.input_var.get()), root)
             self.assertEqual(Path(frame.output_var.get()), output)
             self.assertFalse(frame.include_fovea_var.get())
-            frame._start_compiler.assert_not_called()
-
-            frame._run_clicked()
-
             frame._start_compiler.assert_called_once_with(
                 root, output, False, thread_name="aidas-step5-compiler",
             )
@@ -463,7 +460,7 @@ class Step5CompileTests(unittest.TestCase):
             frame._start_compiler.assert_not_called()
             self.assertIn("unavailable", frame.status_var.get())
 
-    def test_handoff_waits_for_manual_click_before_creating_a_real_grouped_workbook(self):
+    def test_completed_handoff_automatically_creates_real_grouped_workbook(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir).resolve()
             for group, value in (("Control", 10), ("Treatment", 20)):
@@ -482,19 +479,15 @@ class Step5CompileTests(unittest.TestCase):
             frame._append_log = mock.Mock()
             frame._set_running = mock.Mock(side_effect=lambda state: setattr(frame, "_running", state))
             frame.on_compilation_complete = mock.Mock()
+            frame.source_step._completion_step5_handoff_ready = lambda: True
 
             with mock.patch("aidas.steps.step5_compile.messagebox") as dialogs, mock.patch(
                 "aidas.steps.step5_compile.filedialog",
             ) as file_dialogs:
                 frame.start_from_step4()
-                self.assertIsNone(frame._worker)
-                self.assertFalse(frame._running)
-                self.assertFalse((root / DEFAULT_OUTPUT_FILENAME).exists())
-                frame.after.assert_not_called()
+                self.assertIsNotNone(frame._worker)
+                self.assertTrue(frame._running)
                 frame.on_compilation_complete.assert_not_called()
-
-                frame._run_clicked()
-
                 frame._worker.join(timeout=10)
                 self.assertFalse(frame._worker.is_alive())
                 frame._drain_compile_events()

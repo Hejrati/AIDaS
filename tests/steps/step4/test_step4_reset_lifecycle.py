@@ -80,6 +80,10 @@ def _restart_frame() -> Step4Frame:
 class Step4ResetLifecycleTests(unittest.TestCase):
     def test_restart_clears_both_current_and_cached_roi_state(self):
         frame = _restart_frame()
+        frame._automatic_profile_review_ready = frame._automatic_profile_review_opened = True
+        frame.batch_roi_tab_states["tab-a"].update(
+            _automatic_profile_review_ready=True, _automatic_profile_review_opened=True,
+        )
         original_image = frame.image
         original_volume = frame.volume
 
@@ -95,6 +99,10 @@ class Step4ResetLifecycleTests(unittest.TestCase):
         self.assertEqual((frame.start_var.get(), frame.end_var.get()), ("", ""))
         state = frame.batch_roi_tab_states["tab-a"]
         self.assertFalse(state["complete"])
+        self.assertFalse(frame._automatic_profile_review_ready)
+        self.assertFalse(frame._automatic_profile_review_opened)
+        self.assertFalse(state["_automatic_profile_review_ready"])
+        self.assertFalse(state["_automatic_profile_review_opened"])
         self.assertEqual(state["completed"], {})
         self.assertEqual(state["auto_detection_reviews"], {})
         self.assertEqual(state["roi_clicks"], {})

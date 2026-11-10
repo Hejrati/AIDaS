@@ -228,6 +228,56 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         dialog.destroy.assert_called_once_with()
         dialog._on_close_callback.assert_called_once_with(dialog)
 
+    def test_final_peripheral_review_action_closes_and_selects_foveola_without_saving(self):
+        dialog = self._zoom_dialog(changed=True)
+        dialog.roi_index = 19
+        dialog._foveola_after_index = 19
+        dialog._on_foveola_callback = mock.Mock()
+
+        dialog._continue_to_foveola()
+        dialog._continue_to_foveola()
+
+        dialog.destroy.assert_called_once_with()
+        dialog._on_close_callback.assert_called_once_with(dialog)
+        dialog._on_foveola_callback.assert_called_once_with()
+        dialog._on_apply_callback.assert_not_called()
+        dialog._on_save_callback.assert_not_called()
+
+    def test_only_final_peripheral_profile_relabels_cancel_as_now_do_foveola(self):
+        dialog = self._zoom_dialog()
+        dialog._navigation_indices = [0, 3, 19]
+        dialog._on_navigate_callback = mock.Mock()
+        dialog._on_foveola_callback = mock.Mock()
+        dialog._foveola_after_index = 19
+        dialog._roi_suffix = "20"
+        dialog.roi_index = 19
+        dialog.previous_plot_button = mock.Mock()
+        dialog.next_plot_button = mock.Mock()
+        dialog.plot_number_label = mock.Mock()
+        dialog.cancel_button = mock.Mock()
+
+        dialog._update_navigation()
+
+        dialog.cancel_button.configure.assert_called_once_with(
+            text="Now do foveola", command=dialog._continue_to_foveola, width=156,
+        )
+        dialog.roi_index = 3
+        dialog._update_navigation()
+        dialog.cancel_button.configure.assert_called_with(
+            text="Cancel", command=dialog.close, width=104,
+        )
+
+    def test_close_and_escape_semantics_do_not_trigger_foveola_action(self):
+        dialog = self._zoom_dialog()
+        dialog.roi_index = dialog._foveola_after_index = 19
+        dialog._on_foveola_callback = mock.Mock()
+
+        dialog.close()
+
+        dialog._on_foveola_callback.assert_not_called()
+        dialog._on_apply_callback.assert_not_called()
+        dialog._on_save_callback.assert_not_called()
+
     def test_dialog_callback_errors_restore_both_actions(self):
         for action in ("apply", "save"):
             with self.subTest(action=action):

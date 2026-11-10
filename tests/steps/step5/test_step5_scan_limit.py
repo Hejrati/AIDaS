@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -124,6 +125,68 @@ class Step5ScanLimitTests(unittest.TestCase):
             self._wait(lambda: self.frame._input_scan_state == "ready")
             self.frame.run_button.invoke()
             start.assert_called_once()
+
+    def test_completed_step4_handoff_waits_for_scan_then_exports_without_a_click(self):
+        entered, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+        frame = self.frame
+        frame.source_step = SimpleNamespace(
+            _step5_handoff_generation=1,
+            _completion_step5_handoff_ready=lambda: True,
+        )
+
+        def slow_scan(directory, **options):
+            entered.set()
+            release.wait(5)
+            return scan_measurement_directory(directory, **options)
+
+        with mock.patch("aidas.ui.measurement_tree.scan_measurement_directory", side_effect=slow_scan), \
+                mock.patch.object(frame, "_start_compiler") as start:
+            frame.start_from_step4(self.directory)
+            self._wait(entered.is_set)
+            self.assertEqual(frame._input_scan_state, "scanning")
+            start.assert_not_called()
+            release.set()
+            self._wait(lambda: frame._input_scan_state == "ready")
+            start.assert_called_once_with(
+                self.directory, Path(frame.output_var.get()), True,
+                thread_name="aidas-step5-compiler",
+            )
+            frame.on_show()
+            frame.start_from_step4(self.directory)
+            self._wait(lambda: frame._input_scan_state == "ready")
+            self.assertEqual(start.call_count, 1)
+        self.assertEqual(self.popups.mock_calls, [])
+
+    def test_completed_handoff_to_oversized_folder_never_exports(self):
+        frame = self.frame
+        frame.source_step = SimpleNamespace(
+            _step5_handoff_generation=1,
+            _completion_step5_handoff_ready=lambda: True,
+        )
+        with mock.patch.object(frame, "_start_compiler") as start:
+            frame.start_from_step4(self._oversized())
+            self._wait(lambda: frame._input_scan_state == "limited")
+            frame._try_automatic_export()
+            start.assert_not_called()
+            self.assertIn("limit of 3", frame.status_var.get())
+        self.assertEqual(self.popups.mock_calls, [])
+
+    def test_manual_folder_selection_cancels_a_waiting_automatic_handoff(self):
+        frame = self.frame
+        frame.source_step = SimpleNamespace(
+            _step5_handoff_generation=1,
+            _completion_step5_handoff_ready=lambda: True,
+        )
+        other = self.directory / "Other"
+        other.mkdir()
+        with mock.patch.object(frame, "_start_compiler") as start:
+            frame.start_from_step4(self.directory)
+            frame.set_input_folder(other)
+            self._wait(lambda: frame._input_scan_state == "ready")
+            start.assert_not_called()
+        self.assertEqual(frame._input_scan_path, other)
+        self.assertEqual(self.popups.mock_calls, [])
 
     def test_typed_folder_cannot_reuse_a_previous_small_folders_validation(self):
         small = self.directory / "Small"
