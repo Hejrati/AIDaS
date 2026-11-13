@@ -26,7 +26,11 @@ from openpyxl.utils import get_column_letter
 
 from aidas.utils.filesystem import walk_unique_directories
 from aidas.services.measurement_scan import validate_measurement_subfolder_limit
-from aidas.services.step4_results import STEP4_STACK_FILENAMES, read_step4_measurements
+from aidas.services.step4_results import (
+    STEP4_RESULTS_HEADERS,
+    STEP4_STACK_FILENAMES,
+    read_step4_measurements,
+)
 from aidas.services.cleaned_workbook import matches_generated_light_workbook
 
 
@@ -84,6 +88,25 @@ def _natural_key(value: str):
 
 def _raise_walk_error(error: OSError) -> None:
     raise error
+
+
+def _measurement_file_signature(path: Path) -> tuple[int, ...]:
+    status = path.stat()
+    return (status.st_dev, status.st_ino, status.st_size,
+            status.st_mtime_ns, status.st_ctime_ns)
+
+
+def _require_unchanged_measurement(path: Path, signature: tuple[int, ...]) -> None:
+    """Do not publish already-read data after its source was deleted or rebuilt."""
+    try:
+        unchanged = _measurement_file_signature(path) == signature
+    except OSError:
+        unchanged = False
+    if not unchanged:
+        raise RuntimeError(
+            f"A measurement input changed or was removed while creating Excel: {path}. "
+            "Wait for the measurement results to finish rebuilding, then create Excel again."
+        )
 
 
 def classify_eye_from_path(path: PathLike) -> str:
@@ -157,13 +180,16 @@ def find_nasal_temporal_results(subject_path: PathLike) -> tuple[str | None, str
 
 
 def get_rrmcpar_values(filepath: PathLike) -> list:
-    """Read every saved ROI's Round value, including the fovea ROI."""
+    """Read every saved ROI's Round value, retaining blanks for excluded ROIs."""
     if Path(filepath).suffix.lower() in (".tif", ".tiff"):
         rows = read_step4_measurements(filepath)
         return [row[6] for row in (rows or ())]
     workbook = load_workbook(os.fspath(filepath), data_only=True)
     try:
         worksheet = workbook.active
+        indexed_values = _indexed_rrmcpar_values(worksheet)
+        if indexed_values is not None:
+            return indexed_values
         values = []
         for row in worksheet.iter_rows(min_row=2, min_col=7, max_col=7, values_only=True):
             value = row[0]
@@ -173,6 +199,32 @@ def get_rrmcpar_values(filepath: PathLike) -> list:
         return values
     finally:
         workbook.close()
+
+
+def _indexed_rrmcpar_values(worksheet) -> list | None:
+    """Keep blank measurements only when a workbook identifies every ROI row.
+
+    Current side workbooks and indexed ImageJ exports use the seven known
+    measurement headers and consecutive one-based ROI numbers. Historical
+    unindexed tables retain their original nonblank-column-G reader.
+    """
+    headers = tuple(
+        str(worksheet.cell(1, column).value or "").strip().casefold()
+        for column in range(2, 9)
+    )
+    if headers != tuple(header.casefold() for header in STEP4_RESULTS_HEADERS[1:]):
+        return None
+
+    values = []
+    for row in worksheet.iter_rows(min_row=2, max_col=8, values_only=True):
+        if all(value is None or (isinstance(value, str) and not value.strip()) for value in row):
+            continue
+        roi_index = parse_float_or_none(row[0])
+        if isinstance(row[0], bool) or roi_index != len(values) + 1:
+            return None
+        value = row[6]
+        values.append(None if isinstance(value, str) and not value.strip() else value)
+    return values
 
 
 def get_first20_col_g_values(filepath: PathLike) -> list:
@@ -445,6 +497,7 @@ def create_cleaned_light_thickness_workbook(light_path: PathLike | None) -> str 
     if source.suffix.lower() == ".xlsx":
         return str(source)
 
+    source_signature = _measurement_file_signature(source)
     rows = read_tsv_rows(source)
     cleaned = rows if "light2" in source.name.lower() else _clean_light_rows(rows)
     excel_rows = ([list(cleaned[0])] if cleaned else []) + [
@@ -462,6 +515,7 @@ def create_cleaned_light_thickness_workbook(light_path: PathLike | None) -> str 
             width = max((len(row) for row in excel_rows), default=0)
             expected = [row + [None] * (width - len(row)) for row in excel_rows]
             if existing == expected or matches_generated_light_workbook(destination, excel_rows):
+                _require_unchanged_measurement(source, source_signature)
                 _remove_replaced_light2_text(source, destination)
                 return str(destination)
 
@@ -487,6 +541,7 @@ def create_cleaned_light_thickness_workbook(light_path: PathLike | None) -> str 
         temporary_path = Path(temporary_name)
         os.close(descriptor)
         workbook.save(temporary_path)
+        _require_unchanged_measurement(source, source_signature)
         os.replace(temporary_path, destination)
     finally:
         workbook.close()
@@ -560,7 +615,8 @@ def find_fovea_file(folder_path: PathLike | None, *, recursive: bool = True) -> 
     for directory, _subdirectories, filenames in directories:
         for filename in filenames:
             lower = filename.lower()
-            if "fovea_light" not in lower or not lower.endswith(".txt"):
+            if ("fovea_light" not in lower or not lower.endswith(".txt")
+                    or _is_thickness_filename(filename)):
                 continue
             path = Path(directory) / filename
             if path.is_file():
@@ -725,7 +781,8 @@ def write_group_block(
                 subject_processed_callback(measure_name, group_name, subject_id)
             continue
 
-        if not any(value is not None for value in nasal_values) and not any(
+        has_saved_roi_rows = measure_name == "rrMCP-AR" and bool(nasal_values or temporal_values)
+        if not has_saved_roi_rows and not any(value is not None for value in nasal_values) and not any(
             value is not None for value in temporal_values
         ):
             skipped += 1
@@ -862,23 +919,45 @@ def compile_step4_results(
             "Folders without Step 4 measurements are ignored."
         )
 
+    # Capture the actual source records before extraction. Derived LIGHT2
+    # workbooks may be created below; original LIGHT text remains the input.
+    input_signatures = {}
+
+    def record_input(source):
+        if source:
+            path = Path(source)
+            input_signatures[path] = _measurement_file_signature(path)
+
     # A custom destination must never replace a source measurement record.
     for subjects in subject_folders.values():
         for subject in subjects.values():
-            for source_file in find_nasal_temporal_results(subject):
+            measurement_files = find_nasal_temporal_results(subject)
+            if not any(measurement_files):
+                raise RuntimeError(
+                    f"The Step 4 measurements were removed from {subject}. "
+                    "Rebuild the results before creating Excel again."
+                )
+            for source_file in measurement_files:
                 if source_file and Path(source_file).resolve() == output.resolve():
                     raise ValueError("Choose an output path different from the input measurement result files.")
+                record_input(source_file)
             # Thickness is now also an Excel input. Protect both an existing
             # selected table and the destination about to be created from raw
             # LIGHT text, before any extraction or save can change these files.
             for thickness_file in find_light_files(subject):
                 if not thickness_file:
                     continue
+                record_input(thickness_file)
                 cleaned_output = _cleaned_light_workbook_path(Path(thickness_file))
                 if cleaned_output.resolve() == output.resolve():
                     raise ValueError(
                         "Choose an output path different from the input thickness Excel files."
                     )
+            if include_fovea:
+                nasal_folder = find_subfolder_case_insensitive(subject, "nasal")
+                temporal_folder = find_subfolder_case_insensitive(subject, "temporal")
+                record_input(find_fovea_file(nasal_folder) or find_fovea_file(subject, recursive=False))
+                record_input(find_fovea_file(temporal_folder))
 
     total_subjects = sum(len(ids) for ids in group_ids.values())
     total_steps = 2 + (len(SHEET_NAMES) * total_subjects)
@@ -900,6 +979,7 @@ def compile_step4_results(
 
     workbook = Workbook()
     measure_summaries = []
+    temporary_path = None
     try:
         workbook.remove(workbook.active)
         log_worksheet = workbook.create_sheet("Extraction_log")
@@ -942,9 +1022,24 @@ def compile_step4_results(
             log_worksheet.column_dimensions[get_column_letter(column)].width = 28
 
         report_progress(completed_steps, total_steps, "Saving workbook...")
-        workbook.save(output)
+        for source, signature in input_signatures.items():
+            _require_unchanged_measurement(source, signature)
+        # Keep any previous final workbook intact if inputs disappear during
+        # serialization, saving fails, or the destination is open in Excel.
+        with tempfile.NamedTemporaryFile(
+            mode="w+b", prefix=f".{output.name}.", suffix=".tmp.xlsx",
+            dir=output.parent, delete=False,
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            workbook.save(temporary)
+        workbook.close()
+        for source, signature in input_signatures.items():
+            _require_unchanged_measurement(source, signature)
+        os.replace(temporary_path, output)
     finally:
         workbook.close()
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
 
     report_progress(total_steps, total_steps, "Saved compiled workbook.")
     emit(f"\nSaved: {output}")

@@ -295,6 +295,8 @@ class Step4ExcelHandoffTests(unittest.TestCase):
                 outdir / module.STEP4_RESULTS_FILENAME,
                 description=encode_step4_measurements([measurements]),
             )
+            image.close()
+            module.write_step4_measurement_workbook(outdir / "rr_MCPAR.xlsx", [measurements])
 
         frame._write_stack_output_files.side_effect = write_measurements
         step5 = object.__new__(Step5Frame)
@@ -333,7 +335,12 @@ class Step4ExcelHandoffTests(unittest.TestCase):
         self.error.assert_not_called()
         step5.on_compilation_complete.assert_called_once_with(output)
         self.assertIn("Excel file saved", step5.status_var.get())
-        self.assertFalse((side / "rr_MCPAR.xlsx").exists())
+        self.assertTrue((side / "rr_MCPAR.xlsx").is_file())
+        source_workbook = load_workbook(side / "rr_MCPAR.xlsx", data_only=True)
+        try:
+            self.assertEqual(source_workbook.active["G2"].value, 10)
+        finally:
+            source_workbook.close()
         workbook = load_workbook(output, data_only=True)
         try:
             self.assertEqual(workbook.sheetnames, ["rrMCP-AR", "ELM-RPE", "Extraction_log"])

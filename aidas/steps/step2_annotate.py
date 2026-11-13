@@ -61,6 +61,7 @@ from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     notify_workflow_cancelled,
+    notify_workflow_invalidated,
     SidebarStepFrame,
     action_button,
     apply_app_icon_to,
@@ -1555,6 +1556,51 @@ class Step2Frame(SidebarStepFrame):
                 return hdr_path
         return path
 
+    @staticmethod
+    def _source_file_snapshot(path):
+        """Identify the on-disk image behind an editor, including both Analyze files."""
+        if not path or path == "Step 1 output":
+            return None
+        source = Path(path)
+        paths = [source.with_suffix(suffix) for suffix in (".hdr", ".img")] if source.suffix.lower() in {".hdr", ".img"} else [source]
+        snapshot = []
+        try:
+            for item in paths:
+                if not item.is_file():
+                    return None
+                stat = item.stat()
+                snapshot.append((os.path.normcase(str(item.absolute())), stat.st_dev,
+                                 stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        except OSError:
+            return None
+        return tuple(snapshot)
+
+    def _ensure_current_source_unchanged(self):
+        """Prevent a retained editor from restoring deleted or replaced inputs."""
+        path = self.current_file
+        if not path or path == "Step 1 output":
+            return
+        snapshot = self._source_file_snapshot(path)
+        original = self.__dict__.get("_current_source_snapshot")
+        if snapshot is None or (original is not None and snapshot != original):
+            notify_workflow_invalidated(self, 2)
+            raise RuntimeError(
+                "The source image was removed or changed after it was opened. "
+                "Reopen the current image in Step 2, or crop the .sdb again in Step 1, "
+                "before saving annotations.\n" + str(path)
+            )
+
+    def _refresh_saved_source_snapshot(self):
+        """Accept our own successful source rewrite in matching retained editors."""
+        snapshot = self._source_file_snapshot(self.current_file)
+        self._current_source_snapshot = snapshot
+        states = list(self.__dict__.get("_batch_result_states", {}).values())
+        states.append(self.__dict__.get("_single_editor_state"))
+        for state in states:
+            if (state and state.get("input") == self.current_file
+                    and state.get("image") is self.image_data):
+                state["source_snapshot"] = snapshot
+
     def _default_batch_initial_dir(self):
         if self.current_file and self.current_file != "Step 1 output":
             folder = os.path.dirname(self.current_file)
@@ -1701,7 +1747,7 @@ class Step2Frame(SidebarStepFrame):
                     side_folders[entry.name.lower()] = entry.path
 
         source_name = lower_files.get("light.img")
-        if source_name is None:
+        if source_name is None or "light.hdr" not in lower_files:
             return None
 
         segmented_sides = []
@@ -1710,10 +1756,11 @@ class Step2Frame(SidebarStepFrame):
             if side_folder is None:
                 continue
             with os.scandir(side_folder) as entries:
-                if any(entry.name.lower() == "light_marked.img" and entry.is_file() for entry in entries):
+                side_files = {entry.name.lower() for entry in entries if entry.is_file()}
+                if {"light_marked.img", "light_marked.hdr", "light.img", "light.hdr"} <= side_files:
                     segmented_sides.append(side)
 
-        directly_segmented = "light_marked.img" in lower_files
+        directly_segmented = {"light_marked.img", "light_marked.hdr"} <= lower_files.keys()
         current_side = os.path.basename(folder).lower()
         if directly_segmented and not segmented_sides and current_side in {"nasal", "temporal"}:
             segmented_sides.append(current_side)
@@ -2415,7 +2462,7 @@ class Step2Frame(SidebarStepFrame):
             return
         display_path = source_path or "Step 1 output"
         img, source_was_8bit = self._coerce_image_for_annotation(image)
-        prepared = (img, display_path, source_was_8bit)
+        prepared = (img, display_path, source_was_8bit, self._source_file_snapshot(source_path))
         if defer_render:
             # A newer Step 1 crop supersedes an older crop that has not yet
             # been displayed. Do not disturb the currently rendered editor.
@@ -2445,7 +2492,12 @@ class Step2Frame(SidebarStepFrame):
             # chooser or replacing a hidden result editor's state.
             self._pending_external_image = prepared
             return False
-        img, display_path, source_was_8bit = prepared
+        img, display_path, source_was_8bit = prepared[:3]
+        source_snapshot = prepared[3] if len(prepared) > 3 else None
+        if source_snapshot is not None and self._source_file_snapshot(display_path) != source_snapshot:
+            self._pending_external_image = None
+            self.status_var.set("The pending Step 1 image was removed or changed. Crop or reopen it again.")
+            return False
         self._pending_external_image = None
         self._input_analyze_template = None
         self._source_was_8bit = source_was_8bit
@@ -2556,6 +2608,7 @@ class Step2Frame(SidebarStepFrame):
         self._pending_external_image = None
         self._annotation_tutorial_ready = False
         self.current_file = path
+        self._current_source_snapshot = self._source_file_snapshot(path)
         self._notify_image_path_changed()
         self.image_data = image
         self._last_status_mouse_sample = None
@@ -2594,6 +2647,7 @@ class Step2Frame(SidebarStepFrame):
         self._pending_external_image = None
         self._show_single_image_canvas()
         self.current_file = None
+        self._current_source_snapshot = None
         self._notify_image_path_changed()
         self.image_data = None
         self._annotation_tutorial_ready = False
@@ -2705,6 +2759,7 @@ class Step2Frame(SidebarStepFrame):
     def _capture_current_editor_state(self):
         return {
             "input": self.current_file,
+            "source_snapshot": self.__dict__.get("_current_source_snapshot"),
             "image": self.image_data,
             "annotation_tutorial_ready": getattr(self, "_annotation_tutorial_ready", False),
             **self._annotation_snapshot(),
@@ -2732,6 +2787,7 @@ class Step2Frame(SidebarStepFrame):
 
         self.image_canvas = canvas
         self.current_file = state.get("input")
+        self._current_source_snapshot = state.get("source_snapshot")
         self._notify_image_path_changed()
         self.image_data = state.get("image")
         self._last_status_mouse_sample = None
@@ -3947,6 +4003,7 @@ class Step2Frame(SidebarStepFrame):
         source_image = self._source_image_for_original_save()
         if source_image is None:
             return []
+        self._ensure_current_source_unchanged()
 
         image = self._image_int16_for_original_save(source_image)
         if image.ndim != 2:
@@ -3970,6 +4027,7 @@ class Step2Frame(SidebarStepFrame):
         for base_path in base_paths:
             write_analyze(base_path, stack)
             saved_paths.append(base_path)
+        self._refresh_saved_source_snapshot()
         return saved_paths
 
     def _save_marked_images(self, require_complete=False, prompt_on_incomplete=False):
@@ -4010,9 +4068,12 @@ class Step2Frame(SidebarStepFrame):
         )
 
         light_marked = self._build_marked_volume()
+        self._ensure_current_source_unchanged()
         saved_paths = []
         write_analyze(light_base_path, self._orient_volume_for_single_save(light_marked))
         saved_paths.append(light_base_path)
+        if self.current_file and self._image_pair_key(light_base_path) == self._image_pair_key(self.current_file):
+            self._refresh_saved_source_snapshot()
 
         saved_paths.extend(self._save_light_image(reference_shape=light_marked.shape))
 
@@ -4074,6 +4135,7 @@ class Step2Frame(SidebarStepFrame):
         out_base = self._current_marked_output_basepath()
         self._ensure_step3_is_not_using_output_folders([os.path.dirname(out_base)])
         marked_volume = self._build_current_marked_volume()
+        self._ensure_current_source_unchanged()
         write_analyze(
             out_base,
             self._orient_volume_for_single_save(marked_volume, orientation),
@@ -4098,6 +4160,7 @@ class Step2Frame(SidebarStepFrame):
 
         saved_context = {
             "current_file": self.current_file,
+            "source_snapshot": self.__dict__.get("_current_source_snapshot"),
             "image_data": self.image_data,
             "boundary_traces": self.boundary_traces,
             "boundary_order": self.boundary_order,
@@ -4111,6 +4174,7 @@ class Step2Frame(SidebarStepFrame):
         }
         try:
             self.current_file = state.get("input")
+            self._current_source_snapshot = state.get("source_snapshot")
             self.image_data = state.get("image")
             self.boundary_traces = state.get("traces") or {}
             self.boundary_order = state.get("order") or []
@@ -4128,6 +4192,7 @@ class Step2Frame(SidebarStepFrame):
             )
         finally:
             self.current_file = saved_context["current_file"]
+            self._current_source_snapshot = saved_context["source_snapshot"]
             self.image_data = saved_context["image_data"]
             self.boundary_traces = saved_context["boundary_traces"]
             self.boundary_order = saved_context["boundary_order"]
@@ -4154,9 +4219,6 @@ class Step2Frame(SidebarStepFrame):
         self._ensure_step3_is_not_using_output_folders(
             [os.path.dirname(nasal_base), os.path.dirname(temporal_base)]
         )
-        os.makedirs(os.path.dirname(nasal_base), exist_ok=True)
-        os.makedirs(os.path.dirname(temporal_base), exist_ok=True)
-
         volume = self._build_current_marked_volume()
         source_image = self._image_int16_for_original_save(self.image_data)
         source_volume = np.stack([source_image, source_image], axis=0)
@@ -4166,6 +4228,9 @@ class Step2Frame(SidebarStepFrame):
             source_volume,
             orientation,
         )
+        self._ensure_current_source_unchanged()
+        os.makedirs(os.path.dirname(nasal_base), exist_ok=True)
+        os.makedirs(os.path.dirname(temporal_base), exist_ok=True)
         write_analyze(nasal_base, nasal_volume)
         write_analyze(nasal_light_base, nasal_source)
         write_analyze(temporal_base, temporal_volume)
@@ -5557,6 +5622,10 @@ class Step2Frame(SidebarStepFrame):
                         break
                     report_status(index, path)
                     try:
+                        source_snapshot = (
+                            self._source_file_snapshot(path) if current_image_state is None
+                            else current_image_state.get("source_snapshot")
+                        )
                         if current_image_state is None:
                             image, template, _source_was_8bit = self._read_image_for_annotation(path)
                         else:
@@ -5604,8 +5673,11 @@ class Step2Frame(SidebarStepFrame):
                             image.shape,
                             source_label=f"AI_ForAIDAS prediction for {os.path.basename(path)}",
                         )
+                        if source_snapshot is not None and self._source_file_snapshot(path) != source_snapshot:
+                            raise RuntimeError("The source image was removed or changed during segmentation. Reopen it and run again.")
                         results.append({
                             "input": path,
+                            "source_snapshot": source_snapshot,
                             "boundaries": np.asarray(boundaries, dtype=np.float32),
                             "traces": traces,
                             "fovea_x": fovea_x,
@@ -5769,6 +5841,10 @@ class Step2Frame(SidebarStepFrame):
             self._batch_result_tab_canvases[str(frame)] = canvas
 
             try:
+                source_snapshot = self._source_file_snapshot(input_path)
+                original_snapshot = item.get("source_snapshot")
+                if original_snapshot is not None and source_snapshot != original_snapshot:
+                    raise RuntimeError("The source image was removed or changed after segmentation. Reopen it and run again.")
                 data, _template, _source_was_8bit = self._read_image_for_annotation(input_path)
                 orientation = self._selected_save_orientation(item.get("save_orientation"))
                 canvas.set_image(data)
@@ -5803,6 +5879,7 @@ class Step2Frame(SidebarStepFrame):
                 canvas.set_line_overlays(overlays)
                 self._batch_result_states[str(frame)] = {
                     "input": input_path,
+                    "source_snapshot": source_snapshot,
                     "image": data,
                     "traces": traces,
                     "annotation_tutorial_ready": True,
@@ -5850,6 +5927,7 @@ class Step2Frame(SidebarStepFrame):
         if not state:
             return
         state["input"] = self.current_file
+        state["source_snapshot"] = self.__dict__.get("_current_source_snapshot")
         state["image"] = self.image_data
         if (
             self.fovea_x is not None

@@ -25,6 +25,7 @@ from aidas.utils.ui_utils import (
     SidebarStepFrame,
     action_button,
     load_compile_ctk_icon,
+    notify_workflow_invalidated,
 )
 
 
@@ -392,6 +393,24 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         if notice is not None:
             notice.place_forget()
 
+    def _reconcile_completed_output(self) -> None:
+        """Discard a saved-file notice when its file was removed outside the app."""
+        output = self.__dict__.get("_completed_output_path")
+        if output is None:
+            return
+        try:
+            available = Path(output).is_file()
+        except OSError:
+            available = False
+        if not available:
+            self._clear_completion_notice()
+            notify_workflow_invalidated(self, 5)
+            if not self.__dict__.get("_running", False):
+                self.status_var.set(
+                    "The saved Excel file is no longer available. "
+                    "Use Create Excel File after the measurement results are ready."
+                )
+
     def _fovea_option_changed(self, *_args) -> None:
         self._clear_completion_notice()
         if not self._running:
@@ -420,6 +439,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         notice.lift()
 
     def _open_excel_folder(self) -> None:
+        self._reconcile_completed_output()
         output_path = self.__dict__.get("_completed_output_path")
         if output_path is None:
             return
@@ -442,11 +462,21 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         self.winfo_toplevel().destroy()
 
     def _refresh_directory_view(self) -> None:
+        self._reconcile_completed_output()
         view = self.__dict__.get("directory_view")
         if view is None:
             return
         folder = self._existing_directory(self.input_var.get())
-        if folder is not None:
+        input_text = normalize_path_input(self.input_var.get())
+        if folder is not None or input_text:
+            # Rescan a deleted selection as well: retaining the old ready tree
+            # would show results that are no longer on disk.
+            if folder is None:
+                try:
+                    folder = self._expanded_path(input_text)
+                except (OSError, ValueError) as error:
+                    self._directory_scan_changed(None, "error", error)
+                    return
             output_text = normalize_path_input(self.output_var.get())
             output = self._expanded_path(output_text) if output_text else None
             view.set_directory(folder, output_path=output)
@@ -454,6 +484,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
     def _directory_scan_changed(self, directory, state, error=None) -> None:
         if self.__dict__.get("_closing", False):
             return
+        self._reconcile_completed_output()
         self._input_scan_path = directory
         self._input_scan_state = state
         self._input_scan_error = error
@@ -736,8 +767,13 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             result_path = Path(getattr(result, "output_path", self.output_var.get()))
             self.output_var.set(str(result_path))
             self.status_var.set(f"Excel file saved: {result_path}")
-            self._refresh_directory_view()
             self._show_completion_notice(result_path)
+            self._reconcile_completed_output()
+            self._refresh_directory_view()
+            if self.__dict__.get("_completed_output_path") is None:
+                # The user may delete the output between the worker's save
+                # and this queued completion event. Do not mark Step 5 done.
+                return
             callback = getattr(self, "on_compilation_complete", None)
             if callable(callback):
                 callback(result_path)

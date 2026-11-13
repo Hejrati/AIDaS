@@ -34,6 +34,7 @@ from aidas.utils.ui_layout import COLORS, LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     notify_workflow_cancelled,
+    notify_workflow_invalidated,
     NativeNumericSpinbox,
     SidebarStepFrame,
     directory_row,
@@ -838,6 +839,16 @@ class Step1Frame(SidebarStepFrame):
         self._dismiss_crop_notification()
         super().destroy()
 
+    def on_show(self):
+        """Reconcile external deletion before resuming work in Step 1."""
+        if self.__dict__.get("_bright_pixel_notice_pending", False):
+            return
+        stale_current = self._revalidate_saved_crop_directories()
+        if stale_current:
+            self._open_raw(path=stale_current, show_saved=False)
+        self._render_sdb_directories()
+        self._update_batch_handoff_button_state()
+
     @staticmethod
     def _to_uint8_preview(data):
         """Scale any grayscale image to uint8 for display."""
@@ -1423,10 +1434,15 @@ class Step1Frame(SidebarStepFrame):
     # ── Open Raw ──
     def _saved_crop_for_path(self, path):
         """Retrieve this session's crop, or the folder's saved Light image."""
+        directory = os.path.dirname(os.path.abspath(path))
+        # In-memory completion is only a hint: users may remove the generated
+        # files in Explorer while this window stays open. A shared Light pair
+        # backs every per-SDB preview cached for this directory.
+        if not self._revalidate_saved_crop_directory(directory):
+            return None
         cached = getattr(self, "_saved_crop_previews", {}).get(self._path_key(path))
         if cached is not None:
             return np.array(cached, copy=True)
-        directory = os.path.dirname(os.path.abspath(path))
         if not self._sdb_image_is_saved(directory, path):
             known_image = any(
                 self._path_key(source) == self._path_key(path)
@@ -1523,6 +1539,7 @@ class Step1Frame(SidebarStepFrame):
         if self.processed_image is not None and not self._confirm_discard_processed_image(path):
             return
 
+        had_saved_crop = self._sdb_image_is_saved(os.path.dirname(os.path.abspath(path)), path)
         if show_saved:
             try:
                 saved_crop = self._saved_crop_for_path(path)
@@ -1544,6 +1561,8 @@ class Step1Frame(SidebarStepFrame):
         if not self._load_image(img, path, crop_contours=contours, crop_oct_layout=layout):
             return False
         self._commit_sdb_import_params(info, params)
+        if had_saved_crop:
+            self._render_sdb_directories()
         return True
 
     def _browse_sdb_dir(self):
@@ -1570,7 +1589,6 @@ class Step1Frame(SidebarStepFrame):
         previous_directory = self._active_sdb_directory
         self._active_sdb_directory = None
         self._sdb_directory_files.clear()
-        self._saved_output_directories.clear()
         self.sdb_scan_more_label.configure(text="Scanning...")
         self.sdb_scan_tooltip.text = ""
         root = self.sdb_dir_var.get()
@@ -1672,6 +1690,7 @@ class Step1Frame(SidebarStepFrame):
             if status is not None:
                 status.set("Folder scan complete. Select an SDB image.")
         self._sdb_directory_files = directory_files
+        stale_current = self._revalidate_saved_crop_directories(saved_directories=saved)
         self._saved_output_directories = saved
         self.sdb_scan_more_label.configure(text="")
         if errors:
@@ -1681,6 +1700,8 @@ class Step1Frame(SidebarStepFrame):
             self._active_sdb_directory = previous_directory
 
         self._render_sdb_directories()
+        if stale_current:
+            self._open_raw(path=stale_current, show_saved=False)
         if preview_first and not self.__dict__.get("_bright_pixel_notice_pending", False):
             self._preview_selected_sdb()
 
@@ -1831,8 +1852,16 @@ class Step1Frame(SidebarStepFrame):
             return False
         path = self._sdb_files[selection[0]]
         if self.current_file and self._path_key(path) == self._path_key(self.current_file):
-            return True
+            directory = os.path.dirname(os.path.abspath(path))
+            has_outputs = self._revalidate_saved_crop_directory(directory)
+            if not has_outputs:
+                self._render_sdb_directories()
+            if has_outputs or not (
+                self.processed_image is not None and self._processed_image_saved
+            ):
+                return True
         self._open_raw(path=path)
+        self._render_sdb_directories()
         return bool(
             self.current_file
             and self._path_key(path) == self._path_key(self.current_file)
@@ -1959,6 +1988,65 @@ class Step1Frame(SidebarStepFrame):
             self, "_saved_output_directories", set()
         )
 
+    def _revalidate_saved_crop_directory(self, directory, *, has_outputs=None):
+        """Invalidate session results when their shared on-disk crop is gone.
+
+        Call at user/scan boundaries, rather than during each row render. The
+        scan worker can supply its result without doing another disk scan.
+        """
+        if has_outputs is None:
+            has_outputs = self._folder_has_all_saved_outputs(directory)
+        if has_outputs:
+            return True
+        self._discard_saved_crop_directories({self._path_key(directory)})
+        return False
+
+    def _discard_saved_crop_directories(self, directory_keys):
+        """Clear all previews backed by these directories in one cache pass."""
+        saved = self.__dict__.get("_saved_output_directories", set())
+        invalidated = bool(saved & directory_keys)
+        saved.difference_update(directory_keys)
+        cropped = self.__dict__.get("_cropped_sdb_files", set())
+        previews = self.__dict__.get("_saved_crop_previews", {})
+        for key in set(cropped) | set(previews):
+            if self._path_key(os.path.dirname(key)) in directory_keys:
+                cropped.discard(key)
+                previews.pop(key, None)
+                invalidated = True
+        current = self.__dict__.get("current_file")
+        if (current and self.__dict__.get("_processed_image_saved", False)
+                and self._path_key(os.path.dirname(os.path.abspath(current))) in directory_keys):
+            invalidated = True
+        if invalidated:
+            notify_workflow_invalidated(self, 1)
+
+    def _revalidate_saved_crop_directories(self, *, saved_directories=None):
+        """Recheck the queue once and return a saved current image to reopen."""
+        current = self.__dict__.get("current_file")
+        current_directory = (
+            self._path_key(os.path.dirname(os.path.abspath(current))) if current else None
+        )
+        directories = list(self.__dict__.get("_sdb_directory_files", {}))
+        scanned_directories = {self._path_key(directory) for directory in directories}
+        # Opening an SDB directly need not add its folder to the visible queue.
+        if current_directory is not None and current_directory not in scanned_directories:
+            directories.append(os.path.dirname(os.path.abspath(current)))
+        missing_directories = set()
+        for directory in directories:
+            has_outputs = (
+                self._folder_has_all_saved_outputs(directory)
+                if saved_directories is None or self._path_key(directory) not in scanned_directories
+                else self._path_key(directory) in saved_directories
+            )
+            if not has_outputs:
+                missing_directories.add(self._path_key(directory))
+        self._discard_saved_crop_directories(missing_directories)
+        if (current_directory in missing_directories
+                and self.__dict__.get("processed_image") is not None
+                and self.__dict__.get("_processed_image_saved", False)):
+            return current
+        return None
+
     def _update_batch_handoff_button_state(self):
         button = getattr(self, "batch_segment_cropped_btn", None)
         if button is None:
@@ -1981,6 +2069,10 @@ class Step1Frame(SidebarStepFrame):
 
     def _send_cropped_folders_to_step2(self):
         """Start Step 2 batch segmentation for all completed Step 1 folders."""
+        stale_current = self._revalidate_saved_crop_directories()
+        if stale_current:
+            self._open_raw(path=stale_current, show_saved=False)
+        self._render_sdb_directories()
         if not self._all_sdb_images_saved():
             messagebox.showwarning(
                 "Images still need saving",
@@ -2040,6 +2132,7 @@ class Step1Frame(SidebarStepFrame):
 
     def _prev_sdb(self):
         """Open the previous uncropped image in the work queue."""
+        self._revalidate_saved_crop_directories()
         item = self._previous_sdb_queue_item(self.current_file)
         if item is not None:
             self._open_raw(path=item[2], show_saved=False)
@@ -2049,6 +2142,7 @@ class Step1Frame(SidebarStepFrame):
 
     def _next_sdb(self):
         """Open the original SDB for the next uncropped image."""
+        self._revalidate_saved_crop_directories()
         item = self._next_sdb_queue_item(self.current_file)
         if item is not None:
             self._open_raw(path=item[2], show_saved=False)
@@ -2719,10 +2813,9 @@ class Step1Frame(SidebarStepFrame):
         return True
 
     def _invalidate_saved_crop(self, path):
-        key = self._path_key(path)
-        self._cropped_sdb_files.discard(key)
-        self._saved_crop_previews.pop(key, None)
-        self._saved_output_directories.discard(self._path_key(os.path.dirname(os.path.abspath(path))))
+        self._revalidate_saved_crop_directory(
+            os.path.dirname(os.path.abspath(path)), has_outputs=False
+        )
         self._processed_image_saved = False
 
     def _reset(self):

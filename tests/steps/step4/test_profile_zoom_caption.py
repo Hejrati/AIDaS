@@ -94,6 +94,7 @@ class Step4ProfileZoomCaptionTests(unittest.TestCase):
             on_apply=apply, on_save=save, on_close=lambda *_args: None,
             navigation_indices=[0, 3, 5], on_navigate=navigate,
         )
+        dialog.NAVIGATION_FEEDBACK_MS = 0
         self._settle_events()
         window_id = dialog.winfo_id()
         canvas = dialog.canvas
@@ -116,6 +117,7 @@ class Step4ProfileZoomCaptionTests(unittest.TestCase):
         plotted_end = int(dialog._baseline_line.get_xdata()[1])
         dialog._move_boundary("start", 25, refresh_measurements=True)
         dialog.next_plot_button.invoke()
+        self.root.update()
         self.assertEqual(dialog.roi_index, 3)
         self.assertEqual(dialog.plot_number_label.cget("text"), "ROI 04")
         self.assertEqual(dialog.title(), "ROI Profile Editor \u2014 ROI 04")
@@ -123,12 +125,15 @@ class Step4ProfileZoomCaptionTests(unittest.TestCase):
         self.assertIs(dialog.canvas, canvas)
         self.assertEqual(dialog.winfo_id(), window_id)
         dialog.next_plot_button.invoke()
+        self.root.update()
         self.assertEqual(dialog.roi_index, 5)
         self.assertEqual(dialog.next_plot_button.cget("state"), "disabled")
         dialog._navigate_profile(1)
         self.assertEqual(navigate.call_count, 2)
         dialog.previous_plot_button.invoke()
+        self.root.update()
         dialog.previous_plot_button.invoke()
+        self.root.update()
         self.assertEqual(dialog.roi_index, 0)
         self.assertEqual(dialog._start, 25)
         self.assertTrue(dialog._has_pending_changes())

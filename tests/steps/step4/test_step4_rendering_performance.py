@@ -25,6 +25,7 @@ def plot_frame():
         frame.image, roi, start_click=76, end_click=100) for roi in frame.rois[:20]}
     frame.roi_clicks = {suffix: [float(result.start), float(result.end)]
                         for suffix, result in frame.completed.items()}
+    frame.excluded_rois = set()
     frame.auto_detection_reviews = {frame.rois[20].suffix: "manual"}
     frame._roi_adjust_bounds = {}
     frame._flashing_updated_rois = set()
@@ -146,17 +147,21 @@ class Step4RenderingPerformanceTests(unittest.TestCase):
             frame._roi_metric_values(roi)
             self.assertEqual(measure.call_count, 4)
 
-    def test_reused_grid_and_profile_match_fresh_render_after_selection_and_theme_changes(self):
+    def test_reused_grid_and_profile_match_fresh_render_after_exclusion_and_theme_changes(self):
         reused = plot_frame()
         reused._render_current_roi()
         boxes = tuple(reused.ax_roi_grid.patches)
+        ticks = tuple(cell["exclude_tick"] for cell in reused.ax_roi_grid._aidas_grid_cells)
         profile_line = reused.ax_profile._aidas_profile_artists[0]
         palette = module._plot_palette()
         light = dict(palette, axes="#ffffff", figure="#f0f0f0", text="#111111", line="#111111")
-        for index, colors in ((0, palette), (7, light), (20, palette)):
+        for index, colors, exclusions in (
+            (0, palette, {0, 20}), (7, light, {3, 7}), (20, palette, set()),
+        ):
             fresh = plot_frame()
             for frame in (fresh, reused):
                 frame.current_roi_idx = index
+                frame.excluded_rois = {frame.rois[item].suffix for item in exclusions}
                 frame.profile_clicks = list(frame.roi_clicks.get(frame.rois[index].suffix, []))
                 frame._flashing_updated_rois = {frame.rois[2].suffix}
                 frame.auto_detection_reviews[frame.rois[3].suffix] = "review"
@@ -164,9 +169,79 @@ class Step4RenderingPerformanceTests(unittest.TestCase):
                     frame._render_current_roi()
             np.testing.assert_array_equal(reused.canvas.buffer_rgba(), fresh.canvas.buffer_rgba())
             self.assertEqual(tuple(reused.ax_roi_grid.patches), boxes)
+            self.assertEqual(tuple(cell["exclude_tick"] for cell in reused.ax_roi_grid._aidas_grid_cells), ticks)
             self.assertIs(reused.ax_profile._aidas_profile_artists[0], profile_line)
-            self.assertEqual(len(reused.ax_roi_grid.patches), 21)
+            self.assertEqual(len(reused.ax_roi_grid.patches), 42)
             self.assertEqual(len(reused.ax_profile.lines), 3)
+
+    def test_every_roi_is_checked_and_included_by_default_including_unsaved_roi21(self):
+        frame = plot_frame()
+        self.assertEqual(len(frame.rois), 21)
+        self.assertNotIn(frame.rois[20].suffix, frame.completed)
+        frame._render_current_roi()
+        self.assertEqual(frame.excluded_rois, set())
+        for cell in frame.ax_roi_grid._aidas_grid_cells:
+            self.assertTrue(cell["exclude_box"].get_visible())
+            self.assertTrue(cell["exclude_tick"].get_visible())
+
+    def test_every_real_roi_has_a_checkbox_including_unprocessed_and_excluded_profiles(self):
+        frame = plot_frame()
+        frame.excluded_rois = {frame.rois[index].suffix for index in (0, 20)}
+        for width in (8, 3):
+            frame.figure.set_size_inches(width, 5)
+            frame._render_current_roi()
+            cells = frame.ax_roi_grid._aidas_grid_cells
+            self.assertEqual(len(cells), 21)
+            for index, cell in enumerate(cells):
+                self.assertTrue(cell["exclude_box"].get_visible())
+                self.assertEqual(cell["exclude_tick"].get_visible(), index not in (0, 20))
+                # The top-left target is drawn inside its own ROI, including
+                # ROI 21, which has no saved result or profile curve yet.
+                x, y = cell["exclude_box"].get_xy()
+                self.assertTrue(index % 7 <= x < index % 7 + .5)
+                self.assertTrue(2 - index // 7 + .5 < y < 3 - index // 7)
+                bounds = cell["exclude_box"].get_window_extent()
+                self.assertGreater(bounds.width, 0)
+                self.assertGreater(bounds.height, 0)
+            self.assertFalse(cells[0]["curve"].get_visible())
+            self.assertFalse(cells[20]["curve"].get_visible())
+
+        frame.rois = frame.rois[:2]
+        frame.current_roi_idx = 0
+        frame._render_current_roi()
+        for index, cell in enumerate(frame.ax_roi_grid._aidas_grid_cells):
+            self.assertEqual(cell["exclude_box"].get_visible(), index < 2)
+            self.assertEqual(cell["exclude_tick"].get_visible(), index == 1)
+
+    def test_resize_keeps_checkbox_square_and_its_hit_target_aligned(self):
+        frame = plot_frame()
+        frame._render_current_roi()
+        for width, height in ((12, 4), (4, 8)):
+            frame.figure.set_size_inches(width, height)
+            frame._on_plot_canvas_configure(SimpleNamespace(widget=frame.canvas.get_tk_widget()))
+            for index, cell in enumerate(frame.ax_roi_grid._aidas_grid_cells):
+                bounds = cell["exclude_box"].get_window_extent()
+                self.assertAlmostEqual(bounds.width, bounds.height)
+                event = MouseEvent("button_press_event", frame.canvas,
+                                   (bounds.x0 + bounds.x1) / 2, (bounds.y0 + bounds.y1) / 2)
+                self.assertTrue(frame._roi_exclusion_checkbox_hit(index, event))
+
+    def test_checkbox_hover_explains_checked_inclusion_and_unchecked_exclusion(self):
+        frame = plot_frame()
+        with patch.object(frame, "_can_change_roi_exclusion", return_value=True):
+            for exclusions, expected in (
+                (set(), "Uncheck to exclude this ROI from Excel"),
+                ({frame.rois[0].suffix}, "Check to include this ROI"),
+            ):
+                frame.excluded_rois = exclusions
+                frame._render_current_roi()
+                bounds = frame.ax_roi_grid._aidas_grid_cells[0]["exclude_box"].get_window_extent()
+                event = MouseEvent("motion_notify_event", frame.canvas,
+                                   (bounds.x0 + bounds.x1) / 2, (bounds.y0 + bounds.y1) / 2)
+                frame._on_plot_motion(event)
+                hint = frame.ax_roi_grid._aidas_hover_hint
+                self.assertTrue(hint.get_visible())
+                self.assertEqual(hint.get_text(), expected)
 
     def test_hover_blits_only_the_grid_and_restores_its_original_pixels(self):
         frame = plot_frame()

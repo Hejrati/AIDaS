@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 import tkinter as tk
 import unittest
 from unittest import mock
@@ -218,6 +219,13 @@ class FoveaPickerTests(unittest.TestCase):
                     if scale == 1 and len(stage_visits) == 1:
                         self._run_timers(step2_annotate.FOVEA_GUIDE_DELAY_MS +
                                          PromptCue.DURATION_MS + 100)
+                        # Tk may deliver animation frames late on a busy runner.
+                        # Wait for completion with a deadline, then keep the same
+                        # timer-cleanup and resting-position assertions below.
+                        deadline = time.monotonic() + 3.0
+                        while (any(cue._motion_job is not None for cue in self.cues)
+                               and time.monotonic() < deadline):
+                            self._run_timers(20)
                         for cue in self.cues:
                             self.assertIsNone(cue._motion_job)
                         self.assertEqual(float(button.place_info()["x"]), 0)

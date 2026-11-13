@@ -49,13 +49,16 @@ class Step5CompileTests(unittest.TestCase):
         frame._set_running = mock.Mock()
         frame._append_log = mock.Mock()
         frame.on_compilation_complete = mock.Mock()
-        result = SimpleNamespace(output_path=Path("compiled.xlsx"))
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "compiled.xlsx"
+            output.touch()
+            result = SimpleNamespace(output_path=output)
 
-        with mock.patch("aidas.steps.step5_compile.messagebox.showinfo") as popup:
-            frame._compilation_succeeded(result)
+            with mock.patch("aidas.steps.step5_compile.messagebox.showinfo") as popup:
+                frame._compilation_succeeded(result)
 
-        popup.assert_not_called()
-        frame.on_compilation_complete.assert_called_once_with(Path("compiled.xlsx"))
+            popup.assert_not_called()
+            frame.on_compilation_complete.assert_called_once_with(output)
 
     def test_final_success_updates_status_without_a_completion_popup(self):
         app = AIDaSApp.__new__(AIDaSApp)

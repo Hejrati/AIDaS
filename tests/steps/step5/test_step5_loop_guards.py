@@ -65,7 +65,9 @@ class Step5LoopGuardTests(unittest.TestCase):
         frame._run_clicked()
 
     def _finish(self, frame):
-        frame._compilation_succeeded(SimpleNamespace(output_path=Path(frame.output_var.get())))
+        output = Path(frame.output_var.get())
+        output.touch()
+        frame._compilation_succeeded(SimpleNamespace(output_path=output))
 
     def test_completed_handoff_exports_once_across_aliases_and_completion_reentry(self):
         subject = self.root / "Subject_A"
@@ -395,6 +397,7 @@ class Step5LoopGuardTests(unittest.TestCase):
         frame = self._frame()
         self._start_manual(frame)
         self.worker.is_alive.return_value = False
+        Path(frame.output_var.get()).touch()
         frame._events.put(("success", SimpleNamespace(output_path=Path(frame.output_var.get()))))
 
         frame._poll_events()

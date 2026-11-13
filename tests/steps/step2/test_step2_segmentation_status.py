@@ -79,7 +79,8 @@ class Step2SegmentationStatusTests(unittest.TestCase):
         for side in ("NaSaL", "TEMPORAL"):
             side_folder = folder / side
             side_folder.mkdir()
-            (side_folder / "LIGHT_MARKED.IMG").write_bytes(b"saved")
+            for name in ("LIGHT_MARKED.IMG", "LIGHT_MARKED.HDR", "LIGHT.IMG", "LIGHT.HDR"):
+                (side_folder / name).write_bytes(b"saved")
 
         row = self.frame._step2_batch_segmentation_row(folder)
 

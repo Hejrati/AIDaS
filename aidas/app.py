@@ -1755,6 +1755,25 @@ class AIDaSApp(ctk.CTk):
         if source is not None:
             self._animate_step_transition(source, max(0, requested - 1))
 
+    def _on_workflow_invalidated(self, step_number: int) -> None:
+        """Retire this step's completion and any results that depend on it."""
+        try:
+            index = int(step_number) - 1
+        except (TypeError, ValueError):
+            return
+        if not 0 <= index < len(WorkflowProgressStrip.DEFAULT_STEPS):
+            return
+        completed = self.__dict__.get("_workflow_completed_steps", set())
+        if isinstance(completed, int):
+            completed = set(range(completed))
+        self._workflow_completed_steps = {step for step in completed if step < index}
+        self._workflow_cancelled_step = None
+        self.__dict__.pop("_workflow_transition_source", None)
+        transition = self.__dict__.get("_step_transition")
+        if transition is not None and transition.winfo_exists():
+            transition.destroy()
+        self._sync_workflow_progress_strip()
+
     def _on_workflow_cancelled(self, step_number: int) -> None:
         """Reset completion cues and mark the explicitly cancelled step."""
         index = int(step_number) - 1

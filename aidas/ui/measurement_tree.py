@@ -224,6 +224,8 @@ class MeasurementDirectoryTree(ttk.Frame):
 
         def worker():
             try:
+                if not directory.is_dir():
+                    raise FileNotFoundError(f"The selected folder is unavailable: {directory}")
                 inventory = scan_measurement_directory(directory, output_path=output, cancelled=cancelled.is_set)
             except InventoryCancelled:
                 return

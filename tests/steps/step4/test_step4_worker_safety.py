@@ -180,6 +180,7 @@ class Step4WorkerSafetyTests(unittest.TestCase):
         frame._auto_detecting = False
         frame.image = object()
         frame.rois = []
+        frame.current_roi_idx = 0
         frame.completed = {}
         frame._has_current_roi_input = mock.Mock(return_value=True)
         frame._close_profile_zoom = mock.Mock()

@@ -63,6 +63,7 @@ from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
     HoverToolTip,
     notify_workflow_cancelled,
+    notify_workflow_invalidated,
     NativeNumericSpinbox,
     SidebarStepFrame,
     action_button,
@@ -2867,6 +2868,25 @@ class Step3Frame(SidebarStepFrame):
             getattr(self, "step4_result_folders", ())
         )
 
+    def _reconcile_step4_result_folders(self):
+        """Forget removed outputs without treating a fresh session as invalid."""
+        if self.__dict__.get("_busy", False):
+            return self._available_step4_result_folders()
+        previous = self.__dict__.get("step4_result_folders", ()) or ()
+        folders = self._available_step4_result_folders()
+        removed = any(
+            folder and not self._normalize_step4_result_folders([folder])
+            for folder in previous
+        )
+        self.step4_result_folders = folders
+        if removed:
+            notify_workflow_invalidated(self, 3)
+            variable = self.__dict__.get("progress_text_var")
+            if variable is not None:
+                variable.set("Flattened results removed")
+        self._update_continue_to_step4_button_state()
+        return folders
+
     def _update_continue_to_step4_button_state(self):
         """Enable the handoff only when flattened Analyze files are ready."""
 
@@ -2883,7 +2903,7 @@ class Step3Frame(SidebarStepFrame):
     def _continue_to_step4(self):
         """Open all loaded or newly processed flattened folders in Step 4."""
 
-        folders = self._available_step4_result_folders()
+        folders = self._reconcile_step4_result_folders()
         if not folders:
             messagebox.showwarning(
                 "No flattened files",
@@ -3970,6 +3990,7 @@ class Step3Frame(SidebarStepFrame):
         return input_paths, issues
 
     def on_show(self):
+        self._reconcile_step4_result_folders()
         self._refresh_input_status()
 
     def set_input_folder(self, folder):
@@ -4152,12 +4173,18 @@ class Step3Frame(SidebarStepFrame):
         missing = self._missing_input_names(input_paths)
         if missing:
             raise RuntimeError("Missing Step 3 inputs: " + ", ".join(missing))
+        input_snapshot = self._r_input_snapshot(
+            Path(str(base) + suffix) for base in input_paths.values()
+            for suffix in (".hdr", ".img")
+        )
         input_info = self._read_input_stack_info(input_paths)
         requirement_issues = self._input_requirement_issues(input_paths, input_info)
         if requirement_issues:
             raise RuntimeError("Input requirement issue(s): " + "; ".join(requirement_issues))
         self._validate_input_stack_shapes(input_info)
+        self._ensure_r_inputs_unchanged(input_snapshot)
         return {
+            "_input_snapshot": input_snapshot,
             "input_dir": str(folder.resolve()),
             "output_dir": str(folder.resolve()),
             # The app produces one LIGHT acquisition. Preserve the original R
@@ -4170,6 +4197,30 @@ class Step3Frame(SidebarStepFrame):
             "image_index_dark": self._r_index_string(input_info["LIGHT"]["shape"][0]),
             "pixel_width": str(self.PIXEL_WIDTH_UM),
         }
+
+    @staticmethod
+    def _r_input_snapshot(paths):
+        snapshot = []
+        for path in paths:
+            path = Path(path).absolute()
+            stat = path.stat()
+            snapshot.append((str(path), stat.st_dev, stat.st_ino, stat.st_size,
+                             stat.st_mtime_ns, stat.st_ctime_ns))
+        return tuple(snapshot)
+
+    @classmethod
+    def _ensure_r_inputs_unchanged(cls, snapshot):
+        if snapshot is None:
+            return
+        try:
+            if cls._r_input_snapshot(item[0] for item in snapshot) == snapshot:
+                return
+        except OSError:
+            pass
+        raise RuntimeError(
+            "Step 3 input files were removed or changed during processing. "
+            "Recreate the inputs in Steps 1 and 2, then start a new Step 3 run."
+        )
 
     def _register_r_process(self, process):
         with self._r_process_lock:
@@ -4273,7 +4324,11 @@ class Step3Frame(SidebarStepFrame):
         self._pending_batch_restart = None
         self._start_batch_r_runs(*restart, allow_existing_rdata=True)
 
-    def _run_supervised_r_command(self, command, cwd, env, on_line):
+    def _run_supervised_r_command(self, command, cwd, env, on_line, *, input_snapshot=None):
+        try:
+            self._ensure_r_inputs_unchanged(input_snapshot)
+        except RuntimeError as exc:
+            return 1, str(exc), "failed"
         popen_options = {
             "cwd": cwd,
             "stdin": subprocess.DEVNULL,
@@ -4320,6 +4375,7 @@ class Step3Frame(SidebarStepFrame):
             self._unregister_r_process(process)
             return 1, f"Could not start the R output reader: {exc}", "failed"
         stop_reason = None
+        input_error = None
         output_complete = False
         reader_completion = WorkerCompletionGuard(reader)
         exited_empty_polls = 0
@@ -4328,6 +4384,12 @@ class Step3Frame(SidebarStepFrame):
             while True:
                 if self._r_cancel_event.is_set():
                     stop_reason = "cancelled"
+                    break
+                try:
+                    self._ensure_r_inputs_unchanged(input_snapshot)
+                except RuntimeError as exc:
+                    input_error = str(exc)
+                    stop_reason = "failed"
                     break
                 if output_complete:
                     if not self._process_is_running(process):
@@ -4371,7 +4433,7 @@ class Step3Frame(SidebarStepFrame):
                         on_line(item)
                 if stop_reason == "cancelled":
                     return 130, "Cancelled by user.", stop_reason
-                return 1, "The R output stream stopped without reporting completion.", "failed"
+                return 1, input_error or "The R output stream stopped without reporting completion.", "failed"
 
             try:
                 returncode = process.wait()
@@ -4439,6 +4501,7 @@ class Step3Frame(SidebarStepFrame):
         self.r_batch_run_panel.pack(fill="both", expand=True)
         self._r_cancel_event.clear()
         self._busy = True
+        notify_workflow_invalidated(self, 3)
         self.step4_result_folders = []
         self._active_r_core_allocation = workers
         self._active_r_folder_keys = {self._folder_key(folder) for folder in folders}
@@ -4691,6 +4754,7 @@ class Step3Frame(SidebarStepFrame):
             r_config["input_dir"],
             env,
             handle_line,
+            **({"input_snapshot": r_config["_input_snapshot"]} if "_input_snapshot" in r_config else {}),
         )
         return {
             "folder": folder,
@@ -4760,6 +4824,7 @@ class Step3Frame(SidebarStepFrame):
             r_config["output_dir"],
             env,
             output_lines.append,
+            **({"input_snapshot": r_config["_input_snapshot"]} if "_input_snapshot" in r_config else {}),
         )
         return {
             "folder": folder,
@@ -4779,6 +4844,13 @@ class Step3Frame(SidebarStepFrame):
         outcome = result.get("outcome", "completed" if returncode == 0 else "failed")
         commands = list(result.get("cmd", []))
 
+        if returncode == 0 and validate_exports:
+            try:
+                self._ensure_r_inputs_unchanged(r_config.get("_input_snapshot"))
+            except RuntimeError as exc:
+                returncode = 1
+                outcome = "failed"
+                stderr = str(exc)
         if returncode == 0 and validate_exports:
             output_dir = Path(r_config["output_dir"])
             required_exports = (

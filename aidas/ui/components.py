@@ -38,6 +38,9 @@ class AppButton(ctk.CTkButton):
     def __init__(self, master, *, variant: str = "secondary", preserve_icon_colors: bool = False,
                  raised: bool = False, **kwargs):
         self._raised = raised
+        self._aidas_pressed = False
+        self._aidas_pointer_pressed = False
+        self._aidas_button_destroyed = False
         self._preserve_icon_colors = preserve_icon_colors
         legacy_style = str(kwargs.pop("style", ""))
         kwargs.pop("padding", None)
@@ -84,20 +87,82 @@ class AppButton(ctk.CTkButton):
 
     def _draw(self, no_color_updates=False):
         result = super()._draw(no_color_updates)
-        self._draw_depth()
+        # CTk creates replacement text/image labels during a redraw, so their
+        # mouse-down bindings must be installed alongside the canvas binding.
+        self._bind_pointer_press()
+        self._paint_button_state()
         return result
 
-    def _draw_depth(self, *, hovered=False):
+    def _create_bindings(self, sequence=None):
+        super()._create_bindings(sequence)
+        if sequence is None or sequence in ("<ButtonPress-1>", "<Button-1>"):
+            self._bind_pointer_press(force=sequence is not None)
+
+    def _bind_pointer_press(self, *, force=False):
+        for widget in (self._canvas, self._text_label, self._image_label):
+            if widget is not None and (force or not getattr(widget, "_aidas_press_binding", None)):
+                widget._aidas_press_binding = widget.bind(
+                    "<ButtonPress-1>", self._on_press, add="+",
+                )
+
+    def _is_visually_pressed(self):
+        return self._aidas_pressed or (
+            self._aidas_pointer_pressed and self._state != "disabled"
+        )
+
+    def _button_fill(self):
+        color = self._fg_color
+        if self._hover and self._mouse_inside and self._state == "normal":
+            color = self._hover_color or color
+        if color == "transparent":
+            color = self._bg_color
+        color = self._apply_appearance_mode(color)
+        if self._is_visually_pressed():
+            rgb = [value // 257 for value in self.winfo_rgb(color)]
+            color = "#" + "".join(f"{round(value * .78):02x}" for value in rgb)
+        return color
+
+    def _paint_button_state(self):
+        """Render temporary feedback without changing the configured palette."""
+        if self._aidas_button_destroyed:
+            return
+        color = self._button_fill()
+        self._canvas.itemconfig("inner_parts", fill=color, outline=color)
+        for label in (self._text_label, self._image_label):
+            if label is not None:
+                label.configure(bg=color)
+        self._draw_depth()
+
+    def set_pressed(self, pressed: bool) -> None:
+        """Hold visual feedback until explicitly released, including while disabled.
+
+        This changes appearance only. It never invokes the button's command.
+        Releasing also clears transient mouse-down feedback, so a completed
+        asynchronous action can restore the button independently of mouse-up.
+        """
+        self._aidas_pressed = bool(pressed)
+        if not pressed:
+            self._aidas_pointer_pressed = False
+        if self._aidas_button_destroyed:
+            return
+        self._paint_button_state()
+
+    def _on_press(self, event=None):
+        if self._state != "disabled":
+            self._aidas_pointer_pressed = True
+            self._paint_button_state()
+
+    def _draw_depth(self):
         """Add a DPI-aware bevel without changing layout or scheduling animation."""
         if not self._raised:
             return
         self._canvas.delete("aidas_depth")
-        if self._state == "disabled":
+        pressed = self._is_visually_pressed()
+        if self._state == "disabled" and not pressed:
             return
-        color = self._hover_color if hovered else self._fg_color
-        if color is None or color == "transparent":
+        if self._fg_color == "transparent" and not pressed:
             return
-        rgb = [value // 257 for value in self.winfo_rgb(self._apply_appearance_mode(color))]
+        rgb = [value // 257 for value in self.winfo_rgb(self._button_fill())]
 
         def shade(target, strength):
             return "#" + "".join(f"{round(value + (target-value)*strength):02x}" for value in rgb)
@@ -109,20 +174,23 @@ class AppButton(ctk.CTkButton):
         inset = max(radius, 6 * unit)
         self._canvas.create_line(
             inset, height - 3 * unit, width - inset, height - 3 * unit,
-            fill=shade(0, .34), width=4 * unit, capstyle="round", tags="aidas_depth",
+            fill=shade(255, .30) if pressed else shade(0, .34),
+            width=(1.5 if pressed else 4) * unit, capstyle="round", tags="aidas_depth",
         )
         self._canvas.create_line(
             inset, 2.5 * unit, width - inset, 2.5 * unit,
-            fill=shade(255, .42), width=1.5 * unit, capstyle="round", tags="aidas_depth",
+            fill=shade(0, .46) if pressed else shade(255, .42),
+            width=(3.5 if pressed else 1.5) * unit, capstyle="round", tags="aidas_depth",
         )
 
     def _on_enter(self, event=None):
         super()._on_enter(event)
-        self._draw_depth(hovered=self._hover and self._state == "normal")
+        self._paint_button_state()
 
     def _on_leave(self, event=None):
+        self._aidas_pointer_pressed = False
         super()._on_leave(event)
-        self._draw_depth()
+        self._paint_button_state()
 
     def _remember_workflow_origin(self):
         """Capture the button before its action can close or replace the view."""
@@ -139,10 +207,16 @@ class AppButton(ctk.CTkButton):
         return super()._clicked(event)
 
     def _on_release(self, event=None):
-        # The installed CTk button invokes mouse actions from _on_release;
-        # invoke() alone only covers programmatic and keyboard activation.
+        # Match CTk's enabled/inside release behavior. Mouse-down and held
+        # feedback above replace its fixed 100 ms animation, whose callback
+        # otherwise outlives buttons destroyed by their own command.
         self._remember_workflow_origin()
-        return super()._on_release(event)
+        try:
+            if self._mouse_inside and self._state != "disabled":
+                return super().invoke()
+        finally:
+            self._aidas_pointer_pressed = False
+            self._paint_button_state()
 
     def invoke(self):
         self._remember_workflow_origin()
@@ -247,7 +321,11 @@ class AppButton(ctk.CTkButton):
             if kwargs["image"] is getattr(self, "_image", None):
                 kwargs.pop("image")
 
-        return super().configure(require_redraw, **kwargs)
+        if target_state == "disabled":
+            self._aidas_pointer_pressed = False
+        result = super().configure(require_redraw, **kwargs)
+        self._paint_button_state()
+        return result
 
     config = configure
 
@@ -285,6 +363,12 @@ class AppButton(ctk.CTkButton):
 
     def _apply_aidas_theme(self):
         self.configure()
+
+    def destroy(self):
+        self._aidas_button_destroyed = True
+        self._aidas_pressed = False
+        self._aidas_pointer_pressed = False
+        super().destroy()
 
     def state(self, statespec=None):
         """Support the subset of ttk.Button.state used by workflow panels."""

@@ -204,11 +204,11 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
         ),
         input_summary="Completed Step 3 _flat_LIGHT Analyze pairs, using slice 0",
         function_summary="Automatically detect or manually revise profile bounds for 21 ROIs and calculate shape measurements",
-        output_summary="ROI_to_move_stck.tif with measurements, and MAX_Stack.tif",
+        output_summary="ROI_to_move_stck.tif with measurements, MAX_Stack.tif, and rr_MCPAR.xlsx in each processed folder",
         completion_check=(
             "Every selected folder has finished saving and contains "
             "ROI_to_move_stck.tif with its measurement record and MAX_Stack.tif. "
-            "A separate measurement workbook is not created."
+            "New builds also save rr_MCPAR.xlsx in each processed folder, including nasal and temporal."
         ),
         stage_points=(
             (
@@ -219,18 +219,18 @@ TUTORIAL_PAGES: tuple[TutorialPage, ...] = (
             ),
             (
                 "For ROIs 1-20, automatic detection smooths each profile with a degree-2 Savitzky-Golay filter, finds two minima around an internal maximum, validates peak prominence and quadratic fit, and checks agreement across those ROIs. High-confidence results are accepted; ROI 21 and other amber ! cells require review.",
-                "The enlarged MCP/AR profile editor opens automatically at ROI 1, or the first available peripheral profile, after detection. Use Previous and Next to review the profiles and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, click the exact sample or drag the Start or End line in the zoomed editor, and use Apply changes to confirm it. Zoomed manual edits do not snap to a nearby minimum. At the last peripheral profile, use Now do foveola to close the editor and select the manual foveola ROI (ROI 21). Apply or save corrections before continuing.",
+                "The enlarged MCP/AR profile editor opens automatically at ROI 1, or the first available peripheral profile, after detection. Use Previous and Next or the Left and Right arrow keys to review the profiles and Major, Minor, Angle, Circ., AR, Round, and Solidity measurements. Click an amber or incorrect grid preview, click the exact sample or drag the Start or End line in the zoomed editor, and use Apply changes to confirm it. Zoomed manual edits do not snap to a nearby minimum. At the last peripheral profile, use Now do foveola to close the editor and select the manual foveola ROI (ROI 21). Apply or save corrections before continuing.",
             ),
             (
-                "When all 21 ROIs are complete, Build stack becomes available. Folder tab names stay fixed while you work.",
-                "The build shows a wait message while saving ROI_to_move_stck.tif with its measurements and MAX_Stack.tif. After saving, Go to next tab becomes available while folders remain; Go to Step 5 becomes available when all are complete. Saved tabs also provide Open results folder and Restart this file.",
+                "When all 21 ROIs are confirmed or excluded, Build stack becomes available. Every ROI starts checked and included. Uncheck the checkbox at the top-left of a tile to exclude that ROI and leave its rrMCP/AR Excel cell blank; check it again to include it with its previous edits. The enlarged editor also offers Exclude ROI. Other ROI rows and ELM-RPE measurements keep their positions and values.",
+                "Use Go to temporal for a single nasal/temporal pair, or Go to next image for a batch, to switch unfinished images while retaining edits and exclusions. The build shows a wait message while saving ROI_to_move_stck.tif with its measurements, MAX_Stack.tif, and rr_MCPAR.xlsx in each processed nasal or temporal folder. The workbook lists every ROI in its original position, with excluded measurements left blank. After saving, Go to next tab becomes available while folders remain; Go to Step 5 becomes available when all are complete. Saved tabs also provide Open results folder and Restart this file.",
                 "After all stacks finish saving, Step 5 opens with the measurement root, output path, and folder tree prepared, then creates the final Excel workbook automatically after checking the folders. No extra confirmation is needed. Go to Step 5 also transfers the measurement folders.",
             ),
         ),
         tips=(
-            "Build stack remains disabled until every one of the 21 ROI rows is complete.",
-            "Automatic detection never processes ROI 21 or silently accepts a low-confidence curve; every manual or uncertain ROI remains amber until you confirm it.",
-            "Revising a completed ROI updates its measurements without advancing, so the change can be verified immediately.",
+            "Build stack remains disabled until every one of the 21 ROI rows is confirmed or excluded.",
+            "Automatic detection never processes ROI 21 or silently accepts a low-confidence curve; every manual or uncertain ROI remains amber until you confirm or exclude it.",
+            "Apply in the enlarged editor and corrections in the bottom profile both confirm the ROI and clear its warning. Manual corrections stay selected for review and are protected from late automatic detection results.",
             "The folder scanner also accepts legacy Results.xlsx or Results_org.xlsx as the measurement workbook when deciding that earlier work is complete.",
         ),
         step_index=3,

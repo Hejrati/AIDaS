@@ -108,6 +108,12 @@ height/offset adjustments retain their manual behavior. The reset
 buttons restore the full-view defaults when metadata is available. Undo reads the
 original SDB with the same detection before removing a saved crop.
 
+After deleting generated outputs, return to Step 1 or refresh its folder list
+to process the same SDB again. Missing crop files clear the saved status and
+restore the original image for cropping, while unsaved edits are preserved.
+Returning or refreshing does not recreate output files; **Crop & Scale** saves
+them when requested. The original SDB remains unchanged.
+
 When an SDB opens, Step 1 checks its signed intensity histogram in overlapping
 horizontal bands and offers to smooth unusually bright pixels. This check runs
 before a crop is selected, including when using **Whole Image**. Corrections
@@ -173,22 +179,40 @@ Low-confidence, invalid, or cross-ROI outlier detections are shown as amber
 `!` cells and are not considered complete. ROI 21 is always shown for manual
 review unless it was already confirmed before automatic detection. After detection,
 the enlarged MCP/AR profile editor opens at ROI 1, or the first available peripheral
-profile. Use **Previous** and **Next** to review the profiles and **Apply** or
-**Save and Exit** to keep corrections. At the last peripheral profile, **Now do
+profile. Use **Previous** and **Next**, or the keyboard **Left** and **Right**
+arrow keys, to review the profiles and **Apply** or
+**Save and Exit** to confirm corrections and clear the amber warning. Fixes in
+the bottom profile also confirm the ROI and leave it selected for review.
+Navigation buttons visibly depress for mouse clicks and arrow keys, then
+release after the destination profile is drawn.
+Manual edits are protected from detection results that arrive later.
+At the last peripheral profile, **Now do
 foveola** closes the editor and selects the manual foveola ROI (ROI 21).
 Click an amber cell to open its
 zoomed profile, click the exact sample or drag either boundary line, and apply the correction. Manual
 zoom edits do not snap to a nearby minimum. **Build
-stack** remains disabled until every amber result has been reviewed. The final
+stack** remains disabled until every ROI has been confirmed or excluded. Use
+the checkbox at the top-left of each ROI tile to control inclusion in rrMCP/AR
+measurements. **All ROIs start checked and included**. Uncheck a poor-quality
+ROI to exclude it; check it again to restore its previous edits.
+The grid marks unchecked ROIs **Excluded**.
+The enlarged editor also offers **Exclude ROI**. Exclusions stay with their
+image when switching tabs. Their Excel cells remain blank, including for ROI
+21, without shifting other ROI rows or changing ELM-RPE measurements. The final
 `ROI_to_move_stck.tif` and `MAX_Stack.tif` stacks are written only when **Build
-stack** is pressed. The ROI stack stores the same shape measurements in its TIFF
-metadata, preserving the plot pixels and measured values without creating
-`rr_MCPAR.xlsx`. A successful rebuild removes that former generated workbook
-from the rebuilt output folder only after the new measurement record is saved
-and validated.
+stack** is pressed. Build Stack also creates **rr_MCPAR.xlsx** in each processed
+folder, including both nasal and temporal folders. Its original **in** worksheet
+lists the ROI numbers and shape measurements, with Round in column G. Excluded
+ROIs retain their numbered rows with blank measurements. The workbook and TIFF
+metadata use the same measured values. Rebuilding replaces the per-folder
+workbook after the stack has been saved and validated.
 
 Folder tabs keep fixed names while you work. ROI progress remains visible in
-the grid and action controls. After a stack finishes saving, **Go to next tab**
+the grid and action controls. Use **Go to temporal** when reviewing a single
+nasal/temporal folder pair, or **Go to next image** for a batch, to switch to
+another unfinished image while keeping each image's ROI edits. These buttons
+are disabled while loading, detecting, or building, or when no target remains.
+After a stack finishes saving, **Go to next tab**
 is enabled if another folder remains; **Go to Step 5** is enabled when all
 selected folders are complete. These actions stay disabled during file writes.
 
@@ -247,8 +271,8 @@ Folders without nasal/temporal Step 4 measurements are ignored. Step 3 thickness
 and optional fovea extraction continue for the discovered subjects.
 
 The scanner prefers valid measurement records embedded in `ROI_to_move_stck.tif`
-(or `.tiff`). Older folders remain readable: the fallback order is legacy
-`rr_MCPAR.xlsx`, `Results*.xlsx`, then other compatible `.xlsx` files. Excel lock
+(or `.tiff`). The workbook fallback order is `rr_MCPAR.xlsx` from current or older
+folders, `Results*.xlsx`, then other compatible `.xlsx` files. Excel lock
 files (`~$*`) and thickness workbooks are excluded from Step 4 result discovery.
 Legacy workbooks must use the same Step 4 layout (measurements in column G).
 Duplicate subject names within the same group label in separate branches cause

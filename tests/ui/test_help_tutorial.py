@@ -131,6 +131,7 @@ class TutorialContentTests(unittest.TestCase):
             "Solidity",
             "ROI_to_move_stck.tif",
             "MAX_Stack.tif",
+            "rr_MCPAR.xlsx",
             "measurement record",
             "slice 0",
             "Apply changes",

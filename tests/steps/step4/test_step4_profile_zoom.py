@@ -47,7 +47,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         source = inspect.getsource(Step4ProfileZoomDialog.__init__)
 
         self.assertIn("apply_app_icon_to(self)", source)
-        self.assertEqual(source.count("= AppButton("), 5)
+        self.assertEqual(source.count("= AppButton("), 6)
         self.assertIn('text="Save and Exit"', source)
         self.assertIn('text="Apply"', source)
         self.assertIn('text="Cancel"', source)
@@ -114,7 +114,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         profile[16:80] += 80 * np.sin(np.linspace(0, np.pi, 64)) ** 2
         return profile
 
-    def test_profile_zoom_apply_updates_boundaries_without_saving(self):
+    def test_profile_zoom_apply_commits_boundaries_without_advancing(self):
         frame = self._zoom_frame()
 
         self.assertTrue(frame._apply_profile_zoom_clicks(3, 4, 19))
@@ -123,7 +123,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         frame._sync_entry_vars_from_clicks.assert_called_once_with()
         frame._remember_current_roi_clicks.assert_called_once_with()
         frame._render_current_roi.assert_called_once_with()
-        frame._save_current_roi.assert_not_called()
+        frame._save_current_roi.assert_called_once_with(auto_advance=False, apply_entry_values=False)
         self.assertEqual(frame.current_roi_idx, 3)
         self.assertFalse(frame._roi_adjust_bounds["04"])
 
@@ -154,7 +154,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         frame._save_current_roi.assert_not_called()
         frame._render_current_roi.assert_not_called()
 
-    def test_dialog_apply_keeps_open_and_does_not_save(self):
+    def test_dialog_apply_keeps_open_and_records_committed_bounds(self):
         dialog = self._zoom_dialog(changed=True)
 
         def apply(index, start, end, *, adjust_bounds):
@@ -174,9 +174,9 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertFalse(dialog._closing)
         for button in (dialog.save_button, dialog.apply_button):
             self.assertEqual(button.state.call_args, mock.call(["disabled"]))
-        self.assertEqual(dialog._saved_bounds, (2, 8))
+        self.assertEqual(dialog._saved_bounds, (4, 19))
         self.assertEqual(dialog._applied_bounds, (4, 19))
-        self.assertTrue(dialog._saved_adjust_bounds)
+        self.assertFalse(dialog._saved_adjust_bounds)
         self.assertFalse(dialog._applied_adjust_bounds)
         dialog._apply()
         dialog._save()
@@ -355,7 +355,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
                     self.assertEqual(button.state.call_args, mock.call(["disabled"]))
 
                 dialog._move_boundary("start", 4, refresh_measurements=False)
-                self.assertTrue(dialog._adjust_bounds)
+                self.assertFalse(dialog._adjust_bounds)
 
                 for button in (dialog.save_button, dialog.apply_button):
                     self.assertEqual(button.state.call_args, mock.call(["!disabled"]))
@@ -363,13 +363,13 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
                 for button in (dialog.save_button, dialog.apply_button):
                     self.assertEqual(button.state.call_args, mock.call(["disabled"]))
                 self.assertEqual(dialog._applied_bounds, dialog._saved_bounds)
-                self.assertTrue(dialog._applied_adjust_bounds)
+                self.assertFalse(dialog._applied_adjust_bounds)
                 if action == "apply":
                     dialog._on_save_callback.assert_not_called()
                     dialog.destroy.assert_not_called()
                 else:
                     dialog._on_save_callback.assert_called_once_with(
-                        3, 4, 19, adjust_bounds=True
+                        3, 4, 19, adjust_bounds=False
                     )
                     dialog.destroy.assert_called_once_with()
 
@@ -486,13 +486,17 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertFalse(automatic.manual_bounds)
         self.assertEqual(automatic.adjusted_start, 17)
 
-    def test_reopening_an_applied_unsaved_selection_keeps_confirmed_bounds(self):
+    def test_reopening_an_applied_selection_keeps_new_confirmed_bounds(self):
         frame = self._zoom_frame()
         frame.rois = [SimpleNamespace(suffix=f"{index + 1:02d}") for index in range(4)]
         confirmed = SimpleNamespace(start=2, end=8)
         frame.completed = {"04": confirmed}
         frame._roi_overview_result = mock.Mock(return_value=SimpleNamespace(start=4, end=19))
         frame._profile_zoom_measurements = mock.Mock()
+        def commit(**_options):
+            frame.completed["04"] = SimpleNamespace(start=4, end=19, manual_bounds=True)
+            return True
+        frame._save_current_roi.side_effect = commit
         dialog = self._zoom_dialog(changed=True)
         dialog._on_apply_callback = frame._apply_profile_zoom_clicks
         dialog._on_close_callback = frame._profile_zoom_closed
@@ -502,7 +506,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         dialog.close()
 
         self.assertEqual(frame.profile_clicks, [4.0, 19.0])
-        self.assertIs(frame.completed["04"], confirmed)
+        self.assertIsNot(frame.completed["04"], confirmed)
         self.assertIsNone(frame._profile_zoom_dialog)
         with (
             mock.patch("aidas.steps.step4_analyze_isez.intensity_profile", return_value=np.arange(24)),
@@ -513,10 +517,10 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         constructor.assert_called_once()
         options = constructor.call_args.kwargs
         self.assertEqual((options["start"], options["end"]), (4.0, 19.0))
-        self.assertEqual(options["saved_bounds"], (2, 8))
+        self.assertEqual(options["saved_bounds"], (4, 19))
         self.assertFalse(options["adjust_bounds"])
-        self.assertTrue(options["saved_adjust_bounds"])
-        frame._save_current_roi.assert_not_called()
+        self.assertFalse(options["saved_adjust_bounds"])
+        frame._save_current_roi.assert_called_once_with(auto_advance=False, apply_entry_values=False)
 
     def _normalized_zoom_dialog(self):
         dialog = self._zoom_dialog()
@@ -1225,6 +1229,8 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         profile = np.full(20, 9.0)
         profile[11] = 1.5
         dialog = Step4ProfileZoomDialog.__new__(Step4ProfileZoomDialog)
+        dialog._actions_busy = False
+        dialog._closing = False
         dialog.profile = profile
         dialog.ax = object()
         dialog._drag_boundary = "end"
@@ -1249,6 +1255,8 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         profile = np.full(30, 9.0)
         profile[5] = 1.5
         dialog = Step4ProfileZoomDialog.__new__(Step4ProfileZoomDialog)
+        dialog._actions_busy = False
+        dialog._closing = False
         dialog.profile = profile
         dialog.ax = object()
         dialog._start = 10
@@ -1279,7 +1287,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         self.assertIn("_nearest_profile_sample", press_source)
         self.assertIn("_nearest_profile_sample", release_source)
 
-    def test_end_click_save_uses_fast_path_and_advances_new_roi(self):
+    def test_end_click_save_keeps_new_roi_selected_for_review(self):
         frame = Step4Frame.__new__(Step4Frame)
         frame._auto_saving_roi = False
         frame.image = object()
@@ -1291,7 +1299,7 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         frame._auto_save_current_roi()
 
         frame._save_current_roi.assert_called_once_with(
-            auto_advance=True,
+            auto_advance=False,
             apply_entry_values=False,
         )
         self.assertFalse(frame._auto_saving_roi)

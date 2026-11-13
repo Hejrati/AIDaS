@@ -405,6 +405,7 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         }
         frame._find_input_paths = lambda _folder: input_paths
         frame._read_input_stack_info = lambda _paths: input_info
+        frame._r_input_snapshot = lambda _paths: ()
 
         config = frame._r_script_config_for_folder(Path("subject"))
 

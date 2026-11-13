@@ -619,6 +619,7 @@ class Step1WorkQueueTests(unittest.TestCase):
 
     def test_step2_handoff_includes_all_folders_when_every_image_is_saved(self):
         frame = self._queue_frame()
+        frame._folder_has_all_saved_outputs = lambda _folder: True
         frame._sdb_directories = ["folder-a"]
         frame._saved_output_directories = {
             frame._path_key(folder) for folder in frame._sdb_directory_files
@@ -653,6 +654,7 @@ class Step1WorkQueueTests(unittest.TestCase):
 
     def test_each_saved_sdb_retains_its_own_crop_preview_in_the_same_folder(self):
         frame = self._queue_frame()
+        frame._folder_has_all_saved_outputs = lambda _folder: True
         frame._source_output_directory = lambda: "folder-a"
         frame._refresh_sdb_progress_colors = lambda: None
         frame._update_batch_handoff_button_state = lambda: None
@@ -681,6 +683,7 @@ class Step1WorkQueueTests(unittest.TestCase):
 
     def test_unreadable_saved_crop_preserves_the_current_preview(self):
         frame = self._queue_frame()
+        frame._folder_has_all_saved_outputs = lambda _folder: True
         crop = np.ones((2, 3), dtype=np.int16)
         frame.processed_image = crop
         frame._processed_image_saved = True
@@ -813,7 +816,9 @@ class Step1WorkQueueTests(unittest.TestCase):
             (ready / "Light.img").touch()
             (ready / "Light.hdr").touch()
             (already_marked / "Light.img").touch()
+            (already_marked / "Light.hdr").touch()
             (already_marked / "Light_MARKED.img").touch()
+            (already_marked / "Light_MARKED.hdr").touch()
 
             class Step2Stub:
                 _segmenter_running = False
