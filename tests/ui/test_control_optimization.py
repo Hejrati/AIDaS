@@ -95,6 +95,16 @@ class ButtonImageUpdateTests(unittest.TestCase):
         button = object.__new__(AppButton)
         icon = object()
         button._state = "normal"
+        button._raised = False
+        button._aidas_pressed = False
+        button._aidas_pointer_pressed = False
+        button._aidas_button_destroyed = False
+        button._fg_color = "#eeeeee"
+        button._hover = False
+        button._mouse_inside = False
+        button._canvas = mock.Mock()
+        button._text_label = None
+        button._image_label = None
         button._enabled_palette = {"text_color": COLOR_PAIRS["text"]}
         button._aidas_action_icon_source = icon
         button._aidas_tinted_action_icon = None

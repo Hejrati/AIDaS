@@ -10,6 +10,7 @@ from unittest import mock
 
 import customtkinter as ctk
 import numpy as np
+from openpyxl import Workbook
 
 from aidas.app import AIDaSApp
 from aidas.core.config import Config
@@ -196,6 +197,14 @@ class ImagePathStatusTests(unittest.TestCase):
             original_init(window, *args, **kwargs)
             window.attributes("-alpha", 0)
 
+        def completed_workbook(path):
+            workbook = Workbook()
+            try:
+                workbook.save(path)
+            finally:
+                workbook.close()
+            return SimpleNamespace(output_path=path)
+
         with tempfile.TemporaryDirectory() as directory:
             config = Path(directory) / "preferences.json"
             config.write_text(json.dumps({"interface_mode": "Modern",
@@ -237,7 +246,7 @@ class ImagePathStatusTests(unittest.TestCase):
                     step5_status.set("Creating the Excel file…")
                     self.assertEqual(app.status.cget("text"), step5_status.get())
                     saved = Path(directory) / "first measurements.xlsx"
-                    app.step5._compilation_succeeded(SimpleNamespace(output_path=saved))
+                    app.step5._compilation_succeeded(completed_workbook(saved))
                     self.assertEqual(app.status.cget("text"), f"Excel file saved: {saved}")
                     self.assertEqual(step5_status.get(), f"Excel file saved: {saved}")
 
@@ -246,7 +255,7 @@ class ImagePathStatusTests(unittest.TestCase):
                     step5_status.set("Creating the Excel file…")
                     self.assertEqual(app.status.cget("text"), str(paths[0]))
                     saved = Path(directory) / "background measurements.xlsx"
-                    app.step5._compilation_succeeded(SimpleNamespace(output_path=saved))
+                    app.step5._compilation_succeeded(completed_workbook(saved))
                     self.assertEqual(app.status.cget("text"), str(paths[0]))
                     app.notebook.select(app.step5)
                     app.update()

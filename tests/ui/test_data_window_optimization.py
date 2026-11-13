@@ -1,6 +1,7 @@
 """Regression coverage for retained data views and native caption updates."""
 
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import time
 import tkinter as tk
 from types import SimpleNamespace
@@ -43,8 +44,8 @@ class DataViewOptimizationTests(unittest.TestCase):
         self.assertFalse(self.errors, self.errors)
 
     @staticmethod
-    def inventory(name="Example", *, suffix=""):
-        directory = Path(name)
+    def inventory(name="Example", *, suffix="", directory=None):
+        directory = Path(name) if directory is None else Path(directory)
         children = tuple(
             DirectoryNode(directory / f"Results_{index}{suffix}.xlsx",
                           f"Results_{index}{suffix}.xlsx", "excel", "Step 4 measurements")
@@ -96,7 +97,10 @@ class DataViewOptimizationTests(unittest.TestCase):
             self.assertEqual(tree._detail_x, expected)
 
     def test_filter_and_new_scan_keep_child_cache_current(self):
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
         tree = self.tree()
+        tree._inventory = self.inventory(directory=temporary.name)
         tree._rebuild_rows()
         inventory = tree._inventory
         first = tree._display_children(inventory.root)
@@ -107,7 +111,7 @@ class DataViewOptimizationTests(unittest.TestCase):
         self.assertIn("notes.txt", [node.name for node in tree._display_children(inventory.root)])
         tree.hide_other_files_var.set(True)
         tree._filter_changed()
-        updated = self.inventory(suffix="_new")
+        updated = self.inventory(suffix="_new", directory=inventory.root.path)
         tree._directory = inventory.root.path
         with patch("aidas.ui.measurement_tree.scan_measurement_directory", return_value=updated):
             tree.refresh()

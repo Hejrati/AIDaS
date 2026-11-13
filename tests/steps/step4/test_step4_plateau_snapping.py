@@ -301,6 +301,8 @@ class Step4PlateauSnappingTests(unittest.TestCase):
         for click, boundary in ((6.1, "start"), (36.2, "end")):
             with self.subTest(click=click):
                 dialog = module.Step4ProfileZoomDialog.__new__(module.Step4ProfileZoomDialog)
+                dialog._actions_busy = False
+                dialog._closing = False
                 dialog.profile = self._profile()
                 dialog.ax = object()
                 dialog._start, dialog._end = 10, 40
