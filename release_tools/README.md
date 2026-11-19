@@ -25,6 +25,34 @@ validation job and verifies that the tag still identifies the same commit.
 Signing credentials are used only for tagged builds; pull requests never
 publish releases.
 
+## Profile Windows responsiveness
+
+Run the following in the app environment on the same Windows desktop, at the
+same resolution and display scaling, for both revisions under comparison.
+Allow each run to finish before starting another desktop workload.
+
+```powershell
+python release_tools/profile_ui.py --window
+python release_tools/profile_ui.py --window --classic
+```
+
+Each command runs five cycles per view, first idle and then during repeated
+background ROI detection. The fixtures exercise an empty workflow, a segmented
+image with six boundaries, and populated diagnostic results. Each JSON sample
+reports 10 ms Tk timer lateness at the 95th percentile, both across the cycle
+and during move/resize alone. It also reports total times for twelve native
+Win32 moves and twelve resize requests, time from deiconify to mapped content
+readiness, and shared surface repaint calls. These timings include OS window
+transitions. They measure application readiness up to the Tk event queue and
+exclude the final compositor presentation. Use `--trace` to collect
+a separate cumulative-time profile, or `--runs 1` for a quick check.
+
+For a packaged build, run
+`python release_tools/smoke_test_packaged_window.py dist/AIDaS/AIDaS.exe`.
+This checks native move, resize, maximize, minimize and restore in both modes
+using temporary profiles. The source-level `smoke_test_custom_title_bar.py`
+also exercises the custom resize grip, caption styles and work-area bounds.
+
 ## Create a release
 
 1. Set `aidas/__init__.py` to the intended version and add feature-focused notes

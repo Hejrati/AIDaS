@@ -1,10 +1,10 @@
-"""Profile source startup and empty workflow navigation without user preferences.
+"""Profile startup and navigation, or use --window for Windows interaction timings.
 
-Run with the app's Python: python release_tools/profile_ui.py [--classic]
-Timings include cProfile overhead and Tk event processing, but exclude app-module
-imports. No OCT data, network update checks, or processing jobs are started.
+Window scenarios use synthetic OCT data, temporary preferences and separate
+CPU traces. Pass --classic to exercise the Classic interface.
 """
 
+import argparse
 import cProfile
 import json
 from pathlib import Path
@@ -21,16 +21,33 @@ from aidas.app import AIDaSApp
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--classic", action="store_true")
+    parser.add_argument("--window", action="store_true", help="Measure Windows window interactions")
+    parser.add_argument("--runs", type=int, default=5)
+    parser.add_argument("--trace", action="store_true", help="Collect a separate window CPU profile")
+    args = parser.parse_args()
+    if args.runs < 1:
+        parser.error("--runs must be positive")
+    if args.window and sys.platform != "win32":
+        parser.error("--window requires a Windows desktop")
+    if args.trace and not args.window:
+        parser.error("--trace requires --window")
     with tempfile.TemporaryDirectory(prefix="aidas-ui-profile-") as directory, patch(
         "aidas.services.update_ui.UpdateController.check_automatically"
     ):
         Config.CONFIG_DIR = Path(directory)
         Config.CONFIG_FILE = Config.CONFIG_DIR / "preferences.json"
         Config.CONFIG_FILE.write_text(json.dumps({
-            "interface_mode": "Classic" if "--classic" in sys.argv else "Modern",
+            "interface_mode": "Classic" if args.classic else "Modern",
         }), encoding="utf-8")
         app = None
         try:
+            if args.window:
+                from release_tools.profile_window import measure_windows
+                app = AIDaSApp()
+                measure_windows(app, args.runs, args.trace)
+                return
             profile = cProfile.Profile()
             started = time.perf_counter()
             profile.enable()

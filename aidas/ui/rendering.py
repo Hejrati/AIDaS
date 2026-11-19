@@ -274,6 +274,25 @@ def _item_mask(canvas: CTkCanvas, item: int, size) -> Image.Image:
 def _paint_pair(base: Image.Image, outer: Image.Image, border_color,
                 inner: Image.Image, fill_color) -> Image.Image:
     inner = ImageChops.darker(outer, inner)
+    width, height = base.size
+    # Large frames usually have a solid center. When both masks cover it
+    # completely the existing blend evaluates to exactly the fill color.
+    inset = 16
+    if min(width, height) > 2 * inset and width * height > _MASK_CACHE_MAX_PIXELS:
+        center = (inset, inset, width - inset, height - inset)
+        if inner.crop(center).getextrema() == (255, 255):
+            result = Image.new("RGB", base.size, fill_color)
+            for box in ((0, 0, width, inset), (0, height - inset, width, height),
+                        (0, inset, inset, height - inset),
+                        (width - inset, inset, width, height - inset)):
+                edge = _blend_masks(base.crop(box), outer.crop(box), border_color,
+                                    inner.crop(box), fill_color)
+                result.paste(edge, box)
+            return result
+    return _blend_masks(base, outer, border_color, inner, fill_color)
+
+
+def _blend_masks(base, outer, border_color, inner, fill_color):
     border = ImageChops.subtract(outer, inner)
     background = ImageChops.multiply(base, ImageChops.invert(outer).convert("RGB"))
     border_pixels = ImageChops.multiply(Image.new("RGB", base.size, border_color), border.convert("RGB"))

@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import Mock
+
+import tkinter as tk
+import customtkinter as ctk
 
 from aidas.ui.title_bar import (
     CustomWindowsTitleBar,
@@ -236,6 +240,45 @@ class WindowsCaptionControllerTests(unittest.TestCase):
             _resized_window_rect((100, 200, 800, 600), "se", -900, -700, 320, 240),
             (100, 200, 320, 240),
         )
+
+    def test_resize_burst_applies_latest_bounds_and_flushes_on_release(self):
+        bar = object.__new__(CustomWindowsTitleBar)
+        bar.master = Mock()
+        bar.controller = Mock()
+        bar.after = Mock(return_value="resize-job")
+        bar.after_cancel = Mock()
+        bar._resize_after_id = None
+        bar._resize_drag = dict(edge="se", pointer=(0, 0), minimum=(320, 240),
+                                rect=(10, 20, 800, 600))
+        for offset in range(1, 11):
+            bar._drag_client_resize(SimpleNamespace(x_root=offset, y_root=offset))
+        bar.after.assert_called_once()
+        bar.controller.resize_window.assert_not_called()
+        bar._apply_drag_size()
+        bar.controller.resize_window.assert_called_once_with(10, 20, 810, 610)
+        bar._drag_client_resize(SimpleNamespace(x_root=30, y_root=20))
+        bar._end_client_resize()
+        bar.after_cancel.assert_called_once_with("resize-job")
+        bar.controller.resize_window.assert_called_with(10, 20, 830, 620)
+        self.assertIsNone(bar._resize_after_id)
+        self.assertIsNone(bar._resize_target)
+        bar.master.grab_release.assert_called_once()
+
+    def test_grip_reads_physical_minimum_without_changing_ctk_limits(self):
+        try:
+            root = ctk.CTk()
+        except tk.TclError as exc:
+            self.skipTest(str(exc))
+        self.addCleanup(root.destroy)
+        root.withdraw()
+        root.minsize(320, 240)
+        bar = object.__new__(CustomWindowsTitleBar)
+        bar.master = root
+        minimum = tk.Wm.wm_minsize(root)
+        for geometry in ("720x440", "760x480"):
+            self.assertEqual(bar._minimum_physical_size(), minimum)
+            root.geometry(geometry)
+        self.assertEqual(tk.Wm.wm_minsize(root), minimum)
 
     def test_client_size_is_measured_and_corrected_after_frame_change(self):
         window = _FrameAdjustedWindow()

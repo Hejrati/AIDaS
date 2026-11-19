@@ -825,6 +825,8 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
         self._state_sync_after_id: str | None = None
         self._resize_bindings: list[tuple[str, str]] = []
         self._resize_drag: dict[str, object] | None = None
+        self._resize_after_id = None
+        self._resize_target = None
         self._cursor_widget = None
         self._cursor_before_resize = ""
         self._resize_cursor = ""
@@ -980,15 +982,11 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
 
     def _minimum_physical_size(self) -> tuple[int, int]:
         try:
-            minimum_width, minimum_height = self.master.minsize()
+            # CTk's minsize override is a logical-size setter. Calling it as
+            # a getter clears its limits. Tk already stores physical pixels.
+            minimum_width, minimum_height = tk.Wm.wm_minsize(self.master)
         except (AttributeError, tk.TclError, TypeError):
             return 1, 1
-        scaler = getattr(self.master, "_apply_window_scaling", None)
-        if callable(scaler):
-            return (
-                max(1, int(scaler(minimum_width))),
-                max(1, int(scaler(minimum_height))),
-            )
         return max(1, int(minimum_width)), max(1, int(minimum_height))
 
     def _start_client_resize(self, event) -> bool:
@@ -1025,7 +1023,7 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
             return None
         pointer_x, pointer_y = drag["pointer"]
         minimum_width, minimum_height = drag["minimum"]
-        target = _resized_window_rect(
+        self._resize_target = _resized_window_rect(
             drag["rect"],
             str(drag["edge"]),
             int(event.x_root) - int(pointer_x),
@@ -1033,13 +1031,23 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
             int(minimum_width),
             int(minimum_height),
         )
-        self.controller.resize_window(*target)
+        if self._resize_after_id is None:
+            self._resize_after_id = self.after(16, self._apply_drag_size)
         return "break"
+
+    def _apply_drag_size(self):
+        self._resize_after_id = None
+        target, self._resize_target = self._resize_target, None
+        if target is not None:
+            self.controller.resize_window(*target)
 
     def _end_client_resize(self, event=None):
         if self._resize_drag is None:
             return None
         self._resize_drag = None
+        if self._resize_after_id is not None:
+            self.after_cancel(self._resize_after_id)
+            self._apply_drag_size()
         try:
             self.master.grab_release()
         except (AttributeError, tk.TclError):
@@ -1127,6 +1135,7 @@ class CustomWindowsTitleBar(ctk.CTkFrame):
         self.title_label.configure(text=str(title))
 
     def destroy(self) -> None:
+        self._resize_target = None
         self._cancel_client_resize()
         self._set_resize_cursor(None, None)
         if self._state_sync_after_id is not None:

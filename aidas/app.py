@@ -35,7 +35,7 @@ from aidas.core.single_instance import SingleInstanceGuard
 from aidas.services.update_service import launch_installer
 from aidas.services.update_ui import UpdateController
 from aidas.services.feedback import install_exception_capture, record_event, record_exception
-from aidas.ui.bindings import bind_all_widget_event
+from aidas.ui.bindings import bind_all_widget_event, bind_native_callback
 from aidas.ui.classic import build_classic_application_menu
 from aidas.ui.components import (
     AppButton,
@@ -1198,6 +1198,7 @@ class AIDaSApp(ctk.CTk):
             "<Map>",
             self._on_interface_widget_mapped,
         )
+        bind_native_callback(self, "<Unmap>", self._on_window_unmapped, widget_path=True)
         self.bind(
             "<Configure>",
             self._remember_normal_client_size,
@@ -1522,9 +1523,12 @@ class AIDaSApp(ctk.CTk):
         # switch transaction queues one consolidated pass after its geometry
         # work, so running an idle refresh for every intermediate map would
         # make the menu command block while hundreds of canvases redraw.
+        widget = getattr(_event, "widget", None)
+        if widget is self and self.__dict__.pop("_resume_canvas_paints", False):
+            from aidas.ui.rendering import finish_deferred_rendering
+            finish_deferred_rendering(self)
         if self.__dict__.get("_interface_switching", False):
             return
-        widget = getattr(_event, "widget", None)
         if isinstance(widget, ctk.CTkBaseClass):
             # Map is delivered for every descendant when a tab or dialog is
             # shown. Only new CTk widgets need their scalar corners settled;
@@ -1542,6 +1546,12 @@ class AIDaSApp(ctk.CTk):
         self._queue_interface_widget_refresh(
             include_splash=self.__dict__.get("_splash") is not None
         )
+
+    def _on_window_unmapped(self, path):
+        if (path == self._w and self.__dict__.get("_startup_finished", False)
+                and not self._aidas_defer_canvas_updates):
+            self._aidas_defer_canvas_updates = True
+            self._resume_canvas_paints = True
 
     def _remember_normal_client_size(self, event=None) -> None:
         """Remember the last resizable client size for maximized UI switches."""
@@ -1599,8 +1609,8 @@ class AIDaSApp(ctk.CTk):
                         restore_pending_size,
                     )
                 return
-            width = int(getattr(event, "width", self.winfo_width()))
-            height = int(getattr(event, "height", self.winfo_height()))
+            width = event.width if event is not None else self.winfo_width()
+            height = event.height if event is not None else self.winfo_height()
             if width <= 1 or height <= 1:
                 return
             self._normal_logical_client_size = logical_window_size(

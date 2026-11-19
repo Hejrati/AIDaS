@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import time
 import tkinter as tk
 from tkinter import ttk
 from unittest import mock
@@ -82,7 +83,13 @@ def _assert_about_presentation(app):
     dialog = app._about_dialog
     try:
         assert dialog is not None and dialog.winfo_exists()
-        dialog.wait_visibility()
+        # update() above has already dispatched the mapping event. Waiting for
+        # a subsequent visibility change can hang on a stationary desktop.
+        deadline = time.monotonic() + 5
+        while not dialog.winfo_viewable() and time.monotonic() < deadline:
+            app.update()
+            time.sleep(0.01)
+        assert dialog.winfo_viewable(), "About dialog did not become viewable."
         app.update_idletasks()
         assert dialog._presentation_mode == app.interface_mode
         assert dialog.ok_button.cget("text") == "OK"
@@ -137,6 +144,7 @@ def _assert_settings_presentation(app):
             assert isinstance(dialog.appearance_menu, ttk.Combobox)
             assert str(dialog.appearance_menu.cget("state")) == "disabled"
 
+            dialog._select_category("step3")
             scripts = dialog.script_menus["main"].master
             occupied = set()
             for widget in scripts.grid_slaves():
@@ -155,17 +163,15 @@ def _assert_settings_presentation(app):
                         )
                         occupied.add(cell)
 
-            canvas = next(
-                widget
-                for widget in dialog.settings_panel.winfo_children()
-                if isinstance(widget, tk.Canvas)
-            )
+            dialog._select_category("step4")
+            page = dialog._category_pages["step4"]
+            canvas = page._parent_canvas
             dialog.geometry("720x420")
             app.update()
             canvas.yview_moveto(1.0)
             app.update()
             before = canvas.yview()
-            dialog.script_menus["output"].event_generate(
+            page.winfo_children()[0].event_generate(
                 "<MouseWheel>",
                 delta=120,
             )
@@ -273,11 +279,9 @@ def _assert_crop_split_button_geometry(step):
         "The split-button divider is too short to read as a segment boundary."
     )
 
-    assert options.cget("text") == "\u25be", (
-        "Crop & Scale must use the standard small down-pointing triangle."
-    )
+    assert options.cget("image").cget("size") == (AppSplitButton.CHEVRON_SIZE,) * 2
     assert options.cget("anchor") == "center"
-    arrow_label = getattr(options, "_text_label", None)
+    arrow_label = options._image_label
     assert arrow_label is not None and arrow_label.winfo_ismapped(), (
         "The split-button arrow label is not rendered."
     )
@@ -476,23 +480,32 @@ def _assert_step4_sidebar_actions_visible(step, width, height):
 
     scroll_top = step.sidebar.canvas.winfo_rooty()
     scroll_bottom = scroll_top + step.sidebar.canvas.winfo_height()
+    canvas = step.sidebar.canvas
+    initial_view = canvas.yview()[0]
     for name, widget in (
         ("Select folders for ROI", step.batch_roi_button),
-        ("Compile measurements", step.compiler_button),
         ("Previous", step.previous_roi_button),
         ("Next", step.next_roi_button),
-        ("Apply", step.apply_button),
-        ("Clear", step.clear_button),
+        ("Erase", step.clear_button),
     ):
         assert widget.winfo_ismapped(), (
             f"Step 4 {name} is hidden at {width}x{height}."
         )
         widget_top = widget.winfo_rooty()
         widget_bottom = widget_top + widget.winfo_height()
+        if height == WINDOW_SIZES[-1][1] and widget_bottom > scroll_bottom:
+            # Compact windows keep the action footer fixed and scroll the ROI
+            # controls above it. Check that the whole action can be reached.
+            canvas.yview_moveto(1)
+            step.update_idletasks()
+            widget_top = widget.winfo_rooty()
+            widget_bottom = widget_top + widget.winfo_height()
         assert scroll_top - 1 <= widget_top and widget_bottom <= scroll_bottom + 1, (
-            f"Step 4 {name} is outside the initial sidebar viewport at "
+            f"Step 4 {name} is outside the reachable sidebar viewport at "
             f"{width}x{height}."
         )
+        canvas.yview_moveto(initial_view)
+        step.update_idletasks()
         assert widget.winfo_height() + 1 >= widget.winfo_reqheight(), (
             f"Step 4 {name} is vertically clipped at {width}x{height}."
         )
@@ -503,6 +516,8 @@ def _assert_step4_sidebar_actions_visible(step, width, height):
     shell_bottom = shell_top + step.sidebar_shell.winfo_height()
     for name, widget in (
         ("footer", step.sidebar_footer),
+        ("Go to next image", step.next_image_button),
+        ("Auto-detect ROIs", step.auto_detect_button),
         ("Build stack", step.build_stacks_button),
     ):
         assert widget.winfo_ismapped(), (
@@ -537,46 +552,15 @@ def _assert_step4_sidebar_actions_visible(step, width, height):
     assert abs(previous.winfo_width() - next_button.winfo_width()) <= 1, (
         "Step 4 Previous and Next buttons do not have equal widths."
     )
-    navigation_gap = next_button.winfo_rootx() - (
-        previous.winfo_rootx() + previous.winfo_width()
-    )
-    assert abs(navigation_gap - LAYOUT.space_xs) <= 1, (
-        f"Step 4 navigation gap is {navigation_gap}px, not {LAYOUT.space_xs}px."
-    )
+    for left, right in ((previous, step.clear_button), (step.clear_button, next_button)):
+        gap = right.winfo_rootx() - left.winfo_rootx() - left.winfo_width()
+        assert abs(gap - LAYOUT.space_xs) <= 1, f"Unexpected Step 4 navigation gap: {gap}px."
     assert abs(previous.winfo_rootx() - navigation_row.winfo_rootx()) <= 1
     assert abs(
         next_button.winfo_rootx()
         + next_button.winfo_width()
         - navigation_row.winfo_rootx()
         - navigation_row.winfo_width()
-    ) <= 1
-
-    boundary_row = step.start_entry.master
-    assert step.end_entry.master is boundary_row
-    boundary_controls = sorted(
-        boundary_row.winfo_children(),
-        key=lambda control: control.winfo_rootx(),
-    )
-    assert len(boundary_controls) == 6, (
-        "Step 4 boundary row must contain Start, End, Apply, and Clear controls."
-    )
-    assert abs(step.start_entry.winfo_width() - step.end_entry.winfo_width()) <= 1, (
-        "Step 4 Start and End fields do not have equal widths."
-    )
-    boundary_gaps = [
-        right.winfo_rootx() - (left.winfo_rootx() + left.winfo_width())
-        for left, right in zip(boundary_controls, boundary_controls[1:])
-    ]
-    assert all(abs(gap - LAYOUT.space_xs) <= 1 for gap in boundary_gaps), (
-        f"Step 4 boundary control gaps are not uniformly {LAYOUT.space_xs}px: "
-        f"{boundary_gaps}."
-    )
-    assert abs(boundary_controls[0].winfo_rootx() - boundary_row.winfo_rootx()) <= 1
-    assert abs(
-        boundary_controls[-1].winfo_rootx()
-        + boundary_controls[-1].winfo_width()
-        - boundary_row.winfo_rootx()
-        - boundary_row.winfo_width()
     ) <= 1
 
 
@@ -653,44 +637,25 @@ def _run_smoke(interface_mode="Modern") -> int:
             assert app.status_bar is None
             assert app.classic_menu.current_interface == "Classic"
             assert app.style.layout("AIDaS.TNotebook.Tab"), (
-                "Classic mode must show the original four workflow tabs."
+                "Classic mode must show the workflow tabs."
             )
-            assert app.notebook.index("end") == 4
+            assert app.notebook.index("end") == 5
 
         _assert_about_presentation(app)
         _assert_settings_presentation(app)
 
-        steps = (app.step1, app.step2, app.step3, app.step4)
+        steps = (app.step1, app.step2, app.step3, app.step4, app.step5)
         assert app.step2.ai_device_status_var.get().startswith("AI device:"), (
             "Step 2 does not expose its GPU/core execution status."
         )
-        # The fallback-core selector is useful only when Step 2 cannot use a
-        # compatible GPU. Exercise real ttk packing in both states.
-        previous_gpu_compatible = app.step2._ai_gpu_compatible
-        previous_runtime_gpu = app.step2._ai_runtime_using_gpu
         app.step2._open_step2_batch_segmentation_panel(
             PROJECT_ROOT,
             initial_rows=[],
         )
         device_panel = app.step2.batch_segmentation_panel
         try:
-            app.step2._ai_gpu_compatible = True
-            app.step2._ai_runtime_using_gpu = None
-            device_panel._sync_device_controls()
-            app.update_idletasks()
-            assert not device_panel.core_row.winfo_manager(), (
-                "Step 2 shows fallback-core controls for a compatible GPU."
-            )
-
-            app.step2._ai_runtime_using_gpu = False
-            device_panel._sync_device_controls()
-            app.update_idletasks()
-            assert device_panel.core_row.winfo_manager() == "pack", (
-                "Step 2 did not restore fallback-core controls after GPU fallback."
-            )
+            assert not hasattr(device_panel, "core_row"), "Fallback CPU allocation is automatic."
         finally:
-            app.step2._ai_gpu_compatible = previous_gpu_compatible
-            app.step2._ai_runtime_using_gpu = previous_runtime_gpu
             app.step2._close_step2_batch_segmentation_panel(restore_previous=True)
         # Verify the live callbacks use one shared budget without launching
         # either long-running workflow. A three-core Step 3 reservation must
@@ -703,7 +668,7 @@ def _run_smoke(interface_mode="Modern") -> int:
             shared_total, step3_used, step2_free = app.step2._shared_core_budget()
             assert shared_total == total_cores
             assert step3_used == simulated_step3_cores
-            assert step2_free == total_cores - simulated_step3_cores
+            assert step2_free == max(0, total_cores - 1 - simulated_step3_cores)
         finally:
             app.step3._active_r_core_allocation = 0
             app.step3._busy = False
@@ -839,6 +804,8 @@ def _run_smoke(interface_mode="Modern") -> int:
                     _assert_step2_sidebar_actions_visible(step, width, height)
                 if step_number == 4:
                     _assert_step4_sidebar_actions_visible(step, width, height)
+                if step_number == 5:
+                    assert step.run_button.winfo_viewable(), "Compile measurements is hidden."
                 if interface_mode == "Classic":
                     step.sidebar._show_scrollbar()
                     app.update_idletasks()

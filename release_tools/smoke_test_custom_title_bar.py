@@ -316,9 +316,17 @@ def main() -> int:
         controller.minimize()
         _pump(app)
         assert bool(user32.IsIconic(handle)), "Native minimize did not iconify the app."
+        surface = title_bar.close_button._canvas
+        repaint_work = []
+        app.after_idle(lambda: repaint_work.append("completed"))
+        surface.configure(background="#334455")
+        _pump(app)
+        assert repaint_work == ["completed"], "Minimizing blocked the event loop."
+        assert surface._aidas_paint_deferred, "Hidden window repainted a dirty surface."
         controller.restore()
         _pump(app)
         assert not bool(user32.IsIconic(handle)), "The app did not restore from minimize."
+        assert not surface._aidas_paint_deferred, "Restore left visible paint pending."
         assert (int(get_window_long(handle, _GWL_EXSTYLE)) & 0xFFFFFFFF) == extended_style
 
         print("CUSTOM_TITLE_BAR_OK")

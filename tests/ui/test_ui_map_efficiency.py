@@ -8,6 +8,26 @@ from aidas.app import AIDaSApp
 
 
 class MapEfficiencyTests(unittest.TestCase):
+    def test_only_root_remap_resumes_hidden_window_paints(self):
+        app = AIDaSApp.__new__(AIDaSApp)
+        app._startup_finished = True
+        app._aidas_defer_canvas_updates = False
+        surface = Mock()
+        app._aidas_deferred_surfaces = {surface}
+        app._on_window_unmapped(".child")
+        self.assertFalse(app._aidas_defer_canvas_updates)
+        app._on_window_unmapped(app._w)
+        app._on_window_unmapped(app._w)
+        self.assertTrue(app._aidas_defer_canvas_updates)
+        app._on_interface_widget_mapped(SimpleNamespace(widget=object()))
+        self.assertTrue(app._aidas_defer_canvas_updates)
+        with patch("aidas.ui.rendering._schedule") as schedule:
+            app._on_interface_widget_mapped(SimpleNamespace(widget=app))
+            app._on_interface_widget_mapped(SimpleNamespace(widget=app))
+            schedule.assert_called_once_with(surface)
+        self.assertFalse(app._aidas_deferred_surfaces)
+        self.assertFalse(app._aidas_defer_canvas_updates)
+
     def test_remapped_control_is_settled_once_per_interface(self):
         app = AIDaSApp.__new__(AIDaSApp)
         app.interface_mode = "Classic"

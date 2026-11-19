@@ -250,6 +250,22 @@ class RoundedBorderMaskTests(unittest.TestCase):
             np.abs(actual[fully_covered] - np.asarray(surface_color)).max(), 1,
         )
 
+    def test_large_frames_match_full_blend_including_partial_center_coverage(self):
+        size = (575, 301)
+        background = np.random.default_rng(3).integers(0, 256, (*size[::-1], 3), dtype=np.uint8)
+        base = Image.fromarray(background)
+        border, fill = (123, 43, 255), (18, 220, 89)
+        outer, inner = rendering.rounded_rectangle_masks(*size, 9.5, 1.25)
+        for center_alpha in (255, 71):
+            with self.subTest(center_alpha=center_alpha):
+                inner.putpixel((208, 140), center_alpha)
+                alpha = np.asarray(outer, dtype=np.uint32)[..., None]
+                coverage = np.minimum(alpha, np.asarray(inner)[..., None])
+                expected = (background * (255 - alpha) // 255
+                            + (alpha - coverage) * border // 255 + coverage * fill // 255)
+                painted = rendering._paint_pair(base, outer, border, inner, fill)
+                np.testing.assert_array_equal(np.asarray(painted), expected)
+
 
 class SmoothBorderInstallationTests(unittest.TestCase):
     def test_repeated_installation_keeps_the_same_renderer_methods(self):
