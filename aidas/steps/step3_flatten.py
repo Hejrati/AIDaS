@@ -37,6 +37,7 @@ from aidas.utils.step3_image_utils import (
 )
 from aidas.utils.log_paths import app_log_dir
 from aidas.utils.cancellable_process import run_cancellable_process
+from aidas.utils.pausable_process import ProcessPauseError, pause_process_tree
 from aidas.utils.r_packages import check_r_packages
 from aidas.utils.r_script_library import (
     OPTIMIZED_R_SCRIPTS_ENABLED,
@@ -54,10 +55,11 @@ from aidas.core.display import (
     fit_size_to_bounds,
     work_area_bounds,
 )
-from aidas.ui.batch_selection import BatchSelectionMixin
+from aidas.ui.batch_selection import BatchFolderScanMixin, BatchSelectionMixin
 from aidas.ui.batch_empty_state import NoValidFilesNotice
-from aidas.ui.components import AppButton, AppRunButton
+from aidas.ui.components import AppButton, AppRunButton, playback_icon
 from aidas.ui.result_grid import ResultGridCanvas
+from aidas.ui.result_preview import show_result_preview
 from aidas.ui.theme import COLOR_PAIRS, COLORS, TYPOGRAPHY, resolve_color
 from aidas.utils.ui_layout import LAYOUT
 from aidas.utils.ui_utils import (
@@ -1250,54 +1252,12 @@ class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
             self._xscroll_after_id = None
         super().destroy()
 
-    def _make_checkbox_images(self):
-        images = {
-            "checked": tk.PhotoImage(width=16, height=16),
-            "unchecked": tk.PhotoImage(width=16, height=16),
-            "locked": tk.PhotoImage(width=16, height=16),
-        }
-        for image in images.values():
-            image.put("#ffffff", to=(0, 0, 16, 16))
-            image.put("#6b7280", to=(2, 2, 14, 3))
-            image.put("#6b7280", to=(2, 13, 14, 14))
-            image.put("#6b7280", to=(2, 2, 3, 14))
-            image.put("#6b7280", to=(13, 2, 14, 14))
-
-        checked = images["checked"]
-        for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
-            checked.put("#111827", to=(x, y, x + 1, y + 1))
-            checked.put("#111827", to=(x, y + 1, x + 1, y + 2))
-
-        locked = images["locked"]
-        locked.put("#e5e7eb", to=(3, 3, 13, 13))
-        locked.put("#9ca3af", to=(5, 7, 11, 9))
-        return images
-
     def set_rows(self, rows):
-        # Detached processed items are absent from get_children(), but must be
-        # removed before reusing their stable row IDs for a new scan.
-        previous_iids = tuple(dict.fromkeys((*self.tree.get_children(""), *self._row_by_iid)))
-        if previous_iids:
-            self.tree.delete(*previous_iids)
-        self.rows = list(rows or [])
-        self._row_by_iid = {}
         self._column_resize_active = False
         self._resize_start_widths = None
         self._manual_column_widths = None
         self._set_xscroll_visible(False)
-
-        for index, row in enumerate(self.rows):
-            iid = str(index)
-            self._row_by_iid[iid] = row
-            self.tree.insert(
-                "",
-                "end",
-                iid=iid,
-                text="",
-                image=self._image_for_row(row),
-                values=self._values_for_row(row),
-                tags=("locked",) if row.get("locked") else (),
-            )
+        self._replace_rows(rows)
         self._apply_processed_filter()
         self._fit_columns_to_content()
         self._notify_selection_changed()
@@ -1309,24 +1269,7 @@ class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
         self._notify_selection_changed()
 
     def _apply_processed_filter(self):
-        placeholder_iid = "_empty"
-        if self.tree.exists(placeholder_iid):
-            self.tree.delete(placeholder_iid)
-        visible = tuple(
-            iid for iid, row in self._row_by_iid.items()
-            if not (self._hide_processed and row.get("locked"))
-        )
-        self.tree.set_children("", *visible)
-        if not visible:
-            message = (
-                "No unprocessed folders to show."
-                if self.rows and self._hide_processed
-                else "No folders with complete Step 3 inputs were found."
-            )
-            self.tree.insert(
-                "", "end", iid=placeholder_iid, text="",
-                values=(message, "", ""), tags=("locked",),
-            )
+        self._filter_processed_rows("_empty", "No folders with complete Step 3 inputs were found.")
         self._refresh_header_checkbox()
 
     def _values_for_row(self, row):
@@ -1561,7 +1504,7 @@ class RBatchSelectionTable(BatchSelectionMixin, ttk.Frame):
             callback(len(self.selected_rows()))
 
 
-class RBatchSelectionPanel(ttk.Frame):
+class RBatchSelectionPanel(BatchFolderScanMixin, ttk.Frame):
     """Embedded panel for selecting subfolders to run through the Step 3 R script."""
 
     SCAN_POLL_MS = 50
@@ -1843,24 +1786,8 @@ class RBatchSelectionPanel(ttk.Frame):
         return f"Max jobs: {max_workers}"
 
     def _start_scan(self):
-        self._stop_scan()
-        self._scan_closed = False
-        self._scan_ready = False
-        self._scan_cancel = threading.Event()
-        self._scan_events = queue.Queue()
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
-        self.next_button.state(["disabled"])
-        worker = threading.Thread(
-            target=self._scan_worker,
-            args=(self.root_dir, self.input_folders, self._scan_cancel, self._scan_events), daemon=True,
-        )
-        self._scan_completion = WorkerCompletionGuard(worker)
-        try:
-            worker.start()
-        except Exception as exc:
-            self._scan_failed(exc)
-            return
-        self._scan_poll_after_id = self.after(self.SCAN_POLL_MS, self._poll_scan_events)
+        self._start_folder_scan(self.root_dir, self.input_folders)
 
     def _scan_worker(self, root_dir=None, input_folders=None, cancelled=None, events=None):
         if root_dir is None:
@@ -1922,40 +1849,6 @@ class RBatchSelectionPanel(ttk.Frame):
             return
         if cancelled is None or not cancelled.is_set():
             events.put(("done", (rows, scanned, missing, access_errors)))
-
-    def _poll_scan_events(self):
-        """Deliver scan results on Tk's owning thread."""
-        self._scan_poll_after_id = None
-        if self.__dict__.get("_scan_closed", False):
-            return
-        try:
-            kind, payload = self._scan_events.get_nowait()
-        except queue.Empty:
-            guard = self.__dict__.get("_scan_completion")
-            if guard is not None and guard.missing_result():
-                self._scan_failed(RuntimeError("The folder scan stopped without reporting a result. Select another folder to try again."))
-                return
-            try:
-                if self.winfo_exists():
-                    self._scan_poll_after_id = self.after(self.SCAN_POLL_MS, self._poll_scan_events)
-            except tk.TclError:
-                pass
-            return
-
-        if kind == "error":
-            self._scan_failed(payload)
-            return
-        rows, scanned, missing, access_errors = payload
-        self._scan_done(rows, scanned, missing, access_errors)
-
-    def _stop_scan(self):
-        cancelled = self.__dict__.get("_scan_cancel")
-        if cancelled is not None:
-            cancelled.set()
-        pending = self.__dict__.get("_scan_poll_after_id")
-        self._scan_poll_after_id = None
-        if pending is not None:
-            self.after_cancel(pending)
 
     def destroy(self):
         self._scan_closed = True
@@ -2131,6 +2024,8 @@ class RBatchRunPanel(ttk.Frame):
         self.step_states_by_folder = {}
         self.current_step_by_folder = {}
         self.stop_requested = False
+        self.paused = False
+        self._finished = False
         self.close_when_finished = False
         self._build_ui()
 
@@ -2140,8 +2035,7 @@ class RBatchRunPanel(ttk.Frame):
 
         # Reserve the live summary and actions before adding either flexible
         # region.  Tk's packer allocates geometry in packing order; keeping the
-        # footer first means the table shrinks and scrolls instead of clipping
-        # Restart, Stop, or Close when the window height is constrained.
+        # footer first keeps the actions visible as the table shrinks.
         self.summary_var = tk.StringVar(value="")
         summary_row = ttk.Frame(wrapper)
         summary_row.pack(side="bottom", fill="x", pady=(8, 0))
@@ -2150,31 +2044,25 @@ class RBatchRunPanel(ttk.Frame):
         action_box = ttk.Frame(summary_row)
         action_box.pack(side="right", padx=(8, 0))
         self.action_box = action_box
-        self.restart_button = action_button(
+        self.cancel_button = AppButton(
             action_box,
-            self,
-            "Restart",
-            self._restart_batch,
-            "refresh",
-        )
-        self.restart_button.pack(side="left")
-        self.stop_button = AppButton(
-            action_box,
-            text="\u25a0  Stop",
+            text="Cancel",
             command=self._cancel_batch,
             variant="danger",
             width=104,
         )
-        self.stop_button.pack(side="left", padx=(6, 0))
-        self.close_button = AppButton(
+        self.cancel_button.pack(side="left")
+        self.pause_icon = playback_icon(action_box, pause=True)
+        self.resume_icon = playback_icon(action_box)
+        self.pause_button = AppButton(
             action_box,
-            text="Close",
-            variant="danger",
-            width=88,
-            command=self._close,
+            text="Pause",
+            command=self._toggle_pause,
+            variant="warning",
+            image=self.pause_icon,
+            width=104,
         )
-        self.close_button.pack(side="left", padx=(6, 0))
-        self.cancel_button = self.stop_button
+        self.pause_button.pack(side="left", padx=(6, 0))
 
         self.summary_label = ttk.Label(
             summary_row,
@@ -2281,65 +2169,41 @@ class RBatchRunPanel(ttk.Frame):
         self.summary_var.set(text)
 
     def finish(self):
-        self.stop_button.configure(state="disabled")
-        self.restart_button.configure(state="normal")
-        self.close_button.configure(state="normal")
+        self._finished = True
+        self.paused = False
+        self.pause_button.pack_forget()
+        self.cancel_button.set_variant("secondary")
+        self.cancel_button.configure(text="Close", command=self._close, state="normal")
+
+    def _toggle_pause(self):
+        if self.stop_requested or self._finished:
+            return
+        paused = not self.paused
+        if self.step_frame._set_batch_r_paused(paused):
+            self.paused = paused
+            self.pause_button.configure(
+                text="Resume" if paused else "Pause",
+                image=self.resume_icon if paused else self.pause_icon,
+            )
+            self.set_summary("Batch paused. Click Resume to continue." if paused else "")
 
     def _cancel_batch(self):
-        if self.stop_requested:
+        if self.stop_requested or self._finished:
             return
         confirmed = messagebox.askyesno(
-            "Stop Batch Step 3",
-            "Stop the batch run?\n\nActive R processes will be terminated and queued folders will be cancelled.",
+            "Cancel Batch Step 3",
+            "Cancel the batch run?\n\nActive R processes will be terminated and queued folders will be cancelled.",
             parent=self,
         )
-        if not confirmed:
+        if not confirmed or self._finished:
             return
-        self._request_stop("Stopping active R processes and cancelling queued folders...")
-
-    def _request_stop(self, summary):
         self.stop_requested = True
-        self.stop_button.configure(state="disabled")
-        self.restart_button.configure(state="disabled")
-        self.summary_var.set(summary)
+        self.cancel_button.configure(state="disabled")
+        self.pause_button.configure(state="disabled")
+        self.set_summary("Cancelling active R processes and queued folders...")
         self.step_frame._cancel_batch_r_runs()
 
-    def _restart_batch(self):
-        running = bool(self.step_frame._busy)
-        message = (
-            "Restart the batch run?\n\nThe active R processes will be stopped first. "
-            "A clean run will start after they exit."
-            if running
-            else "Restart the batch run from the beginning?"
-        )
-        if not messagebox.askyesno("Restart Batch Step 3", message, parent=self):
-            return
-        self.restart_button.configure(state="disabled")
-        self.stop_button.configure(state="disabled")
-        self.close_button.configure(state="disabled")
-        self.summary_var.set("Preparing a clean batch restart...")
-        self.step_frame._restart_batch_r_runs(
-            self.folders,
-            self.workers,
-            self.main_script_path,
-            self.output_script_path,
-            output_mode=self.output_mode,
-        )
-
     def _close(self):
-        if self.step_frame._busy:
-            confirmed = messagebox.askyesno(
-                "Close Batch Step 3",
-                "The batch is still running. Stop it and close this panel after all R processes exit?",
-                parent=self,
-            )
-            if not confirmed:
-                return
-            self.close_when_finished = True
-            self.close_button.configure(state="disabled")
-            if not self.stop_requested:
-                self._request_stop("Stopping the batch before closing...")
-            return
         self.step_frame._close_r_batch_run_panel(render_previous=True)
 
     def _append_step(self, folder, label, state):
@@ -2657,6 +2521,7 @@ class Step3Frame(SidebarStepFrame):
         self._r_cancel_event = threading.Event()
         self._r_process_lock = threading.Lock()
         self._active_r_processes = set()
+        self._r_suspensions = {}
         self._active_r_folder_keys = set()
         self._pending_batch_restart = None
         self._pending_input_folder = None
@@ -2830,6 +2695,9 @@ class Step3Frame(SidebarStepFrame):
         cancelled = self.__dict__.get("_r_cancel_event")
         if cancelled is not None:
             cancelled.set()
+        resume = self.__dict__.get("_r_resume_event")
+        if resume is not None:
+            resume.set()
         self._reset_r_elapsed_timer()
         super().destroy()
 
@@ -4222,13 +4090,82 @@ class Step3Frame(SidebarStepFrame):
             "Recreate the inputs in Steps 1 and 2, then start a new Step 3 run."
         )
 
-    def _register_r_process(self, process):
-        with self._r_process_lock:
-            self._active_r_processes.add(process)
+    def _launch_r_process(self, command, options, input_snapshot):
+        """Wait for Resume before starting and registering another R stage."""
+        resume = self.__dict__.get("_r_resume_event")
+        while not self._r_cancel_event.is_set():
+            if resume is not None and not resume.wait(0.05):
+                continue
+            self._ensure_r_inputs_unchanged(input_snapshot)
+            with self._r_process_lock:
+                if self._r_cancel_event.is_set():
+                    break
+                if resume is not None and not resume.is_set():
+                    continue
+                process = subprocess.Popen(command, **options)
+                self._active_r_processes.add(process)
+                return process
+        return None
 
     def _unregister_r_process(self, process):
         with self._r_process_lock:
             self._active_r_processes.discard(process)
+            suspension = self.__dict__.get("_r_suspensions", {}).pop(process, None)
+        if suspension is not None:
+            # A descendant can outlive its root if tree termination failed.
+            # Release any surviving threads rather than leaving them paused.
+            try:
+                suspension.resume()
+            except OSError:
+                suspension.discard()
+
+    def _resume_paused_r_processes(self):
+        """Release the batch's suspensions with the process lock held."""
+        error = None
+        for process, suspension in tuple(self._r_suspensions.items()):
+            try:
+                suspension.resume()
+            except OSError as exc:
+                error = exc
+            else:
+                del self._r_suspensions[process]
+        if not self._r_suspensions:
+            self._r_resume_event.set()
+        return error
+
+    def _set_batch_r_paused(self, paused):
+        """Suspend or resume active R jobs and gate subsequent script launches."""
+        if not self._busy or self._r_cancel_event.is_set():
+            return False
+        resume = self._r_resume_event
+        error = None
+        with self._r_process_lock:
+            if paused and resume.is_set():
+                resume.clear()
+                try:
+                    for process in self._active_r_processes:
+                        suspension = pause_process_tree(process)
+                        if suspension is not None:
+                            self._r_suspensions[process] = suspension
+                except OSError as exc:
+                    error = exc
+                    if isinstance(exc, ProcessPauseError):
+                        self._r_suspensions[process] = exc.suspension
+                    rollback_error = self._resume_paused_r_processes()
+                    if rollback_error is not None:
+                        error = f"{exc}\n\nSome R jobs are still paused. Use Resume or Cancel."
+            elif not paused and not resume.is_set():
+                error = self._resume_paused_r_processes()
+            is_paused = not resume.is_set()
+        if error is not None:
+            action = "pause" if paused else "resume"
+            messagebox.showerror("Batch Step 3", f"Could not {action} the batch:\n{error}", parent=self)
+        if (is_paused != paused or not self._busy or self._r_cancel_event.is_set()
+                or resume is not self._r_resume_event):
+            return False
+        self.progress_text_var.set("Batch paused" if paused else "Batch running")
+        self.status_var.set("Step 3 R processing paused." if paused else "Step 3 R processing resumed.")
+        return True
 
     @staticmethod
     def _process_is_running(process):
@@ -4238,6 +4175,12 @@ class Step3Frame(SidebarStepFrame):
             return True
 
     def _terminate_r_process(self, process, *, force=False):
+        lock = self.__dict__.get("_r_process_lock")
+        if lock is not None:
+            with lock:
+                # A stopped process cannot act on SIGTERM until it resumes.
+                force = force or process in self.__dict__.get("_r_suspensions", {})
+                self._active_r_processes.discard(process)
         if not self._process_is_running(process):
             return
         pid = getattr(process, "pid", None)
@@ -4295,6 +4238,9 @@ class Step3Frame(SidebarStepFrame):
         if not self._busy:
             return
         self._r_cancel_event.set()
+        resume = self.__dict__.get("_r_resume_event")
+        if resume is not None:
+            resume.set()
         notify_workflow_cancelled(self, 3)
         self.status_var.set("Cancelling Step 3 R processing...")
         if self.r_batch_run_panel is not None:
@@ -4325,10 +4271,6 @@ class Step3Frame(SidebarStepFrame):
         self._start_batch_r_runs(*restart, allow_existing_rdata=True)
 
     def _run_supervised_r_command(self, command, cwd, env, on_line, *, input_snapshot=None):
-        try:
-            self._ensure_r_inputs_unchanged(input_snapshot)
-        except RuntimeError as exc:
-            return 1, str(exc), "failed"
         popen_options = {
             "cwd": cwd,
             "stdin": subprocess.DEVNULL,
@@ -4349,11 +4291,12 @@ class Step3Frame(SidebarStepFrame):
             popen_options["start_new_session"] = True
 
         try:
-            process = subprocess.Popen(command, **popen_options)
+            process = self._launch_r_process(command, popen_options, input_snapshot)
         except Exception as exc:
             return 1, str(exc), "failed"
+        if process is None:
+            return 130, "Cancelled by user.", "cancelled"
 
-        self._register_r_process(process)
         line_queue = queue.Queue()
         sentinel = object()
 
@@ -4500,6 +4443,8 @@ class Step3Frame(SidebarStepFrame):
         )
         self.r_batch_run_panel.pack(fill="both", expand=True)
         self._r_cancel_event.clear()
+        self._r_resume_event = threading.Event()
+        self._r_resume_event.set()
         self._busy = True
         notify_workflow_invalidated(self, 3)
         self.step4_result_folders = []
@@ -5330,77 +5275,13 @@ class Step3Frame(SidebarStepFrame):
         plot_box_aspect=None,
     ):
         parent = self.plot_holder if parent is None else parent
-        label = tk.Label(
-            parent, bg=background, borderwidth=0, highlightthickness=0, padx=0, pady=0
+        label = show_result_preview(
+            parent, image, background=background, layout=self._result_preview_layout,
+            on_click=on_click, on_image_layout=on_image_layout, align_top=align_top,
+            plot_bounds=plot_bounds, plot_margins=plot_margins, plot_box_aspect=plot_box_aspect,
         )
-        label.pack(fill="both", expand=True)
-        source = image.convert("RGB")
-        redraw_after_id = None
-        rendered_size = None
-
-        def redraw(_event=None):
-            nonlocal redraw_after_id, rendered_size
-            redraw_after_id = None
-            try:
-                if not label.winfo_exists():
-                    return
-                width = max(1, int(label.winfo_width()))
-                height = max(1, int(label.winfo_height()))
-            except tk.TclError:
-                return
-            if width <= 1 or height <= 1:
-                return
-            if (width, height) == rendered_size:
-                return
-            if plot_bounds is not None and plot_margins is not None:
-                left, top, fitted_width, fitted_height = self._result_preview_layout(
-                    source.size, plot_bounds, plot_margins, (width, height), plot_box_aspect,
-                )
-                fitted = source.resize((fitted_width, fitted_height), Image.Resampling.LANCZOS)
-            else:
-                fitted = ImageOps.contain(source, (width, height), Image.Resampling.LANCZOS)
-                left = (width - fitted.width) // 2
-                top = 0 if align_top else (height - fitted.height) // 2
-            canvas = Image.new("RGB", (width, height), background)
-            canvas.paste(fitted, (left, top))
-            photo = ImageTk.PhotoImage(canvas, master=label)
-            try:
-                label.configure(image=photo)
-            except tk.TclError:
-                return
-            label.preview_photo = photo
-            rendered_size = (width, height)
-            if on_image_layout is not None:
-                on_image_layout(label, (left, top, fitted.width, fitted.height))
-
-        def queue_redraw(_event=None):
-            nonlocal redraw_after_id
-            # Configure also fires when a scrolling window only moves. Those
-            # events must reuse the pixels already uploaded to Tk.
-            if _event is not None and (_event.width, _event.height) == rendered_size:
-                return
-            if redraw_after_id is None:
-                redraw_after_id = label.after_idle(redraw)
-
-        def cleanup(event):
-            nonlocal redraw_after_id, source
-            if event.widget is label:
-                if redraw_after_id is not None:
-                    label.after_cancel(redraw_after_id)
-                    redraw_after_id = None
-                label.preview_photo = None
-                source = None
-
-        label.bind("<Configure>", queue_redraw, add="+")
-        label.bind("<Destroy>", cleanup, add="+")
-        if on_click is not None:
-            label.configure(cursor="hand2", takefocus=True)
-            label.bind("<Button-1>", lambda _event: on_click(), add="+")
-            label.bind("<Return>", lambda _event: on_click(), add="+")
-            label.bind("<space>", lambda _event: on_click(), add="+")
         if parent is self.plot_holder:
             self.canvas = label
-        queue_redraw()
         return label
 
     @classmethod

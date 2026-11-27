@@ -251,18 +251,6 @@ class Step4CompilerDialog(CompilerPresentationMixin, ctk.CTkToplevel):
         self.status_var.set(f"Ready to compile measurements in {path}.")
         return True
 
-    def _open_input_folder(self) -> None:
-        if self._running:
-            return
-        if self.set_input_folder(self.input_var.get()):
-            return
-        self.input_var.set(self._accepted_input_folder)
-        messagebox.showerror(
-            "Invalid folder",
-            "Enter an existing folder path.",
-            parent=self,
-        )
-
     def _browse_input(self) -> None:
         initial_dir = (
             self._existing_directory(self.input_var.get())

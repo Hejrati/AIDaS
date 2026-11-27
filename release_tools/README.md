@@ -53,6 +53,25 @@ This checks native move, resize, maximize, minimize and restore in both modes
 using temporary profiles. The source-level `smoke_test_custom_title_bar.py`
 also exercises the custom resize grip, caption styles and work-area bounds.
 
+## Tab responsiveness
+
+Run the same commands on the baseline and candidate revisions on one desktop
+with matching resolution and scaling.
+
+```powershell
+python release_tools/profile_ui.py --tabs
+python release_tools/profile_ui.py --tabs --classic
+```
+
+The fixture populates all five workflow steps and opens two dense annotation
+results and two ROI plots. Each cycle creates a fresh application and measures
+first visits, then revisits the same content. Use `--runs 1` for a smoke run.
+The default is 30 samples per transition and visit type. Each JSON record
+reports the median and p95 time to the expected mapped content, plus the p95
+of the worst delay observed on a 10 ms Tk timer during each selection. Timings
+end at Tk content readiness. Step 5's retained inventory is readable while it
+refreshes and export still waits for the scan to finish.
+
 ## Create a release
 
 1. Set `aidas/__init__.py` to the intended version and add feature-focused notes

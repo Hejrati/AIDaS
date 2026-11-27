@@ -1,4 +1,4 @@
-"""Profile startup and navigation, or use --window for Windows interaction timings.
+"""Profile startup, --tabs for tab latency, or --window for Windows interaction timings.
 
 Window scenarios use synthetic OCT data, temporary preferences and separate
 CPU traces. Pass --classic to exercise the Classic interface.
@@ -23,11 +23,14 @@ from aidas.app import AIDaSApp
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--classic", action="store_true")
-    parser.add_argument("--window", action="store_true", help="Measure Windows window interactions")
-    parser.add_argument("--runs", type=int, default=5)
+    measurement = parser.add_mutually_exclusive_group()
+    measurement.add_argument("--window", action="store_true", help="Measure Windows window interactions")
+    measurement.add_argument("--tabs", action="store_true", help="Measure cold and warm tab selections")
+    parser.add_argument("--runs", type=int, help="Samples per transition (default: 30 for --tabs, 5 for --window)")
     parser.add_argument("--trace", action="store_true", help="Collect a separate window CPU profile")
     args = parser.parse_args()
-    if args.runs < 1:
+    runs = args.runs if args.runs is not None else (30 if args.tabs else 5)
+    if runs < 1:
         parser.error("--runs must be positive")
     if args.window and sys.platform != "win32":
         parser.error("--window requires a Windows desktop")
@@ -43,10 +46,14 @@ def main():
         }), encoding="utf-8")
         app = None
         try:
+            if args.tabs:
+                from release_tools.profile_tabs import measure_tabs
+                measure_tabs(AIDaSApp, Path(directory), runs)
+                return
             if args.window:
                 from release_tools.profile_window import measure_windows
                 app = AIDaSApp()
-                measure_windows(app, args.runs, args.trace)
+                measure_windows(app, runs, args.trace)
                 return
             profile = cProfile.Profile()
             started = time.perf_counter()

@@ -194,6 +194,7 @@ class Step4ResetLifecycleTests(unittest.TestCase):
             import numpy as np
             from aidas.steps.step4_analyze_isez import AutoDetectionRunResult, Step4Frame
             from aidas.utils.io_utils import write_analyze
+            from tests.support.step4 import settle_roi_tab
 
             root = ctk.CTk()
             root.withdraw()
@@ -203,7 +204,7 @@ class Step4ResetLifecycleTests(unittest.TestCase):
             frame.pack(fill='both', expand=True)
 
             def settle():
-                root.update_idletasks()
+                settle_roi_tab(frame)
 
             def start_detection():
                 # Leave the worker unfinished so transitions happen before

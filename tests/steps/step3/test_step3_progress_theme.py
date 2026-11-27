@@ -58,6 +58,38 @@ class Step3ProgressThemeTests(unittest.TestCase):
         self.assertEqual(self.panel.step_text.cget("state"), "disabled")
         self.assertIn("Queued...", self.panel.step_text.get("1.0", "end-1c"))
 
+    def test_running_footer_uses_distinct_actions_and_completion_offers_close(self):
+        cancel, pause = self.panel.action_box.pack_slaves()
+        self.assertIs(cancel, self.panel.cancel_button)
+        self.assertIs(pause, self.panel.pause_button)
+        self.assertEqual(cancel.cget("text"), "Cancel")
+        self.assertEqual(pause.cget("text"), "Pause")
+        self.assertIsInstance(pause.cget("image"), ctk.CTkImage)
+        self.assertEqual(pause.cget("compound"), "left")
+        self.assertEqual(cancel.cget("fg_color")[1], COLORS.danger)
+        self.assertEqual(pause.cget("fg_color")[1], COLORS.warning)
+
+        def glyph_center_row():
+            alpha = pause.cget("image").cget("dark_image").getchannel("A")
+            return [alpha.getpixel((x, alpha.height // 2)) for x in range(alpha.width)]
+
+        pause_row = glyph_center_row()
+        center = len(pause_row) // 2
+        self.assertFalse(pause_row[center])
+        self.assertTrue(any(pause_row[:center]) and any(pause_row[center + 1:]))
+        self.panel.step_frame._set_batch_r_paused = mock.Mock(return_value=True)
+        pause.invoke()
+        self.assertEqual(pause.cget("text"), "Resume")
+        self.assertTrue(glyph_center_row()[center])
+        pause.invoke()
+        self.assertEqual(pause.cget("text"), "Pause")
+        self.assertEqual(glyph_center_row(), pause_row)
+
+        self.panel.finish()
+
+        self.assertEqual(self.panel.action_box.pack_slaves(), [cancel])
+        self.assertEqual(cancel.cget("text"), "Close")
+
     def test_live_appearance_and_interface_changes_preserve_log_content_and_read_only_state(self):
         self.panel._append_step(self.folder, "Flattening slices", "Done")
         text = self.panel.step_text

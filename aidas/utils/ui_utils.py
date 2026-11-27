@@ -464,11 +464,16 @@ def directory_row(
     )
     entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
+    # Keep fractional radii and strokes at display scales such as 125%.
+    button_shape = {
+        "corner_radius": float(SHAPES.corner_radius_sm),
+        "border_width": float(SHAPES.border_width),
+    }
     buttons = {
         "browse": icon_action_button(
             row, owner, browse_command, "folder", tooltip=browse_tooltip,
             icon_size=CONTROLS.icon_size, variant="success", preserve_icon_colors=True,
-            corner_radius=SHAPES.corner_radius_sm,
+            **button_shape,
         ),
         "home": None,
         "refresh": None,
@@ -476,11 +481,11 @@ def directory_row(
     buttons["browse"].pack(side="left", padx=(0, 4))
 
     if home_command is not None:
-        buttons["home"] = icon_button(row, owner, ICON_HOME, home_command, tooltip=home_tooltip)
+        buttons["home"] = icon_button(row, owner, ICON_HOME, home_command, tooltip=home_tooltip, **button_shape)
         buttons["home"].pack(side="right", padx=(4, 4))
 
     if refresh_command is not None:
-        buttons["refresh"] = icon_button(row, owner, ICON_REFRESH, refresh_command, tooltip=refresh_tooltip)
+        buttons["refresh"] = icon_button(row, owner, ICON_REFRESH, refresh_command, tooltip=refresh_tooltip, **button_shape)
         buttons["refresh"].pack(side="right")
 
     return row, entry, buttons

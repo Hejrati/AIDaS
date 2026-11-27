@@ -80,10 +80,10 @@ class Step4BatchLoadingTests(unittest.TestCase):
                     assert opened == [(keys[0], 2, [2])], opened
                     for key in keys:
                         frame.batch_roi_notebook.select(key)
-                        root.update()
+                        wait_until(lambda: frame._batch_roi_selection is None)
                     assert opened == [(key, 2, [2]) for key in keys], opened
                     frame.batch_roi_notebook.select(keys[0])
-                    root.update()
+                    wait_until(lambda: frame._batch_roi_selection is None)
                     assert len(opened) == len(keys), 'Revisiting a file reopened its review'
                     assert sorted(reads) == sorted(paths), 'Tab switching re-read files'
             finally:

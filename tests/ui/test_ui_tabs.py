@@ -465,6 +465,19 @@ class UITabStyleTests(unittest.TestCase):
 
 
 class UITabGeometryTests(unittest.TestCase):
+    def test_rapid_selections_scroll_only_the_final_choice(self):
+        view = ClosableTabView.__new__(ClosableTabView)
+        view._scroll_selected_after_id = None
+        view._model = SimpleNamespace(selected="first")
+        view.after_idle = mock.Mock(return_value="scroll-idle")
+        view._scroll_tab_into_view = mock.Mock()
+        view._queue_scroll_selected_tab()
+        view._model.selected = "last"
+        view._queue_scroll_selected_tab()
+        view.after_idle.assert_called_once()
+        view._scroll_selected_tab()
+        view._scroll_tab_into_view.assert_called_once_with("last")
+
     def test_direct_resize_consumes_pending_header_sync(self):
         view = ClosableTabView.__new__(ClosableTabView)
         view._header_sync_after_id = None

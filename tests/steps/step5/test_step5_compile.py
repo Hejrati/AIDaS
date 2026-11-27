@@ -144,7 +144,8 @@ class Step5CompileTests(unittest.TestCase):
         app = AIDaSApp.__new__(AIDaSApp)
         app.step5 = mock.Mock()
         app.notebook = mock.Mock()
-        app.notebook.index.return_value = 4
+        app.notebook.select.return_value = 4
+        app.notebook.index.side_effect = lambda tab: 4 if tab is app.step5 else tab
         app._last_workflow_tab_index = 3
         app._refresh_image_path_status = mock.Mock()
         app._sync_workflow_progress_strip = mock.Mock()
@@ -152,6 +153,11 @@ class Step5CompileTests(unittest.TestCase):
         app._on_workflow_tab_changed()
         app._on_workflow_tab_changed()
 
+        app.step5.on_show.assert_called_once_with()
+        app.notebook.select.return_value = 3
+        app._on_workflow_tab_changed()
+        app.notebook.select.return_value = 4
+        app._on_workflow_tab_changed()
         self.assertEqual(app.step5.on_show.call_count, 2)
         app.step5.start_from_step4.assert_not_called()
 
@@ -227,7 +233,7 @@ class Step5CompileTests(unittest.TestCase):
             self.assertEqual(Path(frame.input_var.get()), root)
             self.assertEqual(Path(frame.output_var.get()), root / DEFAULT_OUTPUT_FILENAME)
             self.assertIn("Ready to create an Excel file", frame.status_var.get())
-            frame._refresh_directory_view.assert_called_once_with()
+            frame._refresh_directory_view.assert_called_once_with(force=True)
             frame._start_compiler.assert_not_called()
             run_clicked.assert_not_called()
             frame.after.assert_not_called()
@@ -416,7 +422,7 @@ class Step5CompileTests(unittest.TestCase):
             self.assertEqual(Path(frame.input_var.get()), latest)
             self.assertEqual(Path(frame.output_var.get()), latest / DEFAULT_OUTPUT_FILENAME)
             self.assertEqual(frame._pending_step4_handoffs, [])
-            frame._refresh_directory_view.assert_called_once_with()
+            frame._refresh_directory_view.assert_called_once_with(force=True)
 
     def test_a_queued_handoff_does_not_change_inputs_after_step5_is_destroyed(self):
         with tempfile.TemporaryDirectory() as temp_dir:

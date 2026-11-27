@@ -183,8 +183,8 @@ class ImageCanvas(ttk.Frame):
         super().destroy()
 
     # ---------------------------------------------------------- public API
-    def set_image(self, data: np.ndarray | None):
-        """Set an image (H, W) numpy array (any dtype)."""
+    def set_image(self, data: np.ndarray | None, *, defer_render=False):
+        """Set a 2-D image, optionally deferring paint to an upcoming fit."""
         self._cancel_pending_zoom()
         self._last_mouse_sample = None
         if data is None:
@@ -199,8 +199,12 @@ class ImageCanvas(ttk.Frame):
             if arr.dtype.byteorder not in ("=", "|"):
                 arr = arr.astype(arr.dtype.newbyteorder("="), copy=False)
             self._data = np.ascontiguousarray(arr)
-            self._display_data = np.ascontiguousarray(self._to_display(self._data))
-            self._display_pil = Image.fromarray(self._display_data, "L")
+            if defer_render:
+                self._display_data = None
+                self._display_pil = None
+            else:
+                self._display_data = np.ascontiguousarray(self._to_display(self._data))
+                self._display_pil = Image.fromarray(self._display_data, "L")
         self._active_line.clear()
         self._line_overlays.clear()
         self._annotation_anchor_cache = {}
@@ -210,6 +214,8 @@ class ImageCanvas(ttk.Frame):
         self._line_edit_drag = None
         self._vertical_line_x = None
         self._drag_vertical_line = False
+        if defer_render:
+            return
         if data is not None:
             self._auto_zoom()
         self._redraw()
@@ -255,6 +261,10 @@ class ImageCanvas(ttk.Frame):
         self._editable_line_label = label
         self._line_edit_drag = None
         self._redraw_overlays()
+
+    def has_pending_line_edit(self):
+        """Return whether the canvas contains an uncommitted boundary drag."""
+        return self._line_edit_drag is not None
 
     def _editable_line(self):
         label = getattr(self, "_editable_line_label", None)
@@ -578,12 +588,14 @@ class ImageCanvas(ttk.Frame):
         self._cancel_pending_zoom()
         self._zoom_around_visible_center(z)
 
-    def fit_to_window(self):
+    def fit_to_window(self, *, settle_layout=True):
         self._cancel_pending_zoom()
-        self._auto_zoom()
+        self._auto_zoom(settle_layout=settle_layout)
         size = (id(self._data), self._zoom, self.canvas.winfo_width(), self.canvas.winfo_height())
         if self._img_id is None or self._base_size != size:
             self._redraw()
+        elif not settle_layout:
+            return
         self._emit_zoom_change()
 
     def _zoom_around_visible_center(self, zoom):
@@ -670,8 +682,9 @@ class ImageCanvas(ttk.Frame):
             self._render_visible_image()
 
     # ---------------------------------------------------------- internals
-    def _auto_zoom(self):
-        self.update_idletasks()
+    def _auto_zoom(self, *, settle_layout=True):
+        if settle_layout:
+            self.update_idletasks()
         cw = max(self.canvas.winfo_width(), 200)
         ch = max(self.canvas.winfo_height(), 200)
         if self._data is None:
@@ -1049,6 +1062,23 @@ class ImageCanvas(ttk.Frame):
 
     # ---------------------------------------------------------- line drawing
     def _clean_line_points(self, points):
+        if isinstance(points, (list, tuple)) and len(points) >= 256:
+            # Predicted OCT traces contain thousands of finite vertices.
+            # Clip and collapse repeated vertices in one array operation.
+            try:
+                coordinates = np.array(points, dtype=np.float64)
+            except (TypeError, ValueError, OverflowError):
+                pass
+            else:
+                if coordinates.shape == (len(points), 2) and np.isfinite(coordinates).all():
+                    if self._data is not None:
+                        height, width = self._data.shape[:2]
+                        limits = max(0, width - 1), max(0, height - 1)
+                        np.clip(coordinates, 0.0, limits, out=coordinates)
+                    keep = np.ones(len(points), dtype=bool)
+                    keep[1:] = np.any(coordinates[1:] != coordinates[:-1], axis=1)
+                    return list(map(tuple, coordinates[keep].tolist()))
+
         cleaned = []
         for point in points:
             if point is None:

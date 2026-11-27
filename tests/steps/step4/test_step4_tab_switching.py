@@ -59,6 +59,50 @@ class _PageStub:
 
 
 class Step4TabSwitchingTests(unittest.TestCase):
+    def test_cached_selection_keeps_sidebar_idle_until_source_validation(self):
+        frame = Step4Frame.__new__(Step4Frame)
+        state = {"source_snapshot": object(), "loaded": True}
+        frame.batch_roi_tab_states = {"cached": state}
+        frame._active_batch_roi_tab = "previous"
+        frame._batch_roi_selection_after_id = "queued"
+        frame._leave_batch_roi_tab = mock.Mock()
+        frame._set_batch_folder_label = mock.Mock()
+        frame.status_var = mock.Mock()
+        frame._update_confirm_button_state = mock.Mock()
+        frame._close_profile_zoom = mock.Mock()
+
+        frame._activate_batch_roi_tab("cached")
+
+        frame._leave_batch_roi_tab.assert_called_once_with()
+        self.assertEqual(frame._batch_roi_selection, ("cached", state))
+        frame._set_batch_folder_label.assert_not_called()
+        frame.status_var.set.assert_not_called()
+        frame._update_confirm_button_state.assert_not_called()
+        frame._move_roi(1)
+        frame._clear_clicks()
+        frame._auto_detect_all_rois()
+        frame._close_profile_zoom.assert_not_called()
+
+    def test_unchanged_roi_rows_skip_table_reads_and_mutations(self):
+        frame = Step4Frame.__new__(Step4Frame)
+        frame.rois = [ISezROI("01", 1, 2)]
+        frame.current_roi_idx = 0
+        frame.roi_table = mock.Mock()
+        frame.roi_table.get_children.return_value = ("0",)
+        frame.roi_table.selection.return_value = ("0",)
+        frame._roi_needs_review = mock.Mock(return_value=False)
+        frame._roi_metric_values = mock.Mock(return_value=("",))
+        frame._update_build_stack_button_state = mock.Mock()
+
+        frame._refresh_roi_list()
+        frame.roi_table.item.assert_called_once_with("0", values=("01", ""))
+        frame.roi_table.item.reset_mock()
+        frame._refresh_roi_list()
+
+        frame.roi_table.item.assert_not_called()
+        frame.roi_table.selection_set.assert_not_called()
+        frame.roi_table.focus.assert_not_called()
+
     def test_cached_tab_reuses_rendered_canvas_when_theme_is_unchanged(self):
         frame = Step4Frame.__new__(Step4Frame)
         frame.rois = [ISezROI("1", 1, 2)]

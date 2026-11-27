@@ -191,13 +191,31 @@ class MeasurementDirectoryTree(ttk.Frame):
                 sticky="e", pady=(6, 0) if row else 0,
             )
 
-    def set_directory(self, directory: Path, *, output_path: Path | None = None):
-        self._directory, self._output = Path(directory), output_path
-        self._closed.clear()
+    def set_directory(self, directory: Path, *, output_path: Path | None = None, force: bool = False):
+        directory = Path(directory)
+        same_directory = directory == self._directory
+        if same_directory and output_path == self._output and self.scan_state == "scanning" and not force:
+            return
+        self._directory, self._output = directory, output_path
+        if not same_directory:
+            self._closed.clear()
+            self._clear_inventory("Reading folder contents…")
+        self.refresh()
+
+    def _clear_inventory(self, message):
+        self._inventory = None
+        self._rows = []
+        self._filtered_children.clear()
+        self._name_widths.clear()
+        self._detail_widths.clear()
+        self._clear_selection()
+        self._rows_revision += 1
+        self._empty_message = message
+        self._resize()
+
+    def _clear_selection(self):
         self._selected = None
         self.selection_var.set("")
-        self.canvas.yview_moveto(0)
-        self.refresh()
 
     def refresh(self):
         if self._directory is None:
@@ -207,19 +225,14 @@ class MeasurementDirectoryTree(ttk.Frame):
         self._generation += 1
         generation, cancelled = self._generation, self._cancel_scan
         directory, output, events = self._directory, self._output, self._events
-        self.path_var.set(str(directory))
-        self.summary_var.set("Reading folder contents…")
-        # Clear the previous directory immediately so it cannot be mistaken
-        # for the new selection while the worker is reading the filesystem.
-        self._inventory = None
-        self._rows = []
-        self._filtered_children.clear()
-        self._name_widths.clear()
-        self._detail_widths.clear()
-        self._rows_revision += 1
-        self._empty_message = "Reading folder contents…"
-        self._show_notice("")
-        self._schedule_draw()
+        previous_inventory = self._inventory
+        if self.path_var.get() != str(directory):
+            self.path_var.set(str(directory))
+        if previous_inventory is None:
+            self.summary_var.set("Reading folder contents…")
+            self._empty_message = "Reading folder contents…"
+            self._show_notice("")
+            self._schedule_draw()
         self._set_scan_state("scanning")
 
         def worker():
@@ -227,6 +240,16 @@ class MeasurementDirectoryTree(ttk.Frame):
                 if not directory.is_dir():
                     raise FileNotFoundError(f"The selected folder is unavailable: {directory}")
                 inventory = scan_measurement_directory(directory, output_path=output, cancelled=cancelled.is_set)
+                if not directory.is_dir():
+                    raise FileNotFoundError(f"The selected folder is unavailable: {directory}")
+                # Reuse the existing view when the inventory is identical.
+                # Very deep trees can exceed dataclass equality's recursion
+                # limit. They can still be displayed by the iterative builder.
+                try:
+                    if inventory == previous_inventory:
+                        inventory = previous_inventory
+                except RecursionError:
+                    pass
             except InventoryCancelled:
                 return
             except Exception as exc:
@@ -246,25 +269,27 @@ class MeasurementDirectoryTree(ttk.Frame):
             if generation != self._generation:
                 continue
             finished = True
-            self._inventory = inventory
             if error:
-                limited = isinstance(error, MeasurementScanLimitExceeded)
-                self.summary_var.set("Folder limit exceeded." if limited else "Could not read this folder.")
-                self._show_notice(str(error))
-                self._empty_message = (
-                    "Please select another folder with fewer subfolders."
-                    if limited else "This folder could not be read. Select another folder or try Refresh."
-                )
-                self._set_scan_state("limited" if limited else "error", error)
-                self._schedule_draw()
+                self._show_scan_failure(error)
                 continue
-            notices = []
-            if inventory.unassigned_workbooks:
-                notices.append("Measurement results outside nasal/temporal folders are shown below, but the compiler cannot assign them to a side.")
-            if inventory.errors:
-                notices.append("Some folders could not be read. Check their access permissions.")
-            self._show_notice(" ".join(notices))
-            self._rebuild_rows()
+            if inventory is not self._inventory:
+                self._inventory = inventory
+                self._filtered_children.clear()
+                self._name_widths.clear()
+                self._detail_widths.clear()
+                notices = []
+                if inventory.unassigned_workbooks:
+                    notices.append("Measurement results outside nasal/temporal folders are shown below, but the compiler cannot assign them to a side.")
+                if inventory.errors:
+                    notices.append("Some folders could not be read. Check their access permissions.")
+                self._show_notice(" ".join(notices))
+                self._rebuild_rows()
+                if self._selected is not None and not any(
+                    self._selected == (node.path, node.kind) for node, _, _, _ in self._rows
+                ):
+                    self._clear_selection()
+            elif self._measurement_signature is None:
+                self._rebuild_rows()
             self._set_scan_state("ready")
         if not finished and self.scan_state == "scanning":
             self._poll_id = self.after(60, self._poll)
@@ -281,16 +306,17 @@ class MeasurementDirectoryTree(ttk.Frame):
         if self._poll_id is not None:
             self.after_cancel(self._poll_id)
             self._poll_id = None
-        self._inventory = None
-        self._rows = []
-        self._selected = None
-        self.selection_var.set("")
-        self._rows_revision += 1
-        self.summary_var.set("Folder limit exceeded.")
+        self._show_scan_failure(error)
+
+    def _show_scan_failure(self, error):
+        limited = isinstance(error, MeasurementScanLimitExceeded)
+        self.summary_var.set("Folder limit exceeded." if limited else "Could not read this folder.")
         self._show_notice(str(error))
-        self._empty_message = "Please select another folder with fewer subfolders."
-        self._set_scan_state("limited", error)
-        self._schedule_draw()
+        self._clear_inventory(
+            "Please select another folder with fewer subfolders."
+            if limited else "This folder could not be read. Select another folder or try Refresh."
+        )
+        self._set_scan_state("limited" if limited else "error", error)
 
     def _show_notice(self, text):
         self.notice_var.set(text)
@@ -311,8 +337,7 @@ class MeasurementDirectoryTree(ttk.Frame):
 
     def _filter_changed(self):
         self._filtered_children.clear()
-        self._selected = None
-        self.selection_var.set("")
+        self._clear_selection()
         self.canvas.yview_moveto(0)
         self._rebuild_rows()
 

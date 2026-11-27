@@ -167,6 +167,8 @@ class ClosableTabView(ctk.CTkFrame):
         )
         self._close_icon = self._create_close_icon()
         self._header_sync_after_id = None
+        self._scroll_selected_after_id = None
+        self._header_geometry = None
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
@@ -233,8 +235,8 @@ class ClosableTabView(ctk.CTkFrame):
             anchor="nw",
             window=self._tab_row,
         )
-        self._tab_row.bind("<Configure>", self._sync_header_geometry, add="+")
-        self._header_canvas.bind("<Configure>", self._sync_header_geometry, add="+")
+        self._tab_row.bind("<Configure>", self._on_header_configure, add="+")
+        self._header_canvas.bind("<Configure>", self._on_header_configure, add="+")
         for widget in (self._header, self._scrollbar_slot, self._header_canvas, self._tab_row, self._header_scrollbar):
             self._bind_header_hover(widget)
         for widget in (self._header, self._scrollbar_slot, self._header_canvas, self._tab_row):
@@ -515,8 +517,7 @@ class ClosableTabView(ctk.CTkFrame):
 
         if was_selected and replacement_id is not None:
             self._show_selected_page(replacement_id)
-        elif replacement_id is not None:
-            self._style_tab(replacement_id, active=True)
+            self._queue_scroll_selected_tab()
         self._queue_sync_header_geometry()
 
     def index(self, tab: object) -> int:
@@ -563,8 +564,9 @@ class ClosableTabView(ctk.CTkFrame):
             self._style_tab(previous_id, active=False)
 
         self._model.selected = page_id
-        self._show_selected_page(page_id)
-        self.after_idle(lambda selected=page_id: self._scroll_tab_into_view(selected))
+        if previous_id != page_id or not self._tab_widgets[page_id].active:
+            self._show_selected_page(page_id)
+        self._queue_scroll_selected_tab()
         if notify:
             page = self._model.pages[page_id]
             if self.command is not None:
@@ -595,10 +597,6 @@ class ClosableTabView(ctk.CTkFrame):
         widgets.active = active
         background = self._tab_background(widgets)
         title_hover = COLOR_PAIRS["tab_selected_hover"] if active else COLOR_PAIRS["tab_inactive_hover"]
-        widgets.frame.configure(
-            fg_color=background,
-            border_color=COLOR_PAIRS["tab_selected_border"] if active else COLOR_PAIRS["tab_border"],
-        )
         title_options = {
             "fg_color": background,
             "hover_color": title_hover,
@@ -613,11 +611,13 @@ class ClosableTabView(ctk.CTkFrame):
         widgets.title.configure(**title_options)
         if widgets.bottom_join is not None:
             widgets.bottom_join.configure(fg_color=background, bg_color=background)
-        self._update_tab_border_geometry(page_id)
+        self._update_tab_border_geometry(
+            page_id, fg_color=background,
+            border_color=COLOR_PAIRS["tab_selected_border"] if active else COLOR_PAIRS["tab_border"],
+        )
         self._set_close_hover(page_id, widgets.close_hovered)
-        self._draw_content_join()
 
-    def _update_tab_border_geometry(self, page_id: str) -> None:
+    def _update_tab_border_geometry(self, page_id: str, **style) -> None:
         """Align the open lower corners to a single physical-pixel outline."""
 
         widgets = self._tab_widgets.get(page_id)
@@ -631,11 +631,13 @@ class ClosableTabView(ctk.CTkFrame):
         # resolved values so an interface change cannot rewrite the old key.
         border_signature = (inset, resolve_color(sidebar), resolve_color(lower_corner))
         if widgets.border_signature != border_signature:
-            widgets.frame.configure(
+            style.update(
                 border_width=inset,
                 background_corner_colors=(sidebar, sidebar, lower_corner, lower_corner),
             )
             widgets.border_signature = border_signature
+        if style:
+            widgets.frame.configure(**style)
         if widgets.bottom_join is None:
             return
         if not widgets.active:
@@ -815,6 +817,10 @@ class ClosableTabView(ctk.CTkFrame):
             except tk.TclError:
                 self._header_sync_after_id = None
 
+    def _on_header_configure(self, _event=None) -> None:
+        self._queue_sync_header_geometry()
+        self._queue_scroll_selected_tab()
+
     def _sync_header_geometry(self, _event=None) -> None:
         if self._header_sync_after_id is not None:
             try:
@@ -826,19 +832,15 @@ class ClosableTabView(ctk.CTkFrame):
             canvas_width = max(1, self._header_canvas.winfo_width())
             content_width = max(canvas_width, self._tab_row.winfo_reqwidth())
             content_height = max(1, self._tab_row.winfo_reqheight())
-            self._header_canvas.itemconfigure(
-                self._tab_row_window,
-                width=content_width,
-                height=content_height,
-            )
-            self._header_canvas.configure(
-                height=content_height,
-                scrollregion=(0, 0, content_width, content_height),
-            )
+            geometry = (content_width, content_height)
+            if self.__dict__.get("_header_geometry") != geometry:
+                self._header_canvas.itemconfigure(self._tab_row_window, width=content_width, height=content_height)
+                self._header_canvas.configure(height=content_height, scrollregion=(0, 0, *geometry))
+                self._header_geometry = geometry
             self._update_header_overflow(content_width > canvas_width + 1)
             self._draw_content_join()
             if _event is not None and self._model.selected is not None:
-                self.after_idle(lambda: self._scroll_tab_into_view(self._model.selected))
+                self._queue_scroll_selected_tab()
         except tk.TclError:
             pass
 
@@ -889,12 +891,25 @@ class ClosableTabView(ctk.CTkFrame):
         self._header_hovered = self._pointer_within(self._header)
         self._update_scrollbar_visibility()
 
+    def _queue_scroll_selected_tab(self) -> None:
+        if self._scroll_selected_after_id is None:
+            self._scroll_selected_after_id = self.after_idle(self._scroll_selected_tab)
+
+    def _scroll_selected_tab(self) -> None:
+        self._scroll_selected_after_id = None
+        page_id = self._model.selected
+        if page_id is not None:
+            self._scroll_tab_into_view(page_id)
+
     def _scroll_tab_into_view(self, page_id: str) -> None:
         widgets = self._tab_widgets.get(page_id)
         if widgets is None:
             return
         try:
-            self._sync_header_geometry()
+            if self._header_sync_after_id is not None:
+                self._sync_header_geometry()
+            if not self._header_overflow:
+                return
             visible_width = self._header_canvas.winfo_width()
             total_width = max(visible_width, self._tab_row.winfo_reqwidth())
             view_left = self._header_canvas.canvasx(0)
@@ -940,6 +955,12 @@ class ClosableTabView(ctk.CTkFrame):
             except tk.TclError:
                 pass
             self._header_sync_after_id = None
+        if self._scroll_selected_after_id is not None:
+            try:
+                self.after_cancel(self._scroll_selected_after_id)
+            except tk.TclError:
+                pass
+            self._scroll_selected_after_id = None
         self._cancel_header_hover()
         for widgets in self._tab_widgets.values():
             self._cancel_tab_hover(widgets)

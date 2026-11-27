@@ -361,8 +361,66 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
         self.assertIn("rr_MCPAR.xlsx", self._texts(tree))
         (self.directory / "rrMCPAR_ELMRPE_ONL.xlsx").touch()
         tree.refresh()
-        self._wait(lambda: tree._inventory is not None)
+        self._wait(lambda: tree.scan_state == "ready")
         self.assertIn("Compiled Excel workbook", self._texts(tree))
+
+    def test_step5_reentry_retains_tree_and_coalesces_an_in_progress_scan(self):
+        folder = self.directory / "Subject"
+        folder.mkdir()
+        (folder / "Results.xlsx").touch()
+        for index in range(60):
+            (self.directory / f"Results_{index:02}.xlsx").touch()
+        frame = Step5Frame(self.root)
+        frame.pack(fill="both", expand=True)
+        tree = frame.directory_view
+        self.assertTrue(frame.set_input_folder(self.directory))
+        self._wait(lambda: tree.scan_state == "ready")
+        tree.collapse_all()
+        tree.canvas.yview_moveto(.3)
+        self.root.update()
+        selected_index = int(tree.canvas.canvasy(40) // tree._row_height)
+        selected = tree._rows[selected_index][0]
+        tree._click(SimpleNamespace(y=int((selected_index + .5) * tree._row_height
+                                          + 12 - tree.canvas.canvasy(0))))
+        self.root.update()
+        selection = (selected.path, selected.kind)
+        self.assertEqual(tree._selected, selection)
+        self.assertEqual(tree._closed, {folder})
+        self.assertGreater(tree.canvas.yview()[0], 0)
+        previous_scroll = tree.canvas.yview()
+        previous_rows = tree._rows
+
+        started, release = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def scan(directory, **options):
+            started.set()
+            release.wait(5)
+            return scan_measurement_directory(directory, **options)
+
+        with mock.patch("aidas.ui.measurement_tree.scan_measurement_directory", side_effect=scan) as scan_directory:
+            frame.on_show()
+            self._wait(started.is_set)
+            frame.on_show()
+            self.assertEqual(tree.scan_state, "scanning")
+            self.assertIs(tree._rows, previous_rows)
+            self.assertEqual(tree._selected, selection)
+            self.assertEqual(tree._closed, {folder})
+            self.assertEqual(tree.canvas.yview(), previous_scroll)
+            self.assertIn("disabled", frame.run_button.state())
+            release.set()
+            self._wait(lambda: tree.scan_state == "ready")
+            scan_directory.assert_called_once()
+
+        self.assertIs(tree._rows, previous_rows)
+        self.assertEqual(tree.canvas.yview(), previous_scroll)
+        selected.path.unlink()
+        frame.on_show()
+        self._wait(lambda: tree.scan_state == "ready")
+        self.assertIsNone(tree._selected)
+        self.assertEqual(tree.selection_var.get(), "")
+        self.assertEqual(tree._closed, {folder})
+        self.assertNotIn(selected.path, (node.path for node, _, _, _ in tree._rows))
 
     def test_slow_old_scan_cannot_replace_new_directory_and_scans_stay_off_tk(self):
         old = self.directory / "Old"
@@ -396,7 +454,7 @@ class MeasurementDirectoryTreeTests(unittest.TestCase):
             release.set()
             self._wait(finished.is_set)
             tree.refresh()
-            self._wait(lambda: tree._inventory is not None)
+            self._wait(lambda: tree.scan_state == "ready")
         self.assertEqual(tree._inventory.root.path, new)
         self.assertTrue(worker_threads)
         self.assertNotIn(owner, worker_threads)

@@ -36,6 +36,19 @@ class CanvasTabPerformanceTests(unittest.TestCase):
         self.widget.set_line_overlays(overlays)
         self.assertEqual(self.widget.get_line_handle_indices('Boundary'), [0, 100, 1499])
 
+    def test_dense_point_cleaning_matches_scalar_clipping_and_deduplication(self):
+        points = [(x - 25.75, x % 240 - 20.5) for x in range(1600)]
+        points[120:122] = [points[119]] * 2
+        expected = self.widget._clean_line_points(iter(points))
+        with patch.object(self.widget, '_clamp_line_point') as clamp:
+            self.assertEqual(self.widget._clean_line_points(points), expected)
+        clamp.assert_not_called()
+
+        points[5] = None
+        points[6] = (float('nan'), float('inf'))
+        self.assertEqual(self.widget._clean_line_points(points),
+                         self.widget._clean_line_points(iter(points)))
+
     def test_fit_reuses_image_but_updates_zoom_and_resize(self):
         self.widget.fit_to_window()
         image_id = self.widget._img_id

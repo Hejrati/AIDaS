@@ -19,6 +19,7 @@ from customtkinter.windows.widgets.core_widget_classes import CTkBaseClass
 
 
 _SCALE = 4
+_CORNER_SCALE = 16
 _GEOMETRY_SCALE = 64
 _SURFACE_TAG = "aidas_smooth_surface"
 _HIT_TAG = "aidas_smooth_hit_region"
@@ -39,18 +40,20 @@ _PART_TAGS = (
 def _corner_patch(width: int, height: int, radius: float,
                   phase_x: float, phase_y: float) -> Image.Image:
     """Return one antialiased corner, independent of the full widget size."""
-    padding = 3
-    patch = Image.new("L", ((width + padding) * _SCALE, (height + padding) * _SCALE), 0)
+    scale = _CORNER_SCALE
+    patch = Image.new("L", (width * scale, height * scale), 0)
     draw = ImageDraw.Draw(patch)
     # The opposite corners sit outside this small tile. Pillow clips the path
     # without allocating a bitmap for the complete rectangle.
     draw.rounded_rectangle(
-        (phase_x * _SCALE, phase_y * _SCALE,
-         (width + radius * 2 + 3) * _SCALE - 1,
-         (height + radius * 2 + 3) * _SCALE - 1),
-        radius=radius * _SCALE, fill=255,
+        (phase_x * scale, phase_y * scale,
+         (width + radius * 2) * scale - 1,
+         (height + radius * 2) * scale - 1),
+        radius=radius * scale, fill=255,
     )
-    return patch.resize((width + padding, height + padding), Image.Resampling.LANCZOS).crop((0, 0, width, height))
+    # Average only samples within the pixel. A sharpening filter adds faint
+    # rings outside the outline and dark specks along the flat fill.
+    return patch.resize((width, height), Image.Resampling.BOX)
 
 
 def _rectangle_mask(size: tuple[int, int], bounds: tuple[float, ...]) -> Image.Image:
@@ -181,7 +184,7 @@ def _schedule(canvas: CTkCanvas) -> None:
         return
     # Construction changes can arrive between successive splash updates. Once
     # registered for the final paint, this canvas needs no more idle callbacks.
-    if getattr(canvas, "_aidas_paint_deferred", False):
+    if getattr(canvas, "_aidas_paint_deferred", False) or getattr(canvas, "_aidas_paint_on_map", False):
         return
     if getattr(canvas, "_aidas_paint_pending", None) is None and not getattr(canvas, "_aidas_painting", False):
         try:
@@ -196,6 +199,13 @@ def _canvas_configured(canvas: CTkCanvas, event) -> None:
     if getattr(canvas, "_aidas_configured_size", None) != size:
         canvas._aidas_configured_size = size
         _schedule(canvas)
+
+
+def _canvas_mapped(canvas: CTkCanvas) -> None:
+    binding = canvas._aidas_paint_on_map
+    canvas._aidas_paint_on_map = None
+    canvas.unbind("<Map>", binding)
+    _schedule(canvas)
 
 
 def _rgb(canvas: CTkCanvas, color: str) -> tuple[int, int, int]:
@@ -273,6 +283,10 @@ def _item_mask(canvas: CTkCanvas, item: int, size) -> Image.Image:
 
 def _paint_pair(base: Image.Image, outer: Image.Image, border_color,
                 inner: Image.Image, fill_color) -> Image.Image:
+    if border_color == fill_color:
+        result = base.copy()
+        result.paste(fill_color, mask=outer)
+        return result
     inner = ImageChops.darker(outer, inner)
     width, height = base.size
     # Large frames usually have a solid center. When both masks cover it
@@ -367,6 +381,10 @@ def _repaint(canvas: CTkCanvas) -> None:
                 pending = window._aidas_deferred_surfaces = weakref.WeakSet()
             pending.add(canvas)
             canvas._aidas_paint_deferred = True
+            return
+        if getattr(window, "_aidas_render_visible_surfaces_only", False) and not canvas.winfo_viewable():
+            if not getattr(canvas, "_aidas_paint_on_map", None):
+                canvas._aidas_paint_on_map = canvas.bind("<Map>", lambda _event: _canvas_mapped(canvas), add="+")
             return
         vectors = getattr(canvas, "_aidas_vectors", {})
         items = [item for item in canvas.find_all() if item in vectors and vectors[item] != "hidden"]

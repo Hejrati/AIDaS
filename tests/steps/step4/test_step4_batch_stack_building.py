@@ -234,7 +234,7 @@ class BatchStackBuildingTests(unittest.TestCase):
                     frame.rois = frame.rois[:2]
                     paths = [Path(directory)/name/'_flat_LIGHT.hdr' for name in ('active', 'ready')]
                     frame._open_batch_roi_tabs(paths)
-                    root.update()
+                    wait_until(lambda: frame._batch_roi_selection is None)
                     keys = frame.batch_roi_notebook.tabs()
                     state = frame.batch_roi_tab_states[keys[1]]
                     state['completed'] = {

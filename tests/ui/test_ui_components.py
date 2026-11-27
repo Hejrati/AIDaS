@@ -13,6 +13,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from aidas.app import AboutDialog, SettingsDialog
+from aidas.ui.result_preview import show_result_preview
 from aidas.steps.step1_resize_raw import Step1Frame
 from aidas.steps.step2_annotate import Step2BatchSegmentationSelectionPanel, Step2Frame
 from aidas.steps.step3_flatten import (
@@ -330,7 +331,7 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
     def test_step3_results_use_a_clickable_temporal_nasal_grid(self):
         ui_source = inspect.getsource(Step3Frame._build_ui)
         grid_source = inspect.getsource(Step3Frame._render_result_grid)
-        preview_source = inspect.getsource(Step3Frame._display_preview_image)
+        preview_source = inspect.getsource(show_result_preview)
 
         self.assertNotIn('text="View"', ui_source)
         self.assertIn("RESULT_SIDE_ORDER", grid_source)
@@ -560,17 +561,15 @@ class ResponsiveWorkflowPanelTests(unittest.TestCase):
         run_source = inspect.getsource(RBatchRunPanel._build_ui)
         self.assertIn("RBatchSelectionTable.RUN_STATUS_WIDTH_VALUES", run_source)
 
-    def test_step3_run_header_and_action_glyphs_are_compact_and_legible(self):
+    def test_step3_run_footer_uses_cancel_and_pause_actions(self):
         source = inspect.getsource(RBatchRunPanel._build_ui)
 
         self.assertNotIn('f"Timeout:', source)
         self.assertNotIn('"Progress and logs update', source)
-        self.assertIn('text="\\u25a0  Stop"', source)
-        self.assertNotIn("load_color_close_icon", source)
-        self.assertNotIn("image=self.close_icon", source)
+        self.assertIn('text="Cancel"', source)
+        self.assertIn('text="Pause"', source)
         self.assertIn('variant="danger"', source)
-        self.assertIn('text="Close"', source)
-        self.assertIn("self.stop_button = AppButton(", source)
+        self.assertIn('variant="warning"', source)
 
     def test_step3_second_script_schedule_defaults_to_parallel(self):
         source = inspect.getsource(RBatchSelectionPanel._build_ui)

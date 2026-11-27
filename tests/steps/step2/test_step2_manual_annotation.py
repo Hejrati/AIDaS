@@ -532,7 +532,7 @@ class AnnotationTutorialTests(unittest.TestCase):
                         self.assertEqual(banner.opt_out_button._canvas.itemcget("inner_parts", "fill"),
                                          resolve_color(COLOR_PAIRS["primary"], mode))
                         self.assertEqual(banner.ok_button._canvas.itemcget("inner_parts", "fill"),
-                                         resolve_color(COLOR_PAIRS["success"], mode))
+                                         resolve_color(COLOR_PAIRS["success_button"], mode))
                         assert_guide_layout(frame)
 
                 # OK dismisses only this session, and Settings
@@ -587,12 +587,10 @@ class AnnotationTutorialTests(unittest.TestCase):
                 # Selecting another result moves the banner to that tab's
                 # actual drawing viewport, below the tab strip and clear of
                 # its scrollbars. The previous viewport owns no stale guide.
-                with mock.patch.object(frame, "_read_image_for_annotation",
-                                       return_value=(image, None, False)):
-                    frame._open_aidas_batch_results_viewer([
-                        {"input": "First.img", "boundaries": np.ones((6, 96))},
-                        {"input": "Second.img", "boundaries": np.ones((6, 96))},
-                    ])
+                frame._open_aidas_batch_results_viewer([
+                    {"input": "First.img", "image": image, "boundaries": np.ones((6, 96))},
+                    {"input": "Second.img", "image": image, "boundaries": np.ones((6, 96))},
+                ])
                 self.assertEqual(
                     [frame.batch_results_notebook.tab(tab, "tooltip")
                      for tab in frame.batch_results_notebook.tabs()],

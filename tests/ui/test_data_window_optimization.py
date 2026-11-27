@@ -115,8 +115,9 @@ class DataViewOptimizationTests(unittest.TestCase):
         tree._directory = inventory.root.path
         with patch("aidas.ui.measurement_tree.scan_measurement_directory", return_value=updated):
             tree.refresh()
+            self.assertIs(tree._inventory, inventory)
             deadline = time.monotonic() + 5
-            while tree._inventory is None:
+            while tree._inventory is not updated:
                 self.root.update()
                 self.assertLess(time.monotonic(), deadline)
                 time.sleep(0.005)

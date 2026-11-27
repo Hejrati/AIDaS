@@ -19,6 +19,7 @@ class Step4LinePositioningUITests(unittest.TestCase):
             import numpy as np
             from aidas.steps.step4_analyze_isez import Step4Frame
             from aidas.utils.io_utils import write_analyze
+            from tests.support.step4 import settle_roi_tab
 
             ctk.set_widget_scaling(1.0)
             ctk.set_window_scaling(1.0)
@@ -34,7 +35,7 @@ class Step4LinePositioningUITests(unittest.TestCase):
             frame.pack(fill='both', expand=True)
 
             def check_gap():
-                root.update_idletasks()
+                settle_roi_tab(frame)
                 widget = frame.canvas.get_tk_widget()
                 check = widget._aidas_line_positioning_checkbox
                 height = widget.winfo_height()

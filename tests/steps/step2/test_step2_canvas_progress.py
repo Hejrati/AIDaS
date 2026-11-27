@@ -283,13 +283,10 @@ class Step2CanvasProgressTests(unittest.TestCase):
     def test_progress_stays_over_batch_results_when_the_active_tab_changes(self):
         frame = self._make_frame()
         trace = {"RPE": {"points": [(0, 16), (95, 16)], "color": "#ffb703"}}
-        with mock.patch.object(
-            frame, "_read_image_for_annotation", return_value=(self.image, None, False),
-        ):
-            frame._open_aidas_batch_results_viewer([
-                {"input": "first.img", "traces": trace},
-                {"input": "second.img", "traces": trace},
-            ])
+        frame._open_aidas_batch_results_viewer([
+            {"input": "first.img", "image": self.image, "traces": trace},
+            {"input": "second.img", "image": self.image, "traces": trace},
+        ])
         self.root.update()
         frame._set_segmentation_running(True, progress_max=1)
         self.root.update()

@@ -269,7 +269,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         before = dialog._script_status_vars["main"].get()
         dialog._mark_dirty.reset_mock()
 
-        with mock.patch("aidas.app.filedialog.askopenfilename", return_value="") as picker:
+        with mock.patch("aidas.ui.settings.filedialog.askopenfilename", return_value="") as picker:
             dialog._script_popups["main"].invoke(4)
 
         picker.assert_called_once()
@@ -285,8 +285,8 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         before = dialog._script_status_vars["main"].get()
         self.frame.import_r_script_for_role.side_effect = ValueError("Not an R script")
 
-        with mock.patch("aidas.app.filedialog.askopenfilename", return_value="invalid.txt"), \
-                mock.patch("aidas.app.messagebox.showerror") as error:
+        with mock.patch("aidas.ui.settings.filedialog.askopenfilename", return_value="invalid.txt"), \
+                mock.patch("aidas.ui.settings.messagebox.showerror") as error:
             dialog._choose_r_script_option("main", "Custom script")
 
         error.assert_called_once()
@@ -299,7 +299,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         dialog = self._dialog()
         selected = self._script("outside/main_optimized.R", "# independently edited custom\n")
 
-        with mock.patch("aidas.app.filedialog.askopenfilename", return_value=str(selected)):
+        with mock.patch("aidas.ui.settings.filedialog.askopenfilename", return_value=str(selected)):
             dialog._choose_r_script_option("main", "Custom script")
 
         imported = (self.root / "library" / "main" / selected.name).resolve()
@@ -337,7 +337,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         dialog = self._dialog()
         selected = self._script("outside/output_custom.R")
 
-        with mock.patch("aidas.app.filedialog.askopenfilename", return_value=str(selected)) as picker:
+        with mock.patch("aidas.ui.settings.filedialog.askopenfilename", return_value=str(selected)) as picker:
             dialog._script_popups["output"].invoke(4)
 
         self.frame.import_r_script_for_role.assert_called_once_with(selected, "output")
@@ -359,7 +359,7 @@ class RScriptSelectorMenuTests(unittest.TestCase):
     def test_disabled_optimization_hides_optimized_metadata_from_stale_discovery(self):
         for role in self.choices:
             self.preferences.values[f"r_{role}_script_path"] = str(self.paths[role]["original"])
-        with mock.patch("aidas.app.OPTIMIZED_R_SCRIPTS_ENABLED", False):
+        with mock.patch("aidas.ui.settings.OPTIMIZED_R_SCRIPTS_ENABLED", False):
             dialog = self._dialog()
 
         for role in self.choices:
@@ -374,8 +374,8 @@ class RScriptSelectorMenuTests(unittest.TestCase):
         before = dialog._script_status_vars["main"].get()
         self.frame._busy = True
 
-        with mock.patch("aidas.app.messagebox.showwarning") as warning, \
-                mock.patch("aidas.app.filedialog.askopenfilename") as picker:
+        with mock.patch("aidas.ui.settings.messagebox.showwarning") as warning, \
+                mock.patch("aidas.ui.settings.filedialog.askopenfilename") as picker:
             dialog._choose_r_script_option("main", "Original script")
             dialog._choose_r_script_option("main", "Custom script")
 

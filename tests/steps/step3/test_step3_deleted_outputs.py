@@ -19,7 +19,8 @@ class Step3DeletedOutputsTests(unittest.TestCase):
         self.frame = Step3Frame.__new__(Step3Frame)
         frame = self.frame
         frame._r_cancel_event = threading.Event()
-        frame._register_r_process = mock.Mock()
+        frame._r_process_lock = threading.Lock()
+        frame._active_r_processes = set()
         frame._unregister_r_process = mock.Mock()
         frame._terminate_r_process = mock.Mock()
         frame._batch_panel_update = mock.Mock()

@@ -379,42 +379,44 @@ class AppButton(ctk.CTkButton):
     def state(self, statespec=None):
         """Support the subset of ttk.Button.state used by workflow panels."""
 
+        was_disabled = self.cget("state") == "disabled"
         if statespec is None:
-            return ("disabled",) if self.cget("state") == "disabled" else ()
-        disabled = self.cget("state") == "disabled"
+            return ("disabled",) if was_disabled else ()
+        disabled = was_disabled
         for state in statespec:
             if state == "disabled":
                 disabled = True
             elif state == "!disabled":
                 disabled = False
-        self.configure(state="disabled" if disabled else "normal")
+        if disabled != was_disabled:
+            self.configure(state="disabled" if disabled else "normal")
         return ()
 
 
+def playback_icon(master, *, pause: bool = False) -> OwnedCTkImage:
+    """Create a scalable playback glyph that follows its button's text color."""
+    scale = 4
+    image = Image.new("RGBA", (16 * scale, 16 * scale))
+    draw = ImageDraw.Draw(image)
+    if pause:
+        for x in (4.5, 9):
+            draw.rectangle((x * scale, 3 * scale, (x + 2.5) * scale - 1, 13 * scale - 1), fill="white")
+    else:
+        draw.polygon([(x * scale, y * scale) for x, y in ((4.5, 3), (12.5, 8), (4.5, 13))], fill="white")
+    icon = OwnedCTkImage(master, light_image=image, size=(CONTROLS.icon_size, CONTROLS.icon_size))
+    icon._aidas_monochrome_action = True
+    return icon
+
+
 class AppRunButton(AppButton):
-    """The shared rounded blue Run action with a scalable play triangle."""
+    """The shared green Run action with a scalable play triangle."""
 
     _aidas_preserve_corner_radius = True
 
     def __init__(self, master, *, command, **kwargs):
-        def play_image(color):
-            scale = 4
-            image = Image.new("RGBA", (16 * scale, 16 * scale))
-            ImageDraw.Draw(image).polygon(
-                [(x * scale, y * scale) for x, y in ((4.5, 3), (12.5, 8), (4.5, 13))],
-                fill=color,
-            )
-            return image
-
-        icon = OwnedCTkImage(
-            master,
-            light_image=play_image(COLOR_PAIRS["on_primary"][0]),
-            dark_image=play_image(COLOR_PAIRS["on_primary"][1]),
-            size=(CONTROLS.icon_size, CONTROLS.icon_size),
-        )
         kwargs.setdefault("width", 104)
-        super().__init__(master, text="Run", variant="primary", command=command,
-                         image=icon, compound="left", **kwargs)
+        super().__init__(master, text="Run", variant="success", command=command,
+                         image=playback_icon(master), compound="left", **kwargs)
 
 
 class AppOptionMenu(ctk.CTkOptionMenu):

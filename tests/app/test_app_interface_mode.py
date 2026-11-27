@@ -850,14 +850,14 @@ class SettingsCategoryNavigationTests(unittest.TestCase):
             with self.subTest(presentation=presentation):
                 dialog, _preferences, _step3 = self._open(presentation)
                 dialog.sdb_default_vars["sdb_raw_width"].set("invalid")
-                with mock.patch("aidas.app.messagebox.showerror") as error:
+                with mock.patch("aidas.ui.settings.messagebox.showerror") as error:
                     self.assertIsNone(dialog._validated_sdb_defaults())
                 error.assert_called_once()
                 self.assertEqual(dialog.category_navigation.selection(), ("step1",))
                 dialog.sdb_default_vars["sdb_raw_width"].set("768")
                 self._navigate(dialog, "general")
                 dialog.auto_detection_vars["step4_auto_savgol_window"].set("8")
-                with mock.patch("aidas.app.messagebox.showerror") as error:
+                with mock.patch("aidas.ui.settings.messagebox.showerror") as error:
                     self.assertIsNone(dialog._validated_auto_detection_settings())
                 error.assert_called_once()
                 self.assertEqual(dialog.category_navigation.selection(), ("step4",))
@@ -872,7 +872,7 @@ class SettingsCategoryNavigationTests(unittest.TestCase):
                 self.assertEqual(dialog.apply_button.cget("text"), "Apply")
                 dialog.sdb_default_vars["sdb_raw_width"].set("invalid")
 
-                with mock.patch("aidas.app.messagebox.showerror") as error:
+                with mock.patch("aidas.ui.settings.messagebox.showerror") as error:
                     dialog.ok_button.invoke()
 
                 error.assert_called_once()

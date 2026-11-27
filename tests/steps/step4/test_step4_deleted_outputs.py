@@ -1,6 +1,8 @@
 """External deletion must not revive old source images or completed stacks."""
 from pathlib import Path
 import shutil
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -9,6 +11,7 @@ import numpy as np
 from aidas.steps import step4_analyze_isez as module
 from aidas.utils.io_utils import write_analyze
 from tests.steps.step4 import test_step4_auto_excel as export_fixtures
+from tests.support.step4 import settle_roi_tab
 
 
 class DeletedStackLifecycleTests(unittest.TestCase):
@@ -161,7 +164,7 @@ class DeletedSourceTabTests(unittest.TestCase):
         self.enterContext(mock.patch.object(self.frame, '_warm_auto_detection_tools'))
         self.enterContext(mock.patch.object(self.frame, '_open_automatic_profile_review'))
         self.frame._open_batch_roi_tabs([self.path])
-        root.update()
+        settle_roi_tab(self.frame)
         self.tab = self.frame.batch_roi_notebook.nametowidget(self.frame.batch_roi_notebook.select())
         self.state = self.frame.batch_roi_tab_states[str(self.tab)]
 
@@ -179,6 +182,7 @@ class DeletedSourceTabTests(unittest.TestCase):
         self.image[:] = 75
         write_analyze(self.path.with_suffix(''), self.image)
         frame._activate_batch_roi_tab(self.tab)
+        settle_roi_tab(frame)
         np.testing.assert_array_equal(frame.image, self.image[0])
         self.assertEqual(frame.excluded_rois, set())
         self.assertEqual(frame.roi_clicks, {})
@@ -189,15 +193,107 @@ class DeletedSourceTabTests(unittest.TestCase):
         self.path.unlink()
         self.path.with_suffix('.img').unlink()
         self.frame._activate_batch_roi_tab(self.tab)
+        settle_roi_tab(self.frame)
         self.assertIsNone(self.frame.image)
         self.errors.assert_called_once()
         self.image[:] = 90
         write_analyze(self.path.with_suffix(''), self.image)
         self.frame._activate_batch_roi_tab(self.tab)
+        settle_roi_tab(self.frame)
         np.testing.assert_array_equal(self.frame.image, self.image[0])
         self.assertTrue(self.state['loaded'])
         self.assertFalse(self.state['complete'])
         self.errors.assert_called_once()
+
+    def test_closing_a_loading_tab_discards_its_result_and_keeps_navigation_live(self):
+        next_path = self.folder / 'next' / self.path.name
+        next_path.parent.mkdir()
+        write_analyze(next_path.with_suffix(''), self.image + 15)
+        read = module.load_oct_volume
+        entered, release = threading.Event(), threading.Event()
+        owner = threading.get_ident()
+
+        def blocked_read(path):
+            self.assertNotEqual(threading.get_ident(), owner)
+            if path == self.path:
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError('The test did not release the read')
+            return read(path)
+
+        with mock.patch.object(module, 'load_oct_volume', side_effect=blocked_read) as load:
+            try:
+                self.frame._open_batch_roi_tabs([self.path, next_path])
+                deadline = time.monotonic() + 10
+                while not entered.is_set():
+                    self.assertLess(time.monotonic(), deadline)
+                    self.root.update()
+                    time.sleep(0.002)
+                notebook = self.frame.batch_roi_notebook
+                old, new = notebook.tabs()
+                self.frame._close_batch_roi_tab(notebook, notebook.nametowidget(old))
+                beats = []
+                self.root.after(0, lambda: beats.append(True))
+                self.root.update()
+                self.assertEqual(beats, [True])
+                self.assertEqual(notebook.select(), new)
+                self.assertIsNone(self.frame.image)
+            finally:
+                release.set()
+            settle_roi_tab(self.frame)
+            self.assertEqual(self.frame.current_path, next_path)
+            np.testing.assert_array_equal(self.frame.image, self.image[0] + 15)
+            self.assertNotIn(old, self.frame.batch_roi_tab_states)
+            notebook.select(new)
+            settle_roi_tab(self.frame)
+            self.assertEqual(load.call_count, 2, 'An unchanged cached tab must not decode again')
+            self.errors.assert_not_called()
+
+    def test_selecting_another_tab_retires_deleted_inactive_outputs_asynchronously(self):
+        other = self.folder / 'other' / self.path.name
+        other.parent.mkdir()
+        write_analyze(other.with_suffix(''), self.image + 10)
+        frame = self.frame
+        frame._open_batch_roi_tabs([self.path, other])
+        settle_roi_tab(frame)
+        notebook = frame.batch_roi_notebook
+        first, second = notebook.tabs()
+        saved_file = self.folder / 'MAX_Stack.tif'
+        saved_file.touch()
+        saved_snapshot = module._file_snapshot([saved_file])
+        frame._saved_stack_files = saved_snapshot
+        frame._stack_build_complete = True
+        frame.batch_roi_tab_states[first]['complete'] = True
+        saved_file.unlink()
+
+        owner = threading.get_ident()
+        entered, release = threading.Event(), threading.Event()
+        is_current = module._snapshot_is_current
+
+        def slow_check(snapshot):
+            if snapshot == saved_snapshot:
+                self.assertNotEqual(threading.get_ident(), owner)
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError('The test did not release the snapshot check')
+            return is_current(snapshot)
+
+        with mock.patch.object(module, '_snapshot_is_current', side_effect=slow_check):
+            try:
+                notebook.select(second)
+                settle_roi_tab(frame)
+                self.assertEqual(frame.current_path, other)
+                self.assertTrue(frame.batch_roi_tab_states[first]['complete'])
+                self.assertTrue(entered.wait(3))
+            finally:
+                release.set()
+            deadline = time.monotonic() + 10
+            while frame._batch_roi_saved_scan_cancel is not None:
+                self.assertLess(time.monotonic(), deadline)
+                self.root.update()
+                time.sleep(0.002)
+        self.assertFalse(frame.batch_roi_tab_states[first]['complete'])
+        self.assertNotIn('saved_stack_files', frame.batch_roi_tab_states[first])
 
 
 if __name__ == '__main__':

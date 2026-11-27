@@ -465,10 +465,13 @@ class Step3RScriptExecutionTests(unittest.TestCase):
 
     def test_user_cancellation_stops_a_silent_process(self):
         frame = self._make_frame()
-        frame._r_cancel_event.set()
         process = _BlockingProcess()
 
-        with mock.patch("aidas.steps.step3_flatten.subprocess.Popen", return_value=process):
+        def cancel_during_launch(*_args, **_options):
+            frame._r_cancel_event.set()
+            return process
+
+        with mock.patch("aidas.steps.step3_flatten.subprocess.Popen", side_effect=cancel_during_launch):
             returncode, error, outcome = frame._run_supervised_r_command(
                 ["Rscript.exe", "interactive.R"],
                 ".",
@@ -480,6 +483,59 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertEqual(outcome, "cancelled")
         self.assertIn("Cancelled", error)
         self.assertTrue(process.stopped.is_set())
+
+    def test_pause_suspends_active_jobs_and_gates_new_launches_until_resume(self):
+        frame = self._make_frame()
+        frame._busy = True
+        frame._r_resume_event = threading.Event()
+        frame._r_resume_event.set()
+        frame._r_suspensions = {}
+        frame.status_var = mock.Mock()
+        frame.progress_text_var = mock.Mock()
+        active = mock.Mock()
+        suspended = mock.Mock()
+        frame._active_r_processes.add(active)
+        with mock.patch("aidas.steps.step3_flatten.pause_process_tree", return_value=suspended) as pause:
+            self.assertTrue(frame._set_batch_r_paused(True))
+        pause.assert_called_once_with(active)
+        self.assertFalse(frame._r_resume_event.is_set())
+
+        waiting = threading.Event()
+        await_resume = frame._r_resume_event.wait
+
+        def signal_wait(timeout):
+            waiting.set()
+            return await_resume(timeout)
+
+        launched = []
+        worker = threading.Thread(
+            target=lambda: launched.append(frame._launch_r_process(["Rscript"], {}, None)),
+        )
+        with (
+            mock.patch.object(frame._r_resume_event, "wait", side_effect=signal_wait),
+            mock.patch("aidas.steps.step3_flatten.subprocess.Popen") as spawn,
+        ):
+            worker.start()
+            try:
+                self.assertTrue(waiting.wait(2))
+                spawn.assert_not_called()
+                self.assertTrue(frame._set_batch_r_paused(False))
+            finally:
+                frame._r_resume_event.set()
+                worker.join(2)
+            self.assertFalse(worker.is_alive())
+            spawn.assert_called_once_with(["Rscript"])
+        suspended.resume.assert_called_once_with()
+        self.assertEqual(launched, [spawn.return_value])
+
+    def test_cancel_before_launch_does_not_start_a_new_r_process(self):
+        frame = self._make_frame()
+        frame._r_resume_event = threading.Event()
+        frame._r_cancel_event.set()
+        with mock.patch("aidas.steps.step3_flatten.subprocess.Popen") as spawn:
+            result = frame._run_supervised_r_command(["Rscript"], ".", {}, mock.Mock())
+        self.assertEqual(result, (130, "Cancelled by user.", "cancelled"))
+        spawn.assert_not_called()
 
     def test_nonzero_r_exit_is_reported_as_failure(self):
         frame = self._make_frame()
@@ -556,11 +612,13 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertTrue(all(result["outcome"] == "failed" for result in finished))
         self.assertTrue(all("executor unavailable" in result["stderr"] for result in finished))
 
-    def test_stop_requires_confirmation_before_cancelling_batch(self):
+    def test_cancel_requires_confirmation_before_cancelling_paused_batch(self):
         panel = RBatchRunPanel.__new__(RBatchRunPanel)
         panel.stop_requested = False
-        panel.stop_button = mock.Mock()
-        panel.restart_button = mock.Mock()
+        panel._finished = False
+        panel.paused = True
+        panel.cancel_button = mock.Mock()
+        panel.pause_button = mock.Mock()
         panel.summary_var = mock.Mock()
         panel.step_frame = mock.Mock()
 
@@ -572,6 +630,8 @@ class Step3RScriptExecutionTests(unittest.TestCase):
             panel._cancel_batch()
         panel.step_frame._cancel_batch_r_runs.assert_called_once_with()
         self.assertTrue(panel.stop_requested)
+        panel.cancel_button.configure.assert_called_once_with(state="disabled")
+        panel.pause_button.configure.assert_called_once_with(state="disabled")
 
     def test_restart_waits_for_active_batch_to_stop(self):
         frame = Step3Frame.__new__(Step3Frame)
@@ -593,34 +653,32 @@ class Step3RScriptExecutionTests(unittest.TestCase):
         self.assertEqual(frame._pending_batch_restart[0], [Path("folder-a")])
         self.assertEqual(frame._pending_batch_restart[-1], "sequential")
 
-    def test_run_panel_restart_preserves_the_output_mode(self):
+    def test_run_panel_waits_for_pause_and_resume_acknowledgment(self):
         panel = RBatchRunPanel.__new__(RBatchRunPanel)
-        panel.folders = [Path("folder-a")]
-        panel.workers = 2
-        panel.main_script_path = Path("main.R")
-        panel.output_script_path = Path("output.R")
-        panel.output_mode = "sequential"
-        panel.restart_button = mock.Mock()
-        panel.stop_button = mock.Mock()
-        panel.close_button = mock.Mock()
+        panel.stop_requested = False
+        panel._finished = False
+        panel.paused = False
+        panel.pause_icon = mock.sentinel.pause_icon
+        panel.resume_icon = mock.sentinel.resume_icon
+        panel.pause_button = mock.Mock()
         panel.summary_var = mock.Mock()
         panel.step_frame = mock.Mock()
-        panel.step_frame._busy = False
+        panel.step_frame._set_batch_r_paused.side_effect = [True, False, True]
 
-        with mock.patch("aidas.steps.step3_flatten.messagebox.askyesno", return_value=True):
-            panel._restart_batch()
-
-        call = panel.step_frame._restart_batch_r_runs.call_args
-        self.assertEqual(
-            call.args,
-            (
-                panel.folders,
-                2,
-                Path("main.R"),
-                Path("output.R"),
-            ),
-        )
-        self.assertEqual(call.kwargs["output_mode"], "sequential")
+        panel._toggle_pause()
+        self.assertTrue(panel.paused)
+        panel.pause_button.configure.assert_called_once_with(text="Resume", image=panel.resume_icon)
+        panel._toggle_pause()
+        self.assertTrue(panel.paused)
+        panel.pause_button.configure.assert_called_once_with(text="Resume", image=panel.resume_icon)
+        panel._toggle_pause()
+        self.assertFalse(panel.paused)
+        self.assertEqual(panel.pause_button.configure.call_args_list, [
+            mock.call(text="Resume", image=panel.resume_icon),
+            mock.call(text="Pause", image=panel.pause_icon),
+        ])
+        self.assertEqual(panel.step_frame._set_batch_r_paused.call_args_list,
+                         [mock.call(True), mock.call(False), mock.call(False)])
 
     def test_completed_batch_starts_pending_restart_without_an_event_loop_gap(self):
         restart = (

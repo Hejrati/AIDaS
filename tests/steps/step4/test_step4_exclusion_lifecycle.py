@@ -88,7 +88,7 @@ class Step4ExclusionLifecycleTests(unittest.TestCase):
                     frame.rois = frame.rois[:3]
                     frame._open_batch_roi_tabs(paths)
                     root.deiconify()
-                    root.update()
+                    wait_until(lambda: frame._batch_roi_selection is None)
                     tabs = frame.batch_roi_notebook.tabs()
 
                     # All real ROIs start checked and included, even before a
@@ -117,6 +117,7 @@ class Step4ExclusionLifecycleTests(unittest.TestCase):
                     assert frame._all_rois_completed()
 
                     frame.next_image_button.invoke()
+                    wait_until(lambda: frame._batch_roi_selection is None)
                     assert frame._active_batch_roi_tab == tabs[1]
                     assert frame.excluded_rois == set()
                     assert all(cell['exclude_tick'].get_visible()
@@ -127,6 +128,7 @@ class Step4ExclusionLifecycleTests(unittest.TestCase):
                     save_roi(1)
                     save_roi(2)
                     frame.batch_roi_notebook.select(tabs[0])
+                    wait_until(lambda: frame._batch_roi_selection is None)
                     assert frame.excluded_rois == {'01', '03'}
                     assert frame.current_roi_idx == 1
                     tick_roi(0)
@@ -203,6 +205,7 @@ class Step4ExclusionLifecycleTests(unittest.TestCase):
                     assert not frame.batch_roi_tab_states[tabs[0]]['complete']
                     assert frame.batch_roi_tab_states[tabs[1]]['excluded_rois'] == {'01'}
                     frame.batch_roi_notebook.select(tabs[1])
+                    wait_until(lambda: frame._batch_roi_selection is None)
                     assert frame.excluded_rois == {'01'}
                     assert frame._stack_build_complete
                     frame._clear_batch_roi_session()

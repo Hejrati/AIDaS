@@ -4,12 +4,23 @@ from __future__ import annotations
 
 from pathlib import Path
 import threading
+from tkinter import messagebox
 
 
 class CompilerPresentationMixin:
     """Keep computation off Tk while leaving presentation and lifecycle to views."""
 
     MAX_COMPILE_EVENTS_PER_POLL = 200
+
+    def _open_input_folder(self) -> None:
+        if self._running or self.set_input_folder(self.input_var.get()):
+            return
+        self.input_var.set(self._accepted_input_folder)
+        messagebox.showerror(
+            "Invalid folder",
+            "Enter an existing folder path.",
+            parent=self,
+        )
 
     def _compiler_function(self):
         # Step 5 keeps the workbook dependency lazy until compilation starts.

@@ -49,12 +49,18 @@ class ResultGridPerformanceTests(unittest.TestCase):
             self.root.update_idletasks()
             self.root.update()
             canvas = self.frame.canvas
-            if not isinstance(canvas, module.ResultGridCanvas) or not canvas.winfo_exists():
+            if canvas is None or not canvas.winfo_exists():
                 return
-            if canvas._refresh_after_id is None and all(
-                index in canvas._pages and canvas._pages[index].get("ready", True)
-                for index in canvas._visible_pages
-            ):
+            if isinstance(canvas, module.ResultGridCanvas):
+                ready = canvas._refresh_after_id is None and all(
+                    index in canvas._pages and canvas._pages[index].get("ready", True)
+                    for index in canvas._visible_pages
+                )
+            else:
+                ready = not canvas.winfo_viewable() or getattr(canvas, "preview_size", None) == (
+                    canvas.winfo_width(), canvas.winfo_height(),
+                )
+            if ready:
                 return
             if time.monotonic() >= deadline:
                 self.fail("Visible result previews did not finish rendering within 10 seconds")

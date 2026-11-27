@@ -7,6 +7,7 @@ import numpy as np
 
 from aidas.canvas.image_canvas import ImageCanvas
 from aidas.steps.step2_annotate import BOUNDARY_NAMES, FOVEA_BOUNDARY_NAME, Step2Frame
+from aidas.ui.images import OwnedCTkImage
 from aidas.ui.theme import get_interface_mode, set_interface_mode
 
 
@@ -151,7 +152,15 @@ class Step2SegmentationModeTests(unittest.TestCase):
             self.assertFalse(frame.is_manual_segmentation_enabled())
             self.assertEqual(frame._boundary_workflow_frame.winfo_manager(), "")
             self.assertTrue(frame._boundary_legend.winfo_viewable())
-            self.assertEqual(set(frame._boundary_legend.rows), {*BOUNDARY_NAMES, "Fovea center"})
+            rows = frame._boundary_legend.rows
+            self.assertEqual(list(rows), [*BOUNDARY_NAMES, "Fovea center"])
+            for name, label in rows.items():
+                with self.subTest(legend_entry=name):
+                    self.assertIsInstance(label, ctk.CTkLabel)
+                    self.assertTrue(label.winfo_viewable())
+                    self.assertEqual(label.cget("text"), name)
+                    self.assertEqual(label.cget("fg_color"), "transparent")
+                    self.assertIsInstance(label.cget("image"), OwnedCTkImage)
             self.assertFalse(frame.boundary_incomplete_listbox.winfo_viewable())
             self.assertFalse(frame.boundary_completed_listbox.winfo_viewable())
             self.assertFalse(frame.image_canvas._line_on)

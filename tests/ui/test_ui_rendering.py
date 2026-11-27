@@ -5,7 +5,7 @@ import math
 from types import SimpleNamespace
 import tkinter as tk
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from customtkinter.windows.widgets.core_rendering import CTkCanvas, DrawEngine
 import numpy as np
@@ -356,6 +356,30 @@ class SmoothBorderInstallationTests(unittest.TestCase):
 
 
 class SmoothSurfacePerformanceTests(unittest.TestCase):
+    def test_hidden_workflow_surface_paints_only_when_mapped_with_changes(self):
+        self.root._aidas_render_visible_surfaces_only = True
+        canvas = CTkCanvas(self.root, width=120, height=40, bg="#112233")
+        mapped = Mock()
+        canvas.bind("<Map>", mapped, add="+")
+        engine = DrawEngine(canvas)
+        engine.draw_rounded_rect_with_border(120, 40, 8, 0)
+        self.root.update_idletasks()
+        self.assertTrue(canvas._aidas_paint_on_map)
+        self.assertIsNone(getattr(canvas, "_aidas_surface_photo", None))
+
+        self.root.deiconify()
+        canvas.pack()
+        self.root.update()
+        photo = canvas._aidas_surface_photo
+        self.assertIsNotNone(photo)
+        canvas.pack_forget()
+        self.root.update()
+        canvas.pack()
+        self.root.update()
+        self.assertIs(canvas._aidas_surface_photo, photo)
+        self.assertIsNone(canvas._aidas_paint_on_map)
+        self.assertEqual(mapped.call_count, 2)
+
     def test_deferred_changes_coalesce_and_paint_the_final_geometry_and_color(self):
         self.root._aidas_defer_canvas_updates = True
         canvas = CTkCanvas(self.root, width=120, height=40, bg="#112233")

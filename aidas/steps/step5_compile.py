@@ -388,10 +388,13 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         )
 
     def _clear_completion_notice(self, *_args) -> None:
+        had_completion = self.__dict__.get("_completed_output_path") is not None
         self._completed_output_path = None
         notice = self.__dict__.get("completion_notice")
         if notice is not None:
             notice.place_forget()
+        if had_completion:
+            self._update_run_button_state()
 
     def _reconcile_completed_output(self) -> None:
         """Discard a saved-file notice when its file was removed outside the app."""
@@ -422,6 +425,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
 
     def _show_completion_notice(self, output_path: Path) -> None:
         self._completed_output_path = output_path
+        self._update_run_button_state()
         notice = self.__dict__.get("completion_notice")
         if notice is not None:
             self.completion_path.configure(text=f"Saved Excel file: {output_path}")
@@ -461,24 +465,29 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
     def _exit_app(self) -> None:
         self.winfo_toplevel().destroy()
 
-    def _refresh_directory_view(self) -> None:
+    def _refresh_directory_view(self, *, force: bool = False) -> None:
         self._reconcile_completed_output()
         view = self.__dict__.get("directory_view")
         if view is None:
             return
-        folder = self._existing_directory(self.input_var.get())
         input_text = normalize_path_input(self.input_var.get())
-        if folder is not None or input_text:
-            # Rescan a deleted selection as well: retaining the old ready tree
-            # would show results that are no longer on disk.
-            if folder is None:
-                try:
-                    folder = self._expanded_path(input_text)
-                except (OSError, ValueError) as error:
-                    self._directory_scan_changed(None, "error", error)
-                    return
+        if not input_text:
+            return
+        try:
+            # Accepted paths are already resolved. The tree worker checks
+            # whether they still exist, including when revisiting the tab.
+            folder = (
+                Path(input_text) if input_text == self._accepted_input_folder
+                else self._expanded_path(input_text)
+            )
             output_text = normalize_path_input(self.output_var.get())
-            output = self._expanded_path(output_text) if output_text else None
+            output = Path(output_text) if output_text else None
+        except (OSError, RuntimeError, ValueError) as error:
+            self._directory_scan_changed(None, "error", error)
+            return
+        if force:
+            view.set_directory(folder, output_path=output, force=True)
+        else:
             view.set_directory(folder, output_path=output)
 
     def _directory_scan_changed(self, directory, state, error=None) -> None:
@@ -526,20 +535,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self._default_output_path = str(path / DEFAULT_OUTPUT_FILENAME)
             self.output_var.set(self._default_output_path)
         self.status_var.set(f"Ready to create an Excel file from measurements in {path}.")
-        self._refresh_directory_view()
+        self._refresh_directory_view(force=True)
         return True
-
-    def _open_input_folder(self) -> None:
-        if self._running:
-            return
-        if self.set_input_folder(self.input_var.get()):
-            return
-        self.input_var.set(self._accepted_input_folder)
-        messagebox.showerror(
-            "Invalid folder",
-            "Enter an existing folder path.",
-            parent=self,
-        )
 
     def on_show(self) -> None:
         """Refresh this workspace without accepting a new workflow handoff."""
@@ -714,7 +711,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
         """Keep the directory visible while the compiler runs in the background."""
 
     def _update_run_button_state(self, *_args) -> None:
-        if getattr(self, "run_button", None) is None:
+        if self.__dict__.get("run_button") is None:
             return
         if self._running:
             return
@@ -729,7 +726,8 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
                 os.path.normcase(normalize_path_input(self.input_var.get()))
                 == os.path.normcase(str(scan_path))
             )
-        if has_input and has_output and scan_ready:
+        notice_open = self.__dict__.get("_completed_output_path") is not None
+        if has_input and has_output and scan_ready and not notice_open:
             self.run_button.configure(image=self.run_button_icon)
             self.run_button.state(["!disabled"])
         else:
@@ -768,8 +766,7 @@ class Step5Frame(CompilerPresentationMixin, SidebarStepFrame):
             self.output_var.set(str(result_path))
             self.status_var.set(f"Excel file saved: {result_path}")
             self._show_completion_notice(result_path)
-            self._reconcile_completed_output()
-            self._refresh_directory_view()
+            self._refresh_directory_view(force=True)
             if self.__dict__.get("_completed_output_path") is None:
                 # The user may delete the output between the worker's save
                 # and this queued completion event. Do not mark Step 5 done.

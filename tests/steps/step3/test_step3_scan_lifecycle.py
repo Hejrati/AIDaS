@@ -178,7 +178,9 @@ class Step3ScanLifecycleTests(unittest.TestCase):
 
     def test_r_output_reader_start_failure_cleans_up_the_launched_process(self):
         frame = Step3Frame.__new__(Step3Frame)
-        frame._register_r_process = mock.Mock()
+        frame._r_cancel_event = threading.Event()
+        frame._r_process_lock = threading.Lock()
+        frame._active_r_processes = set()
         frame._unregister_r_process = mock.Mock()
         frame._terminate_r_process = mock.Mock()
         process = mock.Mock()

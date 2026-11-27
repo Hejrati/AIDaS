@@ -266,6 +266,7 @@ class Step4ImageNavigationTests(unittest.TestCase):
             import numpy as np
             from aidas.steps.step4_analyze_isez import Step4Frame
             from aidas.utils.io_utils import write_analyze
+            from tests.support.step4 import settle_roi_tab
 
             ctk.set_widget_scaling(1.0)
             ctk.set_window_scaling(1.0)
@@ -287,7 +288,7 @@ class Step4ImageNavigationTests(unittest.TestCase):
                         paths.append(path)
                     frame._open_batch_roi_tabs(paths)
                     root.deiconify()
-                    root.update_idletasks()
+                    settle_roi_tab(frame)
                     button = frame.next_image_button
                     assert button.cget('text') == 'Go to temporal'
                     assert button.cget('state') == 'normal'
@@ -299,11 +300,13 @@ class Step4ImageNavigationTests(unittest.TestCase):
                     frame.profile_clicks = [80.25, 100.5]
                     frame._remember_current_roi_clicks()
                     button.invoke()
+                    settle_roi_tab(frame)
                     assert frame._active_batch_roi_tab == tabs[1]
                     assert button.cget('state') == 'disabled'
                     assert frame.batch_roi_tab_states[tabs[0]]['profile_clicks'] == [80.25, 100.5]
                     assert not frame.batch_roi_tab_states[tabs[0]]['complete']
                     frame.batch_roi_notebook.select(tabs[0])
+                    settle_roi_tab(frame)
                     assert frame.profile_clicks == [80.25, 100.5]
                     assert frame.current_roi_idx == 0
                     assert button.cget('state') == 'normal'

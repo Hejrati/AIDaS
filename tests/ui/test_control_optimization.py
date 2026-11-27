@@ -119,6 +119,14 @@ class ButtonImageUpdateTests(unittest.TestCase):
         configure.assert_called_once_with(False, text="Updated")
         self.assertIs(button._aidas_action_icon_source, icon)
 
+    def test_reapplying_same_enabled_state_skips_configure(self):
+        button, _icon = self._button()
+        button.configure = mock.Mock()
+        button.state(("!disabled",))
+        button.configure.assert_not_called()
+        button.state(("disabled",))
+        button.configure.assert_called_once_with(state="disabled")
+
     def test_replacement_icon_still_reaches_the_button(self):
         button, _icon = self._button()
         replacement = object()

@@ -32,6 +32,27 @@ def settle(app, ready=lambda: True):
         time.sleep(0.002)
 
 
+@contextmanager
+def heartbeat_samples(app):
+    """Record the delay on a recurring 10 ms Tk callback."""
+    delays = []
+    interval = 0.010
+    due = time.perf_counter() + interval
+
+    def heartbeat():
+        nonlocal due, timer
+        now = time.perf_counter()
+        delays.append(max(0, now - due) * 1000)
+        due = now + interval
+        timer = app.after(10, heartbeat)
+
+    timer = app.after(10, heartbeat)
+    try:
+        yield delays
+    finally:
+        app.after_cancel(timer)
+
+
 def exercise(app, ready):
     """Use a real Tk timer to sample lateness while native state and layout change."""
     native = _WindowsAPI()
@@ -48,20 +69,7 @@ def exercise(app, ready):
             raise OSError("Windows rejected a benchmark geometry request")
         settle(app)
 
-    delays = []
-    timer = None
-    interval = 0.010
-    due = time.perf_counter() + interval
-
-    def heartbeat():
-        nonlocal due, timer
-        now = time.perf_counter()
-        delays.append(max(0, now - due) * 1000)
-        due = now + interval
-        timer = app.after(10, heartbeat)
-
-    timer = app.after(10, heartbeat)
-    try:
+    with heartbeat_samples(app) as delays:
         started = time.perf_counter()
         for i in range(12):
             place(40 + i * 3, width, height)
@@ -87,8 +95,6 @@ def exercise(app, ready):
         restored = (time.perf_counter() - started) * 1000
         samples = len(delays)
         settle(app, lambda: len(delays) > samples)
-    finally:
-        app.after_cancel(timer)
     return {"p95_ms": round(float(np.percentile(delays, 95)), 1),
             "motion_p95_ms": round(float(np.percentile(motion_delays, 95)), 1) if motion_delays else None,
             "restore_ms": round(restored, 1), "move_ms": round(move_ms, 1),
@@ -103,6 +109,18 @@ def process_images(stop, image):
         )
         count += 1
     return count
+
+
+def annotation_ready(canvas):
+    return (canvas.canvas.winfo_viewable() and canvas._img_id is not None
+            and not canvas._canvas_size_changed())
+
+
+def results_ready(grid):
+    return (grid._page_size == (grid.winfo_width(), grid.winfo_height())
+            and grid._visible_pages
+            and all(grid._pages[i]["ready"] and not grid._pages[i].get("error")
+                    for i in grid._visible_pages))
 
 
 def scenes(app, image):
@@ -120,11 +138,7 @@ def scenes(app, image):
         ])
     canvas = frame.image_canvas
 
-    def annotation_ready():
-        return (canvas.canvas.winfo_viewable() and canvas._img_id is not None
-                and not canvas._canvas_size_changed())
-
-    yield "annotated", annotation_ready
+    yield "annotated", lambda: annotation_ready(canvas)
 
     app.notebook.select(2)
     settle(app)
@@ -134,13 +148,7 @@ def scenes(app, image):
         frame._render_result_grid([Path(f"study-{i}") for i in range(3)])
         grid = frame.canvas
 
-        def results_ready():
-            return (grid._page_size == (grid.winfo_width(), grid.winfo_height())
-                    and grid._visible_pages
-                    and all(grid._pages[i]["ready"] and not grid._pages[i].get("error")
-                            for i in grid._visible_pages))
-
-        yield "results", results_ready
+        yield "results", lambda: results_ready(grid)
 
 
 @contextmanager

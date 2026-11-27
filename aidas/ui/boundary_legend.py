@@ -1,12 +1,14 @@
 """Read-only color key for retinal boundaries and the foveal marker."""
 
 import customtkinter as ctk
+from PIL import Image, ImageDraw
 
-from aidas.ui.theme import COLOR_PAIRS, SHAPES, TYPOGRAPHY
+from aidas.ui.images import OwnedCTkImage
+from aidas.ui.theme import COLOR_PAIRS, TYPOGRAPHY
 
 
 class BoundaryLegend(ctk.CTkFrame):
-    """Display the map's colors in rounded, non-interactive legend rows."""
+    """Show read-only samples of the boundary traces and fovea marker."""
 
     def __init__(self, master, boundaries, *, fovea_color="#ffd500"):
         super().__init__(master, fg_color="transparent", corner_radius=0)
@@ -15,28 +17,30 @@ class BoundaryLegend(ctk.CTkFrame):
             font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size,
                            weight=TYPOGRAPHY.semibold_weight),
         ).pack(fill="x", pady=(4, 3))
+        font = ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size)
         self.rows = {}
-        for name, color, vertical in [
-            *((name, color, False) for name, color in boundaries),
-            ("Fovea center", fovea_color, True),
-        ]:
-            row = ctk.CTkFrame(
-                self, height=30, fg_color=COLOR_PAIRS["surface_subtle"],
-                corner_radius=SHAPES.corner_radius_sm,
-                border_width=1, border_color=COLOR_PAIRS["border"],
+        entries = [(name, color, False) for name, color in boundaries]
+        entries.append(("Fovea center", fovea_color, True))
+        for name, color, fovea in entries:
+            row = ctk.CTkLabel(
+                self, text=name, image=self._symbol(color, fovea=fovea),
+                compound="left", anchor="w", fg_color="transparent", height=24,
+                text_color=COLOR_PAIRS["text"], font=font, takefocus=False,
             )
-            row.pack(fill="x", pady=2)
-            swatch = ctk.CTkFrame(row, width=40, height=26, fg_color="transparent")
-            swatch.pack(side="left", padx=(4, 6), pady=2)
-            if vertical:
-                for y in (5, 13, 21):
-                    ctk.CTkFrame(swatch, width=3, height=5, corner_radius=0,
-                                 fg_color=color).place(relx=0.5, y=y, anchor="center")
-            else:
-                ctk.CTkFrame(swatch, width=24, height=3, corner_radius=1,
-                             fg_color=color).place(relx=0.5, rely=0.5, anchor="center")
-            ctk.CTkLabel(
-                row, text=name, anchor="w", text_color=COLOR_PAIRS["text"],
-                font=ctk.CTkFont(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body_size),
-            ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+            row.pack(fill="x")
             self.rows[name] = row
+
+    def _symbol(self, color, *, fovea):
+        width, height = 32, 18
+        scale = 4
+        image = Image.new("RGBA", (width * scale, height * scale))
+        pen = ImageDraw.Draw(image)
+        if fovea:
+            x = 14 * scale
+            for y in (1, 7, 13):
+                pen.line((x, y * scale, x, (y + 4) * scale), fill=color, width=2 * scale)
+        else:
+            points = [(3, 12), (10, 8), (17, 11), (25, 6)]
+            pen.line([(x * scale, y * scale) for x, y in points],
+                     fill=color, width=2 * scale, joint="curve")
+        return OwnedCTkImage(self, light_image=image, size=(width, height))

@@ -13,6 +13,7 @@ import customtkinter as ctk
 from openpyxl import Workbook, load_workbook
 
 from aidas.steps.step5_compile import DEFAULT_OUTPUT_FILENAME, Step5Frame
+from aidas.ui.theme import COLOR_PAIRS
 
 
 class Step5DeletedOutputTests(unittest.TestCase):
@@ -63,6 +64,30 @@ class Step5DeletedOutputTests(unittest.TestCase):
                 workbook.save(folder / "rr_MCPAR.xlsx")
             finally:
                 workbook.close()
+
+    def test_completion_notice_disables_excel_action_until_export_settings_change(self):
+        self._write_measurement(self.directory, 11)
+        self._ready(self.directory)
+        button = self.frame.run_button
+        self.assertNotIn("disabled", button.state())
+        output = self.directory / DEFAULT_OUTPUT_FILENAME
+        output.touch()
+
+        self.frame._compilation_succeeded(SimpleNamespace(output_path=output))
+        self._wait(lambda: self.frame._input_scan_state == "ready")
+
+        self.assertTrue(self.frame.completion_notice.winfo_ismapped())
+        self.assertIn("disabled", button.state())
+        self.assertEqual(button.cget("fg_color"), COLOR_PAIRS["surface_subtle"])
+        with mock.patch.object(self.frame, "_start_compiler") as start:
+            button.invoke()
+            start.assert_not_called()
+
+        self.frame.include_fovea_var.set(False)
+        self.root.update()
+        self.assertFalse(self.frame.completion_notice.winfo_ismapped())
+        self.assertNotIn("disabled", button.state())
+        self.assertEqual(button.cget("fg_color"), COLOR_PAIRS["success_button"])
 
     def test_returning_to_step5_clears_deleted_excel_notice_without_recreating_folders(self):
         source = self.directory / "scan.sdb"

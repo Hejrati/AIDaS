@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import threading
+import tkinter as tk
 import unittest
 from unittest.mock import Mock, patch
 
@@ -305,18 +306,21 @@ class Step4RenderingPerformanceTests(unittest.TestCase):
         frame.after = Mock(return_value="pulse")
         frame.after_cancel = Mock()
         widget = frame.canvas.get_tk_widget()
-        event = SimpleNamespace(widget=widget)
+        event = SimpleNamespace(widget=widget, type=tk.EventType.Map)
 
         widget.winfo_viewable.return_value = True
         frame._on_roi_grid_visibility_changed(event)
         self.assertEqual(frame._roi_review_pulse_after_id, "pulse")
+        self.assertFalse(frame.ax_roi_grid._aidas_review_outline.get_visible())
 
         widget.winfo_viewable.return_value = False
+        event.type = tk.EventType.Unmap
         frame._on_roi_grid_visibility_changed(event)
         frame.after_cancel.assert_called_once_with("pulse")
         self.assertIsNone(frame._roi_review_pulse_after_id)
 
         widget.winfo_viewable.return_value = True
+        event.type = tk.EventType.Map
         frame._on_roi_grid_visibility_changed(event)
         self.assertEqual(frame._roi_review_pulse_after_id, "pulse")
 

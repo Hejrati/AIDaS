@@ -223,6 +223,7 @@ class Step4LoadingProgressTests(unittest.TestCase):
             import customtkinter as ctk
             import numpy as np
             from aidas.steps import step4_analyze_isez as module
+            from tests.support.step4 import settle_roi_tab
 
             root = ctk.CTk()
             root.attributes('-alpha', 0)
@@ -278,15 +279,15 @@ class Step4LoadingProgressTests(unittest.TestCase):
                     show_error.assert_not_called()
                     for _ in range(2):
                         frame.batch_roi_notebook.select(keys[1])
-                        root.update()
+                        settle_roi_tab(frame)
                         assert 'Worker read failed: broken' in show_error.call_args.args[1]
                         assert frame.batch_roi_tab_states[keys[1]]['_prepared_load'][1].__traceback__ is None
                         frame.batch_roi_notebook.select(keys[2])
-                        root.update()
+                        settle_roi_tab(frame)
                         np.testing.assert_array_equal(frame.volume, images['last'])
                     assert show_error.call_count == 2
                     frame.batch_roi_notebook.select(keys[0])
-                    root.update()
+                    settle_roi_tab(frame)
                     np.testing.assert_array_equal(frame.volume, images['first'])
                     assert Counter(reads) == Counter(paths), reads
 
@@ -297,7 +298,7 @@ class Step4LoadingProgressTests(unittest.TestCase):
                     assert Counter(reads) == Counter({path: 2 for path in paths}), reads
                     keys = list(frame.batch_roi_notebook.tabs())
                     frame.batch_roi_notebook.select(keys[1])
-                    root.update()
+                    settle_roi_tab(frame)
                     np.testing.assert_array_equal(frame.volume, images['broken'])
                     assert Counter(reads) == Counter({path: 2 for path in paths}), reads
                     assert show_error.call_count == 2

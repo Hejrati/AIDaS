@@ -3,11 +3,13 @@ import unittest
 from unittest.mock import Mock
 
 import customtkinter as ctk
+from PIL import ImageChops, ImageOps, ImageTk
 
 from aidas.steps.step3_flatten import RSetupWizard
-from aidas.ui.components import AppButton
-from aidas.ui.theme import COLOR_PAIRS, get_interface_mode, refresh_interface_widgets, set_interface_mode
-from aidas.utils.ui_utils import action_button, directory_row, icon_action_button
+from aidas.ui import rendering
+from aidas.ui.components import AppButton, AppRunButton
+from aidas.ui.theme import COLOR_PAIRS, SHAPES, get_interface_mode, refresh_interface_widgets, set_interface_mode
+from aidas.utils.ui_utils import CollapsibleSection, action_button, directory_row, icon_action_button
 
 
 class ActionButtonInteractionTests(unittest.TestCase):
@@ -80,6 +82,72 @@ class ActionButtonInteractionTests(unittest.TestCase):
             self.assertEqual(buttons[name].cget("fg_color"), COLOR_PAIRS["button"])
         folder_button.invoke()
         browse.assert_called_once_with()
+
+    def test_step1_toolbar_has_smooth_borders_at_fractional_display_scales(self):
+        self.addCleanup(ctk.set_appearance_mode, ctk.get_appearance_mode())
+        self.addCleanup(ctk.set_widget_scaling, ctk.ScalingTracker.widget_scaling)
+        self.root.geometry("640x360+10000+10000")
+        ctk.set_appearance_mode("Dark")
+        section = CollapsibleSection(self.root, "SDB Files")
+        section.pack(fill="x")
+        directory = StringVar(master=self.root)
+        row, _entry, buttons = directory_row(
+            section.body, self.root, directory, Mock(),
+            home_command=Mock(), refresh_command=Mock(),
+        )
+        row.pack(fill="x")
+
+        def rgb(canvas, color):
+            return tuple(channel // 257 for channel in canvas.winfo_rgb(color))
+
+        for scaling in (1, 1.25, 1.5):
+            ctk.set_widget_scaling(scaling)
+            self.root.update()
+            for name, button in buttons.items():
+                with self.subTest(scaling=scaling, button=name):
+                    canvas = button._canvas
+                    image = ImageTk.getimage(canvas._aidas_surface_photo).convert("RGB")
+                    width, height = image.size
+                    bg = rgb(canvas, canvas.cget("background"))
+                    fill = rgb(canvas, canvas.itemcget("inner_parts", "fill"))
+                    border = rgb(canvas, canvas.itemcget("border_parts", "fill"))
+                    for x, y in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+                        self.assertEqual(image.getpixel((x, y)), bg)
+                    for reflected in (ImageOps.mirror(image), ImageOps.flip(image)):
+                        differences = ImageChops.difference(image, reflected).getextrema()
+                        self.assertLessEqual(max(high for _, high in differences), 1)
+                    colors = {color for _, color in image.getcolors(maxcolors=width * height)}
+                    self.assertTrue({bg, fill, border} <= colors)
+                    self.assertTrue(colors - {bg, fill, border})
+
+                    outer_radius = float(canvas.itemcget("border_parts", "width")) / 2
+                    inner_radius = float(canvas.itemcget("inner_parts", "width")) / 2
+                    effective_scale = button._get_widget_scaling()
+                    self.assertAlmostEqual(outer_radius, SHAPES.corner_radius_sm * effective_scale, delta=0.02)
+                    self.assertAlmostEqual(outer_radius - inner_radius, SHAPES.border_width * effective_scale, delta=0.02)
+
+                    if name == "browse":
+                        outer, inner = (
+                            rendering._item_mask(canvas, canvas.find_withtag(tag)[0], image.size)
+                            for tag in ("border_parts", "inner_parts")
+                        )
+                        coverage = zip(outer.tobytes(), inner.tobytes())
+                        solid_edge = {
+                            image.getpixel((offset % width, offset // width))
+                            for offset, (outer_alpha, inner_alpha) in enumerate(coverage)
+                            if outer_alpha == 255 and inner_alpha < 255
+                        }
+                        self.assertEqual(solid_edge, {fill})
+
+    def test_run_uses_the_shared_green_action_palette(self):
+        for mode in ("Modern", "Classic"):
+            with self.subTest(mode=mode):
+                set_interface_mode(mode, redraw=False)
+                button = AppRunButton(self.root, command=Mock())
+                self.assertEqual(button.cget("fg_color"), COLOR_PAIRS["success_button"])
+                self.assertEqual(button.cget("hover_color"), COLOR_PAIRS["success_hover"])
+                self.assertEqual(button.cget("text_color"), COLOR_PAIRS["on_success_button"])
+                button.destroy()
 
     def test_retained_actions_round_after_switching_from_classic_to_modern(self):
         set_interface_mode("Classic", redraw=False)

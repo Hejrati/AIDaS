@@ -225,11 +225,10 @@ class ImagePathStatusTests(unittest.TestCase):
                     image = np.arange(96 * 400, dtype=np.uint16).reshape(96, 400)
                     frame = app.step2
                     app.notebook.select(frame)
-                    with mock.patch.object(frame, "_read_image_for_annotation", return_value=(image, None, False)):
-                        frame._open_aidas_batch_results_viewer([
-                            {"input": str(path), "traces": {
-                                "RPE": {"points": [(0, 50), (399, 50)], "color": "#ffb703"}
-                            }} for path in paths])
+                    frame._open_aidas_batch_results_viewer([
+                        {"input": str(path), "image": image, "traces": {
+                            "RPE": {"points": [(0, 50), (399, 50)], "color": "#ffb703"}
+                        }} for path in paths])
                     tabs = frame.batch_results_notebook.tabs()
                     for index in (0, 1, 0):
                         frame.batch_results_notebook.select(tabs[index])

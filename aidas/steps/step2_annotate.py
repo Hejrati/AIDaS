@@ -43,7 +43,7 @@ from PIL import Image, ImageDraw, ImageTk
 from aidas.ai.client import AIWorkerClient
 from aidas.canvas.image_canvas import ImageCanvas, RESAMPLE_NEAREST
 from aidas.ui.annotation_guide import AnnotationGuide
-from aidas.ui.batch_selection import BatchSelectionMixin
+from aidas.ui.batch_selection import BatchFolderScanMixin, BatchSelectionMixin
 from aidas.ui.batch_empty_state import NoValidFilesNotice
 from aidas.ui.boundary_legend import BoundaryLegend
 from aidas.ui.components import AppButton, AppRunButton
@@ -332,49 +332,12 @@ class Step2BatchSegmentationTable(BatchSelectionMixin, ttk.Frame):
         self.tree.bind("<Configure>", self._on_tree_configure, add="+")
 
     def _make_checkbox_images(self):
-        images = {
-            "checked": tk.PhotoImage(width=16, height=16),
-            "unchecked": tk.PhotoImage(width=16, height=16),
-            "locked": tk.PhotoImage(width=16, height=16),
-        }
-        for image in images.values():
-            image.put("#ffffff", to=(0, 0, 16, 16))
-            image.put("#6b7280", to=(2, 2, 14, 3))
-            image.put("#6b7280", to=(2, 13, 14, 14))
-            image.put("#6b7280", to=(2, 2, 3, 14))
-            image.put("#6b7280", to=(13, 2, 14, 14))
-
-        locked = images["locked"]
-        locked.put("#e5e7eb", to=(3, 3, 13, 13))
         # A disabled check marks completed segmentation without selecting it
         # for another run. Locked rows keep their independent include=False.
-        for state, color in (("checked", "#111827"), ("locked", "#9ca3af")):
-            for x, y in ((4, 8), (5, 9), (6, 10), (7, 9), (8, 8), (9, 7), (10, 6), (11, 5)):
-                images[state].put(color, to=(x, y, x + 1, y + 1))
-                images[state].put(color, to=(x, y + 1, x + 1, y + 2))
-        return images
+        return super()._make_checkbox_images(locked_check=True)
 
     def set_rows(self, rows):
-        # Detached entries are not returned by get_children; remove them too
-        # when replacing the scan results.
-        old_iids = tuple(dict.fromkeys((*self._row_by_iid, *self.tree.get_children(""))))
-        if old_iids:
-            self.tree.delete(*old_iids)
-        self.rows = list(rows or [])
-        self._row_by_iid = {}
-
-        for index, row in enumerate(self.rows):
-            iid = str(index)
-            self._row_by_iid[iid] = row
-            self.tree.insert(
-                "",
-                "end",
-                iid=iid,
-                text="",
-                image=self._image_for_row(row),
-                values=self._values_for_row(row),
-                tags=("locked",) if row.get("locked") else (),
-            )
+        self._replace_rows(rows)
         if self.rows:
             self._fit_columns_to_content()
         self._apply_processed_filter()
@@ -387,31 +350,7 @@ class Step2BatchSegmentationTable(BatchSelectionMixin, ttk.Frame):
         self._notify_selection_changed()
 
     def _apply_processed_filter(self):
-        if self.tree.exists(self._placeholder_iid):
-            self.tree.delete(self._placeholder_iid)
-
-        visible = tuple(
-            iid for iid, row in self._row_by_iid.items()
-            if not (self._hide_processed and row.get("locked"))
-        )
-        # Replace the child list in one Tcl call, preserving detached items
-        # and their checkbox state for the next filter change.
-        self.tree.set_children("", *visible)
-
-        if not visible:
-            message = (
-                "No unprocessed folders to show."
-                if self.rows and self._hide_processed
-                else "No folders with Light.img were found."
-            )
-            self.tree.insert(
-                "",
-                "end",
-                iid=self._placeholder_iid,
-                text="",
-                values=(message, "", ""),
-                tags=("locked",),
-            )
+        self._filter_processed_rows(self._placeholder_iid, "No folders with Light.img were found.")
 
     def _values_for_row(self, row):
         values = row.get("values") or {}
@@ -476,7 +415,7 @@ class Step2BatchSegmentationTable(BatchSelectionMixin, ttk.Frame):
             callback(len(self.selected_rows()))
 
 
-class Step2BatchSegmentationSelectionPanel(ttk.Frame):
+class Step2BatchSegmentationSelectionPanel(BatchFolderScanMixin, ttk.Frame):
     """Embedded panel for selecting folders to run through Step 2 AI segmentation."""
 
     def __init__(self, step_frame, parent, root_dir, *, initial_rows=None):
@@ -584,24 +523,8 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
             self.summary_label.configure(wraplength=wraplength)
 
     def _start_scan(self):
-        self._stop_scan()
-        self._scan_closed = False
-        self._scan_ready = False
-        self._scan_cancel = threading.Event()
-        self._scan_events = queue.Queue()
         self.step_frame.status_var.set(f"Scanning subfolders under {self.root_dir}...")
-        self.next_button.state(["disabled"])
-        worker = threading.Thread(
-            target=self._scan_worker,
-            args=(self.root_dir, self._scan_cancel, self._scan_events), daemon=True,
-        )
-        self._scan_completion = WorkerCompletionGuard(worker)
-        try:
-            worker.start()
-        except Exception as exc:
-            self._scan_failed(exc)
-            return
-        self._scan_poll_after_id = self.after(50, self._poll_scan_events)
+        self._start_folder_scan(self.root_dir)
 
     def _scan_worker(self, root_dir=None, cancelled=None, events=None):
         root_dir = self.root_dir if root_dir is None else root_dir
@@ -615,33 +538,6 @@ class Step2BatchSegmentationSelectionPanel(ttk.Frame):
         else:
             if not cancelled.is_set():
                 events.put(("done", result))
-
-    def _poll_scan_events(self):
-        self._scan_poll_after_id = None
-        if self.__dict__.get("_scan_closed", False):
-            return
-        try:
-            kind, payload = self._scan_events.get_nowait()
-        except queue.Empty:
-            guard = self.__dict__.get("_scan_completion")
-            if guard is not None and guard.missing_result():
-                self._scan_failed(RuntimeError("The folder scan stopped without reporting a result. Select another folder to try again."))
-                return
-            self._scan_poll_after_id = self.after(50, self._poll_scan_events)
-            return
-        if kind == "error":
-            self._scan_failed(payload)
-        else:
-            self._scan_done(*payload)
-
-    def _stop_scan(self):
-        cancelled = self.__dict__.get("_scan_cancel")
-        if cancelled is not None:
-            cancelled.set()
-        pending = self.__dict__.get("_scan_poll_after_id")
-        self._scan_poll_after_id = None
-        if pending is not None:
-            self.after_cancel(pending)
 
     def destroy(self):
         self._scan_closed = True
@@ -994,7 +890,7 @@ class Step2Frame(SidebarStepFrame):
         self.batch_results_notebook = None
         self.batch_segmentation_panel = None
         self._batch_result_canvases = []
-        self._batch_result_fit_after_id = None
+        self._batch_result_paint_after_id = None
         self._batch_result_tab_canvases = {}
         self._batch_result_states = {}
         self._active_batch_result_tab = None
@@ -1300,7 +1196,7 @@ class Step2Frame(SidebarStepFrame):
         self._ai_device_probe_after_id = None
         if probe_job is not None:
             self.after_cancel(probe_job)
-        self._cancel_batch_result_fit()
+        self._cancel_batch_result_paint()
         self._cancel_progress_animation()
         self._watch_annotation_tutorial_canvas(None)
         self._hide_annotation_tutorial()
@@ -2641,11 +2537,12 @@ class Step2Frame(SidebarStepFrame):
         self._queue_annotation_tutorial()
         return True
 
-    def _clear_image_display(self, status_message=None):
+    def _clear_image_display(self, status_message=None, *, keep_batch_page=False):
         """Clear the editor canvas and reset image-specific annotation state."""
         self._hide_annotation_tutorial()
-        self._pending_external_image = None
-        self._show_single_image_canvas()
+        if not keep_batch_page:
+            self._pending_external_image = None
+            self._show_single_image_canvas()
         self.current_file = None
         self._current_source_snapshot = None
         self._notify_image_path_changed()
@@ -2741,7 +2638,8 @@ class Step2Frame(SidebarStepFrame):
         finally:
             self._updating_fovea_entry = False
         self.fovea_line_var.set(f"Fovea line: x={fovea_x}")
-        self.image_canvas.set_vertical_line_x(fovea_x)
+        if self.image_canvas.get_vertical_line_x() != fovea_x:
+            self.image_canvas.set_vertical_line_x(fovea_x)
         self._set_fovea_controls_enabled(True)
         return fovea_x
 
@@ -2778,10 +2676,13 @@ class Step2Frame(SidebarStepFrame):
 
     def _set_completion_from_traces(self):
         for name in BOUNDARY_NAMES:
-            if name in self.boundary_completion_vars:
-                self.boundary_completion_vars[name].set(name in self.boundary_traces)
+            variable = self.boundary_completion_vars.get(name)
+            complete = name in self.boundary_traces
+            if variable is not None and variable.get() != complete:
+                variable.set(complete)
 
-    def _load_editor_state(self, state, canvas, status_message=None, *, fit_view=True):
+    def _load_editor_state(self, state, canvas, status_message=None, *, fit_view=True,
+                           retain_overlays=False, settle_fit=True):
         if not state or canvas is None:
             return
 
@@ -2812,7 +2713,8 @@ class Step2Frame(SidebarStepFrame):
 
         self.image_canvas.enable_roi(False)
         self.image_canvas.clear_active_line()
-        self._rebuild_saved_overlays()
+        if not retain_overlays or canvas.has_pending_line_edit():
+            self._rebuild_saved_overlays()
         self._set_completion_from_traces()
 
         self._ensure_fovea_line(self.fovea_x)
@@ -2841,10 +2743,8 @@ class Step2Frame(SidebarStepFrame):
         self._refresh_boundary_lists(auto_select=False)
         self._set_drawing_locked(False)
         self._set_segmentation_frame_enabled(True)
-        self._update_ai_button_states()
-        self._sync_boundary_canvas_state()
         if fit_view:
-            self.image_canvas.fit_to_window()
+            self.image_canvas.fit_to_window(settle_layout=settle_fit)
         if status_message:
             self.status_var.set(status_message)
         self._queue_annotation_tutorial()
@@ -3346,10 +3246,12 @@ class Step2Frame(SidebarStepFrame):
 
     def _populate_boundary_listbox(self, listbox, names, selected_name):
         """Populate a boundary listbox with names, marking the selected one."""
+        labels = tuple(f"{'▶' if name == selected_name else ' '} {name}" for name in names)
+        if listbox.get(0, "end") == labels:
+            return
         listbox.delete(0, "end")
-        for name in names:
-            active = "▶" if name == selected_name else " "
-            listbox.insert("end", f"{active} {name}")
+        if labels:
+            listbox.insert("end", *labels)
 
     def _refresh_boundary_lists(self, select_incomplete_name=None, select_completed_name=None, auto_select=True):
         """Update the incomplete/completed boundary listboxes and sync selection.
@@ -4158,6 +4060,7 @@ class Step2Frame(SidebarStepFrame):
                 return self._save_current_marked_orientation_pair()
             return self._save_current_marked_image(sync_active=False)
 
+        self._prepare_batch_result_state(state)
         saved_context = {
             "current_file": self.current_file,
             "source_snapshot": self.__dict__.get("_current_source_snapshot"),
@@ -5400,11 +5303,7 @@ class Step2Frame(SidebarStepFrame):
                 fit_view=False,
             )
         else:
-            canvas.set_line_overlays([
-                {"points": trace["points"], "color": trace["color"], "label": name,
-                 "handle_indices": trace.get("handle_indices")}
-                for name, trace in traces.items() if name != FOVEA_BOUNDARY_NAME
-            ])
+            self._set_canvas_boundary_overlays(canvas, traces, state["order"])
             self.status_var.set("AI segmentation complete for the selected image.")
 
     def _run_aidas_batch_segmentation(
@@ -5675,14 +5574,17 @@ class Step2Frame(SidebarStepFrame):
                         )
                         if source_snapshot is not None and self._source_file_snapshot(path) != source_snapshot:
                             raise RuntimeError("The source image was removed or changed during segmentation. Reopen it and run again.")
-                        results.append({
+                        result_item = {
                             "input": path,
                             "source_snapshot": source_snapshot,
                             "boundaries": np.asarray(boundaries, dtype=np.float32),
                             "traces": traces,
                             "fovea_x": fovea_x,
                             "save_orientation": orientation,
-                        })
+                        }
+                        if current_image_state is None:
+                            result_item.update(image=image, template=template, source_was_8bit=_source_was_8bit)
+                        results.append(result_item)
                         log_lines.append(f"OK: {path}")
                         log_lines.append("  Preview generated in Step 2; no image or CSV was saved.")
                         if fovea_x is not None:
@@ -5801,7 +5703,7 @@ class Step2Frame(SidebarStepFrame):
             self._single_editor_state = self._capture_current_editor_state()
 
         previous_notebook = getattr(self, "batch_results_notebook", None)
-        self._cancel_batch_result_fit()
+        self._cancel_batch_result_paint()
         if previous_notebook is not None:
             previous_notebook.destroy()
 
@@ -5824,88 +5726,70 @@ class Step2Frame(SidebarStepFrame):
                 tooltip=os.path.abspath(os.fspath(input_path)),
             )
 
-            canvas = ImageCanvas(
-                frame,
-                on_mouse_move=self._on_mouse_moved,
-                on_line_change=self._on_active_line_changed,
-                on_line_finish=self._finish_boundary,
-                on_line_edit=self._on_saved_line_edited,
-                on_vertical_line_change=self._on_vertical_line_changed,
-                on_zoom_change=self._on_canvas_zoom_changed,
-            )
-            canvas.enable_roi(False)
-            canvas.enable_line(False)
-            canvas.enable_vertical_line(False)
-            canvas.pack(fill="both", expand=True)
-            self._batch_result_canvases.append(canvas)
-            self._batch_result_tab_canvases[str(frame)] = canvas
-
-            try:
-                source_snapshot = self._source_file_snapshot(input_path)
-                original_snapshot = item.get("source_snapshot")
-                if original_snapshot is not None and source_snapshot != original_snapshot:
-                    raise RuntimeError("The source image was removed or changed after segmentation. Reopen it and run again.")
-                data, _template, _source_was_8bit = self._read_image_for_annotation(input_path)
-                orientation = self._selected_save_orientation(item.get("save_orientation"))
-                canvas.set_image(data)
-                traces = item.get("traces")
-                if traces is None:
-                    traces, _order = self._boundary_traces_from_rows(
-                        item["boundaries"],
-                        data.shape,
-                        source_label=f"AI_ForAIDAS prediction for {os.path.basename(input_path)}",
-                    )
-                traces = self._copy_trace_dict(traces)
-                order = [name for name in BOUNDARY_NAMES if name in traces]
-                overlays = []
-                for name in BOUNDARY_NAMES:
-                    trace = traces.get(name)
-                    if trace:
-                        overlays.append({
-                            "points": trace["points"],
-                            "color": trace.get("color"),
-                            "label": name,
-                            "handle_indices": trace.get("handle_indices"),
-                        })
-                fovea_x = item.get("fovea_x")
-                if fovea_x is not None:
-                    fovea_trace = self._vertical_line_trace(int(fovea_x), data.shape[0])
-                    traces[FOVEA_BOUNDARY_NAME] = fovea_trace
-                    if FOVEA_BOUNDARY_NAME not in order:
-                        order.append(FOVEA_BOUNDARY_NAME)
-                # The interactive vertical marker draws the fovea. Including
-                # it here forces the first activation to rebuild every dense
-                # boundary overlay just to remove this duplicate line.
-                canvas.set_line_overlays(overlays)
-                self._batch_result_states[str(frame)] = {
-                    "input": input_path,
-                    "source_snapshot": source_snapshot,
-                    "image": data,
-                    "traces": traces,
-                    "annotation_tutorial_ready": True,
-                    "order": order,
-                    "fovea_x": None if fovea_x is None else int(fovea_x),
-                    "template": _template,
-                    "source_was_8bit": _source_was_8bit,
-                    "save_orientation": orientation,
-                    "canvas": canvas,
-                }
-                canvas.fit_to_window()
-            except (OSError, ValueError, RuntimeError) as exc:
-                ctk.CTkLabel(
-                    frame,
-                    text=f"Could not load {input_path}: {exc}",
-                    text_color=COLOR_PAIRS["danger"],
-                    anchor="w",
-                    justify="left",
-                    wraplength=360,
-                ).pack(fill="x", padx=8, pady=4, before=canvas)
+            self._batch_result_states[str(frame)] = {
+                **item,
+                "save_orientation": self._selected_save_orientation(item.get("save_orientation")),
+            }
 
         self._show_batch_results_canvas()
         if notebook.tabs():
             notebook.select(notebook.tabs()[0])
         self.status_var.set(f"AI batch results opened: {len(viewable_results)} image(s). Select a tab to edit its boundaries.")
-        self._batch_result_fit_after_id = self.after(100, self._run_batch_result_fit)
+
+    def _prepare_batch_result_state(self, state):
+        """Populate the editable data for a first visit or an unvisited save."""
+        if "order" in state:
+            return
+        path = state["input"]
+        snapshot = self._source_file_snapshot(path)
+        original_snapshot = state.get("source_snapshot")
+        if original_snapshot is not None and snapshot != original_snapshot:
+            raise RuntimeError("The source image was removed or changed after segmentation. Reopen it and run again.")
+
+        image = state.get("image")
+        template = state.get("template")
+        source_was_8bit = state.get("source_was_8bit", False)
+        if image is None:
+            image, template, source_was_8bit = self._read_image_for_annotation(path)
+            if self._source_file_snapshot(path) != snapshot:
+                raise RuntimeError("The source image changed while it was being opened. Reopen it and run again.")
+        traces = state.get("traces")
+        if traces is None:
+            traces, _ = self._boundary_traces_from_rows(
+                state["boundaries"], image.shape,
+                source_label=f"AI_ForAIDAS prediction for {os.path.basename(path)}",
+            )
+        traces = self._copy_trace_dict(traces)
+        order = [name for name in BOUNDARY_NAMES if name in traces]
+        fovea_x = state.get("fovea_x")
+        if fovea_x is not None:
+            fovea_x = int(fovea_x)
+            traces[FOVEA_BOUNDARY_NAME] = self._vertical_line_trace(fovea_x, image.shape[0])
+            order.append(FOVEA_BOUNDARY_NAME)
+        state.update(
+            image=image, source_snapshot=snapshot, traces=traces, order=order,
+            fovea_x=fovea_x, template=template, source_was_8bit=source_was_8bit,
+            annotation_tutorial_ready=True,
+        )
+
+    def _create_batch_result_canvas(self, tab):
+        canvas = ImageCanvas(
+            tab,
+            on_mouse_move=self._on_mouse_moved,
+            on_line_change=self._on_active_line_changed,
+            on_line_finish=self._finish_boundary,
+            on_line_edit=self._on_saved_line_edited,
+            on_vertical_line_change=self._on_vertical_line_changed,
+            on_zoom_change=self._on_canvas_zoom_changed,
+        )
+        canvas.enable_roi(False)
+        canvas.enable_line(False)
+        canvas.enable_vertical_line(False)
+        canvas.pack(fill="both", expand=True)
+        canvas.canvas.bind("<Map>", lambda _event: self._queue_batch_result_paint(canvas), add="+")
+        self._batch_result_canvases.append(canvas)
+        self._batch_result_tab_canvases[str(tab)] = canvas
+        return canvas
 
     @staticmethod
     def _batch_result_tab_text(title):
@@ -5950,39 +5834,78 @@ class Step2Frame(SidebarStepFrame):
             return
         tab_key = str(tab)
         state = self._batch_result_states.get(tab_key)
-        if not state:
+        canvas = (state or {}).get("canvas") or self._batch_result_tab_canvases.get(tab_key)
+        if state is None and canvas is None:
             return
-        canvas = state.get("canvas") or self._batch_result_tab_canvases.get(tab_key)
         if (tab_key == self._active_batch_result_tab
                 and canvas is self.image_canvas):
             return
         self._sync_active_batch_result_state()
         self._active_batch_result_tab = tab_key
+        retain_overlays = canvas is not None
+        if canvas is None:
+            canvas = self._create_batch_result_canvas(tab)
+            try:
+                self._prepare_batch_result_state(state)
+                canvas.set_image(state["image"], defer_render=True)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._batch_result_states.pop(tab_key)
+                ctk.CTkLabel(
+                    tab, text=f"Could not load {state['input']}: {exc}",
+                    text_color=COLOR_PAIRS["danger"], anchor="w", justify="left",
+                    wraplength=360,
+                ).pack(fill="x", padx=8, pady=4, before=canvas)
+                state = None
+            else:
+                state["canvas"] = canvas
+                state["painted"] = False
+        if state is None:
+            self.image_canvas = canvas
+            self._clear_image_display("Could not open this batch result.", keep_batch_page=True)
+            return
+        # A hidden page keeps its last size until Tk lays it out again. Its
+        # visible host can already tell us whether a new layout is required.
+        viewport = canvas.master.master
+        viewport_size = (viewport.winfo_width(), viewport.winfo_height())
+        painted = state.get("painted", retain_overlays)
         self._load_editor_state(
             state,
             canvas,
             status_message=f"Editing batch result: {os.path.basename(state.get('input') or '')}",
+            fit_view=painted,
+            retain_overlays=retain_overlays,
+            settle_fit=state.get("fit_viewport_size") != viewport_size,
         )
+        if painted:
+            state["fit_viewport_size"] = (viewport.winfo_width(), viewport.winfo_height())
+        else:
+            self._queue_batch_result_paint(canvas)
 
-    def _cancel_batch_result_fit(self):
-        job = self.__dict__.get("_batch_result_fit_after_id")
-        self._batch_result_fit_after_id = None
+    def _queue_batch_result_paint(self, canvas):
+        state = self._batch_result_states.get(self._active_batch_result_tab)
+        if (state is not None and state.get("canvas") is canvas
+                and state.get("painted") is False and self._batch_result_paint_after_id is None):
+            self._batch_result_paint_after_id = self.after_idle(self._paint_selected_batch_result)
+
+    def _paint_selected_batch_result(self):
+        self._batch_result_paint_after_id = None
+        state = self._batch_result_states.get(self._active_batch_result_tab)
+        if state is None or state.get("painted") is not False:
+            return
+        canvas = state["canvas"]
+        if canvas is not self.image_canvas or not canvas.canvas.winfo_viewable():
+            return  # The Map binding will retry after the page becomes visible.
+        canvas.fit_to_window(settle_layout=False)
+        viewport = canvas.master.master
+        state["fit_viewport_size"] = (viewport.winfo_width(), viewport.winfo_height())
+        state["painted"] = True
+
+    def _cancel_batch_result_paint(self):
+        job = self.__dict__.get("_batch_result_paint_after_id")
         if job is not None:
+            self._batch_result_paint_after_id = None
             try:
                 self.after_cancel(job)
-            except tk.TclError:
-                pass
-
-    def _run_batch_result_fit(self):
-        self._batch_result_fit_after_id = None
-        if self.winfo_exists():
-            self._fit_batch_result_canvases()
-
-    def _fit_batch_result_canvases(self):
-        for canvas in list(getattr(self, "_batch_result_canvases", [])):
-            try:
-                if canvas.winfo_exists():
-                    canvas.fit_to_window()
             except tk.TclError:
                 pass
 
@@ -5992,8 +5915,6 @@ class Step2Frame(SidebarStepFrame):
         tab_key = str(tab)
         if canvas is None:
             canvas = self._batch_result_tab_canvases.get(tab_key)
-        if canvas is None:
-            return
         closing_active = tab_key == getattr(self, "_active_batch_result_tab", None)
         if closing_active:
             self._sync_active_batch_result_state()
@@ -6034,7 +5955,7 @@ class Step2Frame(SidebarStepFrame):
 
     def _finish_batch_results_session(self, notebook, status_message):
         """Return Step 2 to its reusable empty state after its last result closes."""
-        self._cancel_batch_result_fit()
+        self._cancel_batch_result_paint()
         if notebook is not None:
             try:
                 notebook.destroy()
