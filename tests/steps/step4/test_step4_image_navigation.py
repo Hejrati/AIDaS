@@ -4,10 +4,11 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from aidas.steps.step4_analyze_isez import Step4Frame
+from aidas.steps.step4_analyze_isez import ISezROI, Step4Frame
 from tests.support.paths import PROJECT_ROOT
 
 
@@ -48,6 +49,84 @@ def _frame(*folders: str) -> Step4Frame:
 
 
 class Step4ImageNavigationTests(unittest.TestCase):
+    @staticmethod
+    def _foveola_frame(*folders, active="tab-0"):
+        frame = _frame(*folders)
+        frame._active_batch_roi_tab = frame.batch_roi_notebook.current = active
+        frame.current_path = frame.batch_roi_tab_states[active]["path"]
+        frame.current_roi_idx = 0
+        frame.rois = [ISezROI("fovea", 1, 4, 1, 140)]
+        frame.profile_clicks = [25.0, 110.0]
+        frame.image = object()
+        frame.canvas = None
+        frame._auto_saving_roi = False
+        frame._roi_context_generation = 1
+        frame.completed = {}
+        frame.roi_clicks = {}
+        frame.auto_detection_reviews = {"fovea": "Manual review"}
+        frame.winfo_viewable = mock.Mock(return_value=True)
+        frame.status_var = mock.Mock()
+        frame.after_idle = mock.Mock(return_value="foveola-idle")
+        for name in (
+            "_refresh_roi_list", "_start_roi_update_animation", "_select_roi_in_list",
+            "_draw_roi_overview_grid", "_update_build_stack_button_state",
+            "_sync_active_batch_roi_state", "_sync_entry_vars_from_clicks",
+            "_render_current_roi", "_close_profile_zoom", "_build_stack_outputs",
+        ):
+            setattr(frame, name, mock.Mock())
+        return frame
+
+    def test_confirming_nasal_foveola_opens_the_same_subjects_temporal_tab(self):
+        frame = self._foveola_frame(
+            "a/renamed nasal", "b/temporal", "a/Temporal", "b/nasal",
+        )
+        result = SimpleNamespace(start=25, end=110)
+        with mock.patch("aidas.steps.step4_analyze_isez.analyze_and_save_roi", return_value=result):
+            frame._auto_save_current_roi()
+
+        self.assertIs(frame.completed["fovea"], result)
+        self.assertEqual(frame.batch_roi_notebook.selections, [])
+        frame.after_idle.call_args.args[0]()
+
+        self.assertEqual(frame.batch_roi_notebook.selections, ["tab-2"])
+        frame._build_stack_outputs.assert_not_called()
+
+    def test_confirming_temporal_foveola_from_detail_runs_normal_stack_action(self):
+        frame = self._foveola_frame("a/nasal", "a/temporal", active="tab-1")
+        frame.auto_detection_reviews["02"] = "Check the boundaries"
+        result = SimpleNamespace(start=25, end=110)
+        with mock.patch("aidas.steps.step4_analyze_isez.analyze_and_save_roi", return_value=result):
+            self.assertTrue(frame._save_profile_zoom_clicks(0, 25, 110))
+
+        self.assertIs(frame.completed["fovea"], result)
+        self.assertEqual(frame.auto_detection_reviews, {"02": "Check the boundaries"})
+        frame._build_stack_outputs.assert_not_called()
+        frame.after_idle.call_args.args[0]()
+
+        frame._close_profile_zoom.assert_called_once_with()
+        frame._build_stack_outputs.assert_called_once_with()
+        self.assertEqual(frame.batch_roi_notebook.selections, [])
+
+    def test_automatic_handoff_does_not_cross_subjects_when_temporal_is_missing(self):
+        frame = self._foveola_frame("a/nasal", "b/temporal")
+        result = frame.completed["fovea"] = object()
+
+        frame._queue_foveola_handoff(result)
+
+        frame.after_idle.assert_not_called()
+        self.assertEqual(frame.batch_roi_notebook.selections, [])
+
+    def test_stale_foveola_handoff_cannot_advance_another_image(self):
+        frame = self._foveola_frame("a/nasal", "a/temporal", active="tab-1")
+        result = frame.completed["fovea"] = object()
+        frame._queue_foveola_handoff(result)
+
+        frame._roi_context_generation += 1
+        frame.after_idle.call_args.args[0]()
+
+        frame._build_stack_outputs.assert_not_called()
+        self.assertEqual(frame.batch_roi_notebook.selections, [])
+
     def test_single_subject_opens_temporal_before_current_rois_are_finished(self):
         frame = _frame("subject/nasal", "subject/temporal")
         frame.completed = {}
@@ -212,6 +291,7 @@ class Step4ImageNavigationTests(unittest.TestCase):
                     button = frame.next_image_button
                     assert button.cget('text') == 'Go to temporal'
                     assert button.cget('state') == 'normal'
+                    assert button._variant == 'success'
                     assert button.winfo_ismapped()
                     assert button.winfo_rooty() >= frame.winfo_rooty()
                     assert button.winfo_rooty() + button.winfo_height() <= frame.winfo_rooty() + frame.winfo_height()

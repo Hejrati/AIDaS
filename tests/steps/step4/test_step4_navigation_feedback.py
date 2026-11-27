@@ -39,7 +39,7 @@ class Step4NavigationFeedbackTests(unittest.TestCase):
             "adjust_bounds": False,
         }
 
-    def _open_dialog(self, *, feedback_ms=None, navigation=True):
+    def _open_dialog(self, *, feedback_ms=None, navigation=True, **options):
         size_window = Step4ProfileZoomDialog._size_and_center_on_active_screen
 
         def invisible_size(dialog):
@@ -48,7 +48,7 @@ class Step4NavigationFeedbackTests(unittest.TestCase):
 
         with mock.patch.object(Step4ProfileZoomDialog, "_size_and_center_on_active_screen", invisible_size):
             self.dialog = Step4ProfileZoomDialog(
-                self.root, **self._profile_options(0),
+                self.root, **(self._profile_options(0) | options),
                 on_preview=lambda *_args, **_kwargs: {k: 1.0 for k in RESULTS_HEADERS[1:]},
                 on_apply=mock.Mock(return_value=True), on_save=mock.Mock(return_value=True),
                 on_close=mock.Mock(), navigation_indices=[0, 3, 5],
@@ -58,6 +58,56 @@ class Step4NavigationFeedbackTests(unittest.TestCase):
             self.dialog.NAVIGATION_FEEDBACK_MS = feedback_ms
         self.root.update()
         return self.dialog
+
+    def test_review_can_confirm_suggested_boundaries_without_editing(self):
+        dialog = self._open_dialog(review_required=True, review_has_more=True)
+        dialog._on_save_callback.side_effect = [False, True]
+
+        self.assertIn("Confirm them as shown", dialog.instructions_label.cget("text"))
+        self.assertEqual(dialog.save_button.cget("text"), "Confirm and review next")
+        self.assertEqual(dialog.save_button.cget("state"), "normal")
+        self.assertFalse(dialog.apply_button.winfo_manager())
+        self.assertFalse(dialog.plot_number_label.winfo_ismapped())
+
+        dialog.save_button.invoke()
+
+        self.assertTrue(dialog.winfo_exists())
+        self.assertFalse(dialog.review_confirmed)
+        self.assertEqual(dialog.save_button.cget("state"), "normal")
+
+        dialog.save_button.invoke()
+
+        self.assertFalse(dialog.winfo_exists())
+        self.assertTrue(dialog.review_confirmed)
+        self.assertEqual(
+            dialog._on_save_callback.call_args_list,
+            [mock.call(0, 20, 70, adjust_bounds=False)] * 2,
+        )
+        dialog._on_close_callback.assert_called_once_with(dialog)
+
+    def test_review_requires_two_distinct_points_when_there_is_no_suggestion(self):
+        dialog = self._open_dialog(start=None, end=None, review_required=True)
+
+        self.assertIn("Select the Start and End points", dialog.instructions_label.cget("text"))
+        self.assertEqual(dialog.save_button.cget("text"), "Confirm and finish review")
+        self.assertEqual(dialog.save_button.cget("state"), "disabled")
+        self.assertFalse(dialog._start_line.get_visible())
+        self.assertFalse(dialog._end_line.get_visible())
+
+        for sample in (20, 20):
+            dialog._on_press(SimpleNamespace(inaxes=dialog.ax, xdata=sample, button=1))
+            self.assertIn("Select the second boundary", dialog.instructions_label.cget("text"))
+            self.assertEqual(dialog.save_button.cget("state"), "disabled")
+        self.assertTrue(dialog._start_line.get_visible())
+        self.assertFalse(dialog._end_line.get_visible())
+        dialog._on_save_callback.assert_not_called()
+
+        dialog._on_press(SimpleNamespace(inaxes=dialog.ax, xdata=70, button=1))
+
+        self.assertEqual(dialog.save_button.cget("state"), "normal")
+        self.assertTrue(dialog._end_line.get_visible())
+        dialog.save_button.invoke()
+        dialog._on_save_callback.assert_called_once_with(0, 20, 70, adjust_bounds=False)
 
     def _wait_for(self, predicate, message="Navigation did not finish"):
         deadline = time.monotonic() + 3

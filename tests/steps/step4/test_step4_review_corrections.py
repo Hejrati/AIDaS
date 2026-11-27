@@ -86,6 +86,7 @@ class Step4ReviewCorrectionsTests(unittest.TestCase):
         frame._roi_adjust_bounds["fovea"] = False
         options = frame._profile_zoom_options(20)
         self.assertTrue(options["requires_confirmation"])
+        self.assertEqual(options["roi_suffix"], "21")
         dialog = self._dialog()
         dialog._requires_confirmation = options["requires_confirmation"]
         dialog._on_apply_callback = frame._apply_profile_zoom_clicks
@@ -190,19 +191,6 @@ class Step4ReviewCorrectionsTests(unittest.TestCase):
         self.assertNotIn("01", result.reviews)
         self.assertNotIn("01", result.roi_clicks)
         self.assertEqual(progress.call_args, mock.call(4, 4))
-
-    def test_popup_exclusion_closes_before_toggle_without_saving_draft(self):
-        dialog = self._dialog()
-        dialog._start = 30
-        order = []
-        dialog._on_close_callback.side_effect = lambda _dialog: order.append("closed")
-        dialog._on_exclude_callback = mock.Mock(side_effect=lambda: order.append("excluded"))
-        dialog._exclude_roi()
-        dialog._exclude_roi()
-        self.assertEqual(order, ["closed", "excluded"])
-        dialog._on_apply_callback.assert_not_called()
-        dialog._on_save_callback.assert_not_called()
-
 
 if __name__ == "__main__":
     unittest.main()

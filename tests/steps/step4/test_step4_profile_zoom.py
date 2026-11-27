@@ -47,7 +47,8 @@ class Step4ProfileZoomHelpersTests(unittest.TestCase):
         source = inspect.getsource(Step4ProfileZoomDialog.__init__)
 
         self.assertIn("apply_app_icon_to(self)", source)
-        self.assertEqual(source.count("= AppButton("), 6)
+        self.assertEqual(source.count("= AppButton("), 5)
+        self.assertNotIn('text="Exclude ROI"', source)
         self.assertIn('text="Save and Exit"', source)
         self.assertIn('text="Apply"', source)
         self.assertIn('text="Cancel"', source)

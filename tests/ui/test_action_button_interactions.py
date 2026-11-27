@@ -1,4 +1,4 @@
-from tkinter import ttk
+from tkinter import StringVar, ttk
 import unittest
 from unittest.mock import Mock
 
@@ -6,8 +6,8 @@ import customtkinter as ctk
 
 from aidas.steps.step3_flatten import RSetupWizard
 from aidas.ui.components import AppButton
-from aidas.ui.theme import get_interface_mode, refresh_interface_widgets, set_interface_mode
-from aidas.utils.ui_utils import action_button, icon_action_button
+from aidas.ui.theme import COLOR_PAIRS, get_interface_mode, refresh_interface_widgets, set_interface_mode
+from aidas.utils.ui_utils import action_button, directory_row, icon_action_button
 
 
 class ActionButtonInteractionTests(unittest.TestCase):
@@ -61,6 +61,25 @@ class ActionButtonInteractionTests(unittest.TestCase):
             wizard._set_content_buttons(state)
             self.assertEqual(modern.cget("state"), state)
             self.assertEqual(str(native.cget("state")), state)
+
+    def test_step1_folder_picker_keeps_the_folder_icon_on_a_green_button(self):
+        browse = Mock()
+        directory = StringVar(master=self.root)
+        row, _entry, buttons = directory_row(
+            self.root, self.root, directory, browse,
+            home_command=Mock(), refresh_command=Mock(),
+        )
+        row.pack()
+        folder_button = buttons["browse"]
+        next_button = AppButton(self.root, text="Next", variant="success")
+        self.assertEqual(folder_button.cget("fg_color"), next_button.cget("fg_color"))
+        self.assertEqual(folder_button.cget("fg_color"), COLOR_PAIRS["success_button"])
+        self.assertEqual(*folder_button.cget("fg_color"))
+        self.assertIs(folder_button.cget("image"), folder_button._aidas_action_icon_source)
+        for name in ("home", "refresh"):
+            self.assertEqual(buttons[name].cget("fg_color"), COLOR_PAIRS["button"])
+        folder_button.invoke()
+        browse.assert_called_once_with()
 
     def test_retained_actions_round_after_switching_from_classic_to_modern(self):
         set_interface_mode("Classic", redraw=False)

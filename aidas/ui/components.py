@@ -238,10 +238,16 @@ class AppButton(ctk.CTkButton):
                 "border_color": COLOR_PAIRS["danger"],
             },
             "success": {
-                "fg_color": COLOR_PAIRS["success"],
+                "fg_color": COLOR_PAIRS["success_button"],
                 "hover_color": COLOR_PAIRS["success_hover"],
+                "text_color": COLOR_PAIRS["on_success_button"],
+                "border_color": COLOR_PAIRS["success_button"],
+            },
+            "warning": {
+                "fg_color": COLOR_PAIRS["warning"],
+                "hover_color": COLOR_PAIRS["warning_hover"],
                 "text_color": COLOR_PAIRS["on_primary"],
-                "border_color": COLOR_PAIRS["success"],
+                "border_color": COLOR_PAIRS["warning"],
             },
             "ghost": {
                 "fg_color": "transparent",

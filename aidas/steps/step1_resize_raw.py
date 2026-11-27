@@ -635,6 +635,7 @@ class Step1Frame(SidebarStepFrame):
         self.next_sdb_btn = AppButton(
             self.canvas_navigation,
             text="",
+            variant="success",
             image=self.next_sdb_btn_icon,
             width=CONTROLS.height_lg,
             height=CONTROLS.height_lg,

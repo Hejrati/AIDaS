@@ -67,7 +67,8 @@ from aidas.ui.batch_selection import BatchSelectionMixin
 from aidas.ui.components import AppButton, AppRunButton
 from aidas.ui.tabs import ClosableTabView
 from aidas.ui.theme import COLOR_PAIRS, COLORS
-from aidas.ui.windowing import logical_window_size, synchronize_window_chrome
+from aidas.ui.title_bar import install_dialog_title_bar
+from aidas.ui.windowing import apply_windows_titlebar_colors, logical_window_size, synchronize_window_chrome
 from aidas.utils.batch_summary import format_batch_summary
 from aidas.utils.io_utils import read_analyze, read_tiff
 from aidas.utils.filesystem import (
@@ -1833,8 +1834,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         roi_index: int,
         roi_suffix: str,
         profile: np.ndarray,
-        start: float | int,
-        end: float | int,
+        start: float | int | None,
+        end: float | int | None,
         on_preview,
         on_apply,
         on_save,
@@ -1846,8 +1847,9 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         on_navigate=None,
         on_foveola=None,
         foveola_after_index: int | None = None,
-        on_exclude=None,
         requires_confirmation: bool = False,
+        review_required: bool = False,
+        review_has_more: bool = False,
     ):
         super().__init__(owner)
         self.withdraw()
@@ -1865,8 +1867,10 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._on_close_callback = on_close
         self._on_navigate_callback = on_navigate
         self._on_foveola_callback = on_foveola
-        self._on_exclude_callback = on_exclude
-        self._requires_confirmation = bool(requires_confirmation)
+        self._requires_confirmation = bool(requires_confirmation or review_required)
+        self._review_required = review_required
+        self._review_has_more = review_has_more
+        self.review_confirmed = False
         self._foveola_after_index = foveola_after_index
         self._navigation_indices = sorted(set(navigation_indices or [self.roi_index]))
         self._profile_drafts = {}
@@ -1875,24 +1879,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._drag_boundary = None
         self._drag_view = None
         self._context_window = None
-        self._start, self._end = _updated_profile_bounds(
-            start,
-            end,
-            boundary="end",
-            sample=max(float(start), float(end)),
-            n_points=self.profile.size,
-        )
-        self._applied_bounds = (self._start, self._end)
-        self._saved_bounds = (
-            self._applied_bounds if saved_bounds is None else
-            tuple(sorted(_clamp_profile_index(value, self.profile.size) for value in saved_bounds))
-        )
+        self._set_profile_selection(start, end, saved_bounds, adjust_bounds, saved_adjust_bounds)
         self._actions_busy = False
-        self._adjust_bounds = bool(adjust_bounds)
-        self._applied_adjust_bounds = self._adjust_bounds
-        self._saved_adjust_bounds = (
-            self._adjust_bounds if saved_adjust_bounds is None else bool(saved_adjust_bounds)
-        )
 
         self.title(f"ROI Profile Editor \u2014 ROI {roi_suffix}")
         try:
@@ -1908,16 +1896,13 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
 
         instructions = ttk.Frame(self, padding=(10, 9, 10, 5), style="ProfileZoom.TFrame")
         instructions.pack(fill="x")
-        ttk.Label(
+        self.instructions_label = ttk.Label(
             instructions,
             style="ProfileZoom.TLabel",
-            text=(
-                "Click the exact profile position you want to move the closest boundary, or "
-                "drag the blue Start or red End line."
-            ),
             justify="left",
             wraplength=860,
-        ).pack(side="left", fill="x", expand=True)
+        )
+        self.instructions_label.pack(side="left", fill="x", expand=True)
 
         measurements = ttk.LabelFrame(self, text="Ellipse fitting measurements", padding=(8, 4, 8, 7),
                                       style="ProfileZoom.TLabelframe")
@@ -1955,7 +1940,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         )
         self.plot_number_label.pack(side="left", padx=12)
         self.next_plot_button = AppButton(
-            navigation, text="Next", width=112, variant="primary",
+            navigation, text="Next", width=112, variant="success",
             raised=True,
             image=load_ctk_image(self, "flat-color-icons--right.png", size=20),
             compound="left", anchor="center",
@@ -1965,13 +1950,6 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.next_plot_button.pack(side="left")
         actions = ttk.Frame(footer, style="ProfileZoom.TFrame")
         actions.pack(side="right")
-        self.exclude_button = AppButton(
-            footer, text="Exclude ROI", width=122, variant="danger",
-            anchor="center", bg_color=COLOR_PAIRS["surface_elevated"],
-            command=self._exclude_roi,
-        )
-        if on_exclude is not None:
-            self.exclude_button.pack(side="left")
         self.cancel_button = AppButton(
             actions,
             anchor="center",
@@ -2002,6 +1980,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             width=132,
         )
         self.save_button.pack(side="right", padx=(0, 6))
+        self._update_review_controls()
         self._update_action_states()
 
         chart_frame = ttk.Frame(self, style="ProfileZoom.TFrame")
@@ -2068,14 +2047,16 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         indices = self._navigation_indices
         previous = any(index < self.roi_index for index in indices)
         following = any(index > self.roi_index for index in indices)
-        enabled = not self._actions_busy and self._on_navigate_callback is not None
+        review_required = self.__dict__.get("_review_required", False)
+        enabled = not review_required and not self._actions_busy and self._on_navigate_callback is not None
         self.previous_plot_button.state(["!disabled"] if enabled and previous else ["disabled"])
         self.next_plot_button.state(["!disabled"] if enabled and following else ["disabled"])
         self.plot_number_label.configure(text=f"ROI {self._roi_suffix}")
         button = self.__dict__.get("cancel_button")
         if button is not None:
             foveola_action = (
-                self.__dict__.get("_on_foveola_callback") is not None
+                not review_required
+                and self.__dict__.get("_on_foveola_callback") is not None
                 and self.roi_index == self.__dict__.get("_foveola_after_index")
             )
             button.configure(
@@ -2097,7 +2078,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         callback()
 
     def _navigate_profile(self, direction: int) -> None:
-        if self._closing or self._actions_busy or self._on_navigate_callback is None:
+        if (self._closing or self._actions_busy or self._on_navigate_callback is None
+                or self.__dict__.get("_review_required", False)):
             return
         candidates = [index for index in self._navigation_indices
                       if (index - self.roi_index) * direction > 0]
@@ -2171,18 +2153,10 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
                 else:
                     self._release_navigation_feedback(token)
 
-    def _exclude_roi(self) -> None:
-        if self._actions_busy or self._closing:
-            return
-        callback = self.__dict__.get("_on_exclude_callback")
-        if callback is not None:
-            self.close()
-            callback()
-
     def _load_profile(
         self, *, roi_index, roi_suffix, profile, start, end,
         saved_bounds=None, adjust_bounds=True, saved_adjust_bounds=None,
-        requires_confirmation=False,
+        requires_confirmation=False, review_required=False, review_has_more=False,
     ) -> None:
         """Replace the displayed ROI while retaining unapplied edits for browsing."""
         self._profile_drafts[self.roi_index] = {
@@ -2193,22 +2167,15 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             "applied_adjust_bounds": self._applied_adjust_bounds,
             "saved_adjust_bounds": self._saved_adjust_bounds,
             "requires_confirmation": self.__dict__.get("_requires_confirmation", False),
+            "pending_boundary_samples": self.__dict__.get("_pending_boundary_samples"),
         }
         self.roi_index = int(roi_index)
         self._roi_suffix = str(roi_suffix)
         self.profile = np.asarray(profile, dtype=np.float64).reshape(-1)
-        self._start, self._end = _updated_profile_bounds(
-            start, end, boundary="end", sample=max(float(start), float(end)),
-            n_points=self.profile.size,
-        )
-        self._applied_bounds = (self._start, self._end)
-        self._saved_bounds = self._applied_bounds if saved_bounds is None else tuple(
-            sorted(_clamp_profile_index(value, self.profile.size) for value in saved_bounds)
-        )
-        self._adjust_bounds = bool(adjust_bounds)
-        self._applied_adjust_bounds = self._adjust_bounds
-        self._saved_adjust_bounds = self._adjust_bounds if saved_adjust_bounds is None else bool(saved_adjust_bounds)
-        self._requires_confirmation = bool(requires_confirmation)
+        self._set_profile_selection(start, end, saved_bounds, adjust_bounds, saved_adjust_bounds)
+        self._requires_confirmation = bool(requires_confirmation or review_required)
+        self._review_required = review_required
+        self._review_has_more = review_has_more
         draft = self._profile_drafts.get(self.roi_index)
         if draft is not None:
             self._start, self._end = draft["bounds"]
@@ -2218,6 +2185,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             self._applied_adjust_bounds = draft["applied_adjust_bounds"]
             self._saved_adjust_bounds = draft["saved_adjust_bounds"]
             self._requires_confirmation = draft["requires_confirmation"]
+            self._pending_boundary_samples = draft["pending_boundary_samples"]
         self._drag_boundary = self._drag_view = self._context_window = None
         self.canvas.get_tk_widget().configure(cursor="")
         title = f"ROI Profile Editor \u2014 ROI {roi_suffix}"
@@ -2227,7 +2195,59 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             title_bar.set_title(title)
         self._draw_profile()
         self._refresh_measurements()
+        self._update_review_controls()
         self._update_navigation()
+
+    def _set_profile_selection(self, start, end, saved_bounds, adjust_bounds, saved_adjust_bounds) -> None:
+        self._pending_boundary_samples = None
+        if start is None or end is None:
+            self._pending_boundary_samples = tuple(
+                _clamp_profile_index(sample, self.profile.size)
+                for sample in (start, end) if sample is not None
+            )
+            # The full plot is visible while the user chooses the boundaries.
+            start, end, adjust_bounds = 1, self.profile.size, False
+        self._start, self._end = _updated_profile_bounds(
+            start, end, boundary="end", sample=max(float(start), float(end)),
+            n_points=self.profile.size,
+        )
+        self._applied_bounds = (self._start, self._end)
+        self._saved_bounds = self._applied_bounds if saved_bounds is None else tuple(
+            sorted(_clamp_profile_index(value, self.profile.size) for value in saved_bounds)
+        )
+        self._adjust_bounds = self._applied_adjust_bounds = bool(adjust_bounds)
+        self._saved_adjust_bounds = self._adjust_bounds if saved_adjust_bounds is None else bool(saved_adjust_bounds)
+
+    def _update_review_controls(self) -> None:
+        samples = self._pending_boundary_samples
+        navigation = self.plot_number_label.master
+        if self._review_required:
+            if samples is None:
+                instructions = (
+                    "Needs review. Check the blue Start and red End lines. "
+                    "Confirm them as shown if they look right, or drag either line to adjust it."
+                )
+            elif samples:
+                instructions = "Needs review. Select the second boundary on the plot, then confirm."
+            else:
+                instructions = "Needs review. Select the Start and End points on the plot, then confirm."
+            self.instructions_label.configure(text=instructions, style="ProfileZoom.Review.TLabel")
+            self.save_button.configure(
+                text="Confirm and review next" if self._review_has_more else "Confirm and finish review",
+                width=208,
+            )
+            self.apply_button.pack_forget()
+            navigation.pack_forget()
+        else:
+            self.instructions_label.configure(
+                text="Click the exact profile position you want to move the closest boundary, or "
+                     "drag the blue Start or red End line.",
+                style="ProfileZoom.TLabel",
+            )
+            self.save_button.configure(text="Save and Exit", width=132)
+            if not self.apply_button.winfo_manager():
+                self.apply_button.pack(side="right", padx=(0, 6), before=self.save_button)
+                navigation.pack(pady=(0, 10), before=self.save_button.master)
 
     def _size_and_center_on_active_screen(self) -> None:
         bounds = work_area_bounds(self)
@@ -2310,6 +2330,14 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             picker=7,
             zorder=4,
         )
+        samples = self.__dict__.get("_pending_boundary_samples")
+        if samples is not None:
+            self._boundary_curve.set_visible(False)
+            self._baseline_line.set_visible(False)
+            self._end_line.set_visible(False)
+            self._start_line.set_visible(bool(samples))
+            if samples:
+                self._start_line.set_xdata([samples[0]] * 2)
         self._crosshair_x = self.ax.axvline(
             self._view_left,
             color=self.CROSSHAIR_COLOR,
@@ -2347,11 +2375,13 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self.ax.set_xlabel("Profile position (1-based sample)")
         self.ax.set_ylabel("Normalized intensity")
         self.ax.grid(True, color=palette["grid"], linewidth=0.55, alpha=0.75)
-        legend = self.ax.legend(loc="upper right")
-        legend.get_frame().set_facecolor(palette["axes"])
-        legend.get_frame().set_edgecolor(palette["border"])
-        for label in legend.get_texts():
-            label.set_color(palette["text"])
+        if samples is None or samples:
+            handles = [self._start_line, self._end_line] if samples is None else [self._start_line]
+            legend = self.ax.legend(handles=handles, loc="upper right")
+            legend.get_frame().set_facecolor(palette["axes"])
+            legend.get_frame().set_edgecolor(palette["border"])
+            for label in legend.get_texts():
+                label.set_color(palette["text"])
         try:
             self.canvas.get_tk_widget().configure(background=palette["figure"], highlightthickness=0)
         except tk.TclError:
@@ -2366,6 +2396,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         background = COLORS.surface_elevated
         style.configure("ProfileZoom.TFrame", background=background)
         style.configure("ProfileZoom.TLabel", background=background, foreground=COLORS.text)
+        style.configure("ProfileZoom.Review.TLabel", background=background, foreground=COLORS.warning)
         style.configure("ProfileZoom.TLabelframe", background=background)
         style.configure("ProfileZoom.TLabelframe.Label", background=background, foreground=COLORS.text)
         if getattr(self, "figure", None) is not None:
@@ -2385,6 +2416,24 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         self._set_crosshair_visible(False)
 
     def _refresh_plot_data(self) -> None:
+        if self.__dict__.get("_pending_boundary_samples") is not None:
+            self._view_left, self._view_right = 1, self.profile.size
+            self._context_window = (0, self.profile.size + 1)
+            self._context_x = np.arange(1, self.profile.size + 1, dtype=np.float64)
+            finite = self.profile[np.isfinite(self.profile)]
+            minimum = finite.min() if finite.size else 0.0
+            spread = finite.max() - minimum if finite.size else 0.0
+            self._context_y = (
+                ((self.profile - minimum) / spread) * 100.0 if spread > np.finfo(np.float64).eps
+                else np.zeros_like(self.profile)
+            )
+            self._plot_data = {
+                "x": self._context_x, "y": self._context_y,
+                "baseline_x": np.array([]), "baseline_y": np.array([]),
+                "adjusted_start": self._start, "adjusted_end": self._end,
+                "center": (self._view_right + self._view_left) / 2,
+            }
+            return
         self._plot_data = _profile_selection_plot_data(
             self.profile, self._start, self._end, adjust_bounds=self._adjust_bounds,
         )
@@ -2461,6 +2510,10 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         return value if np.isfinite(value) else None
 
     def _refresh_measurements(self) -> None:
+        if self.__dict__.get("_pending_boundary_samples") is not None:
+            for variable in self.measurement_vars.values():
+                variable.set("--")
+            return
         try:
             values = self._on_preview_callback(
                 self.roi_index, self._start, self._end, adjust_bounds=self._adjust_bounds,
@@ -2538,7 +2591,8 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
         return int(data["adjusted_start"]), int(data["adjusted_end"])
 
     def _boundary_at_event(self, event, *, tolerance_pixels: float = 9.0) -> str | None:
-        if event.inaxes is not self.ax or event.xdata is None:
+        if (event.inaxes is not self.ax or event.xdata is None
+                or self.__dict__.get("_pending_boundary_samples") is not None):
             return None
         plotted_start, plotted_end = self._displayed_profile_bounds()
         event_x = getattr(event, "x", None)
@@ -2594,6 +2648,22 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             return
         if event.inaxes is not self.ax or event.xdata is None:
             return
+        samples = self.__dict__.get("_pending_boundary_samples")
+        if samples is not None:
+            sample, _intensity = _nearest_profile_sample(self.profile, event.xdata)
+            if sample in samples:
+                return
+            if samples:
+                self._start, self._end = sorted((*samples, sample))
+                self._pending_boundary_samples = None
+                self._context_window = None
+            else:
+                self._pending_boundary_samples = (sample,)
+            self._draw_profile()
+            self._refresh_measurements()
+            self._update_review_controls()
+            self._update_action_states()
+            return
         boundary = self._boundary_at_event(event)
         if boundary is None:
             plotted_start, plotted_end = self._displayed_profile_bounds()
@@ -2642,18 +2712,22 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             self._applied_bounds, self._applied_adjust_bounds,
         )
 
+    def _can_commit_selection(self) -> bool:
+        return (
+            not self._actions_busy
+            and self.__dict__.get("_pending_boundary_samples") is None
+            and self._has_pending_changes()
+        )
+
     def _update_action_states(self) -> None:
-        state = ["!disabled"] if not self._actions_busy and self._has_pending_changes() else ["disabled"]
-        for button in (self.save_button, self.apply_button):
-            button.state(state)
-        exclude_button = self.__dict__.get("exclude_button")
-        if exclude_button is not None:
-            exclude_button.state(["disabled"] if self._actions_busy else ["!disabled"])
+        state = ["!disabled"] if self._can_commit_selection() else ["disabled"]
+        self.save_button.state(state)
+        self.apply_button.state(["disabled"] if self.__dict__.get("_review_required", False) else state)
         if hasattr(self, "previous_plot_button"):
             self._update_navigation()
 
     def _apply(self) -> None:
-        if self._actions_busy or not self._has_pending_changes():
+        if not self._can_commit_selection() or self.__dict__.get("_review_required", False):
             return
         self._actions_busy = True
         self._update_action_states()
@@ -2671,7 +2745,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
             self._update_action_states()
 
     def _save(self) -> None:
-        if self._actions_busy or not self._has_pending_changes():
+        if not self._can_commit_selection():
             return
         self._actions_busy = True
         self._update_action_states()
@@ -2684,6 +2758,7 @@ class Step4ProfileZoomDialog(ctk.CTkToplevel):
                 self._saved_bounds = self._applied_bounds = (self._start, self._end)
                 self._saved_adjust_bounds = self._applied_adjust_bounds = self._adjust_bounds
                 self._requires_confirmation = False
+                self.review_confirmed = self.__dict__.get("_review_required", False)
         finally:
             self._actions_busy = False
             self._update_action_states()
@@ -2705,6 +2780,7 @@ class Step4Frame(SidebarStepFrame):
     """Step 4 tab UI for interactive ISez profile selection and output saving."""
 
     ROI_TABLE_VISIBLE_ROWS = 3
+    ROI_REVIEW_PULSE_INTERVAL_MS = 650
     BACKGROUND_POLL_MS = 40
     MAX_BACKGROUND_EVENTS_PER_POLL = 64
 
@@ -2731,6 +2807,7 @@ class Step4Frame(SidebarStepFrame):
         self.auto_detection_reviews: dict[str, ProfileBoundaryDetection | str] = {}
         self._flashing_updated_rois: set[str] = set()
         self._roi_update_animation_jobs: dict[str, str] = {}
+        self._roi_review_pulse_after_id = None
         self.roi_clicks: dict[str, list[float]] = {}
         self._roi_adjust_bounds: dict[str, bool] = {}
         self.profile_clicks: list[float] = []
@@ -2753,6 +2830,7 @@ class Step4Frame(SidebarStepFrame):
         self._stack_build_events = None
         self._roi_context_generation = 0
         self._auto_save_after_id = None
+        self._foveola_handoff_after_id = None
         self._auto_detection_after_id = None
         self._stack_build_after_id = None
         self._batch_roi_open_after_id = None
@@ -2886,6 +2964,7 @@ class Step4Frame(SidebarStepFrame):
             "Next",
             lambda: self._move_roi(1),
             "next",
+            variant="success",
         )
         self.next_roi_button.grid(
             row=0,
@@ -2911,7 +2990,7 @@ class Step4Frame(SidebarStepFrame):
         self.next_image_button = AppButton(
             self.sidebar_footer,
             text="Go to next image",
-            variant="secondary",
+            variant="success",
             command=self._go_to_next_image,
             state="disabled",
         )
@@ -3112,6 +3191,7 @@ class Step4Frame(SidebarStepFrame):
     ):
         """Layer a processing or completion card over the active plot grid."""
 
+        self._stop_roi_review_pulse()
         holder = getattr(self, "plot_holder", None)
         if holder is None:
             return None
@@ -3392,6 +3472,59 @@ class Step4Frame(SidebarStepFrame):
         self.batch_roi_notebook.select(target)
         self._update_next_image_button_state()
 
+    def _paired_temporal_tab(self, folder: Path) -> str | None:
+        states = self.__dict__.get("batch_roi_tab_states", {})
+        siblings = {
+            key: Path(state["folder"]).name.strip().casefold()
+            for key, state in states.items()
+            if state.get("folder") is not None and Path(state["folder"]).parent == folder.parent
+        }
+        # A lone non-temporal sibling may have a descriptive nasal folder name.
+        if folder.name.strip().casefold() != "nasal" and len(siblings) != 2:
+            return None
+        temporal = [key for key, side in siblings.items() if side == "temporal"]
+        if len(temporal) == 1 and not states[temporal[0]].get("complete", False):
+            return temporal[0]
+        return None
+
+    def _queue_foveola_handoff(self, result: ISezResult) -> None:
+        path = self.__dict__.get("current_path")
+        if path is None:
+            return
+        folder = Path(path).parent
+        temporal = folder.name.strip().casefold() == "temporal"
+        target = None if temporal else self._paired_temporal_tab(folder)
+        if not temporal and target is None:
+            return
+
+        notebook = self.__dict__.get("batch_roi_notebook")
+        generation = self.__dict__.get("_roi_context_generation")
+        index = self.current_roi_idx
+
+        def advance():
+            self._foveola_handoff_after_id = None
+            values = self.__dict__
+            if (values.get("_roi_context_generation") != generation
+                    or self.current_roi_idx != index or self.completed.get("fovea") is not result
+                    or values.get("_step4_destroying", False) or values.get("_stack_building", False)
+                    or values.get("_stack_build_complete", False)
+                    or values.get("_batch_roi_open_cancel") is not None
+                    or "fovea" in values.get("excluded_rois", ())
+                    or not self.winfo_viewable()):
+                return
+            if values.get("_auto_detecting", False):
+                self._foveola_handoff_after_id = self.after(self.BACKGROUND_POLL_MS, advance)
+                return
+
+            if temporal:
+                self._close_profile_zoom()
+                self._build_stack_outputs()
+            elif notebook is not None and target == self._paired_temporal_tab(folder):
+                notebook.select(target)
+                self._update_next_image_button_state()
+
+        self._foveola_handoff_after_id = self.after_idle(advance)
+
     def _refresh_completion_notice_progress(self) -> None:
         """Refresh a retained completed-tab card with current batch progress."""
 
@@ -3430,9 +3563,10 @@ class Step4Frame(SidebarStepFrame):
     def _invalidate_roi_work(self) -> None:
         """Detach pending work before changing or resetting the active file."""
 
+        self._stop_roi_review_pulse(redraw=not self.__dict__.get("_step4_destroying", False))
         self._roi_context_generation = getattr(self, "_roi_context_generation", 0) + 1
         batch_building = getattr(self, "_batch_stack_cancel", None) is not None
-        jobs = ["_auto_save_after_id", "_auto_detection_after_id"]
+        jobs = ["_auto_save_after_id", "_auto_detection_after_id", "_foveola_handoff_after_id"]
         if not batch_building:
             jobs.append("_stack_build_after_id")
         for name in jobs:
@@ -4014,6 +4148,7 @@ class Step4Frame(SidebarStepFrame):
                 self._hide_batch_roi_loading_canvas()
                 self._update_next_image_button_state()
                 self._open_automatic_profile_review()
+                self._start_roi_review_pulse()
 
         def _detect_one_file(item):
             key, job_path = item
@@ -4242,8 +4377,8 @@ class Step4Frame(SidebarStepFrame):
                 if auto_flagged_count:
                     self.status_var.set(
                         f"Auto ROI ran on {auto_file_count}/{len(auto_jobs)} file(s). "
-                        f"{auto_flagged_count} file(s) have amber ! ROI(s) that need review; "
-                        "ROI 21 is always manual."
+                        f"{auto_flagged_count} file(s) have plots that need review. "
+                        "Double-click an amber tile to review it."
                     )
                 else:
                     self.status_var.set(
@@ -4489,6 +4624,7 @@ class Step4Frame(SidebarStepFrame):
         self._refresh_completion_notice_progress()
         self._update_continue_to_step5_button_state()
         self._open_automatic_profile_review()
+        self._start_roi_review_pulse()
         return True
 
     def _close_batch_roi_tab(self, notebook, tab) -> None:
@@ -4662,6 +4798,7 @@ class Step4Frame(SidebarStepFrame):
 
         if restore_state is not None:
             self._open_automatic_profile_review()
+            self._start_roi_review_pulse()
 
     def _set_slice_zero(self, *, render: bool = True) -> None:
         if self.volume is None:
@@ -4804,10 +4941,11 @@ class Step4Frame(SidebarStepFrame):
             self.roi_table.delete(*existing)
         for index, roi in enumerate(self.rois):
             excluded = roi.suffix in self.__dict__.get("excluded_rois", ())
-            needs_review = roi.suffix in getattr(self, "auto_detection_reviews", {})
-            roi_label = f"{roi.suffix} (excluded)" if excluded else (
-                f"{roi.suffix} !" if needs_review else roi.suffix
-            )
+            needs_review = self._roi_needs_review(index)
+            if excluded or (needs_review and self.__dict__.get("_stack_build_complete", False)):
+                roi_label = f"{roi.suffix} (excluded)" if excluded else f"{roi.suffix} (omitted)"
+            else:
+                roi_label = f"{roi.suffix} !" if needs_review else roi.suffix
             values = (roi_label, *self._roi_metric_values(roi))
             if reuse_rows:
                 if self.roi_table.item(str(index), "values") != values:
@@ -4818,6 +4956,7 @@ class Step4Frame(SidebarStepFrame):
         self._update_build_stack_button_state()
 
     def _render_empty_canvas(self) -> None:
+        self._stop_roi_review_pulse(redraw=False)
         self._close_profile_zoom()
         self._hide_roi_grid_hint()
         self._hide_grid_notice()
@@ -4863,12 +5002,14 @@ class Step4Frame(SidebarStepFrame):
         self.canvas.mpl_connect("figure_leave_event", self._hide_roi_grid_hint)
         self.canvas._aidas_roi_grid_axes = self.ax_roi_grid
         self.canvas.mpl_connect("draw_event", self._cache_roi_grid_background)
-        self.canvas.get_tk_widget().bind("<Configure>", self._on_plot_canvas_configure, add="+")
-        self.canvas.get_tk_widget().configure(
+        widget = self.canvas.get_tk_widget()
+        widget.bind("<Configure>", self._on_plot_canvas_configure, add="+")
+        widget.bind("<Map>", self._on_roi_grid_visibility_changed, add="+")
+        widget.bind("<Unmap>", self._on_roi_grid_visibility_changed, add="+")
+        widget.configure(
             background=palette["figure"],
             highlightthickness=0,
         )
-        widget = self.canvas.get_tk_widget()
         widget._aidas_line_positioning_checkbox = ctk.CTkCheckBox(
             widget,
             text="Disable automatic line positioning",
@@ -4933,6 +5074,10 @@ class Step4Frame(SidebarStepFrame):
             "Double-click to zoom"
             if index in self.ax_roi_grid._aidas_preview_cells else "Click to select"
         )
+        if self._roi_needs_review(index):
+            text = ("Omitted from saved results" if self.__dict__.get("_stack_build_complete", False)
+                    else "Double-click to review")
+            position = (position[0], position[1] + 0.13)
         if self._roi_exclusion_checkbox_hit(index, event):
             if not self._can_change_roi_exclusion():
                 text = "Exclusions are locked for this image"
@@ -4966,8 +5111,8 @@ class Step4Frame(SidebarStepFrame):
             except tk.TclError:
                 pass
 
-    @staticmethod
-    def _cache_roi_grid_background(event) -> None:
+    @classmethod
+    def _cache_roi_grid_background(cls, event) -> None:
         from matplotlib.transforms import Bbox
 
         canvas = event.canvas
@@ -4983,21 +5128,24 @@ class Step4Frame(SidebarStepFrame):
         )
         ax._aidas_hover_region = region
         ax._aidas_hover_background = canvas.copy_from_bbox(region)
-        hint = getattr(ax, "_aidas_hover_hint", None)
-        if hint is not None and hint.get_animated() and hint.get_visible():
-            ax.draw_artist(hint)
+        cls._draw_roi_grid_overlays(ax)
+
+    @staticmethod
+    def _draw_roi_grid_overlays(ax) -> None:
+        for name in ("_aidas_review_outline", "_aidas_hover_hint"):
+            artist = getattr(ax, name, None)
+            if artist is not None and artist.get_animated() and artist.get_visible():
+                ax.draw_artist(artist)
 
     def _redraw_roi_grid_hint(self) -> None:
-        """Update hover text without rendering every grid cell and profile."""
+        """Update transient grid overlays without rendering the plots."""
         ax = self.ax_roi_grid
         background = getattr(ax, "_aidas_hover_background", None)
         canvas = self.canvas
         if (background is not None and canvas.supports_blit is True
                 and not canvas.figure.stale):
             canvas.restore_region(background)
-            hint = ax._aidas_hover_hint
-            if hint.get_visible():
-                ax.draw_artist(hint)
+            self._draw_roi_grid_overlays(ax)
             canvas.blit(ax._aidas_hover_region)
         else:
             canvas.draw_idle()
@@ -5089,6 +5237,7 @@ class Step4Frame(SidebarStepFrame):
         self._place_line_positioning_checkbox()
         self._update_profile_status(profile)
         self._update_confirm_button_state()
+        self._start_roi_review_pulse()
 
     def _roi_overview_result(self, index: int) -> ISezResult | None:
         if self.image is None or index >= len(self.rois):
@@ -5119,6 +5268,7 @@ class Step4Frame(SidebarStepFrame):
             return None
 
     def _draw_roi_overview_grid(self) -> None:
+        from matplotlib.collections import LineCollection
         from matplotlib.patches import Rectangle
 
         ax = self.ax_roi_grid
@@ -5139,6 +5289,7 @@ class Step4Frame(SidebarStepFrame):
         # Keep hover artists with their axes, including canvases cached per file.
         ax._aidas_preview_cells = set()
         enabled = self._can_change_roi_exclusion()
+        review_outlines = []
 
         for index in range(21):
             col = index % 7
@@ -5147,12 +5298,18 @@ class Step4Frame(SidebarStepFrame):
             suffix = self.rois[index].suffix if index < len(self.rois) else ""
             excluded = suffix in self.__dict__.get("excluded_rois", ())
             updated = suffix in self._flashing_updated_rois
-            needs_review = suffix in getattr(self, "auto_detection_reviews", {})
+            needs_review = self._roi_needs_review(index)
+            omitted = needs_review and self.__dict__.get("_stack_build_complete", False)
+            if needs_review and not omitted:
+                left, right = col + 0.03, col + 0.97
+                bottom, top = row + 0.03, row + 0.97
+                review_outlines.append(((left, bottom), (right, bottom), (right, top),
+                                        (left, top), (left, bottom)))
             if excluded:
                 face = palette["axes"]
             elif updated:
                 face = palette["success_soft"]
-            elif needs_review:
+            elif needs_review and not omitted:
                 face = palette["warning_soft"]
             elif active:
                 face = palette["primary_soft"]
@@ -5215,13 +5372,22 @@ class Step4Frame(SidebarStepFrame):
 
             roi = self.rois[index]
             done = roi.suffix in self.completed
-            status_symbol = "Excluded" if excluded else ("\u2713" if done else ("!" if needs_review else "x"))
-            status_color = (
-                palette["muted"] if excluded else (
-                    palette["success"] if done else (palette["warning"] if needs_review else palette["danger"])
-                )
+            if excluded or omitted:
+                status_symbol = "Excluded" if excluded else "Omitted"
+                status_color = palette["muted"]
+            elif needs_review:
+                status_symbol, status_color = "Needs review", palette["warning"]
+            elif done:
+                status_symbol, status_color = "\u2713", palette["success"]
+            else:
+                status_symbol, status_color = "x", palette["danger"]
+            long_status = excluded or needs_review
+            cell["status"].set(
+                text=status_symbol, color=status_color,
+                position=(col + 0.50, row + 0.05) if long_status else (col + 0.96, row + 0.94),
+                ha="center" if long_status else "right",
+                va="bottom" if long_status else "top",
             )
-            cell["status"].set(text=status_symbol, color=status_color)
 
             result = self._roi_overview_result(index)
             if result is None:
@@ -5259,15 +5425,72 @@ class Step4Frame(SidebarStepFrame):
 
         self._layout_roi_exclusion_checkboxes()
         if not reuse:
+            ax._aidas_review_outline = LineCollection(
+                [], linewidths=1.6, alpha=0.82, visible=False, zorder=6,
+            )
+            ax.add_collection(ax._aidas_review_outline, autolim=False)
             ax._aidas_hover_hint = ax.text(
                 0, 0, "", ha="center", va="bottom", fontsize=6,
                 color=palette["muted"], visible=False, zorder=5,
                 bbox={"facecolor": palette["axes"], "edgecolor": "none", "pad": 1.5},
             )
+        animated = getattr(self.canvas, "supports_blit", False) is True
+        outline = ax._aidas_review_outline
+        outline.set(color=palette["warning"], animated=animated)
+        outline.set_segments(review_outlines)
+        if not review_outlines:
+            self._stop_roi_review_pulse(redraw=False)
         hint = ax._aidas_hover_hint
         hint.set(color=palette["muted"], visible=False,
-                 animated=getattr(self.canvas, "supports_blit", False) is True)
+                 animated=animated)
         hint.get_bbox_patch().set_facecolor(palette["axes"])
+
+    def _on_roi_grid_visibility_changed(self, event) -> None:
+        canvas = self.canvas
+        if canvas is not None and event.widget is canvas.get_tk_widget():
+            if event.widget.winfo_viewable():
+                self._start_roi_review_pulse()
+            else:
+                self._stop_roi_review_pulse(redraw=False)
+
+    def _start_roi_review_pulse(self) -> None:
+        if self.__dict__.get("_roi_review_pulse_after_id") is None:
+            self._pulse_roi_review()
+
+    def _pulse_roi_review(self) -> None:
+        """Keep blinking while the active grid has visible review flags."""
+        self._roi_review_pulse_after_id = None
+        values = self.__dict__
+        outline = getattr(values.get("ax_roi_grid"), "_aidas_review_outline", None)
+        canvas = values.get("canvas")
+        if (outline is None or not outline.get_segments()
+                or canvas is None or not canvas.get_tk_widget().winfo_viewable()
+                or values.get("_profile_zoom_dialog") is not None or values.get("_opening_profile_zoom", False)
+                or values.get("_batch_roi_loading_surface") is not None
+                or values.get("_stack_building", False) or values.get("_stack_build_complete", False)
+                or values.get("_step4_destroying", False)):
+            self._stop_roi_review_pulse(redraw=False)
+            return
+
+        outline.set_visible(not outline.get_visible())
+        self._redraw_roi_grid_hint()
+        self._roi_review_pulse_after_id = self.after(
+            self.ROI_REVIEW_PULSE_INTERVAL_MS, self._pulse_roi_review,
+        )
+
+    def _stop_roi_review_pulse(self, *, redraw: bool = True) -> None:
+        job = self.__dict__.get("_roi_review_pulse_after_id")
+        self._roi_review_pulse_after_id = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except tk.TclError:
+                pass
+        outline = getattr(self.__dict__.get("ax_roi_grid"), "_aidas_review_outline", None)
+        if outline is not None and outline.get_visible():
+            outline.set_visible(False)
+            if redraw:
+                self._redraw_roi_grid_hint()
 
     def _redraw_roi_update_flash(self) -> None:
         if self.ax_roi_grid is None:
@@ -5454,9 +5677,55 @@ class Step4Frame(SidebarStepFrame):
             self._render_current_roi()
             self._queue_roi_auto_save()
 
+    def _roi_needs_review(self, index: int) -> bool:
+        if not 0 <= index < len(self.rois):
+            return False
+        suffix = self.rois[index].suffix
+        return (
+            suffix in self.__dict__.get("auto_detection_reviews", {})
+            and suffix not in self.__dict__.get("excluded_rois", ())
+        )
+
+    def _pending_review_indices(self) -> list[int]:
+        return [index for index in range(len(self.rois)) if self._roi_needs_review(index)]
+
+    def _review_next_plot(self) -> None:
+        values = self.__dict__
+        if (self.image is None or values.get("_step4_destroying", False)
+                or values.get("_stack_building", False) or values.get("_stack_build_complete", False)
+                or values.get("_batch_roi_loading_surface") is not None):
+            return
+        pending = self._pending_review_indices()
+        if not pending:
+            return
+        index = pending[0]
+        if index != self.current_roi_idx:
+            self._close_profile_zoom()
+            self._remember_current_roi_clicks()
+            self.current_roi_idx = index
+            self._load_current_roi_clicks()
+            self._select_roi_in_list()
+            self._render_current_roi()
+        self._open_profile_zoom(index)
+
     def _profile_zoom_closed(self, dialog) -> None:
-        if self._profile_zoom_dialog is dialog:
-            self._profile_zoom_dialog = None
+        if self._profile_zoom_dialog is not dialog:
+            return
+        self._profile_zoom_dialog = None
+        if self.__dict__.get("_foveola_handoff_after_id") is not None:
+            return
+        if getattr(dialog, "review_confirmed", False) is not True or not self._pending_review_indices():
+            self._start_roi_review_pulse()
+            return
+        generation = self._roi_context_generation
+        index = self.current_roi_idx
+
+        def review_next():
+            if (self._roi_context_generation == generation and self.current_roi_idx == index
+                    and self._profile_zoom_dialog is None):
+                self._review_next_plot()
+
+        self.after_idle(review_next)
 
     def _close_profile_zoom(self) -> None:
         dialog = getattr(self, "_profile_zoom_dialog", None)
@@ -5468,7 +5737,7 @@ class Step4Frame(SidebarStepFrame):
         except tk.TclError:
             pass
 
-    def _open_profile_zoom(self, index: int) -> None:
+    def _open_profile_zoom(self, index: int, *, navigation_indices: list[int] | None = None) -> None:
         if self.image is None or index != self.current_roi_idx:
             return
         if self.rois[index].suffix in self.__dict__.get("excluded_rois", set()):
@@ -5499,11 +5768,25 @@ class Step4Frame(SidebarStepFrame):
             options = self._profile_zoom_options(index)
             if options is None:
                 return
-            available = [candidate for candidate in range(len(self.rois))
-                         if self._roi_overview_result(candidate) is not None]
-            peripheral = [candidate for candidate in available
-                          if candidate < AUTO_MANUAL_ONLY_ROI_INDEX]
-            foveola_after = max(peripheral) if peripheral and len(self.rois) > AUTO_MANUAL_ONLY_ROI_INDEX else None
+            self._stop_roi_review_pulse()
+            available = navigation_indices
+            foveola_after = None
+            if options.get("review_required", False):
+                available = [index]
+            elif available is None:
+                finished = self.__dict__.get("_stack_build_complete", False)
+                available = []
+                for candidate in range(len(self.rois)):
+                    if self._roi_needs_review(candidate):
+                        if finished:
+                            continue
+                    elif self._roi_overview_result(candidate) is None:
+                        continue
+                    available.append(candidate)
+                peripheral = [candidate for candidate in available
+                              if candidate < AUTO_MANUAL_ONLY_ROI_INDEX]
+                if peripheral and len(self.rois) > AUTO_MANUAL_ONLY_ROI_INDEX:
+                    foveola_after = max(peripheral)
             self._profile_zoom_dialog = Step4ProfileZoomDialog(
                 self, **options,
                 navigation_indices=available,
@@ -5514,7 +5797,6 @@ class Step4Frame(SidebarStepFrame):
                 on_close=self._profile_zoom_closed,
                 on_foveola=self._continue_to_foveola if foveola_after is not None else None,
                 foveola_after_index=foveola_after,
-                on_exclude=self._toggle_current_roi_exclusion,
             )
         except Exception as exc:
             self._profile_zoom_dialog = None
@@ -5523,9 +5805,10 @@ class Step4Frame(SidebarStepFrame):
             self._opening_profile_zoom = False
         if error is not None:
             messagebox.showerror("Profile Detail", f"Could not open the detailed profile.\n{error}", parent=self)
+            self._start_roi_review_pulse()
 
     def _open_automatic_profile_review(self) -> None:
-        """Open the first peripheral preview once when a file is ready."""
+        """Browse finished peripheral ROIs once after automatic detection."""
         values = self.__dict__
         if (values.get("image") is None or values.get("_step4_destroying", False)
                 or values.get("_stack_building", False) or values.get("_stack_build_complete", False)
@@ -5539,20 +5822,25 @@ class Step4Frame(SidebarStepFrame):
         if (not state.get("_automatic_profile_review_ready", False)
                 or state.get("_automatic_profile_review_opened", False)):
             return
-        if values.get("_profile_zoom_dialog") is not None:
-            state["_automatic_profile_review_opened"] = True
-            return
-        first = next((index for index in range(min(len(self.rois), AUTO_MANUAL_ONLY_ROI_INDEX))
-                      if self._roi_overview_result(index) is not None), None)
-        if first is None:
-            return
         state["_automatic_profile_review_opened"] = True
-        self._remember_current_roi_clicks()
-        self.current_roi_idx = first
-        self._load_current_roi_clicks()
-        self._select_roi_in_list()
-        self._render_current_roi()
-        self._open_profile_zoom(first)
+        if values.get("_profile_zoom_dialog") is not None:
+            return
+        excluded = values.get("excluded_rois", ())
+        available = [
+            index for index, roi in enumerate(self.rois[:AUTO_MANUAL_ONLY_ROI_INDEX])
+            if self.completed.get(roi.suffix) is not None and roi.suffix not in excluded
+            and not self._roi_needs_review(index)
+        ]
+        if not available:
+            return
+        first = available[0]
+        if first != self.current_roi_idx:
+            self._remember_current_roi_clicks()
+            self.current_roi_idx = first
+            self._load_current_roi_clicks()
+            self._select_roi_in_list()
+            self._render_current_roi()
+        self._open_profile_zoom(first, navigation_indices=available)
         if values.get("batch_roi_notebook") is not None:
             self._sync_active_batch_roi_state()
 
@@ -5574,28 +5862,31 @@ class Step4Frame(SidebarStepFrame):
     def _profile_zoom_options(self, index: int) -> dict | None:
         if self.image is None or not 0 <= index < len(self.rois):
             return None
-        result = self._roi_overview_result(index)
-        if result is None:
+        needs_review = self._roi_needs_review(index)
+        if needs_review and self.__dict__.get("_stack_build_complete", False):
+            return None
+        result = None if needs_review else self._roi_overview_result(index)
+        if result is None and not needs_review:
             return None
         roi = self.rois[index]
         if index == self.current_roi_idx:
             clicks = list(self.profile_clicks[:2])
         else:
             clicks = list(getattr(self, "roi_clicks", {}).get(roi.suffix, [])[:2])
-        if len(clicks) < 2:
+        if len(clicks) < 2 and result is not None:
             clicks = [float(result.start), float(result.end)]
         confirmed = self.completed.get(roi.suffix)
         return {
-            "roi_index": index, "roi_suffix": roi.suffix,
+            "roi_index": index, "roi_suffix": "21" if roi.suffix == "fovea" else roi.suffix,
             "profile": intensity_profile(self.image, roi),
-            "start": clicks[0], "end": clicks[1],
+            "start": clicks[0] if clicks else None, "end": clicks[1] if len(clicks) == 2 else None,
             "saved_bounds": (confirmed.start, confirmed.end) if confirmed is not None else None,
             "adjust_bounds": self._should_adjust_roi_bounds(roi.suffix),
             "saved_adjust_bounds": (getattr(confirmed, "manual_bounds", False) is not True)
                                    if confirmed is not None else None,
-            "requires_confirmation": confirmed is None or roi.suffix in self.__dict__.get(
-                "auto_detection_reviews", {},
-            ),
+            "requires_confirmation": confirmed is None or needs_review,
+            "review_required": needs_review,
+            "review_has_more": needs_review and len(self._pending_review_indices()) > 1,
         }
 
     def _navigate_profile_zoom(self, index: int) -> dict | None:
@@ -5699,7 +5990,7 @@ class Step4Frame(SidebarStepFrame):
                 self._toggle_roi_exclusion(index)
             return
 
-        has_drawn_preview = self._roi_overview_result(index) is not None
+        has_drawn_preview = self._roi_needs_review(index) or self._roi_overview_result(index) is not None
         if self._profile_zoom_dialog is not None and (
             not has_drawn_preview or self._profile_zoom_dialog.roi_index != index
         ):
@@ -5788,7 +6079,6 @@ class Step4Frame(SidebarStepFrame):
         self.profile_clicks.clear()
         self.roi_clicks.pop(suffix, None)
         self.completed.pop(suffix, None)
-        self.auto_detection_reviews.pop(suffix, None)
         getattr(self, "_roi_adjust_bounds", {}).pop(suffix, None)
         self.start_var.set("")
         self.end_var.set("")
@@ -5849,9 +6139,6 @@ class Step4Frame(SidebarStepFrame):
             and self.__dict__.get("_batch_roi_loading_surface") is None
         )
 
-    def _toggle_current_roi_exclusion(self) -> None:
-        self._toggle_roi_exclusion(self.current_roi_idx)
-
     def _toggle_roi_exclusion(self, index: int) -> None:
         """Keep an explicit blank export slot without discarding a user's edits."""
         if not self._can_change_roi_exclusion() or not 0 <= index < len(self.rois):
@@ -5877,9 +6164,24 @@ class Step4Frame(SidebarStepFrame):
         self._render_current_roi()
         self._update_continue_to_step5_button_state()
 
-    def _all_rois_completed(self) -> bool:
-        excluded = self.__dict__.get("excluded_rois", ())
-        return bool(self.rois) and all(
+    def _stack_review_suffixes(self, key=None, state=None) -> frozenset[str]:
+        """Match review flags to the ROIs in the current stack layout."""
+        if state is None or key == self.__dict__.get("_active_batch_roi_tab"):
+            reviews = self.__dict__.get("auto_detection_reviews", {})
+            excluded = self.__dict__.get("excluded_rois", ())
+        else:
+            reviews = state.get("auto_detection_reviews") or {}
+            excluded = state.get("excluded_rois") or ()
+        if not reviews:
+            return frozenset()
+        return frozenset(
+            roi.suffix for roi in self.rois
+            if roi.suffix in reviews and roi.suffix not in excluded
+        )
+
+    def _all_rois_completed(self, *, skipped_reviews=()) -> bool:
+        excluded = set(self.__dict__.get("excluded_rois", ())).union(skipped_reviews)
+        return bool(self.rois) and self._stack_review_suffixes() <= excluded and all(
             roi.suffix in self.completed or roi.suffix in excluded for roi in self.rois
         )
 
@@ -5896,7 +6198,8 @@ class Step4Frame(SidebarStepFrame):
         )
         auto_detect_button = getattr(self, "auto_detect_button", None)
         if auto_detect_button is not None:
-            auto_detect_button.set_variant("secondary" if build_ready or continue_ready else "primary")
+            review_ready = bool(self._stack_review_suffixes())
+            auto_detect_button.set_variant("secondary" if build_ready or continue_ready or review_ready else "primary")
 
         build_button = getattr(self, "build_stacks_button", None)
         if build_button is not None:
@@ -5909,20 +6212,29 @@ class Step4Frame(SidebarStepFrame):
         if states:
             total = len(states)
             ready_count = sum(self._batch_tab_stack_ready(key, state) for key, state in states.items())
+            needs_review = any(
+                not state.get("complete") and self._stack_review_suffixes(key, state)
+                for key, state in states.items()
+            )
         elif self._has_current_roi_input():
             total = 1
-            ready_count = int(self._all_rois_completed() and not getattr(self, "_stack_build_complete", False))
+            unfinished = not getattr(self, "_stack_build_complete", False)
+            ready_count = int(unfinished and self._all_rois_completed())
+            needs_review = unfinished and bool(self._stack_review_suffixes())
         else:
             self.build_stacks_button.configure(text="Build Stack — no image loaded")
             self._update_roi_action_emphasis(False)
             self.build_stacks_button.state(["disabled"])
             return
-        self.build_stacks_button.configure(text=f"Build Stack ({ready_count}/{total} ready to build)")
+        self.build_stacks_button.configure(text=(
+            "Build Stack…" if needs_review else f"Build Stack ({ready_count}/{total} ready to build)"
+        ))
         build_ready = (
-            ready_count > 0
+            (ready_count > 0 or needs_review)
             and not getattr(self, "_stack_building", False)
+            and not getattr(self, "_auto_detecting", False)
         )
-        self._update_roi_action_emphasis(build_ready)
+        self._update_roi_action_emphasis(build_ready and not needs_review)
         if build_ready:
             self.build_stacks_button.state(["!disabled"])
         else:
@@ -5985,7 +6297,6 @@ class Step4Frame(SidebarStepFrame):
             elif getattr(self, "_stack_build_complete", False):
                 outdir = Path(self.output_dir_var.get() or ".")
                 enabled = self._step4_outputs_complete(outdir)
-        button.set_variant("primary" if enabled else "success")
         button.state(["!disabled"] if enabled else ["disabled"])
 
     def _auto_detection_parameters(self) -> dict[str, int | float]:
@@ -6254,14 +6565,11 @@ class Step4Frame(SidebarStepFrame):
         excluded = self.__dict__.get("excluded_rois", set())
         completed_count = len(set(self.completed) - excluded)
         review_count = len(set(self.auto_detection_reviews) - excluded)
-        summary = f"Automatic detection accepted {completed_count}/{len(self.rois)} ROI(s). "
+        summary = f"Automatic detection accepted {completed_count} of {len(self.rois)} plots. "
         if excluded:
-            summary += f"{len(excluded)} ROI(s) excluded. "
+            summary += f"Excluded plots: {len(excluded)}. "
         if review_count:
-            self.status_var.set(
-                summary +
-                f"{review_count} amber ! ROI(s) need review; ROI 21 is always manual."
-            )
+            self.status_var.set(summary + "Double-click an amber tile to review it.")
         else:
             self.status_var.set(summary + "Review the grid, then build the stack.")
         state = self.__dict__
@@ -6271,6 +6579,7 @@ class Step4Frame(SidebarStepFrame):
         state["_automatic_profile_review_opened"] = preserve_selection
         if not preserve_selection:
             self._open_automatic_profile_review()
+        self._start_roi_review_pulse()
 
     def _poll_auto_detection_events(self, events) -> None:
         """Finish an auto-detection worker while keeping Tk operations local."""
@@ -6447,12 +6756,7 @@ class Step4Frame(SidebarStepFrame):
 
         review = getattr(self, "auto_detection_reviews", {}).get(roi.suffix)
         if review is not None:
-            confidence = getattr(review, "confidence", 0.0)
-            reason = getattr(review, "reason", str(review))
-            self.profile_status_var.set(
-                f"ROI {roi.suffix}: automatic bounds {start}-{end} need review "
-                f"(confidence {confidence:.0%}). {reason}. Drag a line in the grid detail or click a boundary to confirm."
-            )
+            self.profile_status_var.set(f"ROI {roi.suffix} needs review. Double-click its tile to check and confirm the boundaries.")
         elif not adjust_bounds:
             self.profile_status_var.set(f"ROI {roi.suffix}: manual bounds {start}-{end}.")
         else:
@@ -6551,6 +6855,8 @@ class Step4Frame(SidebarStepFrame):
             if self.canvas is not None:
                 self.canvas.draw()
             self._update_build_stack_button_state()
+        if roi.suffix == "fovea" and not replacing_completed_roi:
+            self._queue_foveola_handoff(result)
         return True
 
     @staticmethod
@@ -6666,24 +6972,120 @@ class Step4Frame(SidebarStepFrame):
             self._hide_grid_notice()
             self.status_var.set("Could not build stack outputs.")
             messagebox.showerror("Step 4", f"Could not build stack outputs.\n{payload}")
+            self._start_roi_review_pulse()
             return
         self._finish_stack_build(outdir)
+
+    def _choose_stack_review_action(
+        self, count: int, *, can_save_without: bool, skipped_images: int = 0
+    ) -> str | None:
+        """Ask for explicit consent before omitting any flagged plots."""
+        parent = self.winfo_toplevel()
+        window = tk.Toplevel(self, background=COLORS.surface)
+        window.withdraw()
+        window.title("Review before saving")
+        window.transient(parent)
+        window.resizable(False, False)
+        apply_app_icon_to(window)
+        body = ctk.CTkFrame(window, fg_color="transparent")
+        body.pack(fill="both", expand=True, padx=24, pady=20)
+        heading = "1 plot still needs review" if count == 1 else f"{count} plots still need review"
+        ctk.CTkLabel(body, text=heading, font=ctk.CTkFont(size=17, weight="bold")).pack(anchor="w")
+        detail = "Check the start and end boundaries before saving."
+        if can_save_without:
+            detail = (
+                "Saving now will omit this plot from the results."
+                if count == 1 else "Saving now will omit these plots from the results."
+            )
+            if skipped_images == 1:
+                detail += " Results for 1 incomplete image will stay unsaved."
+            elif skipped_images > 1:
+                detail += f" Results for {skipped_images} incomplete images will stay unsaved."
+        ctk.CTkLabel(
+            body, text=detail, justify="left", wraplength=370,
+        ).pack(anchor="w", pady=(6, 18))
+
+        choice = None
+
+        def close(action=None):
+            nonlocal choice
+            choice = action
+            window.destroy()
+
+        actions = ctk.CTkFrame(body, fg_color="transparent")
+        actions.pack(anchor="e")
+        AppButton(
+            actions, text="Review 1 plot" if count == 1 else f"Review {count} plots",
+            variant="warning", command=lambda: close("review"), width=115,
+        ).pack(side="left", padx=(0, LAYOUT.space_xs))
+        if can_save_without:
+            AppButton(
+                actions, text="Save without this plot" if count == 1 else f"Save without these {count} plots",
+                variant="success", command=lambda: close("save"), width=175,
+            ).pack(side="left", padx=(0, LAYOUT.space_xs))
+        AppButton(
+            actions, text="Cancel", variant="danger", command=close, width=80,
+        ).pack(side="left")
+        window.protocol("WM_DELETE_WINDOW", close)
+        window.bind("<Escape>", lambda _event: close())
+        window.bind("<Return>", lambda _event: close("review"))
+        if install_dialog_title_bar(window) is None:
+            apply_windows_titlebar_colors(
+                window, background=COLOR_PAIRS["window_chrome"], foreground=COLOR_PAIRS["text"],
+            )
+        window.update_idletasks()
+        bounds = work_area_bounds(parent)
+        x, y = centered_position(bounds, window.winfo_reqwidth(), window.winfo_reqheight())
+        window.geometry(f"{x:+d}{y:+d}")
+        window.deiconify()
+        window.update_idletasks()
+        window.grab_set()
+        window.focus_set()
+        self.wait_window(window)
+        return choice
 
     def _build_stack_outputs(self) -> None:
         if getattr(self, "_stack_building", False):
             self.status_var.set("Stack creation is already running. Please wait.")
             return
+        if getattr(self, "_auto_detecting", False):
+            self.status_var.set("Wait for automatic detection to finish before building the stack.")
+            return
         self._revalidate_saved_stacks()
         if getattr(self, "batch_roi_tab_states", {}):
             self._build_ready_tab_stacks()
             return
-        if not self.completed and not self.__dict__.get("excluded_rois"):
+        manual_exclusions = set(self.__dict__.get("excluded_rois", ()))
+        pending_reviews = self._stack_review_suffixes()
+        if pending_reviews:
+            generation = self.__dict__.get("_roi_context_generation")
+            can_save_without = (
+                bool(set(self.completed) - pending_reviews or manual_exclusions)
+                and self._all_rois_completed(skipped_reviews=pending_reviews)
+            )
+            choice = self._choose_stack_review_action(
+                len(pending_reviews), can_save_without=can_save_without,
+            )
+            if choice == "review":
+                self._review_next_plot()
+            if choice != "save" or not can_save_without:
+                return
+            if (
+                generation != self.__dict__.get("_roi_context_generation")
+                or pending_reviews != self._stack_review_suffixes()
+                or manual_exclusions != set(self.__dict__.get("excluded_rois", ()))
+            ):
+                self.status_var.set("Plot reviews changed. Choose Build Stack again.")
+                return
+            self._close_profile_zoom()
+        if not self.completed and not manual_exclusions:
             messagebox.showwarning("Step 4", "Save at least one ROI before building stack outputs.")
             return
-        if not self._all_rois_completed():
+        omitted = manual_exclusions | pending_reviews
+        if not self._all_rois_completed(skipped_reviews=pending_reviews):
             missing = [
                 roi.suffix for roi in self.rois
-                if roi.suffix not in self.completed and roi.suffix not in self.__dict__.get("excluded_rois", ())
+                if roi.suffix not in self.completed and roi.suffix not in omitted
             ]
             messagebox.showwarning(
                 "Step 4",
@@ -6696,7 +7098,7 @@ class Step4Frame(SidebarStepFrame):
         ordered = [self.completed.get(roi.suffix) for roi in self.rois]
         excluded = frozenset(
             index for index, roi in enumerate(self.rois, 1)
-            if roi.suffix in self.__dict__.get("excluded_rois", ())
+            if roi.suffix in omitted
         )
         outdir = Path(self.output_dir_var.get() or ".").expanduser().resolve()
         self._automatic_step5_handoff = False
@@ -6752,11 +7154,16 @@ class Step4Frame(SidebarStepFrame):
         except tk.TclError:
             pass
 
-    def _batch_tab_stack_ready(self, key: str, state: dict) -> bool:
+    def _batch_tab_stack_ready(self, key: str, state: dict, *, skipped_reviews=()) -> bool:
         completed = self.completed if key == getattr(self, "_active_batch_roi_tab", None) else (state.get("completed") or {})
         excluded = self.__dict__.get("excluded_rois", ()) if key == getattr(self, "_active_batch_roi_tab", None) else (state.get("excluded_rois") or ())
-        return bool(self.rois) and not state.get("complete") and all(
-            roi.suffix in completed or roi.suffix in excluded for roi in self.rois
+        if not self.rois or state.get("complete"):
+            return False
+        if skipped_reviews and not (set(completed).difference(skipped_reviews) or excluded):
+            return False
+        omitted = set(excluded).union(skipped_reviews)
+        return self._stack_review_suffixes(key, state) <= omitted and all(
+            roi.suffix in completed or roi.suffix in omitted for roi in self.rois
         )
 
     def _cancel_batch_stack_build(self) -> None:
@@ -6778,10 +7185,45 @@ class Step4Frame(SidebarStepFrame):
     def _build_ready_tab_stacks(self) -> None:
         """Snapshot all ready tabs; only the worker reads or writes files."""
         self._sync_active_batch_roi_state()
+        unfinished = {
+            key: state for key, state in self.batch_roi_tab_states.items() if not state.get("complete")
+        }
+        pending = {
+            key: reviews for key, state in unfinished.items()
+            if (reviews := self._stack_review_suffixes(key, state))
+        }
+        if pending:
+            generation = self.__dict__.get("_roi_context_generation")
+            ready_after_omitting = sum(
+                self._batch_tab_stack_ready(key, state, skipped_reviews=pending.get(key, ()))
+                for key, state in unfinished.items()
+            )
+            choice = self._choose_stack_review_action(
+                sum(map(len, pending.values())),
+                can_save_without=ready_after_omitting > 0,
+                skipped_images=len(unfinished) - ready_after_omitting,
+            )
+            if choice == "review":
+                if self._active_batch_roi_tab not in pending:
+                    self.batch_roi_notebook.select(next(iter(pending)))
+                self._review_next_plot()
+            if choice != "save" or not ready_after_omitting:
+                return
+            if generation != self.__dict__.get("_roi_context_generation"):
+                self.status_var.set("Plot reviews changed. Choose Build Stack again.")
+                return
+            self._sync_active_batch_roi_state()
+
         jobs = []
         destinations = set()
         for key, state in self.batch_roi_tab_states.items():
-            if not self._batch_tab_stack_ready(key, state):
+            if state.get("complete"):
+                continue
+            skipped_reviews = pending.get(key, frozenset())
+            if pending and skipped_reviews != self._stack_review_suffixes(key, state):
+                self.status_var.set("Plot reviews changed. Choose Build Stack again.")
+                return
+            if not self._batch_tab_stack_ready(key, state, skipped_reviews=skipped_reviews):
                 continue
             path = Path(state["path"])
             output = self.output_dir_var.get() if key == self._active_batch_roi_tab else state.get("output_dir")
@@ -6799,11 +7241,13 @@ class Step4Frame(SidebarStepFrame):
                 image = np.asarray(prepared[1][0])
             ordered = [state["completed"].get(roi.suffix) for roi in self.rois]
             excluded = frozenset(state.get("excluded_rois") or ())
-            jobs.append((key, state, path, image, ordered, excluded, state.get("source_snapshot"), outdir))
+            jobs.append((key, state, path, image, ordered, excluded, skipped_reviews, state.get("source_snapshot"), outdir))
         if not jobs:
             messagebox.showwarning("Step 4", "No tabs are ready. Confirm or exclude every ROI in a tab before building its stack.")
             self._update_build_stack_button_state()
             return
+        if pending:
+            self._close_profile_zoom()
 
         cancelled = self._batch_stack_cancel = threading.Event()
         events = self._stack_build_events = queue.Queue()
@@ -6818,7 +7262,7 @@ class Step4Frame(SidebarStepFrame):
         failures = []
 
         def worker():
-            for key, state, path, image, ordered, excluded, source, outdir in jobs:
+            for key, state, path, image, ordered, excluded, skipped_reviews, source, outdir in jobs:
                 if cancelled.is_set():
                     return
                 try:
@@ -6829,8 +7273,9 @@ class Step4Frame(SidebarStepFrame):
                     validate_source()
                     if image is None:
                         image = np.asarray(load_oct_volume(path)[0])
+                    omitted = excluded | skipped_reviews
                     excluded_indices = frozenset(
-                        index for index, roi in enumerate(self.rois, 1) if roi.suffix in excluded
+                        index for index, roi in enumerate(self.rois, 1) if roi.suffix in omitted
                     )
                     options = {"excluded_roi_indices": excluded_indices} if excluded_indices else {}
                     if source is not None:
@@ -6841,9 +7286,9 @@ class Step4Frame(SidebarStepFrame):
                     if source is not None and saved is None:
                         raise RuntimeError("Saved results were removed before stack creation finished.")
                 except Exception as exc:
-                    events.put(("error", (key, state, ordered, excluded, outdir, str(exc), source, None)))
+                    events.put(("error", (key, state, ordered, excluded, skipped_reviews, outdir, str(exc), source, None)))
                 else:
-                    events.put(("built", (key, state, ordered, excluded, outdir, None, source, saved)))
+                    events.put(("built", (key, state, ordered, excluded, skipped_reviews, outdir, None, source, saved)))
             events.put(("done", None))
 
         def finish():
@@ -6863,6 +7308,7 @@ class Step4Frame(SidebarStepFrame):
                 messagebox.showerror("Step 4", "Some stacks could not be built:\n" + "\n".join(failures))
             else:
                 self._auto_continue_to_step5()
+            self._start_roi_review_pulse()
 
         def poll():
             if cancelled.is_set() or events is not getattr(self, "_stack_build_events", None):
@@ -6878,7 +7324,7 @@ class Step4Frame(SidebarStepFrame):
                 if kind == "done":
                     finish()
                     return
-                key, state, ordered, excluded, outdir, error, source, saved = payload
+                key, state, ordered, excluded, skipped_reviews, outdir, error, source, saved = payload
                 if self.batch_roi_tab_states.get(key) is not state:
                     continue
                 if error is not None:
@@ -6889,18 +7335,27 @@ class Step4Frame(SidebarStepFrame):
                     continue
                 # A reset, edit, or closed tab must not be marked complete by
                 # a worker using an earlier snapshot of its ROI measurements.
-                if set(state.get("excluded_rois") or ()) != excluded or not all(
-                    state.get("completed", {}).get(roi.suffix) is result
-                    for roi, result in zip(self.rois, ordered)
+                if (
+                    set(state.get("excluded_rois") or ()) != excluded
+                    or self._stack_review_suffixes(key, state) != skipped_reviews
+                    or not all(
+                        state.get("completed", {}).get(roi.suffix) is result
+                        for roi, result in zip(self.rois, ordered)
+                    )
                 ):
                     continue
                 state["complete"] = True
                 state["last_results_dir"] = outdir
                 state["saved_stack_files"] = saved
+                if skipped_reviews:
+                    state["plot_theme_signature"] = None
                 if key == self._active_batch_roi_tab:
                     self._stack_build_complete = True
                     self._last_results_dir = outdir
                     self._saved_stack_files = saved
+                    if skipped_reviews:
+                        self._refresh_roi_list()
+                        self._render_current_roi()
                 self._update_build_stack_button_state()
                 self._update_continue_to_step5_button_state()
             guard = self.__dict__.get("_stack_build_guard")
@@ -6940,6 +7395,9 @@ class Step4Frame(SidebarStepFrame):
         self._last_results_dir = outdir
         self._saved_stack_files = self._saved_stack_snapshot(outdir)
         self._stack_build_complete = True
+        if self._stack_review_suffixes():
+            self._refresh_roi_list()
+            self._render_current_roi()
         self.status_var.set(f"Built stack outputs in {outdir}.")
         self._update_build_stack_button_state()
         self._update_auto_detect_button_state()

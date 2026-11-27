@@ -76,7 +76,6 @@ ACTION_ICON_FILES = {
     "undo": "flat-color-icons--undo-action.png",
 }
 _MONOCHROME_ACTIONS = {"next", "previous", "process"}
-ICON_FOLDER = ACTION_ICON_FILES["folder"]
 ICON_HOME = ACTION_ICON_FILES["home"]
 ICON_REFRESH = ACTION_ICON_FILES["refresh"]
 
@@ -270,6 +269,7 @@ def action_button(
     *,
     tooltip=None,
     icon_size=ACTION_ICON_SIZE,
+    variant=None,
     **button_options,
 ):
     """Create a themed, rounded action with the app's standard icon and state."""
@@ -278,12 +278,13 @@ def action_button(
 
     options = dict(button_options)
     legacy_style = str(options.pop("style", ""))
-    variant = {
-        "AIDaS.PrimaryAction.TButton": "primary",
-        "AIDaS.Primary.TButton": "primary",
-        "Accent.TButton": "primary",
-        "AIDaS.DangerAction.TButton": "danger",
-    }.get(legacy_style, "secondary")
+    if variant is None:
+        variant = {
+            "AIDaS.PrimaryAction.TButton": "primary",
+            "AIDaS.Primary.TButton": "primary",
+            "Accent.TButton": "primary",
+            "AIDaS.DangerAction.TButton": "danger",
+        }.get(legacy_style, "secondary")
     if action in {"cancel", "close"}:
         variant = "danger"
         options.pop("image", None)
@@ -464,7 +465,11 @@ def directory_row(
     entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
 
     buttons = {
-        "browse": icon_button(row, owner, ICON_FOLDER, browse_command, tooltip=browse_tooltip),
+        "browse": icon_action_button(
+            row, owner, browse_command, "folder", tooltip=browse_tooltip,
+            icon_size=CONTROLS.icon_size, variant="success", preserve_icon_colors=True,
+            corner_radius=SHAPES.corner_radius_sm,
+        ),
         "home": None,
         "refresh": None,
     }

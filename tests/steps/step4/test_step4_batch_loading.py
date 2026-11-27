@@ -29,6 +29,11 @@ class Step4BatchLoadingTests(unittest.TestCase):
             reads = []
             opened = []
             image = np.ones((1, 450, 3000), dtype=np.int16)
+            profile = 10 + np.exp(-((np.arange(140) - 89) / 4) ** 2)
+            finished = module.analyze_and_save_roi(
+                image[0], module.default_isez_rois()[2], start_click=80, end_click=99,
+                adjust_bounds=False, profile=profile,
+            )
             def load(path):
                 assert threading.get_ident() != owner
                 reads.append(path)
@@ -38,8 +43,8 @@ class Step4BatchLoadingTests(unittest.TestCase):
                 entered.set()
                 assert release.wait(15)
                 return module.AutoDetectionRunResult(
-                    completed={}, reviews={'01': 'new review', '02': 'check'},
-                    roi_clicks={'01': [80, 99], '02': [82, 98]},
+                    completed={'03': finished}, reviews={'01': 'new review', '02': 'check'},
+                    roi_clicks={'01': [80, 99], '02': [82, 98], '03': [80, 99]},
                     removed_clicks=set(), review_count=2, current_roi_idx=0,
                 )
             def wait_until(condition):
@@ -53,8 +58,8 @@ class Step4BatchLoadingTests(unittest.TestCase):
                 with mock.patch.object(module, 'load_oct_volume', side_effect=load), \
                      mock.patch.object(frame, '_compute_auto_detection_run', side_effect=detect), \
                      mock.patch.object(frame, '_warm_auto_detection_tools'), \
-                     mock.patch.object(frame, '_open_profile_zoom', side_effect=lambda index:
-                         opened.append((frame._active_batch_roi_tab, index))):
+                     mock.patch.object(frame, '_open_profile_zoom', side_effect=lambda index, *, navigation_indices:
+                         opened.append((frame._active_batch_roi_tab, index, navigation_indices))):
                     paths = [Path(f'file-{i}/_flat_LIGHT.hdr') for i in range(3)]
                     frame._open_batch_roi_tabs(paths, show_progress=True)
                     wait_until(entered.is_set)
@@ -72,11 +77,11 @@ class Step4BatchLoadingTests(unittest.TestCase):
                     assert state['current_roi_idx'] == 4
                     assert state['profile_clicks'] == [79]
                     assert state['_prepared_load'][0] == 'loaded'
-                    assert opened == [(keys[0], 0)], opened
+                    assert opened == [(keys[0], 2, [2])], opened
                     for key in keys:
                         frame.batch_roi_notebook.select(key)
                         root.update()
-                    assert opened == [(key, 0) for key in keys], opened
+                    assert opened == [(key, 2, [2]) for key in keys], opened
                     frame.batch_roi_notebook.select(keys[0])
                     root.update()
                     assert len(opened) == len(keys), 'Revisiting a file reopened its review'

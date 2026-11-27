@@ -41,7 +41,7 @@ class Step4ExclusionTests(unittest.TestCase):
     def test_exclusion_is_reversible_and_preserves_saved_work_and_current_selection(self):
         frame = self.frame
         saved = frame.completed["01"] = object()
-        frame._toggle_current_roi_exclusion()
+        frame._toggle_roi_exclusion(0)
         self.assertEqual(frame.excluded_rois, {"01"})
         self.assertEqual(frame.roi_clicks["01"], [78.0, 101.0])
         self.assertIs(frame.completed["01"], saved)
@@ -51,7 +51,7 @@ class Step4ExclusionTests(unittest.TestCase):
         self.assertTrue(all(value == "" for value in frame._roi_metric_values(frame.rois[0])))
         self.assertTrue(frame._can_change_roi_exclusion())
 
-        frame._toggle_current_roi_exclusion()
+        frame._toggle_roi_exclusion(0)
         self.assertEqual(frame.excluded_rois, set())
         self.assertIs(frame.completed["01"], saved)
         self.assertEqual(frame.auto_detection_reviews["01"], "Needs review")
@@ -60,11 +60,11 @@ class Step4ExclusionTests(unittest.TestCase):
 
     def test_excluding_missing_result_satisfies_only_its_own_readiness_slot(self):
         frame = self.frame
-        frame._toggle_current_roi_exclusion()
+        frame._toggle_roi_exclusion(0)
         self.assertFalse(frame._all_rois_completed())
         frame.completed["02"] = object()
         self.assertTrue(frame._all_rois_completed())
-        frame._toggle_current_roi_exclusion()
+        frame._toggle_roi_exclusion(0)
         self.assertFalse(frame._all_rois_completed())
 
     def test_all_excluded_rois_are_ready_without_fabricated_results(self):
@@ -81,7 +81,7 @@ class Step4ExclusionTests(unittest.TestCase):
         for flag in ("_stack_building", "_stack_build_complete", "_batch_roi_loading_surface"):
             with self.subTest(flag=flag):
                 setattr(frame, flag, True)
-                frame._toggle_current_roi_exclusion()
+                frame._toggle_roi_exclusion(0)
                 self.assertEqual(frame.excluded_rois, set())
                 self.assertFalse(frame._can_change_roi_exclusion())
                 delattr(frame, flag)
@@ -90,7 +90,7 @@ class Step4ExclusionTests(unittest.TestCase):
         frame = self.frame
         frame._auto_detecting = True
         frame._auto_detection_edited_suffixes = set()
-        frame._toggle_current_roi_exclusion()
+        frame._toggle_roi_exclusion(0)
         self.assertIn("01", frame._auto_detection_edited_suffixes)
 
     def test_toggling_another_tile_keeps_selection_and_pending_save_for_current_roi(self):

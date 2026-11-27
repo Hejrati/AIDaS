@@ -175,33 +175,38 @@ For each profile, AIDaS performs these deterministic steps:
    outlier.
 
 High-confidence detections are saved in memory and shown with green checkmarks.
-Low-confidence, invalid, or cross-ROI outlier detections are shown as amber
-`!` cells and are not considered complete. ROI 21 is always shown for manual
-review unless it was already confirmed before automatic detection. After detection,
-the enlarged MCP/AR profile editor opens at ROI 1, or the first available peripheral
-profile. Use **Previous** and **Next**, or the keyboard **Left** and **Right**
-arrow keys, to review the profiles and **Apply** or
-**Save and Exit** to confirm corrections and clear the amber warning. Fixes in
-the bottom profile also confirm the ROI and leave it selected for review.
-Navigation buttons visibly depress for mouse clicks and arrow keys, then
-release after the destination profile is drawn.
-Manual edits are protected from detection results that arrive later.
-At the last peripheral profile, **Now do
-foveola** closes the editor and selects the manual foveola ROI (ROI 21).
-Click an amber cell to open its
-zoomed profile, click the exact sample or drag either boundary line, and apply the correction. Manual
-zoom edits do not snap to a nearby minimum. **Build
-stack** remains disabled until every ROI has been confirmed or excluded. Use
-the checkbox at the top-left of each ROI tile to control inclusion in rrMCP/AR
-measurements. **All ROIs start checked and included**. Uncheck a poor-quality
-ROI to exclude it; check it again to restore its previous edits.
+Low-confidence, invalid, or cross-ROI outlier detections are marked **Needs
+review** in amber. Their outlines blink while they await review in the grid.
+After detection, the enlarged MCP/AR profile editor opens
+to the first completed peripheral ROI, starting with ROI 1 when available.
+Use **Previous** and **Next** to browse completed peripheral ROIs. If there
+are no completed peripheral ROIs, Step 4 stays on the grid.
+
+Double-click a tile marked **Needs review** to open it, including ROI 21.
+
+Check the Start and End lines. Confirm them as shown if they look correct,
+or drag either line to adjust it. For ROI 21 and other plots without suggested
+boundaries, select the Start and End points on the profile first. Choose
+**Confirm and review next** to continue or **Confirm and finish review** for
+the final plot. Manual zoom edits use the exact samples you select, and late
+detection results preserve manual edits.
+
+The first successful confirmation of the nasal foveola (ROI 21) opens its
+matching unfinished Temporal image when available. Confirming the Temporal
+foveola for the first time starts **Build Stack**. You can also start the
+build manually.
+
+If plots still need review, choose **Review** in the save prompt to open the
+next flagged plot. When a partial build is available, you can explicitly save
+without the listed unreviewed plots. To exclude a specific ROI, uncheck the box
+at the top-left of its tile. Check it again to restore its previous edits.
+All ROIs start checked and included.
 The grid marks unchecked ROIs **Excluded**.
-The enlarged editor also offers **Exclude ROI**. Exclusions stay with their
-image when switching tabs. Their Excel cells remain blank, including for ROI
-21, without shifting other ROI rows or changing ELM-RPE measurements. The final
-`ROI_to_move_stck.tif` and `MAX_Stack.tif` stacks are written only when **Build
-stack** is pressed. Build Stack also creates **rr_MCPAR.xlsx** in each processed
-folder, including both nasal and temporal folders. Its original **in** worksheet
+Exclusions stay with their image when switching tabs. Their Excel cells
+remain blank, including for ROI 21, without shifting other ROI rows or
+changing ELM-RPE measurements. Build Stack creates `ROI_to_move_stck.tif`,
+`MAX_Stack.tif`, and **rr_MCPAR.xlsx** in each processed folder, including both
+nasal and temporal folders. The workbook's original **in** worksheet
 lists the ROI numbers and shape measurements, with Round in column G. Excluded
 ROIs retain their numbered rows with blank measurements. The workbook and TIFF
 metadata use the same measured values. Rebuilding replaces the per-folder

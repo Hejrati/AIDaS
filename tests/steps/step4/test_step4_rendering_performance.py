@@ -41,6 +41,7 @@ def plot_frame():
     frame.canvas.mpl_connect("draw_event", frame._cache_roi_grid_background)
     widget = Mock()
     widget.winfo_manager.return_value = "pack"
+    widget.winfo_viewable.return_value = False
     frame.canvas.get_tk_widget = lambda: widget
     frame._ensure_plot_canvas = lambda: None
     frame._place_line_positioning_checkbox = Mock()
@@ -257,6 +258,86 @@ class Step4RenderingPerformanceTests(unittest.TestCase):
             full_draw.assert_not_called()
             self.assertEqual(blit.call_count, 2)
             np.testing.assert_array_equal(frame.canvas.buffer_rgba(), before)
+
+    def test_review_outline_keeps_blinking_until_the_last_flag_clears(self):
+        frame = plot_frame()
+        frame._render_current_roi()
+        outline = frame.ax_roi_grid._aidas_review_outline
+        flagged_cell = frame.ax_roi_grid._aidas_grid_cells[20]
+        face = flagged_cell["box"].get_facecolor()
+        before = np.asarray(frame.canvas.buffer_rgba()).copy()
+        frame.after = Mock(return_value="pulse")
+        frame.after_cancel = Mock()
+        frame.canvas.get_tk_widget().winfo_viewable.return_value = True
+        dialog = frame._profile_zoom_dialog = object()
+        self.assertEqual(len(outline.get_segments()), 1)
+
+        with patch.object(frame.canvas, "draw_idle") as full_draw, \
+                patch.object(frame, "_draw_roi_overview_grid") as rebuild_grid, \
+                patch.object(frame.canvas, "blit", wraps=frame.canvas.blit) as blit:
+            frame._start_roi_review_pulse()
+            frame.after.assert_not_called()
+            frame._profile_zoom_closed(dialog)
+            for index in range(10):
+                phase = index % 2 == 0
+                self.assertEqual(outline.get_visible(), phase)
+                self.assertEqual(np.array_equal(frame.canvas.buffer_rgba(), before), not phase)
+                self.assertEqual(flagged_cell["status"].get_text(), "Needs review")
+                self.assertEqual(flagged_cell["box"].get_facecolor(), face)
+                self.assertEqual(frame._roi_review_pulse_after_id, "pulse")
+                delay, pulse = frame.after.call_args.args
+                self.assertGreaterEqual(delay, 600)
+                if index < 9:
+                    pulse()
+            full_draw.assert_not_called()
+            rebuild_grid.assert_not_called()
+            self.assertEqual(blit.call_count, 10)
+
+        frame.auto_detection_reviews.clear()
+        frame._draw_roi_overview_grid()
+        frame.after_cancel.assert_called_once_with("pulse")
+        self.assertIsNone(frame._roi_review_pulse_after_id)
+        self.assertFalse(outline.get_visible())
+
+    def test_review_outline_pauses_when_canvas_is_hidden_and_restarts_when_mapped(self):
+        frame = plot_frame()
+        frame._render_current_roi()
+        frame.after = Mock(return_value="pulse")
+        frame.after_cancel = Mock()
+        widget = frame.canvas.get_tk_widget()
+        event = SimpleNamespace(widget=widget)
+
+        widget.winfo_viewable.return_value = True
+        frame._on_roi_grid_visibility_changed(event)
+        self.assertEqual(frame._roi_review_pulse_after_id, "pulse")
+
+        widget.winfo_viewable.return_value = False
+        frame._on_roi_grid_visibility_changed(event)
+        frame.after_cancel.assert_called_once_with("pulse")
+        self.assertIsNone(frame._roi_review_pulse_after_id)
+
+        widget.winfo_viewable.return_value = True
+        frame._on_roi_grid_visibility_changed(event)
+        self.assertEqual(frame._roi_review_pulse_after_id, "pulse")
+
+    def test_review_outline_omits_excluded_tiles_and_is_canceled_when_switching_images(self):
+        frame = plot_frame()
+        frame.auto_detection_reviews[frame.rois[0].suffix] = "uncertain"
+        frame.excluded_rois.add(frame.rois[0].suffix)
+        frame._render_current_roi()
+        outline = frame.ax_roi_grid._aidas_review_outline
+        self.assertEqual(len(outline.get_segments()), 1)
+        np.testing.assert_allclose(outline.get_segments()[0][0], (6.03, 0.03))
+
+        frame.after = Mock(return_value="pulse")
+        frame.after_cancel = Mock()
+        frame.canvas.get_tk_widget().winfo_viewable.return_value = True
+        frame._start_roi_review_pulse()
+        self.assertTrue(outline.get_visible())
+        frame._invalidate_roi_work()
+        frame.after_cancel.assert_called_once_with("pulse")
+        self.assertIsNone(frame._roi_review_pulse_after_id)
+        self.assertFalse(outline.get_visible())
 
     def test_hidden_canvas_configure_does_not_resize_the_active_figure(self):
         frame = module.Step4Frame.__new__(module.Step4Frame)

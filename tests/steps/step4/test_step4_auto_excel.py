@@ -99,6 +99,48 @@ class Step4ExcelHandoffTests(unittest.TestCase):
         frame.on_continue_to_step5.assert_called_once_with(str(self.root))
         self.info.assert_not_called()
 
+    def test_pending_review_routes_to_plot_without_saving(self):
+        frame = self._single_frame()
+        frame.rois.append(SimpleNamespace(suffix="02"))
+        frame.auto_detection_reviews = {"02": "Check both boundaries"}
+        frame._choose_stack_review_action = mock.Mock(return_value="review")
+        frame._review_next_plot = mock.Mock()
+
+        frame._build_stack_outputs()
+
+        frame._choose_stack_review_action.assert_called_once_with(1, can_save_without=True)
+        frame._review_next_plot.assert_called_once_with()
+        self.assertFalse(frame._workers)
+        frame.on_continue_to_step5.assert_not_called()
+
+    def test_partial_save_omits_only_consented_plots_and_preserves_flags(self):
+        frame = self._single_frame()
+        frame.rois.extend([SimpleNamespace(suffix="02"), SimpleNamespace(suffix="03")])
+        frame.auto_detection_reviews = {"02": "Check both boundaries"}
+        frame.excluded_rois = {"03"}
+        frame._choose_stack_review_action = mock.Mock(return_value="save")
+        frame._refresh_roi_list = mock.Mock()
+        frame._render_current_roi = mock.Mock()
+
+        frame._build_stack_outputs()
+        self._finish_single(frame)
+
+        self.assertEqual(frame._write_stack_output_files.call_args.kwargs["excluded_roi_indices"], {2, 3})
+        self.assertEqual(frame.excluded_rois, {"03"})
+        self.assertIn("02", frame.auto_detection_reviews)
+        frame.on_continue_to_step5.assert_called_once_with(str(self.root))
+
+    def test_partial_save_is_unavailable_with_an_unflagged_missing_plot(self):
+        frame = self._single_frame()
+        frame.rois.extend([SimpleNamespace(suffix="02"), SimpleNamespace(suffix="03")])
+        frame.auto_detection_reviews = {"02": "Check both boundaries"}
+        frame._choose_stack_review_action = mock.Mock(return_value=None)
+
+        frame._build_stack_outputs()
+
+        frame._choose_stack_review_action.assert_called_once_with(1, can_save_without=False)
+        self.assertFalse(frame._workers)
+
     def test_all_ready_batch_tabs_finish_before_one_step5_handoff(self):
         fixture = self._batch_fixture()
         fixture.frame._build_stack_outputs()
@@ -131,7 +173,7 @@ class Step4ExcelHandoffTests(unittest.TestCase):
             text="Go to Step 5 (4/4 completed)", command=frame._continue_to_step5,
         )
         frame.continue_to_step5_button.state.assert_called_with(["!disabled"])
-        frame.continue_to_step5_button.set_variant.assert_called_with("primary")
+        frame.continue_to_step5_button.set_variant.assert_not_called()
         frame.on_continue_to_step5.assert_called_once_with(fixture.root)
 
     def test_finished_active_stack_offers_next_tab_until_unfinished_file_is_processed(self):

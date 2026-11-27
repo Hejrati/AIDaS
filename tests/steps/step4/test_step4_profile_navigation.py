@@ -161,6 +161,7 @@ class Step4ProfileNavigationTests(unittest.TestCase):
     def _automatic_review_frame(self):
         frame = self._frame()
         frame.rois = [SimpleNamespace(suffix=f"{index + 1:02d}") for index in range(21)]
+        frame.rois[20].suffix = "fovea"
         frame.current_roi_idx = 20
         frame._automatic_profile_review_ready = True
         frame._profile_zoom_dialog = None
@@ -171,6 +172,7 @@ class Step4ProfileNavigationTests(unittest.TestCase):
 
     def test_automatic_review_starts_at_roi_one_and_opens_only_once(self):
         frame = self._automatic_review_frame()
+        frame.auto_detection_reviews = {"fovea": "Manual"}
 
         frame._open_automatic_profile_review()
         # Closing the editor, rendering, and revisiting the same file must not
@@ -179,9 +181,63 @@ class Step4ProfileNavigationTests(unittest.TestCase):
         frame._open_automatic_profile_review()
 
         self.assertEqual(frame.current_roi_idx, 0)
-        frame._open_profile_zoom.assert_called_once_with(0)
+        frame._open_profile_zoom.assert_called_once_with(0, navigation_indices=[0, 3, 5])
         frame._save_current_roi.assert_not_called()
         frame._queue_roi_auto_save.assert_not_called()
+
+    def test_automatic_preview_only_browses_finished_peripheral_plots(self):
+        frame = self._automatic_review_frame()
+        frame.excluded_rois = {"01"}
+        frame.roi_clicks["02"] = [10.0, 60.0]
+        frame.auto_detection_reviews = {"03": "Uncertain"}
+        frame.completed.update({"03": frame.completed["04"], "fovea": frame.completed["04"]})
+        del frame._open_profile_zoom
+
+        with (
+            mock.patch("aidas.steps.step4_analyze_isez.intensity_profile", side_effect=self._profile_for),
+            mock.patch("aidas.steps.step4_analyze_isez.Step4ProfileZoomDialog") as constructor,
+        ):
+            frame._open_automatic_profile_review()
+
+        options = constructor.call_args.kwargs
+        self.assertEqual(options["roi_index"], 3)
+        self.assertEqual(options["navigation_indices"], [3, 5])
+        self.assertIsNone(options["on_foveola"])
+        self.assertTrue(frame._automatic_profile_review_opened)
+
+    def test_flagged_profile_without_preview_opens_with_empty_boundaries(self):
+        frame = self._frame()
+        frame.auto_detection_reviews = {"02": "Uncertain", "03": "Manual"}
+        with mock.patch("aidas.steps.step4_analyze_isez.intensity_profile", side_effect=self._profile_for):
+            options = frame._profile_zoom_options(2)
+
+        self.assertTrue(options["review_required"])
+        self.assertTrue(options["review_has_more"])
+        self.assertIsNone(options["start"])
+        self.assertIsNone(options["end"])
+
+    def test_confirmed_review_opens_next_at_idle_only_in_same_context(self):
+        for switch_image in (False, True):
+            with self.subTest(switch_image=switch_image):
+                frame = self._frame()
+                dialog = frame._profile_zoom_dialog
+                dialog.review_confirmed = True
+                del frame._profile_zoom_closed
+                frame._roi_context_generation = 1
+                frame.auto_detection_reviews = {"03": "Manual"}
+                frame.after_idle = mock.Mock()
+                frame._open_profile_zoom = mock.Mock()
+
+                frame._profile_zoom_closed(dialog)
+                self.assertIsNone(frame._profile_zoom_dialog)
+                if switch_image:
+                    frame._roi_context_generation += 1
+                frame.after_idle.call_args.args[0]()
+
+                if switch_image:
+                    frame._open_profile_zoom.assert_not_called()
+                else:
+                    frame._open_profile_zoom.assert_called_once_with(2)
 
     def test_new_detection_run_reopens_review_after_the_previous_review_closed(self):
         frame = self._automatic_review_frame()
@@ -197,22 +253,27 @@ class Step4ProfileNavigationTests(unittest.TestCase):
         frame._apply_auto_detection_run(result)
         frame._apply_auto_detection_run(result)
 
-        self.assertEqual(frame._open_profile_zoom.call_args_list, [mock.call(0), mock.call(0)])
+        preview = mock.call(0, navigation_indices=[0, 3, 5])
+        self.assertEqual(frame._open_profile_zoom.call_args_list, [preview, preview])
         self.assertEqual(frame.current_roi_idx, 0)
         frame._save_current_roi.assert_not_called()
 
     def test_automatic_review_skips_missing_previews_and_never_opens_fovea(self):
         frame = self._automatic_review_frame()
-        frame.completed = {"04": object(), "21": object()}
+        frame.completed = {"04": object(), "fovea": object()}
 
         frame._open_automatic_profile_review()
 
-        frame._open_profile_zoom.assert_called_once_with(3)
+        frame._open_profile_zoom.assert_called_once_with(3, navigation_indices=[3])
         frame._automatic_profile_review_opened = False
-        frame.completed = {"21": object()}
+        frame.completed = {"fovea": object()}
+        frame.auto_detection_reviews = {"fovea": "Manual"}
         frame._open_profile_zoom.reset_mock()
         frame._open_automatic_profile_review()
         frame._open_profile_zoom.assert_not_called()
+
+        frame._review_next_plot()
+        frame._open_profile_zoom.assert_called_once_with(20)
 
     def test_automatic_review_waits_for_loading_and_respects_finished_or_destroyed_files(self):
         for name in ("_stack_building", "_stack_build_complete", "_step4_destroying", "_batch_roi_open_cancel"):
@@ -237,7 +298,8 @@ class Step4ProfileNavigationTests(unittest.TestCase):
             frame._active_batch_roi_tab = key
             frame._open_automatic_profile_review()
 
-        self.assertEqual(frame._open_profile_zoom.call_args_list, [mock.call(0), mock.call(0)])
+        preview = mock.call(0, navigation_indices=[0, 3, 5])
+        self.assertEqual(frame._open_profile_zoom.call_args_list, [preview, preview])
 
     def test_foveola_action_selects_manual_roi_without_saving(self):
         frame = self._automatic_review_frame()

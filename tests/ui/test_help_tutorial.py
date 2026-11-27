@@ -138,7 +138,10 @@ class TutorialContentTests(unittest.TestCase):
             "Auto-detect ROIs 1-20",
             "ROI 21",
             "opens automatically",
-            "Now do foveola",
+            "Double-click a tile marked Needs review",
+            "choose Review in the Build Stack prompt",
+            "Confirm and review next",
+            "Confirm and finish review",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, text)

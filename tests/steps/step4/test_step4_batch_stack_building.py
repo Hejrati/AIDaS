@@ -83,6 +83,40 @@ class BatchStackBuildingTests(unittest.TestCase):
         self.assertFalse(self.frame._stack_building)
         self.error.assert_not_called()
 
+    def test_build_prompts_to_review_flags_on_another_tab_before_saving(self):
+        state = self.states["unfinished"]
+        state["auto_detection_reviews"] = {"02": "Check both boundaries"}
+        frame = self.frame
+        frame.batch_roi_notebook = mock.Mock()
+        frame._choose_stack_review_action = mock.Mock(return_value="review")
+        frame._review_next_plot = mock.Mock()
+
+        frame._build_stack_outputs()
+
+        frame._choose_stack_review_action.assert_called_once_with(
+            1, can_save_without=True, skipped_images=0,
+        )
+        frame.batch_roi_notebook.select.assert_called_once_with("unfinished")
+        frame._review_next_plot.assert_called_once_with()
+        self.assertFalse(self.workers)
+
+    def test_partial_batch_saves_blank_plot_slots_after_explicit_consent(self):
+        state = self.states["unfinished"]
+        state["auto_detection_reviews"] = {"02": "Check both boundaries"}
+        frame = self.frame
+        frame._choose_stack_review_action = mock.Mock(return_value="save")
+
+        frame._build_stack_outputs()
+        self.finish()
+
+        calls = frame._write_stack_output_files.call_args_list
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[-1].args[2], (self.root / "unfinished").resolve())
+        self.assertEqual(calls[-1].kwargs["excluded_roi_indices"], {2})
+        self.assertFalse(state.get("excluded_rois"))
+        self.assertIn("02", state["auto_detection_reviews"])
+        self.assertTrue(state["complete"])
+
     def test_ready_inactive_tab_enables_build_when_active_tab_is_unfinished(self):
         self.frame.completed = self.states["active"]["completed"] = {}
         self.frame._update_build_stack_button_state()
